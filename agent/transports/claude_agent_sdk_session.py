@@ -730,6 +730,12 @@ class ClaudeAgentSdkSession:
             hint = classify_auth_failure(str(exc))
             result.error = hint or f"claude-agent-sdk startup failed: {exc}"
             result.should_retire = True
+            # Keep the traceback: `str(exc)` alone collapses a KeyError to a
+            # bare quoted key (e.g. "'anyio'"), which is undiagnosable from the
+            # user-facing error string. WARNING so it reaches errors.log.
+            logger.warning(
+                "claude-agent-sdk startup failed (%s)", exc, exc_info=True
+            )
             # A refusal to start is fatal to the run, not turn-scoped: the
             # metered-key guard and an uninstallable SDK are config errors
             # ("startup" — NOT "billing": kanban maps failure_reason

@@ -893,19 +893,42 @@ def run_claude_agent_sdk_turn(
         and not turn.interrupted
         and (should_review_memory or should_review_skills)
     ):
-        # Deliberately NOT spawning the background review on this runtime:
-        # the fork inherits api_mode="claude_agent_sdk" and early-returns
+        # The review fork can only write when it is ROUTED off this runtime.
+        # Unrouted, it inherits api_mode="claude_agent_sdk" and early-returns
         # into a fresh SDK session whose tool surface has no `memory` /
-        # `skill_manage` — it would burn a subscription turn and be unable
-        # to write anything. The nudge counters above keep ticking so a
-        # bounded replacement pass can reuse them. (#25267)
-        logger.debug(
-            "claude-sdk runtime: background review skipped "
-            "(memory=%s, skills=%s) — the review fork cannot write on "
-            "this runtime",
-            should_review_memory,
-            should_review_skills,
-        )
+        # `skill_manage` — it would burn a subscription turn and be unable to
+        # write anything. When auxiliary.background_review names a concrete
+        # provider+model, _resolve_review_runtime() returns routed=True and the
+        # fork is an ordinary Hermes agent with the full tool surface, so the
+        # self-improvement loop behaves exactly as on the native runtimes.
+        # Mirrors the codex_app_server -> codex_responses downgrade. (#25267)
+        _review_routed = False
+        try:
+            from agent.background_review import _resolve_review_runtime
+
+            _review_routed = bool(_resolve_review_runtime(agent).get("routed"))
+        except Exception:
+            logger.debug("review-runtime resolution raised", exc_info=True)
+
+        if _review_routed:
+            try:
+                agent._spawn_background_review(
+                    messages_snapshot=list(messages),
+                    review_memory=should_review_memory,
+                    review_skills=should_review_skills,
+                )
+            except Exception:
+                logger.debug(
+                    "claude-sdk background review raised", exc_info=True
+                )
+        else:
+            logger.debug(
+                "claude-sdk runtime: background review skipped "
+                "(memory=%s, skills=%s) — route auxiliary.background_review "
+                "to a concrete non-SDK provider+model to enable it",
+                should_review_memory,
+                should_review_skills,
+            )
 
     result = {
         "final_response": turn.final_text,

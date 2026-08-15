@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 import os
 import re
 import sys
+import atexit
 import tempfile
 import time
 import threading
@@ -64,6 +65,51 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from hermes_constants import get_hermes_home
+
+
+# Background-review threads are daemons, so a one-shot CLI invocation would
+# otherwise kill them mid-write. They are registered here and joined (bounded)
+# at interpreter exit. See AIAgent._spawn_background_review.
+_BG_REVIEW_THREADS: "List[threading.Thread]" = []
+_BG_REVIEW_ATEXIT_REGISTERED = False
+_BG_REVIEW_JOIN_TIMEOUT_DEFAULT = 120.0
+
+
+def _bg_review_join_timeout() -> float:
+    """Seconds to wait for in-flight reviews at exit (0 disables the join)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        aux = (load_config_readonly().get("auxiliary") or {}).get(
+            "background_review"
+        ) or {}
+        return float(aux.get("join_timeout", _BG_REVIEW_JOIN_TIMEOUT_DEFAULT))
+    except Exception:
+        return _BG_REVIEW_JOIN_TIMEOUT_DEFAULT
+
+
+def _join_background_review_threads() -> None:
+    """Bounded join of in-flight background reviews at interpreter exit."""
+    timeout = _bg_review_join_timeout()
+    if timeout <= 0:
+        return
+    deadline = time.monotonic() + timeout
+    for t in list(_BG_REVIEW_THREADS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if t.is_alive():
+            logger.debug("waiting up to %.1fs for %s", remaining, t.name)
+            t.join(remaining)
+
+
+def _register_background_review_thread(t: "threading.Thread") -> None:
+    global _BG_REVIEW_ATEXIT_REGISTERED
+    _BG_REVIEW_THREADS[:] = [x for x in _BG_REVIEW_THREADS if x.is_alive()]
+    _BG_REVIEW_THREADS.append(t)
+    if not _BG_REVIEW_ATEXIT_REGISTERED:
+        atexit.register(_join_background_review_threads)
+        _BG_REVIEW_ATEXIT_REGISTERED = True
 
 
 def _launch_cwd_for_session(source: str) -> Optional[str]:
@@ -1834,6 +1880,15 @@ class AIAgent:
             target=propagate_context_to_thread(target), daemon=True, name="bg-review"
         )
         t.start()
+        # A daemon thread is killed the instant the interpreter exits. In a
+        # long-lived host (gateway / interactive REPL) the review finishes
+        # naturally, but a ONE-SHOT invocation (`hermes chat -q ...`) returns
+        # immediately after the answer prints and the review is destroyed
+        # mid-flight — the memory/skill write silently never happens. Register
+        # the thread for a bounded join at interpreter exit so one-shot runs
+        # keep the self-improvement loop. Still daemon=True, so a wedged
+        # review can never block exit past the timeout.
+        _register_background_review_thread(t)
 
     def _build_memory_write_metadata(
         self,
