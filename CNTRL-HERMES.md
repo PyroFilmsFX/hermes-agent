@@ -238,5 +238,12 @@ probe: build the append, send "say ok" through `ClaudeSDKClient` with `setting_s
 read_file/search_files never registered); the claude-agent-sdk profile now serves
 `skill_manage`; the unrouted review skips with one warning instead of silence.
 
+**Item 4 done Sep 1 — kanban one-way sync v0.** Proposal + mapping in
+`docs/cntrl/kanban-one-way-sync.md`; code out-of-tree in `cntrl-plugins/cntrl_sync/` (symlinked
+into `$HERMES_HOME/plugins/`, opt-in via `plugins.enabled`). Proven live against cntrl
+(`thinks-mini`, :3101) and the real board: labelled task → Hermes (`triage`/`ready`), completed in
+Hermes → cntrl `done` + result comment, second pull no echo. v1 (cntrl webhooks for
+`task.assigned`/`task.status_changed`, `metadata.hermes_task_id`) is cntrl-side work.
+
 **Open, in order:** (1) ~~desktop UI streaming~~ done, (2) ~~pgvector against `:5434/thinkscore`~~ done,
-(3) ~~skill auto system~~ done, (4) kanban one-way sync proposal (§3), (5) ~~conductor inside Hermes~~ decided (option B, above).
+(3) ~~skill auto system~~ done, (4) ~~kanban one-way sync~~ v0 done, (5) ~~conductor inside Hermes~~ decided (option B, above).

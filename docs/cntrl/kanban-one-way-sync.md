@@ -1,6 +1,6 @@
 # cntrl ↔ Hermes kanban — one-way sync
 
-Status: proposal + v0 plan, 2026-09-01. Follows `CNTRL-HERMES.md` §3 (two boards on purpose,
+Status: v0 built and proven live 2026-09-01 (`cntrl-plugins/cntrl_sync/`, 12 unit tests, one real round trip: cntrl task → Hermes board → completed in Hermes → cntrl `done` + comment, no echo). v1/v2 remain proposals. Follows `CNTRL-HERMES.md` §3 (two boards on purpose,
 sync one-way and narrow) and the Aug 26 council ruling (Hermes is the spine, cntrl the control
 plane, all our code out-of-tree in `$HERMES_HOME/plugins/`).
 
@@ -148,11 +148,19 @@ repo; it keeps cntrl-facing code next to cntrl, at the cost of two repos per cha
 
 1. Label name (`hermes`) and whether `category != bizops` is enough, or an allow-list of `taskType`.
 2. Poll interval for v0 (proposal: 30 s).
-3. Whether a pushed task lands as Hermes `todo` (human starts it) or `ready` (dispatcher may pick
-   it up). Proposal: `todo`.
+3. Where a pushed task lands. Hermes has no `todo` for a parentless task (`create_task` yields
+   `triage`, `ready`, or `todo`-behind-parents), so the choice is `triage` (human decides) or
+   `ready` (dispatcher may run it). v0 default: `triage` (`landing:` setting).
 4. §6.
 
-## 8. Test plan
+## 8. Install (v0)
+
+`plugins.enabled: [cntrl_sync]` is required — standalone user plugins are opt-in. Settings live
+at `plugins.entries.cntrl_sync.settings` (see `cntrl-plugins/cntrl_sync/README.md`); the key
+goes in `$HERMES_HOME/.env` as `CNTRL_API_KEY`. The gateway loads the plugin at start, so a
+backend restart is needed after installing.
+
+## 9. Test plan
 
 - Unit: fake `ctx`, temp `HERMES_HOME` with a real `kanban_db`, fake HTTP via monkeypatched
   `urllib`; cover filter, create/dedupe, refresh, terminal-status down, and each flow-back hook.
