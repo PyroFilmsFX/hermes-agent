@@ -205,6 +205,12 @@ cannot fast-forward here).
 - Known: two `TestSystemPromptAppend` tests in `tests/agent/test_claude_sdk_runtime.py` fail
   from branch divergence (session_search tool, skills index). Pre-existing, not yet ported.
 
-**Open, in order:** (1) ~~desktop UI streaming~~ done, (2) pgvector against `:5434/thinkscore`,
+- pgvector was already proven Aug 15–16: 3 `memory_entries` (all embedded), 29 captured
+  `conversations` in `:5434/thinkscore`. It looked dead on Sep 1 only because the Aug 26 venv
+  rebuild dropped `psycopg` too. Restored (`psycopg[binary]`, `psycopg-pool`), embed key now in
+  `.hermes-test/.env` (`HERMES_EMBED_API_KEY`), provider registered + activated on a real turn,
+  conversations 29 → 31. Same trap as the SDK: a bare `uv sync` removes psycopg again.
+
+**Open, in order:** (1) ~~desktop UI streaming~~ done, (2) ~~pgvector against `:5434/thinkscore`~~ done,
 (3) skill auto system, (4) kanban one-way sync proposal (§3), (5) conductor inside Hermes via
 `setting_sources: ["user"]` — hooks tradeoff undecided.
