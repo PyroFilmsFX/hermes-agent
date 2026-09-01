@@ -95,11 +95,12 @@ no-op (no echo loops: the down-sync ignores changes whose mapped Hermes status e
 Hermes plugin `cntrl_sync` in `$HERMES_HOME/plugins/cntrl_sync/`:
 
 - `plugin.yaml`: `hooks: [on_kanban_task_updated, kanban_task_completed, kanban_task_blocked]`,
-  `config_schema` for `base_url`, `api_key_env`, `poll_seconds`, `label`, `profile_map`,
-  `board_prefix`. No pip dependencies (`urllib` only — the SDK env allowlist and the lazy-install
+  `config_schema` for `base_url`, `api_key_env`, `poll_seconds`, `label`, `landing`, `board`,
+  `profile_map`. No pip dependencies (`urllib` only — the SDK env allowlist and the lazy-install
   quarantine both stay untouched).
-- `register(ctx)`: registers the three hooks; starts the poll loop with `ctx.spawn_task()`
-  (there is no plugin-facing cron; `on_kanban_dispatch_tick` is the alternative anchor).
+- `register(ctx)`: registers the three hooks; starts the poll loop on a daemon thread (as
+  `plugins/google_meet` does — `register` runs without a guaranteed event loop, and there is no
+  plugin-facing cron; `on_kanban_dispatch_tick` is the alternative anchor).
 - Poll: `GET /api/tasks/my-tasks?limit=200` with the user's `tb_` key → filter (§1) → for each
   task `create_task(idempotency_key="cntrl:<uuid>", …)` or refresh title/body/priority when
   they changed (compare against `ctx.state["seen"][uuid]`), and map a terminal cntrl status onto
