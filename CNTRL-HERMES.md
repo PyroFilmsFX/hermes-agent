@@ -187,6 +187,24 @@ cannot fast-forward here).
   `setting_sources: ["user"]`, memory `pgvector`). Embedding key is read from
   `HERMES_EMBED_API_KEY`; `GEMINI_API_KEY` is set in the shell, the Hermes name is not.
 
-**Open, in order:** (1) desktop UI streaming, (2) pgvector against `:5434/thinkscore`,
+**Done Sep 1 (all proven on the running desktop, `HERMES_HOME=.hermes-test`):**
+- Streaming reaches the desktop. A real turn on `claude-fable-5-1` grew the assistant message
+  3 → 33 → 150 → 303 → 592 → 732 chars over ~6 s (sampled over CDP every second). Item (1) closed.
+- `claude-fable-5-1` is first in the claude-agent-sdk picker (`_PROVIDER_MODELS["anthropic"]`).
+- `claude-agent-sdk` 0.2.150 (bundles Claude Code 2.1.257); the package is exempt from the uv
+  14-day quarantine (`exclude-newer-package`). 0.2.120 bundled 2.1.211, which 400s on Fable 5.1.
+- `agent.claude_agent_sdk.cli_path` pins the SDK to `~/.local/bin/claude` so it follows
+  `claude update`; set in the test home.
+- Desktop dev launch (from repo root):
+  `HERMES_HOME=$PWD/.hermes-test HERMES_DESKTOP_HERMES_ROOT=$PWD HERMES_DESKTOP_CDP_PORT=9223 npm run dev --workspace apps/desktop`
+  (9222 is held by another browser on this machine). `apps/desktop/scripts/live-drive.mjs`
+  with `CDP_PORT=9223` sends prompts and evals the DOM.
+- "Transcribing 0:00" that looked stuck was the first whisper model load + HuggingFace check
+  (15:44:27 → 15:45:50, ~83 s) with no progress UI; it then returned an empty transcript. Not a
+  hang. A cancel affordance / "loading speech model" state would be the fix if it matters.
+- Known: two `TestSystemPromptAppend` tests in `tests/agent/test_claude_sdk_runtime.py` fail
+  from branch divergence (session_search tool, skills index). Pre-existing, not yet ported.
+
+**Open, in order:** (1) ~~desktop UI streaming~~ done, (2) pgvector against `:5434/thinkscore`,
 (3) skill auto system, (4) kanban one-way sync proposal (§3), (5) conductor inside Hermes via
 `setting_sources: ["user"]` — hooks tradeoff undecided.
