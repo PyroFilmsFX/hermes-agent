@@ -848,11 +848,55 @@ class TestRuntimeGlue:
 
 
 class TestBackgroundReviewSuppressed:
-    """The review fork inherits ``api_mode="claude_agent_sdk"`` and lands in
-    a fresh SDK session whose tool surface has no ``memory``/``skill_manage``
-    — it burns a subscription turn and cannot write anything. The runtime
-    must therefore never spawn it, while the nudge counters keep ticking so
-    a bounded replacement pass can reuse them. (#25267)"""
+    """Unrouted, the review fork would inherit ``api_mode="claude_agent_sdk"``
+    and land in a fresh SDK session that cannot write memory — it would burn
+    a subscription turn for nothing, so the runtime never spawns it (and says
+    so, once). Routed to a concrete non-SDK provider+model
+    (``auxiliary.background_review``) the fork is an ordinary Hermes agent
+    with the full toolset, and it must spawn — for skills too, even though
+    the SDK session's own tool set decides nothing about the fork. (#25267)"""
+
+    def test_routed_review_spawns_for_memory_and_skills(self, monkeypatch):
+        import agent.background_review as br
+
+        monkeypatch.setattr(br, "_resolve_review_runtime", lambda a: {"routed": True})
+        agent = _make_agent()
+        agent._skill_nudge_interval = 1
+        agent._iters_since_skill = 1  # interval already crossed
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+            should_review_memory=True,
+        )
+        agent._spawn_background_review.assert_called_once()
+        kwargs = agent._spawn_background_review.call_args.kwargs
+        assert kwargs["review_memory"] is True
+        assert kwargs["review_skills"] is True
+        assert agent._iters_since_skill == 0
+
+    def test_unrouted_skip_warns_once_per_process(self, monkeypatch, caplog):
+        import agent.background_review as br
+        import agent.claude_sdk_runtime as rt
+
+        monkeypatch.setattr(br, "_resolve_review_runtime", lambda a: {"routed": False})
+        monkeypatch.setattr(rt, "_UNROUTED_REVIEW_WARNED", False)
+        with caplog.at_level(logging.DEBUG, logger="agent.claude_sdk_runtime"):
+            for _ in range(2):
+                agent = _make_agent()
+                run_claude_agent_sdk_turn(
+                    agent,
+                    user_message="hi",
+                    original_user_message="hi",
+                    messages=[{"role": "user", "content": "hi"}],
+                    effective_task_id="task-1",
+                    should_review_memory=True,
+                )
+                agent._spawn_background_review.assert_not_called()
+        skipped = [r for r in caplog.records if "background review skipped" in r.getMessage()]
+        assert [r.levelno for r in skipped] == [logging.WARNING, logging.DEBUG]
 
     def test_memory_nudge_does_not_spawn_review(self):
         agent = _make_agent()
@@ -2496,12 +2540,10 @@ class TestSystemPromptAppend:
         assert "database client, process/service state, network operation" in out
         assert "Bash remains subject to normal approval" in out
 
-    def test_memory_guidance_present_skill_sentence_stripped(self, tmp_path, monkeypatch):
-        # MEMORY_GUIDANCE ships verbatim EXCEPT its one sentence instructing
-        # the skill tool (skill_manage is not exposed — checklist #3:
-        # guidance only for callable tools). The strip must be a pure
-        # deletion of a sentence that actually exists in the native constant
-        # — if upstream rewords it, this test goes red and we re-derive.
+    def test_memory_guidance_keeps_skill_sentence_when_writer_exposed(self, tmp_path, monkeypatch):
+        # MEMORY_GUIDANCE ships verbatim: the hermes-tools profile for this
+        # runtime serves skill_manage, so its skill sentence is callable
+        # guidance (checklist #3) and must NOT be stripped.
         from agent.claude_sdk_runtime import (
             _strip_uncallable_tool_guidance,
             build_system_prompt_append,
@@ -2509,14 +2551,14 @@ class TestSystemPromptAppend:
         from agent.prompt_builder import MEMORY_GUIDANCE
 
         self._home(tmp_path, monkeypatch, memory="uses trunk-based development")
-        stripped = _strip_uncallable_tool_guidance(MEMORY_GUIDANCE)
-        assert stripped != MEMORY_GUIDANCE, "skill sentence not found — upstream reworded it"
-        assert "save it as a skill with the skill tool" not in stripped
+        assert _strip_uncallable_tool_guidance(MEMORY_GUIDANCE) == MEMORY_GUIDANCE
+        assert "save it as a skill with the skill tool" in MEMORY_GUIDANCE, (
+            "skill sentence not found — upstream reworded it"
+        )
 
         out = build_system_prompt_append()
         assert "You have persistent memory across sessions" in out
-        assert stripped in out
-        assert "save it as a skill with the skill tool" not in out
+        assert "save it as a skill with the skill tool" in out
         # Disambiguation addendum (caught live): the claude_code preset has
         # its own file-based memory convention; the append must pin the
         # hermes-tools memory tool as the ONLY durable store.
@@ -2528,13 +2570,29 @@ class TestSystemPromptAppend:
         assert "disposable" in out
         assert "will not be injected" not in out
 
-    def test_skills_guidance_never_injected(self, tmp_path, monkeypatch):
-        # SKILLS_GUIDANCE instructs skill_manage — unexposed by design.
+    def test_skill_sentences_stripped_when_writer_unexposed(self, tmp_path, monkeypatch):
+        # If a deployment profile drops skill_manage again, every sentence
+        # naming it must go with it — a pure deletion, never a rewording.
+        import agent.claude_sdk_runtime as rt
+        from agent.prompt_builder import MEMORY_GUIDANCE
+
+        monkeypatch.setattr(rt, "_skill_writer_exposed", lambda: False)
+        self._home(tmp_path, monkeypatch, memory="a fact")
+        stripped = rt._strip_uncallable_tool_guidance(MEMORY_GUIDANCE)
+        assert stripped != MEMORY_GUIDANCE
+        assert "save it as a skill with the skill tool" not in stripped
+        out = rt.build_system_prompt_append()
+        assert "skill_manage" not in out
+
+    def test_skills_guidance_injected_when_writer_exposed(self, tmp_path, monkeypatch):
+        # SKILLS_GUIDANCE instructs skill_manage — it ships exactly when the
+        # profile serves that tool.
         from agent.claude_sdk_runtime import build_system_prompt_append
 
         self._home(tmp_path, monkeypatch, memory="a fact")
         out = build_system_prompt_append()
-        assert "skill_manage" not in out
+        assert "save the approach as a skill with skill_manage" in out
+        assert "Skill Safety Rule" in out
 
     def test_session_search_guidance_always_present(self, tmp_path, monkeypatch):
         from agent.claude_sdk_runtime import build_system_prompt_append
@@ -2662,10 +2720,12 @@ class TestSystemPromptAppend:
         monkeypatch.setattr(pb, "build_skills_system_prompt", fake_index)
         out = build_system_prompt_append()
         assert "fixture-skill: proves the wiring" in out
-        assert "skill_manage" not in out
+        # The index's skill_manage sentence is callable guidance now and
+        # must survive (it was stripped while the tool was unexposed).
+        assert "fix it with skill_manage(action='patch')" in out
         tools = captured.get("available_tools") or set()
         assert "memory" in tools and "session_search" in tools
-        assert {"read_file", "search_files"} <= tools
+        assert {"read_file", "search_files", "skill_manage"} <= tools
         assert not tools & {"terminal", "shell", "write_file", "patch", "process"}
         assert set(EXPOSED_TOOLS) <= tools
 

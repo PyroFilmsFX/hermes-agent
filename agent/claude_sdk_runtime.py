@@ -88,6 +88,9 @@ _APPEND_TOTAL_MAX_CHARS = 20000
 # Stripped as pure deletions (never rewording); the pin tests go red if
 # upstream rewords them. One lives in MEMORY_GUIDANCE, one in the skills
 # index boilerplate (caught live: the index ships it unconditionally).
+# One-shot guard for the unrouted-review warning (see the skills gate).
+_UNROUTED_REVIEW_WARNED = False
+
 _SKILL_TOOL_SENTENCE = (
     "If you've discovered a new way to do something, solved a problem that could be "
     "necessary later, save it as a skill with the skill tool.\n"
@@ -137,7 +140,21 @@ _SEARCH_QUERY_ADDENDUM = (
 )
 
 
+def _skill_writer_exposed() -> bool:
+    """True when the hermes-tools MCP profile for this runtime serves
+    ``skill_manage`` — the guidance that names it ships only then
+    (checklist #3: guidance only for callable tools)."""
+    try:
+        from agent.transports.hermes_tools_mcp_server import exposed_tools_for_profile
+
+        return "skill_manage" in exposed_tools_for_profile("claude-agent-sdk")
+    except Exception:  # pragma: no cover
+        return False
+
+
 def _strip_uncallable_tool_guidance(text: str) -> str:
+    if _skill_writer_exposed():
+        return text
     return (
         text.replace(_SKILL_TOOL_SENTENCE, "")
         .replace(_SKILL_MANAGE_INDEX_SENTENCE, "")
@@ -284,6 +301,17 @@ def build_system_prompt_append(
         blocks.append(SESSION_SEARCH_GUIDANCE + "\n" + _SEARCH_QUERY_ADDENDUM)
     except Exception:  # pragma: no cover
         logger.debug("session_search guidance unavailable", exc_info=True)
+
+    # Skill-writer guidance rides along only when the MCP profile actually
+    # serves skill_manage; otherwise the model would be told to call a tool
+    # it cannot see.
+    if _skill_writer_exposed():
+        try:
+            from agent.prompt_builder import SKILLS_GUIDANCE
+
+            blocks.append(SKILLS_GUIDANCE)
+        except Exception:  # pragma: no cover
+            logger.debug("skills guidance unavailable", exc_info=True)
 
     # SDK-specific capability preference follows general memory/search guidance
     # and stays small enough that it cannot crowd out the skills index.
@@ -1062,13 +1090,12 @@ def run_claude_agent_sdk_turn(
     if (
         agent._skill_nudge_interval > 0
         and agent._iters_since_skill >= agent._skill_nudge_interval
-        # `agent.valid_tool_names` is the SDK SESSION's surface, which never
-        # contains skill_manage on this runtime by design (the append even
-        # strips guidance naming it). But the agent that would call
-        # skill_manage is the REVIEW FORK, and a routed fork is an ordinary
-        # Hermes agent carrying the full toolset. Gating on the SDK session's
-        # tools therefore disabled skill review permanently here — memory
-        # review worked while skill review silently never fired.
+        # `agent.valid_tool_names` is the SDK SESSION's surface. The agent
+        # that runs the review is the REVIEW FORK, and a routed fork is an
+        # ordinary Hermes agent carrying the full toolset — so a routed
+        # review must count even when the session itself lacks skill_manage
+        # (gating on the session's tools disabled skill review permanently
+        # here: memory review worked while skill review never fired).
         and ("skill_manage" in agent.valid_tool_names or _review_routed)
     ):
         should_review_skills = True
@@ -1113,7 +1140,13 @@ def run_claude_agent_sdk_turn(
                     "claude-sdk background review raised", exc_info=True
                 )
         else:
-            logger.debug(
+            # Loud once per process: an unrouted review means memory/skill
+            # auto-capture is silently dead on this runtime, which looked
+            # like "the skill auto system is broken" for weeks.
+            global _UNROUTED_REVIEW_WARNED
+            _log = logger.debug if _UNROUTED_REVIEW_WARNED else logger.warning
+            _UNROUTED_REVIEW_WARNED = True
+            _log(
                 "claude-sdk runtime: background review skipped "
                 "(memory=%s, skills=%s) — route auxiliary.background_review "
                 "to a concrete non-SDK provider+model to enable it",

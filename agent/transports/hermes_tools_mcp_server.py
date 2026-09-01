@@ -163,6 +163,40 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_link",
 )
 
+# A host selects one of these fixed profiles at process launch. This is not a
+# user-facing setting: unknown values retain the Codex-compatible default.
+# Claude lacks Codex's native filesystem tools, so it may opt into only these
+# existing bounded inspection tools—never shell, mutation, process, or Git.
+_CLAUDE_AGENT_SDK_INSPECTION_TOOLS: tuple[str, ...] = (
+    "read_file",
+    "search_files",
+)
+
+
+# The skill writer. Bounded to $HERMES_HOME/skills and gated by the same
+# write_approval store as every other origin (tools/write_approval.py), so
+# serving it does not widen this subprocess toward shell/process/Git. Without
+# it the SDK runtime's model can never keep a procedure it is asked to keep —
+# the 2026-08-16 "save this as a skill" sessions dead-ended on skill_view /
+# skills_list — and the skill-creation nudge has nothing to act on unless the
+# background review is routed to another provider.
+_CLAUDE_AGENT_SDK_SKILL_TOOLS: tuple[str, ...] = ("skill_manage",)
+
+
+def exposed_tools_for_profile(profile: Optional[str] = None) -> tuple[str, ...]:
+    """Return the curated surface for a trusted runtime profile.
+
+    The default (and every unknown profile) is the existing Codex surface.
+    Only the fixed Claude Agent SDK profile receives bounded file inspection.
+    """
+    if profile == "claude-agent-sdk":
+        return (
+            EXPOSED_TOOLS
+            + _CLAUDE_AGENT_SDK_INSPECTION_TOOLS
+            + _CLAUDE_AGENT_SDK_SKILL_TOOLS
+        )
+    return EXPOSED_TOOLS
+
 
 # --- Stateless agent-loop shims (#26567) ---------------------------------
 #
@@ -399,10 +433,12 @@ def _stateless_shim_defs() -> list:
     return defs
 
 
-def _build_server() -> Any:
-    """Create the FastMCP server with Hermes tools attached. Lazy imports
-    so the module can be imported without the mcp package installed
-    (we degrade to a clear error only when actually run)."""
+def _build_server(profile: Optional[str] = None) -> Any:
+    """Create the FastMCP server with the selected curated tool profile.
+
+    Unknown profiles intentionally resolve to the Codex-compatible default via
+    ``exposed_tools_for_profile`` rather than widening this subprocess.
+    """
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - install hint
@@ -437,7 +473,7 @@ def _build_server() -> Any:
 
     exposed_count = 0
 
-    for name in EXPOSED_TOOLS:
+    for name in exposed_tools_for_profile(profile):
         spec = all_defs.get(name)
         if spec is None:
             logger.debug(
@@ -524,7 +560,7 @@ def _build_server() -> Any:
     logger.info(
         "hermes-tools MCP server registered %d/%d tools + %d stateless shims",
         exposed_count,
-        len(EXPOSED_TOOLS),
+        len(exposed_tools_for_profile(profile)),
         shim_count,
     )
     return mcp
@@ -534,6 +570,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     """Entry point for `python -m agent.transports.hermes_tools_mcp_server`."""
     argv = argv or sys.argv[1:]
     verbose = "--verbose" in argv or "-v" in argv
+    profile = None
+    if "--profile" in argv:
+        index = argv.index("--profile")
+        if index + 1 < len(argv):
+            profile = argv[index + 1]
 
     log_level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(
@@ -560,7 +601,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.debug("hermes dotenv load failed", exc_info=True)
 
     try:
-        server = _build_server()
+        server = _build_server(profile=profile) if profile is not None else _build_server()
     except ImportError as exc:
         sys.stderr.write(f"hermes-tools MCP server cannot start: {exc}\n")
         return 2
