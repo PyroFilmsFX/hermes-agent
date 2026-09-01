@@ -2859,6 +2859,71 @@ class TestStreaming:
             session.close()
         assert holder["client"].options["setting_sources"] == ["user", "project"]
 
+    def test_plugins_absent_by_default(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert "plugins" not in holder["client"].options
+
+    def test_plugins_config_loads_plugin_roots(self, monkeypatch, tmp_path):
+        # The isolation-preserving way to bring ONE plugin (conductor) into
+        # Hermes turns: setting_sources stays [] and the plugin root is
+        # loaded explicitly via the SDK's --plugin-dir mapping.
+        import hermes_cli.config as cfg
+
+        root = tmp_path / "conductor"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "plugin.json").write_text('{"name": "conductor"}')
+        not_a_plugin = tmp_path / "just-a-dir"
+        not_a_plugin.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {
+                "agent": {
+                    "claude_agent_sdk": {
+                        "plugins": [
+                            "~/conductor",
+                            str(root),  # duplicate after ~ expansion
+                            str(not_a_plugin),
+                            str(tmp_path / "missing"),
+                            "",
+                            7,
+                        ]
+                    }
+                }
+            },
+        )
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert holder["client"].options["plugins"] == [
+            {"type": "local", "path": str(root)}
+        ]
+        assert holder["client"].options["setting_sources"] == []
+
+    def test_plugins_all_invalid_means_absent(self, monkeypatch, tmp_path):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {
+                "agent": {"claude_agent_sdk": {"plugins": [str(tmp_path / "nope"), "x"]}}
+            },
+        )
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert "plugins" not in holder["client"].options
+
     def test_deltas_reach_callback_and_never_the_transcript(self):
         got = []
         script = [

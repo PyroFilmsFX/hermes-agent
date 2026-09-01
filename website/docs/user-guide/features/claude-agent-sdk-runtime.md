@@ -78,6 +78,18 @@ Headless runs (`hermes chat -q`, cron) have no approver to answer that round-tri
 
 Ambient Claude settings are isolated: the runtime pins the SDK's `setting_sources` to the empty list, so `~/.claude/settings.json` and project `.claude/settings*.json` cannot re-permission tools or add hooks underneath the configured posture. (This also means `CLAUDE.md` files are not loaded — this runtime composes its own system-prompt append from Hermes' memory, skills index, and your `append_file`.)
 
+The SDK spawns the Claude Code CLI bundled inside the `claude-agent-sdk` package, not the `claude` on your PATH. That bundle lags CLI releases, so a just-shipped model id can fail with `Claude Code X does not support this model` while `claude update` on the same machine already has it. Pin the runtime to your own launcher with `agent.claude_agent_sdk.cli_path` (for example `~/.local/bin/claude`); it then tracks `claude update`. A path that is not an executable file is ignored with a warning and the bundled CLI is used.
+
+To bring a specific Claude Code plugin into Hermes turns without opening the whole `~/.claude` (which `setting_sources: ["user"]` would do — every enabled plugin, every session-tracker hook, every MCP server, the permission allowlist), list its root under `agent.claude_agent_sdk.plugins`. Each entry is loaded through the SDK's `--plugin-dir`, so that plugin's skills, agents, hooks and MCP servers are available while isolation stays on. Entries without a `.claude-plugin/plugin.json` are ignored with a warning.
+
+```yaml
+agent:
+  claude_agent_sdk:
+    setting_sources: []
+    plugins:
+      - ~/.claude/plugins/marketplaces/thinkbot-plugin/plugins/conductor
+```
+
 ## What Hermes still provides
 
 - **hermes-tools MCP server** — a curated stdio surface: memory and `session_search` shims; browser/web/media/skills/TTS tools; and bounded `read_file` / `search_files` inspection. It does not expose shell, file mutation, process control, or generic Git tools. When `hybrid_mcp_bridge: true`, the standard surface becomes an in-process MCP server under the same name (`mcp__hermes-tools__*`) — operator grants stored in `~/.claude/settings.json` keep matching without a migration step. Extra bridge-only third-party MCP and agent-level tools are exposed separately as `mcp__hermes-hybrid__*`.
