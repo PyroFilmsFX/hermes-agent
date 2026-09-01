@@ -347,6 +347,14 @@ DEFAULT_CONFIG = {
             # "~/.local/bin/claude", to track that update instead. A path
             # that is not an executable file is ignored with a warning.
             "cli_path": "",
+            # Claude Code plugin roots to load explicitly (--plugin-dir), e.g.
+            # ["~/.claude/plugins/marketplaces/<marketplace>/plugins/<name>"].
+            # Brings that plugin's skills, agents, hooks and MCP servers into
+            # Hermes turns while setting_sources stays [] — so the rest of
+            # ~/.claude (other plugins, session-tracker hooks, MCP servers,
+            # permission allowlists) does NOT ride along. Entries without a
+            # .claude-plugin/plugin.json are ignored with a warning.
+            "plugins": [],
             # Soft turn budget in seconds. null (the default) = the built-in
             # 600. The budget is activity-aware: it only fires when no tool
             # call is outstanding, no approval prompt is awaiting a human,

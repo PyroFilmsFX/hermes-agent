@@ -60,6 +60,16 @@ Ambient Claude settings are isolated: the runtime pins the SDK's `setting_source
 
 The SDK spawns the Claude Code CLI bundled inside the `claude-agent-sdk` package, not the `claude` on your PATH. That bundle lags CLI releases, so a just-shipped model id can fail with `Claude Code X does not support this model` while `claude update` on the same machine already has it. Pin the runtime to your own launcher with `agent.claude_agent_sdk.cli_path` (for example `~/.local/bin/claude`); it then tracks `claude update`. A path that is not an executable file is ignored with a warning and the bundled CLI is used.
 
+To bring a specific Claude Code plugin into Hermes turns without opening the whole `~/.claude` (which `setting_sources: ["user"]` would do — every enabled plugin, every session-tracker hook, every MCP server, the permission allowlist), list its root under `agent.claude_agent_sdk.plugins`. Each entry is loaded through the SDK's `--plugin-dir`, so that plugin's skills, agents, hooks and MCP servers are available while isolation stays on. Entries without a `.claude-plugin/plugin.json` are ignored with a warning.
+
+```yaml
+agent:
+  claude_agent_sdk:
+    setting_sources: []
+    plugins:
+      - ~/.claude/plugins/marketplaces/thinkbot-plugin/plugins/conductor
+```
+
 ## What Hermes still provides
 
 - **hermes-tools MCP server** — memory and `session_search` shims (plus the standard Hermes tool surface) are exposed into the SDK's loop over stdio.
