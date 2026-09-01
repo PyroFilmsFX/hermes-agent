@@ -402,6 +402,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # fuzzy-match collisions (e.g. "anthropic/claude-sonnet-4" is a
     # substring of "anthropic/claude-sonnet-4.6").
     # OpenRouter-prefixed models resolve via OpenRouter live API or models.dev.
+    "claude-fable-5-1": 1000000,
     "claude-fable-5": 1000000,
     "claude-fable": 1000000,
     "claude-opus-5": 1000000,
