@@ -211,6 +211,16 @@ cannot fast-forward here).
   `.hermes-test/.env` (`HERMES_EMBED_API_KEY`), provider registered + activated on a real turn,
   conversations 29 → 31. Same trap as the SDK: a bare `uv sync` removes psycopg again.
 
+**Item 5 decided Sep 1 — conductor inside Hermes, option B.** `setting_sources: ["user"]`
+(option A) pulled the whole `~/.claude` into every Hermes turn: 30 enabled plugins, the
+agent-deck + orca session hooks on 15 events, context7/kitty MCP servers spawned per turn, and
+the permission allowlist underneath Hermes' posture (seen live: `apps/desktop/.claude/state`
+appeared at 15:44 from those hooks). Option B keeps `setting_sources: []` and loads conductor
+explicitly via the new `agent.claude_agent_sdk.plugins` (SDK `--plugin-dir`). Proven: CLI argv
+carries `--plugin-dir …/conductor`, only the hermes-tools MCP is spawned, conductor's own hooks
+fire (telemetry written in the session cwd). Flip back to A by setting `setting_sources: ["user"]`.
+Residual: conductor's hooks write `.claude/state` into the SDK session cwd; the `tb-workers` MCP
+server is registered but fails to connect there exactly as it does in Claude Code today.
+
 **Open, in order:** (1) ~~desktop UI streaming~~ done, (2) ~~pgvector against `:5434/thinkscore`~~ done,
-(3) skill auto system, (4) kanban one-way sync proposal (§3), (5) conductor inside Hermes via
-`setting_sources: ["user"]` — hooks tradeoff undecided.
+(3) skill auto system, (4) kanban one-way sync proposal (§3), (5) ~~conductor inside Hermes~~ decided (option B, above).
