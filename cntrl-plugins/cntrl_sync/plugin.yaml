@@ -1,0 +1,40 @@
+name: cntrl_sync
+version: 0.1.0
+description: "One-way sync between the cntrl bizops board and this user's Hermes board: cntrl dev tasks labelled for Hermes are pulled in (create/refresh/close), and Hermes status flows back to cntrl. Out-of-tree plugin — see docs/cntrl/kanban-one-way-sync.md."
+author: "cntrl"
+kind: standalone
+hooks:
+  - kanban_task_completed
+  - kanban_task_blocked
+  - on_kanban_task_updated
+pip_dependencies: []
+requires_env: []
+config_schema:
+  base_url:
+    type: string
+    description: "cntrl server, e.g. http://127.0.0.1:3101"
+    default: "http://127.0.0.1:3101"
+  api_key_env:
+    type: string
+    description: "Environment variable holding this user's cntrl API key (tb_…)"
+    default: "CNTRL_API_KEY"
+  poll_seconds:
+    type: integer
+    description: "Pull interval; 0 disables the pull loop (hooks still flow status up)"
+    default: 30
+  label:
+    type: string
+    description: "cntrl label that opts a task into Hermes"
+    default: "hermes"
+  landing:
+    type: string
+    description: "Hermes status a pulled task lands in: triage (human decides) or ready (dispatcher may run it)"
+    default: "triage"
+  board:
+    type: string
+    description: "Hermes board to write into; empty = the current board"
+    default: ""
+  profile_map:
+    type: object
+    description: "cntrl user id or email -> Hermes profile name (assignee). Unmapped users land unassigned."
+    default: {}
