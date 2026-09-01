@@ -684,3 +684,57 @@ class TestSession:
             )
             session, _ = _make_session(script=[ResultMessage(result="ok")])
             assert "cli_path" not in session.build_option_fields(), bad
+
+    # --- agent.claude_agent_sdk.plugins (cntrl carry) ---
+
+    def test_plugins_absent_by_default(self):
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "plugins" not in session.build_option_fields()
+
+    def test_plugins_config_loads_plugin_roots(self, monkeypatch, tmp_path):
+        # The isolation-preserving way to bring ONE plugin (conductor) into
+        # Hermes turns: setting_sources stays [] and the plugin root is
+        # loaded explicitly via the SDK's --plugin-dir mapping.
+        import hermes_cli.config as cfg
+
+        root = tmp_path / "conductor"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "plugin.json").write_text('{"name": "conductor"}')
+        not_a_plugin = tmp_path / "just-a-dir"
+        not_a_plugin.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {
+                "agent": {
+                    "claude_agent_sdk": {
+                        "plugins": [
+                            "~/conductor",
+                            str(root),  # duplicate after ~ expansion
+                            str(not_a_plugin),
+                            str(tmp_path / "missing"),
+                            "",
+                            7,
+                        ]
+                    }
+                }
+            },
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        fields = session.build_option_fields()
+        assert fields["plugins"] == [{"type": "local", "path": str(root)}]
+        assert fields["setting_sources"] == []
+
+    def test_plugins_all_invalid_means_absent(self, monkeypatch, tmp_path):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"claude_agent_sdk": {"plugins": [str(tmp_path / "nope"), "x"]}}},
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "plugins" not in session.build_option_fields()

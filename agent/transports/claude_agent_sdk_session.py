@@ -54,6 +54,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _HERMES_TO_SDK_PERMISSION_MODE,
     _build_hermes_tools_mcp_config,
     _configured_cli_path,
+    _configured_plugins,
     _configured_hybrid_exclude,
     _configured_max_buffer_size,
     _configured_permission_mode,
@@ -611,6 +612,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         cli_path = _configured_cli_path()
         if cli_path:
             fields["cli_path"] = cli_path
+        # Explicitly loaded plugin roots (see _configured_plugins).
+        plugins = _configured_plugins()
+        if plugins:
+            fields["plugins"] = plugins
         # Default OFF (upstream-conservative): partial messages only when the
         # operator opts in via agent.claude_agent_sdk.streaming in config.yaml.
         # Reads the __init__ snapshot so option and quiet-watchdog semantics
