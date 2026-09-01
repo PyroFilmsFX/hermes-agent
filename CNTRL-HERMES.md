@@ -244,6 +244,13 @@ into `$HERMES_HOME/plugins/`, opt-in via `plugins.enabled`). Proven live against
 (`thinks-mini`, :3101) and the real board: labelled task → Hermes (`triage`/`ready`), completed in
 Hermes → cntrl `done` + result comment, second pull no echo. v1 (cntrl webhooks for
 `task.assigned`/`task.status_changed`, `metadata.hermes_task_id`) is cntrl-side work.
+Re-proven Sep 1 evening **inside the running desktop backend** after a full relaunch (the first
+proof called the plugin functions directly): the daemon pull thread picked the task up within
+30 s (`triage`, `t_977fdb49`), a `PATCH /api/plugins/kanban/tasks/<id>` to `done` fired the
+`kanban_task_completed` hook in-process, cntrl went `done` with the result comment, next pull no
+echo. Two gotchas: cntrl `my-tasks` is **workspace-scoped** — a task created without
+`workspaceId` never reaches the plugin (three such orphans were deleted from `:5434/thinkscore`);
+and the Hermes board rejects `triage → done`, so go through `ready`.
 
 **Open, in order:** (1) ~~desktop UI streaming~~ done, (2) ~~pgvector against `:5434/thinkscore`~~ done,
 (3) ~~skill auto system~~ done, (4) ~~kanban one-way sync~~ v0 done, (5) ~~conductor inside Hermes~~ decided (option B, above).
