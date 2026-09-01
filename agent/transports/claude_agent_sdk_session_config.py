@@ -270,6 +270,42 @@ def _configured_cli_path() -> str:
     return path
 
 
+def _configured_plugins() -> list:
+    """agent.claude_agent_sdk.plugins from config.yaml, validated.
+
+    Explicit Claude Code plugin directories to load into the spawned CLI
+    (``--plugin-dir``), each ``{"type": "local", "path": ...}`` for the SDK.
+    This is the isolation-preserving way to bring ONE plugin (its skills,
+    agents, hooks and MCP servers) into Hermes turns: ``setting_sources``
+    stays ``[]`` so the operator's whole ``~/.claude`` — every enabled plugin,
+    every session-tracker hook, every MCP server, the permission allowlist —
+    does not ride along underneath the configured posture. Entries that are
+    not a plugin root (no ``.claude-plugin/plugin.json``) are dropped with a
+    warning: a typo must never silently load nothing while looking configured."""
+    raw = _provider_config().get("plugins")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    plugins: list = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            logger.warning(
+                "agent.claude_agent_sdk.plugins entry %r is not a path — dropping it.",
+                entry,
+            )
+            continue
+        path = os.path.expanduser(entry.strip())
+        if not os.path.isfile(os.path.join(path, ".claude-plugin", "plugin.json")):
+            logger.warning(
+                "agent.claude_agent_sdk.plugins entry %r is not a Claude Code plugin "
+                "root (no .claude-plugin/plugin.json) — dropping it.",
+                entry,
+            )
+            continue
+        if all(existing["path"] != path for existing in plugins):
+            plugins.append({"type": "local", "path": path})
+    return plugins
+
+
 def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float]:
     """Numeric seconds from `agent.claude_agent_sdk.<key>`, validated.
 
