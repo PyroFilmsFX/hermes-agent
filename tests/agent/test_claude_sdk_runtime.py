@@ -2590,9 +2590,16 @@ class TestSystemPromptAppend:
         from agent.claude_sdk_runtime import build_system_prompt_append
 
         self._home(tmp_path, monkeypatch, memory="a fact")
+        from agent.claude_sdk_runtime import _SDK_SKILLS_GUIDANCE
+        from agent.prompt_builder import SKILLS_GUIDANCE
+
         out = build_system_prompt_append()
-        assert "save the approach as a skill with skill_manage" in out
-        assert "Skill Safety Rule" in out
+        assert _SDK_SKILLS_GUIDANCE in out
+        # The native block trips the API's third-party-harness screen on the
+        # SDK entrypoint (400 "out of extra usage", 2026-09-01) — it must
+        # never ride this append.
+        assert "Skill Safety Rule" not in out
+        assert SKILLS_GUIDANCE not in out
 
     def test_session_search_guidance_always_present(self, tmp_path, monkeypatch):
         from agent.claude_sdk_runtime import build_system_prompt_append

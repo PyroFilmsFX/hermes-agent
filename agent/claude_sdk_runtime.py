@@ -88,6 +88,22 @@ _APPEND_TOTAL_MAX_CHARS = 20000
 # Stripped as pure deletions (never rewording); the pin tests go red if
 # upstream rewords them. One lives in MEMORY_GUIDANCE, one in the skills
 # index boilerplate (caught live: the index ships it unconditionally).
+# Skill guidance for the SDK append. NOT the native SKILLS_GUIDANCE block:
+# Anthropic's API screens Agent-SDK requests (CLAUDE_CODE_ENTRYPOINT=sdk-py)
+# for appended system prompts that read like a third-party harness and
+# rejects them with a misleading ``400 You're out of extra usage`` (the
+# interactive CLI passes the identical prompt). Measured 2026-09-01: the
+# native block — "After completing a complex task (5+ tool calls) … save
+# the approach as a skill with skill_manage … ## Skill Safety Rule …" — on
+# top of the rest of this append tipped every request over; this one
+# sentence passes. Keep additions to this append small and re-probe (send
+# "say ok" through ClaudeSDKClient with setting_sources=[] and the built
+# append) before shipping more tool prose.
+_SDK_SKILLS_GUIDANCE = (
+    "If you discover a reusable procedure or fix a tricky problem, save it "
+    "as a skill with skill_manage; patch a skill that turns out wrong.\n"
+)
+
 # One-shot guard for the unrouted-review warning (see the skills gate).
 _UNROUTED_REVIEW_WARNED = False
 
@@ -304,14 +320,10 @@ def build_system_prompt_append(
 
     # Skill-writer guidance rides along only when the MCP profile actually
     # serves skill_manage; otherwise the model would be told to call a tool
-    # it cannot see.
+    # it cannot see. It is the COMPACT form on purpose — see
+    # _SDK_SKILLS_GUIDANCE.
     if _skill_writer_exposed():
-        try:
-            from agent.prompt_builder import SKILLS_GUIDANCE
-
-            blocks.append(SKILLS_GUIDANCE)
-        except Exception:  # pragma: no cover
-            logger.debug("skills guidance unavailable", exc_info=True)
+        blocks.append(_SDK_SKILLS_GUIDANCE)
 
     # SDK-specific capability preference follows general memory/search guidance
     # and stays small enough that it cannot crowd out the skills index.
