@@ -169,7 +169,7 @@ dependencies = [
 anthropic = ["anthropic==0.87.0"]  # CVE-2026-34450, CVE-2026-34452
 # Claude via the official Agent SDK (subscription OAuth) — only needed when
 # provider=claude-agent-sdk. The SDK bundles/locates the Claude Code CLI.
-claude-agent-sdk = ["claude-agent-sdk==0.2.120"]
+claude-agent-sdk = ["claude-agent-sdk==0.2.150"]
 # Web search backends — each only loaded when the user picks it as their
 # search provider (configured via `hermes tools` or config.yaml).
 exa = ["exa-py==2.10.2"]
@@ -389,7 +389,10 @@ exclude-newer = "14 days"
 # request-smuggling) fix in 4.4.1, published 2026-08-03. Remove after 2026-08-17.
 # aiohttp, cryptography: same shape — the advisory fixes are newer than the
 # 14-day window, so the resolver cannot see them without an exception.
-exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false }
+# claude-agent-sdk: its bundled Claude Code CLI gates which model ids work; a
+# same-day release is the only way to pick up a just-shipped model (owner ruling
+# 2026-09-01), so this package is exempt from the 14-day window.
+exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false, claude-agent-sdk = false }
 
 [tool.setuptools]
 # Top-level single-file modules (not packages). Without this, uv2nix's

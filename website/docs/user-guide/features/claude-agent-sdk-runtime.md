@@ -58,6 +58,8 @@ The default mapping (`HERMES_TERMINAL_SECURITY_MODE=auto`) selects the SDK's `ac
 
 Ambient Claude settings are isolated: the runtime pins the SDK's `setting_sources` to the empty list, so `~/.claude/settings.json` and project `.claude/settings*.json` cannot re-permission tools or add hooks underneath the configured posture. (This also means `CLAUDE.md` files are not loaded — this runtime composes its own system-prompt append from Hermes' memory, skills index, and your `append_file`.)
 
+The SDK spawns the Claude Code CLI bundled inside the `claude-agent-sdk` package, not the `claude` on your PATH. That bundle lags CLI releases, so a just-shipped model id can fail with `Claude Code X does not support this model` while `claude update` on the same machine already has it. Pin the runtime to your own launcher with `agent.claude_agent_sdk.cli_path` (for example `~/.local/bin/claude`); it then tracks `claude update`. A path that is not an executable file is ignored with a warning and the bundled CLI is used.
+
 ## What Hermes still provides
 
 - **hermes-tools MCP server** — memory and `session_search` shims (plus the standard Hermes tool surface) are exposed into the SDK's loop over stdio.

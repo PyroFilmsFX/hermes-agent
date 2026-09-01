@@ -24,7 +24,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent.claude_sdk_runtime import run_claude_agent_sdk_turn
-from agent.conversation_loop import _handle_claude_sdk_turn_with_fallback
+try:  # upstream >= the parity-followups base; cntrl-hermes forwards via run_agent
+    from agent.conversation_loop import _handle_claude_sdk_turn_with_fallback
+except ImportError:  # pragma: no cover - branch-dependent
+    _handle_claude_sdk_turn_with_fallback = None
 from agent.transports.claude_agent_sdk_session import (
     ClaudeAgentSdkSession,
     classify_auth_failure,
@@ -144,6 +147,10 @@ class ResultMessage:
 
 
 class TestClaudeSdkFallbackBridge:
+    @pytest.mark.skipif(
+        _handle_claude_sdk_turn_with_fallback is None,
+        reason="conversation_loop fallback bridge not present on this branch",
+    )
     def test_quota_error_activates_configured_fallback(self):
         class Agent:
             def __init__(self):
@@ -1791,6 +1798,61 @@ class TestStreaming:
         finally:
             session.close()
         assert holder["client"].options["setting_sources"] == ["user", "project"]
+
+    def test_cli_path_absent_by_default(self):
+        # No config → the SDK picks its own binary (bundled, then PATH).
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert "cli_path" not in holder["client"].options
+
+    def test_cli_path_config_opt_in_expands_home(self, monkeypatch, tmp_path):
+        # The bundled CLI lags releases; operators pin their own `claude`
+        # (2026-09-01: bundled 2.1.211 rejected claude-fable-5-1, which
+        # needs >= 2.1.251, while ~/.local/bin/claude was already 2.1.257).
+        import hermes_cli.config as cfg
+
+        launcher = tmp_path / "claude"
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {
+                "agent": {"claude_agent_sdk": {"cli_path": "~/claude"}}
+            },
+        )
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert holder["client"].options["cli_path"] == str(launcher)
+
+    def test_cli_path_not_executable_dropped(self, monkeypatch, tmp_path):
+        # A typo must never silently run some other binary: missing or
+        # non-executable paths fall back to the SDK default (with a warning).
+        import hermes_cli.config as cfg
+
+        plain = tmp_path / "not-a-launcher"
+        plain.write_text("")
+        for bad in (str(tmp_path / "missing"), str(plain), 42, "   "):
+            monkeypatch.setattr(
+                cfg,
+                "load_config_readonly",
+                lambda *a, _bad=bad, **k: {
+                    "agent": {"claude_agent_sdk": {"cli_path": _bad}}
+                },
+            )
+            session, holder = _make_session(script=[ResultMessage(result="ok")])
+            try:
+                session.run_turn("ping")
+            finally:
+                session.close()
+            assert "cli_path" not in holder["client"].options, bad
 
     def test_deltas_reach_callback_and_never_the_transcript(self):
         got = []

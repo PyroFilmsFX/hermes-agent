@@ -102,7 +102,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # Official Claude Agent SDK — needed when provider=claude-agent-sdk (the
     # subscription-OAuth agent-loop runtime). Mirrors the `claude-agent-sdk`
     # extra in pyproject.toml; bump both in lockstep.
-    "provider.claude_agent_sdk": ("claude-agent-sdk==0.2.120",),
+    "provider.claude_agent_sdk": ("claude-agent-sdk==0.2.150",),
     # AWS Bedrock provider
     "provider.bedrock": ("boto3==1.42.89",),
     # Google Vertex AI provider — OAuth2 token minting for the Gemini
