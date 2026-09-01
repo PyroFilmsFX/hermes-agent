@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,49 @@ def _read_capped(path: str, cap: int = _APPEND_SOURCE_MAX_CHARS) -> str:
             return fh.read()[:cap].strip()
     except OSError:
         return ""
+
+
+def _hybrid_bridge_enabled() -> bool:
+    """agent.claude_agent_sdk.hybrid_mcp_bridge from config.yaml.
+
+    Off by default — the wide bridge exposes agent-level tools whose
+    enablement is a security choice. Operators opt in via config.
+    """
+    from agent.transports.claude_agent_sdk_session import _provider_flag
+
+    return _provider_flag("hybrid_mcp_bridge", default=False)
+
+
+def _snapshot_agent_tools_with_mcp_refresh(agent) -> Optional[List[Dict[str, Any]]]:
+    """Return ``agent.tools`` after making sure late-registered MCP tools are
+    included. See ``tools/mcp_tool.py::refresh_agent_mcp_tools`` for context:
+    the agent snapshots its tool list once at build time and never re-reads
+    the registry, so MCP servers whose initial connect finishes AFTER that
+    snapshot (slow HTTP handshake, OAuth-gated servers, ``/reload-mcp``) are
+    invisible until the snapshot is rebuilt. ``turn_context.py`` already does
+    this between turns; we do it at session-creation time too so the hybrid
+    MCP bridge (which is built ONCE per session) doesn't freeze a stale
+    snapshot into the SDK's ``mcp_servers`` for the entire session.
+
+    Never raises; a refresh failure falls back to the raw snapshot.
+    """
+    try:
+        # Same import-cost gate as turn_context.py's between-turns refresh:
+        # ``tools.mcp_tool`` is heavy (~0.4s) and only worth importing when
+        # something else already did (which means MCPs may be registered).
+        import sys as _sys
+        if "tools.mcp_tool" in _sys.modules:
+            from tools.mcp_tool import (
+                has_registered_mcp_tools,
+                refresh_agent_mcp_tools,
+            )
+            if has_registered_mcp_tools() and not getattr(
+                agent, "_skip_mcp_refresh", False
+            ):
+                refresh_agent_mcp_tools(agent, quiet_mode=True)
+    except Exception:
+        logger.debug("MCP refresh before hybrid build failed", exc_info=True)
+    return getattr(agent, "tools", None)
 
 
 # Total append budget. Blocks are included whole, in priority order; a block
@@ -65,6 +109,23 @@ _MEMORY_TOOL_DISAMBIGUATION = (
     "runtime that store is unmanaged (no capacity gauge, no curation, no "
     "backup) and its contents are treated as disposable. Every fact worth "
     "keeping goes through the memory tool."
+)
+
+# The SDK profile exposes only these bounded native Hermes inspection tools
+# for filesystem work. Prefer them before Bash: they retain protected-path
+# checks and need no approval round-trip. This grants no additional permission:
+# database, process, service, network, and other shell-only work stays gated.
+_MCP_INSPECTION_PREFERENCE = (
+    "## SDK inspection, status, and operational-record tools\n"
+    "For multi-step tool work, provide a brief user-facing status before a "
+    "distinct tool phase when useful. Keep it concise and factual; never "
+    "reveal private reasoning. For routine filesystem inspection, prefer the "
+    "Hermes MCP `read_file` and `search_files` tools before Bash. Use `read_file` "
+    "contents and `search_files` to locate files or search their contents. "
+    "They enforce Hermes protected-path rules. Use Bash only when the task "
+    "genuinely requires a shell-only capability (for example a database "
+    "client, process/service state, network operation, or an unavailable "
+    "tool); Bash remains subject to normal approval."
 )
 
 # Observed live twice: models write "topic word word word" discovery queries;
@@ -224,6 +285,10 @@ def build_system_prompt_append(
     except Exception:  # pragma: no cover
         logger.debug("session_search guidance unavailable", exc_info=True)
 
+    # SDK-specific capability preference follows general memory/search guidance
+    # and stays small enough that it cannot crowd out the skills index.
+    blocks.append(_MCP_INSPECTION_PREFERENCE)
+
     # Skills index for the read-side tools, filtered to the honest
     # MCP-exposed surface. `memory` joins only when the shim is actually
     # registered (see the two-predicate gate above); EXPOSED_TOOLS is the
@@ -231,9 +296,9 @@ def build_system_prompt_append(
     # in the MCP child's env and cannot be evaluated here.
     try:
         from agent import prompt_builder
-        from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
+        from agent.transports.hermes_tools_mcp_server import exposed_tools_for_profile
 
-        advertised = set(EXPOSED_TOOLS) | {"session_search"}
+        advertised = set(exposed_tools_for_profile("claude-agent-sdk")) | {"session_search"}
         if memory_tool_exposed:
             advertised.add("memory")
         index = prompt_builder.build_skills_system_prompt(
@@ -548,6 +613,58 @@ def run_claude_agent_sdk_turn(
     except Exception:
         logger.debug("approval turn-context refresh failed", exc_info=True)
 
+    def _make_visibility_callbacks():
+        """Create visibility callbacks fenced to this exact Hermes turn."""
+        visibility_turn_id = str(getattr(agent, "_current_turn_id", "") or "")
+        lock = getattr(agent, "_sdk_visibility_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            agent._sdk_visibility_lock = lock
+        with lock:
+            agent._sdk_visibility_epoch = getattr(agent, "_sdk_visibility_epoch", 0) + 1
+            visibility_epoch = agent._sdk_visibility_epoch
+            agent._sdk_visibility_turn_id = visibility_turn_id
+            agent._sdk_visibility_iteration_count = 0
+
+        def _visibility_is_current() -> bool:
+            with lock:
+                return (
+                    getattr(agent, "_sdk_visibility_epoch", None) == visibility_epoch
+                    and getattr(agent, "_sdk_visibility_turn_id", None) == visibility_turn_id
+                    and getattr(agent, "_current_turn_id", None) == visibility_turn_id
+                    and not getattr(agent, "_interrupt_requested", False)
+                )
+
+        def _on_tool_iteration() -> None:
+            with lock:
+                if not _visibility_is_current():
+                    return
+                agent._sdk_visibility_iteration_count += 1
+            try:
+                agent._touch_activity("completed SDK tool iteration")
+            except Exception:
+                logger.debug("claude-sdk iteration activity update failed", exc_info=True)
+
+        def _relay_interim_assistant(text: str) -> None:
+            if not _visibility_is_current() or not isinstance(text, str):
+                return
+            visible = agent._strip_think_blocks(text).strip()
+            if visible:
+                from agent.redact import redact_sensitive_text
+                visible = redact_sensitive_text(visible)
+            if not visible or visible == "(empty)" or agent._interim_text_was_delivered(visible):
+                return
+            callback = getattr(agent, "interim_assistant_callback", None)
+            if callback is None:
+                return
+            try:
+                callback(visible, already_streamed=False)
+                agent._record_delivered_interim_text(visible)
+            except Exception:
+                logger.debug("interim assistant relay raised", exc_info=True)
+
+        return _relay_interim_assistant, _on_tool_iteration
+
     def _create_session(resume_id: Optional[str]) -> None:
         from agent.runtime_cwd import resolve_agent_cwd
 
@@ -578,6 +695,16 @@ def run_claude_agent_sdk_turn(
                 approval_callback = None
 
         def _on_tool_started(tool_name: str, preview: str, args: dict) -> None:
+            # Claude SDK tool calls bypass the native tool executor, so mirror
+            # its shared activity updates here. The gateway heartbeat reads
+            # get_activity_summary(), which derives its useful current action
+            # from these fields; without this, an active SDK turn remains
+            # stuck at its initial "initializing" state.
+            agent._current_tool = tool_name
+            try:
+                agent._touch_activity(f"executing tool: {tool_name}")
+            except Exception:
+                logger.debug("claude-sdk activity update failed", exc_info=True)
             progress_callback = getattr(agent, "tool_progress_callback", None)
             if progress_callback is None:
                 return
@@ -591,13 +718,27 @@ def run_claude_agent_sdk_turn(
         def _relay_stream_delta(text: str) -> None:
             # Late-bound: the gateway assigns stream_delta_callback per turn
             # AFTER the session exists (and clears it between turns).
-            callback = getattr(agent, "stream_delta_callback", None)
-            if callback is None:
-                return
-            try:
-                callback(text)
-            except Exception:
-                logger.debug("stream delta relay raised", exc_info=True)
+            # Fan out to BOTH display sinks, mirroring the native runtimes
+            # (run_agent.py: [self.stream_delta_callback, self._stream_callback]).
+            # `stream_delta_callback` is the CLI/TUI sink. `_stream_callback` is
+            # the one the JSON-RPC gateway installs via run_conversation's
+            # `stream_callback=` kwarg, and that is the sink the DESKTOP listens
+            # on (it feeds the `message.delta` notification). Relaying only to
+            # the first meant the desktop never streamed on this runtime, no
+            # matter how the operator set display.streaming.
+            callbacks = [
+                cb
+                for cb in (
+                    getattr(agent, "stream_delta_callback", None),
+                    getattr(agent, "_stream_callback", None),
+                )
+                if cb is not None
+            ]
+            for cb in callbacks:
+                try:
+                    cb(text)
+                except Exception:
+                    logger.debug("stream delta relay raised", exc_info=True)
 
         append = build_system_prompt_append(
             platform=getattr(agent, "platform", None),
@@ -693,11 +834,39 @@ def run_claude_agent_sdk_turn(
             hermes_session_id=getattr(agent, "session_id", None),
             resume_session_id=resume_id,
             on_stream_delta=_relay_stream_delta,
+            on_interim_assistant=on_interim_assistant,
+            on_tool_iteration=on_tool_iteration,
             on_unsolicited_result=on_unsolicited_result,
             # Operator budget cap (agent.claude_agent_sdk.max_budget_usd);
             # None = no budget. Read per session creation so a config edit
             # applies on the next session, same as the append snapshot.
             max_budget_usd=_configured_max_budget_usd(),
+            # Hybrid MCP bridge inputs (ported from PR #56413). Passing the
+            # live agent + its OpenAI-format tool list activates an in-process
+            # MCP server that exposes the full Hermes tool registry — so
+            # proxified third-party MCP servers become reachable from inside
+            # the SDK loop, not just the ~25 curated stdio tools.
+            #
+            # Off by default (agent.claude_agent_sdk.hybrid_mcp_bridge:
+            # false) so a green-field upgrade is byte-identical to fcava's
+            # stdio-only behaviour — the wide bridge exposes agent-level
+            # tools whose enablement is a security choice. Operators opt in
+            # explicitly.
+            #
+            # agent.tools is a snapshot taken at agent build time and never
+            # re-reads the registry (see tools/mcp_tool.py::refresh_agent_mcp_tools
+            # docstring). If an HTTP MCP finished connecting AFTER that snapshot
+            # (e.g. slow initial handshake, or /reload-mcp), its tools would be
+            # invisible to the hybrid bridge. Force a refresh here so the bridge
+            # sees the current registry — the same call turn_context.py does
+            # between turns, but pulled forward so it also applies to the
+            # session-creation build.
+            agent=(agent if _hybrid_bridge_enabled() else None),
+            tools=(
+                _snapshot_agent_tools_with_mcp_refresh(agent)
+                if _hybrid_bridge_enabled()
+                else None
+            ),
         )
         # The prologue persisted Hermes' native composed prompt — a prompt
         # this runtime never sends. Overwrite the snapshot with the
@@ -744,6 +913,17 @@ def run_claude_agent_sdk_turn(
             "error": None,
             "agent_persisted": True,
         }
+
+    on_interim_assistant, on_tool_iteration = _make_visibility_callbacks()
+    live_session = getattr(agent, "_claude_sdk_session", None)
+    if live_session is not None:
+        try:
+            live_session.set_turn_visibility_callbacks(
+                on_interim_assistant=on_interim_assistant,
+                on_tool_iteration=on_tool_iteration,
+            )
+        except Exception:
+            logger.debug("claude-sdk visibility callback refresh failed", exc_info=True)
 
     turn = None
     resumed = False
@@ -868,11 +1048,28 @@ def run_claude_agent_sdk_turn(
     )
     usage_result = _record_claude_sdk_usage(agent, turn)
 
+    # Is the post-turn review routed OFF this runtime? Resolved here because
+    # the skills gate below depends on it.
+    _review_routed = False
+    try:
+        from agent.background_review import _resolve_review_runtime
+
+        _review_routed = bool(_resolve_review_runtime(agent).get("routed"))
+    except Exception:
+        logger.debug("review-runtime resolution raised", exc_info=True)
+
     should_review_skills = False
     if (
         agent._skill_nudge_interval > 0
         and agent._iters_since_skill >= agent._skill_nudge_interval
-        and "skill_manage" in agent.valid_tool_names
+        # `agent.valid_tool_names` is the SDK SESSION's surface, which never
+        # contains skill_manage on this runtime by design (the append even
+        # strips guidance naming it). But the agent that would call
+        # skill_manage is the REVIEW FORK, and a routed fork is an ordinary
+        # Hermes agent carrying the full toolset. Gating on the SDK session's
+        # tools therefore disabled skill review permanently here — memory
+        # review worked while skill review silently never fired.
+        and ("skill_manage" in agent.valid_tool_names or _review_routed)
     ):
         should_review_skills = True
         agent._iters_since_skill = 0
@@ -902,13 +1099,7 @@ def run_claude_agent_sdk_turn(
         # fork is an ordinary Hermes agent with the full tool surface, so the
         # self-improvement loop behaves exactly as on the native runtimes.
         # Mirrors the codex_app_server -> codex_responses downgrade. (#25267)
-        _review_routed = False
-        try:
-            from agent.background_review import _resolve_review_runtime
-
-            _review_routed = bool(_resolve_review_runtime(agent).get("routed"))
-        except Exception:
-            logger.debug("review-runtime resolution raised", exc_info=True)
+        # `_review_routed` is resolved once above (the skills gate needs it too).
 
         if _review_routed:
             try:

@@ -45,17 +45,13 @@ logger = logging.getLogger(__name__)
 # the agent.claude_agent_sdk.permission_mode config key (an SDK mode literal
 # — see _configured_permission_mode), then this env mapping.
 #
-# Posture, stated honestly: "auto" → acceptEdits is NOT codex parity, it is
-# merely the closest available mode. Codex's default workspace-write profile
-# still surfaces escalations for approval; acceptEdits auto-approves file
-# edits under cwd with NO Hermes approval callback in the loop — the
-# can_use_tool bridge is wired ONLY in "default" mode (see
-# build_option_fields), and bypassPermissions disables SDK permission
-# prompts entirely. Operators who want the gateway's approval flow set
-# HERMES_TERMINAL_SECURITY_MODE=approval-required or
-# agent.claude_agent_sdk.permission_mode: default in config.yaml.
+# SDK default posture is intentionally stricter than generic terminal `auto`:
+# `default` preserves Hermes' per-tool approval bridge. Mapping `auto` to
+# `acceptEdits` skips that bridge entirely, so even the fixed bounded MCP read
+# surface is denied/unguarded depending on CLI state. Explicit operator choices
+# retain their SDK literals below.
 _HERMES_TO_SDK_PERMISSION_MODE = {
-    "auto": "acceptEdits",
+    "auto": "default",
     "approval-required": "default",
     "unrestricted": "bypassPermissions",
     "yolo": "bypassPermissions",
@@ -102,6 +98,15 @@ def _configured_permission_mode() -> Optional[str]:
 # The SDK's own setting-source literals (verified against the installed
 # claude-agent-sdk 0.2.120 SettingSource type).
 _SDK_SETTING_SOURCES = ("user", "project", "local")
+
+# These are the only two filesystem-capable tools exposed by the fixed
+# ``claude-agent-sdk`` Hermes MCP profile. Their handlers retain the native
+# file safety/read-block checks; an exact identity check avoids treating a
+# generic MCP prefix or a lookalike server/tool as trusted.
+_SDK_AUTO_ALLOWED_MCP_INSPECTION_TOOLS = frozenset({
+    "mcp__hermes-tools__read_file",
+    "mcp__hermes-tools__search_files",
+})
 
 
 def _configured_setting_sources() -> list:
@@ -301,6 +306,101 @@ def _swallow_interrupt_result(future: Any) -> None:
         logger.debug("SDK interrupt control request failed", exc_info=True)
 
 
+def _http_mcp_entries_from_config() -> dict[str, dict]:
+    """Return third-party HTTP MCPs discovered in Hermes' merged config, in
+    the McpHttpServerConfig shape the SDK wants ({"type": "http", "url": ...}).
+
+    Reads (in order, later overrides earlier) ``$HERMES_HOME/config.yaml``
+    then ``$HERMES_HOME/profiles/<profile>/config.yaml`` and pulls every
+    ``mcp_servers.<name>`` entry that carries a ``url:`` field (i.e. HTTP
+    MCPs). ``${...}`` env placeholders in the URL are resolved against the
+    gateway process env. Header-bearing entries are refused: the SDK
+    serializes its MCP config into the Claude CLI's ``--mcp-config`` process
+    argument, so forwarding a resolved Authorization header would expose the
+    secret to local process inspection. Entries without a valid resolved
+    HTTP(S) URL (stdio subprocess, in-process, missing env placeholder) are
+    ignored without logging the URL. Returns ``{}`` on any read/parse failure
+    — the caller keeps working with just the hybrid + stdio wrapper.
+
+    Rationale: HTTP MCPs registered in Hermes end up in the registry under a
+    toolset ``mcp-<name>`` that isn't included in the agent's default enabled
+    toolsets, so ``get_tool_definitions()`` returns them behind tool_search's
+    tier-2 deferral — the hybrid bridge (which snapshots ``agent.tools`` at
+    session build) never sees them. Exposing them straight to the SDK client
+    bypasses the whole toolset-filter path.
+    """
+    import os as _os
+    import re as _re
+    from urllib.parse import urlsplit as _urlsplit
+
+    try:
+        import yaml as _yaml  # type: ignore
+    except Exception:
+        return {}
+
+    home = _os.environ.get("HERMES_HOME") or _os.path.expanduser("~/.hermes")
+    profile = _os.environ.get("HERMES_PROFILE") or "default"
+    paths = [
+        _os.path.join(home, "config.yaml"),
+        _os.path.join(home, "profiles", profile, "config.yaml"),
+    ]
+
+    merged: dict[str, Any] = {}
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                data = _yaml.safe_load(fh) or {}
+            block = (data.get("mcp_servers") or {}) if isinstance(data, dict) else {}
+            if isinstance(block, dict):
+                merged.update(block)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.debug("failed to read %s for HTTP MCP discovery", p, exc_info=True)
+            continue
+
+    _env_re = _re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+    def _resolve_env(s: str) -> str:
+        return _env_re.sub(lambda m: _os.environ.get(m.group(1), ""), s)
+
+    out: dict[str, dict] = {}
+    for name, cfg in merged.items():
+        if not isinstance(cfg, dict):
+            continue
+        url = cfg.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        headers = cfg.get("headers")
+        if isinstance(headers, dict) and headers:
+            # Never resolve or log header values. ClaudeAgentOptions passes
+            # mcp_servers through `--mcp-config <json>`, making every value
+            # visible in the child process argv. Dropping the headers and
+            # connecting anonymously would be a misleading auth downgrade;
+            # refuse the whole server instead.
+            logger.warning(
+                "claude-agent-sdk: refusing HTTP MCP %r because it requires "
+                "headers that the SDK would expose in process arguments",
+                str(name),
+            )
+            continue
+        resolved = _resolve_env(url).strip()
+        parsed = _urlsplit(resolved)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            # Missing env placeholders commonly produce `https:///path`.
+            # Do not hand malformed config to the child or log the resolved
+            # URL: it may itself contain credentials.
+            logger.warning(
+                "claude-agent-sdk: refusing HTTP MCP %r because its resolved "
+                "URL is not a valid HTTP(S) endpoint",
+                str(name),
+            )
+            continue
+        entry: dict[str, Any] = {"type": "http", "url": resolved}
+        out[str(name)] = entry
+    return out
+
+
 # Substrings in SDK/CLI errors that signal broken subscription credentials.
 # Conservative on purpose — mirrors codex's _OAUTH_REFRESH_FAILURE_HINTS
 # contract: every needle is a phrase, never a bare token. Bare "401" matched
@@ -313,7 +413,6 @@ _AUTH_FAILURE_HINTS = (
     "invalid api key",
     "authentication_error",
     "401 unauthorized",
-    "unauthorized",
     "oauth token",
     "token has expired",
     "expired token",
@@ -348,6 +447,21 @@ def classify_auth_failure(*parts: str) -> Optional[str]:
 def check_claude_sdk_available() -> tuple[bool, str]:
     """Preflight: the optional SDK extra must be importable, and it bundles /
     locates the Claude Code CLI itself. Mirrors check_codex_binary()."""
+    # Fast path FIRST: when the SDK already imports, never enter the lazy
+    # installer. ensure() can shell out to `uv pip install` and calls
+    # importlib.invalidate_caches(); doing either immediately before importing
+    # claude_agent_sdk -> mcp -> anyio rewrites site-packages and drops import
+    # caches under a live interpreter, which intermittently surfaces as
+    #     KeyError: 'anyio'
+    # from importlib._bootstrap._find_and_load — a hard, flaky session-start
+    # failure on installs where the extra is ALREADY present.
+    try:
+        import claude_agent_sdk  # noqa: F401
+
+        return True, "ok"
+    except ImportError:
+        pass
+
     # Lazy-install lane, mirroring agent/anthropic_adapter._get_anthropic_sdk:
     # the extra is opt-in (excluded from [all]), so first use on a lean
     # install goes through tools.lazy_deps.ensure. FeatureUnavailable falls
@@ -484,6 +598,27 @@ def _provider_flag(config_key: str, default: bool = False) -> bool:
     return bool(value)
 
 
+def _configured_hybrid_exclude() -> list:
+    """agent.claude_agent_sdk.hybrid_mcp_bridge_exclude from config.yaml.
+
+    Names to drop from the hybrid bridge (both buckets). Match on the raw
+    Hermes registry name, no ``mcp__`` prefix. Non-string entries are
+    dropped silently — a typo is a config error the operator will notice
+    when the tool doesn't disappear, not a reason to widen exposure.
+    """
+    raw = _provider_config().get("hybrid_mcp_bridge_exclude")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        name = entry.strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def _build_hermes_tools_mcp_config(
     hermes_session_id: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -508,7 +643,12 @@ def _build_hermes_tools_mcp_config(
     return {
         "type": "stdio",
         "command": sys.executable,
-        "args": ["-m", "agent.transports.hermes_tools_mcp_server"],
+        "args": [
+            "-m",
+            "agent.transports.hermes_tools_mcp_server",
+            "--profile",
+            "claude-agent-sdk",
+        ],
         "env": env,
     }
 
@@ -544,7 +684,16 @@ class ClaudeAgentSdkSession:
         hermes_session_id: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         on_stream_delta: Optional[Callable[[str], None]] = None,
+        on_interim_assistant: Optional[Callable[[str], None]] = None,
+        on_tool_iteration: Optional[Callable[[], None]] = None,
         on_unsolicited_result: Optional[Callable[[list[str]], None]] = None,
+        # Hybrid MCP bridge (ported from PR #56413): the explicit config
+        # opt-in plus both `agent` and `tools` activate in-process servers
+        # exposing the full Hermes registry (including proxified third-party
+        # MCPs). Missing either input or the opt-in preserves fcava's original
+        # stdio-only behavior.
+        agent: Optional[Any] = None,
+        tools: Optional[list[dict]] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._model = model
@@ -553,7 +702,7 @@ class ClaudeAgentSdkSession:
             or _configured_permission_mode()
             or _HERMES_TO_SDK_PERMISSION_MODE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
-                "acceptEdits",
+                "default",
             )
         )
         self._system_prompt_append = system_prompt_append
@@ -573,7 +722,19 @@ class ClaudeAgentSdkSession:
         # Display-only partial-text consumer (W4 streaming). Deltas never
         # enter the projected transcript; the gateway's stream consumer
         # handles rate limiting and the already_sent final-send dedup.
+        self._turn_callback_lock = threading.RLock()
         self._on_stream_delta = on_stream_delta
+        # Hybrid MCP bridge inputs (see param docstring above).
+        self._agent = agent
+        self._tools = tools
+        # Completed assistant prose that accompanies a tool call is a true
+        # interim status, not final-answer text. It follows the gateway's
+        # existing commentary callback so platforms can render it separately.
+        # These callbacks are refreshed before EVERY run_turn: a session may
+        # safely span several Hermes turns, while visibility must stay scoped
+        # to the current one.
+        self._on_interim_assistant = on_interim_assistant
+        self._on_tool_iteration = on_tool_iteration
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -604,6 +765,17 @@ class ClaudeAgentSdkSession:
         self._on_unsolicited_result = on_unsolicited_result
         self._unsolicited_text: list[str] = []
         self._unsolicited_delivered: set[str] = set()
+
+    def set_turn_visibility_callbacks(
+        self,
+        *,
+        on_interim_assistant: Optional[Callable[[str], None]],
+        on_tool_iteration: Optional[Callable[[], None]],
+    ) -> None:
+        """Atomically install current-turn, runtime-owned visibility hooks."""
+        with self._turn_callback_lock:
+            self._on_interim_assistant = on_interim_assistant
+            self._on_tool_iteration = on_tool_iteration
 
     # ---------- lifecycle ----------
 
@@ -768,7 +940,7 @@ class ClaudeAgentSdkSession:
             self._interrupt_event.clear()
             result.interrupted = True
             return result
-        text = _coerce_turn_input_text(user_input)
+        prompt = _coerce_turn_input(user_input)
 
         import concurrent.futures
 
@@ -797,7 +969,7 @@ class ClaudeAgentSdkSession:
         hard_trip = False
         turn_data: Optional[dict[str, Any]] = None
         future = asyncio.run_coroutine_threadsafe(
-            self._consume_turn(text), self._loop
+            self._consume_turn(prompt), self._loop
         )
         try:
             pending_verdict: Optional[str] = None
@@ -986,7 +1158,7 @@ class ClaudeAgentSdkSession:
 
     # ---------- internals ----------
 
-    async def _consume_turn(self, text: str) -> dict[str, Any]:
+    async def _consume_turn(self, prompt: Any) -> dict[str, Any]:
         """The async side of one turn: query, then read THIS turn's messages
         off the reader loop's inbox until the ResultMessage.
 
@@ -1017,7 +1189,12 @@ class ClaudeAgentSdkSession:
         self._turn_inbox = inbox
         interrupted = False
         try:
-            await self._client.query(text)
+            query_input = (
+                _sdk_user_message_stream(prompt)
+                if isinstance(prompt, list)
+                else prompt
+            )
+            await self._client.query(query_input)
             while True:
                 message = await inbox.get()
                 watch = self._turn_watch
@@ -1056,6 +1233,7 @@ class ClaudeAgentSdkSession:
                     continue
                 if not interrupted:
                     self._notify_tool_started(message)
+                    self._notify_interim_assistant(message)
                 projection = projector.project(message)
                 if watch is not None:
                     # Outstanding-tool evidence: ToolUseBlocks issue, tool
@@ -1092,6 +1270,7 @@ class ClaudeAgentSdkSession:
                         out["messages"].extend(projection.messages)
                     if projection.is_tool_iteration:
                         out["tool_iterations"] += 1
+                        self._notify_tool_iteration()
                     if projection.final_text is not None:
                         out["final_text"] = projection.final_text
                 if projection.is_result:
@@ -1105,7 +1284,8 @@ class ClaudeAgentSdkSession:
                     subtype = getattr(message, "subtype", "") or ""
                     if getattr(message, "is_error", False):
                         errors = getattr(message, "errors", None) or []
-                        if subtype == "success" and not errors:
+                        api_error_status = getattr(message, "api_error_status", None)
+                        if subtype == "success" and not errors and not api_error_status:
                             # Contradictory envelope: is_error=True yet
                             # subtype="success" with nothing in errors. The
                             # CLI emits this shape rarely (2026-08-11: it
@@ -1124,10 +1304,12 @@ class ClaudeAgentSdkSession:
                                 message,
                             )
                             break
-                        err_text = (
-                            f"SDK result error (subtype={subtype}): "
-                            + ("; ".join(str(e) for e in errors) or subtype)
-                        )
+                        detail = "; ".join(str(e) for e in errors) or getattr(
+                            message, "result", None
+                        ) or subtype
+                        err_text = f"SDK result error (subtype={subtype}): {detail}"
+                        if api_error_status:
+                            err_text += f" (HTTP {api_error_status})"
                         # A turn WE interrupted before any assistant content
                         # ends as is_error/error_during_execution in the CLI
                         # ("[ede_diagnostic] result_type=user…") — that is the
@@ -1375,6 +1557,41 @@ class ClaudeAgentSdkSession:
         except Exception:  # pragma: no cover - display callback
             logger.debug("stream delta callback raised", exc_info=True)
 
+    def _notify_interim_assistant(self, message: Any) -> None:
+        """Relay completed tool-adjacent assistant prose as commentary."""
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        with self._turn_callback_lock:
+            callback = self._on_interim_assistant
+        if callback is None:
+            return
+        if type(message).__name__ != "AssistantMessage":
+            return
+        blocks = list(getattr(message, "content", None) or [])
+        if not any(type(block).__name__ == "ToolUseBlock" for block in blocks):
+            return
+        text = "\n".join(
+            str(getattr(block, "text", "") or "")
+            for block in blocks
+            if type(block).__name__ == "TextBlock" and getattr(block, "text", "")
+        ).strip()
+        if not text:
+            return
+        try:
+            callback(text)
+        except Exception:  # pragma: no cover - display callback
+            logger.debug("interim assistant callback raised", exc_info=True)
+
+    def _notify_tool_iteration(self) -> None:
+        with self._turn_callback_lock:
+            callback = self._on_tool_iteration
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # pragma: no cover - display callback
+            logger.debug("tool-iteration callback raised", exc_info=True)
+
     def _notify_tool_started(self, message: Any) -> None:
         """Bridge ToolUseBlocks to Hermes tool-progress (gateway breadcrumbs),
         mirroring codex_runtime._codex_note_to_tool_progress (#38835)."""
@@ -1399,10 +1616,89 @@ class ClaudeAgentSdkSession:
         """The ClaudeAgentOptions field dict — plain data so tests can assert
         on it without importing the SDK."""
         mcp_servers: dict[str, Any] = {}
-        if self._include_hermes_tools:
+        # Hybrid in-process MCP bridge (ported from PR #56413) — exposes the
+        # full Hermes tool registry, including proxified third-party MCP
+        # servers, which the stdio `hermes-tools` wrapper cannot reach
+        # because credentials live in the gateway process env and don't
+        # propagate to the subprocess. Activation requires ALL of:
+        #   1. the operator opted in via
+        #      ``agent.claude_agent_sdk.hybrid_mcp_bridge: true``
+        #      (checked here as well as at the runtime call site);
+        #   2. the caller supplied both ``agent`` and ``tools``.
+        # The bridge splits into two in-process servers:
+        #   - ``hermes-tools`` — stdio-legacy names (see
+        #     ``HERMES_TOOLS_LEGACY_NAMES``). Preserves operator grants
+        #     stored in ``~/.claude/settings.json`` that key on
+        #     ``mcp__hermes-tools__<tool>``: a box on
+        #     ``permission_mode: default`` would otherwise face an
+        #     approval storm for tools it already granted.
+        #   - ``hermes-hybrid`` — everything else (proxified MCPs +
+        #     agent-level tools).
+        # The exclude list from config is applied to BOTH buckets so an
+        # operator can keep the wide bridge for proxified MCPs without
+        # inheriting a specific tool (delegate_task, cron_*, terminal, ...).
+        hybrid_active = False
+        hybrid_opted_in = _provider_flag("hybrid_mcp_bridge", default=False)
+        if hybrid_opted_in and self._agent is not None and self._tools:
+            try:
+                from agent.transports.hermes_hybrid_mcp import (
+                    HERMES_TOOLS_SERVER,
+                    HYBRID_SERVER,
+                    build_hybrid_mcp_server,
+                )
+                from agent.transports.hermes_tool_exposure import (
+                    HERMES_TOOLS_LEGACY_NAMES,
+                )
+
+                exclude_names = _configured_hybrid_exclude()
+                mcp_servers[HERMES_TOOLS_SERVER] = build_hybrid_mcp_server(
+                    self._agent,
+                    self._tools,
+                    server_name=HERMES_TOOLS_SERVER,
+                    only_names=HERMES_TOOLS_LEGACY_NAMES,
+                    exclude_names=exclude_names,
+                )
+                mcp_servers[HYBRID_SERVER] = build_hybrid_mcp_server(
+                    self._agent,
+                    self._tools,
+                    server_name=HYBRID_SERVER,
+                    exclude_names=(
+                        list(exclude_names) + list(HERMES_TOOLS_LEGACY_NAMES)
+                    ),
+                )
+                hybrid_active = True
+            except Exception as exc:  # noqa: BLE001
+                # Never break session start on hybrid bridge failure — the
+                # stdio wrapper still provides the curated tool set.
+                logger.warning(
+                    "hybrid MCP bridge failed to build (%s) — falling back "
+                    "to stdio hermes-tools only",
+                    exc,
+                )
+        # The stdio ``hermes-tools`` wrapper exposes ~25 curated tools that
+        # the hybrid bridge already re-exposes under the same server name
+        # (``hermes-tools``) when active — registering both concurrently
+        # would send Claude two copies of every curated tool under the same
+        # server. Skip stdio when hybrid is active. (Hybrid failure above
+        # falls back to stdio via ``hybrid_active`` staying False.)
+        if self._include_hermes_tools and not hybrid_active:
             mcp_servers["hermes-tools"] = _build_hermes_tools_mcp_config(
                 hermes_session_id=self._hermes_session_id
             )
+
+        # Headerless third-party HTTP MCPs configured in Hermes (config.yaml
+        # mcp_servers.<name>.url) can be exposed directly to the SDK because
+        # the registry snapshot may not contain their late/proxified tools.
+        # This is part of the SAME wide-surface security choice as the hybrid
+        # bridge, never an independent back door: discovery runs only after
+        # the explicit opt-in passed and both in-process bridge buckets built
+        # successfully. Header-bearing entries are refused by the loader
+        # because the SDK puts its MCP config in the Claude CLI argv.
+        if hybrid_active:
+            for entry_name, entry_cfg in _http_mcp_entries_from_config().items():
+                if entry_name in mcp_servers:
+                    continue
+                mcp_servers[entry_name] = entry_cfg
 
         system_prompt: Any = {"type": "preset", "preset": "claude_code"}
         if self._system_prompt_append:
@@ -1457,7 +1753,12 @@ class ClaudeAgentSdkSession:
             # dead-ends with "The user did not answer the questions." The model
             # must ask in plain text (Telegram-compatible); full option-button
             # mapping is a later feature.
-            "disallowed_tools": ["AskUserQuestion"],
+            #
+            # Native Read duplicates the bounded Hermes MCP read_file surface,
+            # but turns ordinary inspection into approval-card noise. Keep the
+            # protected-path-aware MCP tool and disallow only the duplicate
+            # native tool; Bash and all write-capable native tools are unchanged.
+            "disallowed_tools": ["AskUserQuestion", "Read"],
         }
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
@@ -1536,6 +1837,8 @@ class ClaudeAgentSdkSession:
         PermissionResultAllow: Any,
         PermissionResultDeny: Any,
     ) -> Any:
+        if tool_name in _SDK_AUTO_ALLOWED_MCP_INSPECTION_TOOLS:
+            return PermissionResultAllow()
         try:
             kwargs: dict = {"allow_permanent": False}
             # tool_use_id correlation (P2.a): the SDK guarantees a
@@ -1641,29 +1944,148 @@ def _tool_preview(name: str, args: dict) -> str:
     return name
 
 
-def _coerce_turn_input_text(user_input: Any) -> str:
-    """Collapse Hermes/OpenAI rich content into plain text input (same
-    contract as the codex session's _coerce_turn_input_text)."""
+def _sdk_image_content_block(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Translate one Hermes/OpenAI image part to an SDK-native image block.
+
+    The Agent SDK accepts structured user messages in streaming-input mode.
+    Preserve base64 data URIs and http(s) image URLs instead of pretending a
+    text-only query still carries the attachment. Return ``None`` for an
+    unsupported/malformed source; callers add an explicit user-visible marker.
+    """
+    import base64 as _base64
+    import re as _re
+    from urllib.parse import urlsplit as _urlsplit
+
+    source = item.get("source")
+    if isinstance(source, dict):
+        source_type = source.get("type")
+        if source_type == "base64":
+            media_type = source.get("media_type")
+            data = source.get("data")
+            if (
+                isinstance(media_type, str)
+                and media_type.startswith("image/")
+                and isinstance(data, str)
+                and data
+            ):
+                try:
+                    _base64.b64decode(data, validate=True)
+                except Exception:
+                    return None
+                return {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                }
+        elif source_type == "url":
+            raw_url = source.get("url")
+            if isinstance(raw_url, str):
+                parsed = _urlsplit(raw_url)
+                if parsed.scheme in {"http", "https"} and parsed.netloc:
+                    return {
+                        "type": "image",
+                        "source": {"type": "url", "url": raw_url},
+                    }
+
+    raw_url: Any = item.get("image_url")
+    if isinstance(raw_url, dict):
+        raw_url = raw_url.get("url")
+    if not isinstance(raw_url, str):
+        raw_url = item.get("url")
+    if not isinstance(raw_url, str) or not raw_url:
+        return None
+
+    data_match = _re.fullmatch(
+        r"data:(image/[A-Za-z0-9.+-]+);base64,(.+)",
+        raw_url,
+        flags=_re.DOTALL,
+    )
+    if data_match:
+        media_type, data = data_match.groups()
+        try:
+            _base64.b64decode(data, validate=True)
+        except Exception:
+            return None
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+
+    parsed = _urlsplit(raw_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return {
+            "type": "image",
+            "source": {"type": "url", "url": raw_url},
+        }
+    return None
+
+
+def _coerce_turn_input(user_input: Any) -> Any:
+    """Preserve Hermes/OpenAI rich images while keeping text-only turns plain.
+
+    ClaudeSDKClient.query accepts either a string or an async stream of SDK
+    message dictionaries. A content list with at least one valid image becomes
+    SDK-native blocks; a text-only list keeps the historical joined-string
+    behavior. Invalid image sources become truthful text, never a fabricated
+    claim that an image is attached.
+    """
     if isinstance(user_input, str):
         return user_input
     if isinstance(user_input, list):
-        parts: list[str] = []
+        blocks: list[dict[str, Any]] = []
+        has_valid_image = False
         for item in user_input:
             if isinstance(item, str):
                 if item.strip():
-                    parts.append(item)
+                    blocks.append({"type": "text", "text": item})
                 continue
             if not isinstance(item, dict):
                 if item is not None:
-                    parts.append(str(item))
+                    blocks.append({"type": "text", "text": str(item)})
                 continue
             item_type = item.get("type")
             if item_type in {"text", "input_text"}:
                 text = item.get("text") or item.get("content") or ""
                 if text:
-                    parts.append(str(text))
+                    blocks.append({"type": "text", "text": str(text)})
             elif item_type in {"image", "image_url", "input_image"}:
-                parts.append("[image attached]")
-        text = "\n\n".join(p for p in parts if p).strip()
-        return text or "What do you see in this image?"
+                image = _sdk_image_content_block(item)
+                if image is not None:
+                    blocks.append(image)
+                    has_valid_image = True
+                else:
+                    logger.warning(
+                        "claude-agent-sdk: image attachment has an unsupported "
+                        "or malformed source; sending an explicit unavailable marker"
+                    )
+                    blocks.append({
+                        "type": "text",
+                        "text": (
+                            "[image attachment unavailable: unsupported or "
+                            "malformed source]"
+                        ),
+                    })
+        if has_valid_image:
+            return blocks
+        return "\n\n".join(
+            str(block.get("text") or "")
+            for block in blocks
+            if block.get("type") == "text"
+        ).strip()
     return "" if user_input is None else str(user_input)
+
+
+async def _sdk_user_message_stream(content: list[dict[str, Any]]):
+    """One-message async stream accepted by ``ClaudeSDKClient.query``."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }

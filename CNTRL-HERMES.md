@@ -154,3 +154,39 @@ the narrow sync in §3.
 
 **Upstream**
 - 4 fixes proposed: https://github.com/fcavalcantirj/hermes-agent/pull/3
+
+---
+
+## 7. Rulings and status — 2026-09-01
+
+**Decided (Aug 26 four-model council, unanimous; ledger: `docs/councils/council-log.jsonl`):**
+Hermes is the spine. cntrl is the control plane. No codebase merge. All our code lives
+out-of-tree in `$HERMES_HOME/plugins/`. conductor stays independent for now (3/4); revisit
+after the first milestone.
+
+**Branch state:** the 7 `fix/claude-sdk-parity-followups` commits are carried on
+`cntrl-hermes` as one commit (same bytes; that branch is a rebase onto a newer upstream and
+cannot fast-forward here).
+
+**Found on resume (Sep 1):**
+- The SDK path **worked**: 47 SDK sessions and 9 completed desktop turns between Aug 14 and
+  Aug 16 01:51 (`.hermes-test/logs/agent.log`). Streaming deltas arrived from the SDK, but
+  22 of 26 were logged `callback=NONE` — only the CLI sink was wired, not the desktop's
+  `_stream_callback`. That is the "UI streaming not working" bug. The fan-out fix (last of
+  the 7 carried commits, Aug 16 02:06) is **untested in the desktop**: the 14:33 retest hit
+  "claude-agent-sdk is not installed".
+- `claude-agent-sdk` is an optional extra. It vanished from `.venv` between Aug 16 10:00 and
+  14:33, and `.venv` was rebuilt again Aug 26 13:12. Any `uv sync` (and a bare `uv run`,
+  which syncs first) without `--extra claude-agent-sdk` removes it. The desktop runs this
+  repo's `.venv` (`findPythonForRoot` in `apps/desktop/electron/main.ts`). Reinstall with
+  `uv sync --extra claude-agent-sdk`; afterwards use `.venv/bin/python` or `uv run --no-sync`.
+- `psycopg` is not installed either; the pgvector provider stays `is_available=False` until
+  `psycopg[binary,pool]` + `pgvector` are in `.venv`. Postgres `:5434` is up now.
+- Desktop dev needs `npm ci` at repo root (no `node_modules` anywhere).
+- Test home: `HERMES_HOME=$PWD/.hermes-test` (provider `claude-agent-sdk`, streaming on,
+  `setting_sources: ["user"]`, memory `pgvector`). Embedding key is read from
+  `HERMES_EMBED_API_KEY`; `GEMINI_API_KEY` is set in the shell, the Hermes name is not.
+
+**Open, in order:** (1) desktop UI streaming, (2) pgvector against `:5434/thinkscore`,
+(3) skill auto system, (4) kanban one-way sync proposal (§3), (5) conductor inside Hermes via
+`setting_sources: ["user"]` — hooks tradeoff undecided.
