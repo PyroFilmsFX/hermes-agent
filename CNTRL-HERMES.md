@@ -219,8 +219,17 @@ appeared at 15:44 from those hooks). Option B keeps `setting_sources: []` and lo
 explicitly via the new `agent.claude_agent_sdk.plugins` (SDK `--plugin-dir`). Proven: CLI argv
 carries `--plugin-dir …/conductor`, only the hermes-tools MCP is spawned, conductor's own hooks
 fire (telemetry written in the session cwd). Flip back to A by setting `setting_sources: ["user"]`.
-Residual: conductor's hooks write `.claude/state` into the SDK session cwd; the `tb-workers` MCP
-server is registered but fails to connect there exactly as it does in Claude Code today.
+Residual: conductor's hooks write `.claude/state` into the SDK session cwd. The `tb-workers` MCP
+failed to connect there (and in Claude Code) until Sep 1 evening: Claude Code launches it with
+`uv run` from the session cwd, and this repo's `exclude-newer = "14 days"` hid `mcp>=2.1.1` while
+`.python-version` (3.11) crashed the server's pydantic adapter. Fixed in the conductor plugin's
+`.mcp.json` (`--no-project --no-config --python ">=3.12"`, thinkbot-plugin main `c0deb0706`), not
+here — a hermes-side `exclude-newer-package` exemption cannot help because the venv is 3.11.
+Proven inside Hermes Sep 1: the SDK session's `claude` process spawned the MCP, a prompt called
+`mcp__plugin_conductor_tb-workers__list_workers`, the desktop showed its "Approval needed" card,
+Run returned `{"result":[]}` and the reply was "tb-workers OK: 0 workers". Note the `plugins:`
+path points at `~/.claude/plugins/marketplaces/…`, which Claude Code re-clones on auto-update,
+so the fix reached Hermes as soon as it was on the marketplace's `main`.
 
 **Anthropic third-party-harness screen (found Sep 1, cost two hours).** Agent-SDK requests
 (`CLAUDE_CODE_ENTRYPOINT=sdk-py`) whose appended system prompt reads too much like another
