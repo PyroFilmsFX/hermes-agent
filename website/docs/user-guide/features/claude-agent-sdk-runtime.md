@@ -99,6 +99,6 @@ agent:
 ## Limitations
 
 - Auxiliary text tasks (title generation, compression, extraction) auto-route through one-shot Agent SDK queries on the same subscription. Built-in and MCP tools are disabled for those calls. If that SDK route is unavailable, aux fails closed instead of selecting a metered fallback; an explicitly configured auxiliary provider remains an operator opt-in.
-- The background memory/skill review pass is skipped on this runtime (the review fork cannot write through the SDK's tool surface).
+- The background memory/skill review pass runs only when `auxiliary.background_review` routes it to a concrete non-SDK provider+model (there the fork is an ordinary Hermes agent with the full toolset). Unrouted, it is skipped — with a warning, once per process. The foreground session can also save skills itself: the hermes-tools profile for this runtime serves `skill_manage` (bounded to `$HERMES_HOME/skills`, gated by `write_approval` like every other origin).
 - Model names are Claude model ids (e.g. `claude-opus-4-8`); leave unset to use the CLI's default model.
 - With `model.provider: claude-agent-sdk` pinned in `config.yaml`, a bare `-m <claude-model-id>` stays on this provider — the pin survives model→provider inference, and short aliases (`-m sonnet`) resolve within it. Without a pinned provider, Claude model ids route to the native `anthropic` (metered API) provider as usual. Known residual: dot-form ids absent from the curated catalog (e.g. `claude-opus-4.8`) still leave the pin — use the dash-form ids.
