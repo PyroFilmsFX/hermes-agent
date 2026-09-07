@@ -29,6 +29,50 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 
 
+# Background-review threads are daemons, so a one-shot CLI invocation would
+# otherwise kill them mid-write. They are registered here and joined (bounded)
+# at interpreter exit. See AIAgent._spawn_background_review. (cntrl carry)
+_BG_REVIEW_THREADS: "List[threading.Thread]" = []
+_BG_REVIEW_ATEXIT_REGISTERED = False
+_BG_REVIEW_JOIN_TIMEOUT_DEFAULT = 120.0
+
+
+def _bg_review_join_timeout() -> float:
+    """Seconds to wait for in-flight reviews at exit (0 disables the join)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        aux = (load_config_readonly().get("auxiliary") or {}).get("background_review") or {}
+        return float(aux.get("join_timeout", _BG_REVIEW_JOIN_TIMEOUT_DEFAULT))
+    except Exception:
+        return _BG_REVIEW_JOIN_TIMEOUT_DEFAULT
+
+
+def _join_background_review_threads() -> None:
+    """Bounded join of in-flight background reviews at interpreter exit."""
+    timeout = _bg_review_join_timeout()
+    if timeout <= 0:
+        return
+    deadline = time.monotonic() + timeout
+    for t in list(_BG_REVIEW_THREADS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if t.is_alive():
+            logger.debug("waiting up to %.1fs for %s", remaining, t.name)
+            t.join(remaining)
+
+
+def _register_background_review_thread(t: "threading.Thread") -> None:
+    global _BG_REVIEW_ATEXIT_REGISTERED
+    _BG_REVIEW_THREADS[:] = [x for x in _BG_REVIEW_THREADS if x.is_alive()]
+    _BG_REVIEW_THREADS.append(t)
+    if not _BG_REVIEW_ATEXIT_REGISTERED:
+        atexit.register(_join_background_review_threads)
+        _BG_REVIEW_ATEXIT_REGISTERED = True
+
+
+
 def _launch_cwd_for_session(source: str) -> Optional[str]:
     """cwd to stamp on a new session row (``hermes -c`` / ``--resume``), or None.
 
@@ -796,7 +840,11 @@ class AIAgent(
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
-            threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()
+            _t = threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review")
+            _t.start()
+            # One-shot invocations (`hermes chat -q ...`) exit right after the answer prints and would kill
+            # this daemon mid-write; register it for a bounded join at interpreter exit. (cntrl carry)
+            _register_background_review_thread(_t)
         except Exception:
             finish_background_review_run(self, review_run)
             raise
