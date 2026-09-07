@@ -244,6 +244,32 @@ def _configured_max_buffer_size() -> int:
     return value
 
 
+def _configured_cli_path() -> str:
+    """agent.claude_agent_sdk.cli_path from config.yaml, validated.
+
+    The SDK prefers its own bundled Claude Code binary over the ``claude`` on
+    PATH, and that bundle lags the CLI releases by weeks — long enough that a
+    freshly shipped model id is rejected with "Claude Code X does not support
+    this model" while ``claude update`` on the same machine already has it.
+    Pointing at the operator's launcher (``~/.local/bin/claude``) keeps the
+    runtime current with that update instead of with the SDK release cadence.
+    Empty/absent keeps the SDK default. A path that is not an executable file
+    is dropped with a warning: a typo must never silently run a different
+    binary than the one the operator asked for. (cntrl carry)"""
+    raw = _provider_config().get("cli_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    path = os.path.expanduser(raw.strip())
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        logger.warning(
+            "agent.claude_agent_sdk.cli_path %r is not an executable file — "
+            "ignoring it (the SDK's bundled Claude Code CLI will be used).",
+            raw,
+        )
+        return ""
+    return path
+
+
 def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float]:
     """Numeric seconds from `agent.claude_agent_sdk.<key>`, validated.
 
