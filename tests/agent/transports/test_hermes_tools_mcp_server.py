@@ -108,13 +108,15 @@ class TestModuleSurface:
         )
 
     def test_claude_sdk_profile_adds_bounded_read_only_file_tools(self):
-        """Claude gets inspection only; no filesystem mutation tool is exposed."""
+        """Claude gets inspection + the skill writer; no filesystem mutation tool is exposed."""
         from agent.transports.hermes_tool_exposure import exposed_tools_for_profile
         from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
 
         tools = set(exposed_tools_for_profile("claude-agent-sdk"))
         assert {"read_file", "search_files"} <= tools
-        assert "skill_manage" not in tools
+        # The skill WRITER is served on this profile (cntrl carry): without it the
+        # SDK runtime's skill auto-capture is dead. It stays off the Codex default.
+        assert "skill_manage" in tools
         assert "skill_manage" not in EXPOSED_TOOLS
         assert not tools & {
             "terminal", "shell", "write_file", "patch", "process",

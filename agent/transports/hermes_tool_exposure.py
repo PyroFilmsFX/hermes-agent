@@ -104,6 +104,11 @@ CLAUDE_AGENT_SDK_INSPECTION_TOOLS: Tuple[str, ...] = (
     "search_files",
 )
 
+# The skill WRITER. Without it the SDK runtime's skill auto-capture is dead:
+# the review fork writes through this server, and the append only ships
+# skill guidance when this profile actually serves the tool. (cntrl carry)
+CLAUDE_AGENT_SDK_SKILL_TOOLS: Tuple[str, ...] = ("skill_manage",)
+
 
 def exposed_tools_for_profile(profile: Optional[str] = None) -> Tuple[str, ...]:
     """Return the curated stateless surface for a trusted runtime profile.
@@ -112,7 +117,7 @@ def exposed_tools_for_profile(profile: Optional[str] = None) -> Tuple[str, ...]:
     Only the fixed Claude Agent SDK profile gains bounded file inspection.
     """
     if profile == "claude-agent-sdk":
-        return CURATED_STATELESS_TOOLS + CLAUDE_AGENT_SDK_INSPECTION_TOOLS
+        return CURATED_STATELESS_TOOLS + CLAUDE_AGENT_SDK_INSPECTION_TOOLS + CLAUDE_AGENT_SDK_SKILL_TOOLS
     return CURATED_STATELESS_TOOLS
 
 

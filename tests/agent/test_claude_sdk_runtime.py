@@ -1365,6 +1365,29 @@ class TestBackgroundReviewRouting:
         agent._spawn_background_review.assert_called_once()
         assert agent._spawn_background_review.call_args.kwargs["review_skills"]
 
+
+    def test_unrouted_skip_warns_once_per_process(self, monkeypatch, caplog):
+        # An unrouted review means auto-capture is silently dead; say so
+        # loudly once, then stay quiet. (cntrl carry)
+        import agent.claude_sdk_runtime as rt
+
+        self._route(monkeypatch, False)
+        monkeypatch.setattr(rt, "_UNROUTED_REVIEW_WARNED", False)
+        with caplog.at_level(logging.DEBUG, logger="agent.claude_sdk_runtime"):
+            for _ in range(2):
+                agent = _make_agent()
+                run_claude_agent_sdk_turn(
+                    agent,
+                    user_message="hi",
+                    original_user_message="hi",
+                    messages=[{"role": "user", "content": "hi"}],
+                    effective_task_id="task-1",
+                    should_review_memory=True,
+                )
+                agent._spawn_background_review.assert_not_called()
+        skipped = [r for r in caplog.records if "background review skipped" in r.getMessage()]
+        assert [r.levelno for r in skipped] == [logging.WARNING, logging.DEBUG]
+
     def test_skip_background_review_blocks_routed_skill_review(self, monkeypatch):
         self._route(monkeypatch, True)
         agent = _make_agent()
@@ -3738,7 +3761,18 @@ class TestSystemPromptAppend:
         )
         from agent.prompt_builder import MEMORY_GUIDANCE
 
+        import agent.claude_sdk_runtime as rt
+
         self._home(tmp_path, monkeypatch, memory="uses trunk-based development")
+        # Writer exposed (the cntrl profile serves skill_manage): the sentence
+        # is callable guidance and must survive verbatim.
+        assert _strip_uncallable_tool_guidance(MEMORY_GUIDANCE) == MEMORY_GUIDANCE
+        out = build_system_prompt_append()
+        assert MEMORY_GUIDANCE in out
+
+        # Writer unexposed (a profile that drops skill_manage again): the
+        # instructing sentence goes, everything else is carried verbatim.
+        monkeypatch.setattr(rt, "_skill_writer_exposed", lambda: False)
         stripped = _strip_uncallable_tool_guidance(MEMORY_GUIDANCE)
         assert "skill_manage" not in stripped
         assert "Memory is the narrow exception" in stripped
@@ -3759,12 +3793,27 @@ class TestSystemPromptAppend:
         assert "disposable" in out
         assert "will not be injected" not in out
 
-    def test_skills_guidance_never_injected(self, tmp_path, monkeypatch):
-        # SKILLS_GUIDANCE instructs skill_manage — unexposed by design.
-        from agent.claude_sdk_runtime import build_system_prompt_append
+    def test_compact_skills_guidance_injected_when_writer_exposed(self, tmp_path, monkeypatch):
+        # The profile serves skill_manage, so skill guidance ships — but the
+        # COMPACT sentence, never the native SKILLS_GUIDANCE block: that block
+        # trips Anthropic's third-party-harness screen on the SDK entrypoint
+        # (400 "out of extra usage", measured 2026-09-01). (cntrl carry)
+        import agent.claude_sdk_runtime as rt
+        from agent.prompt_builder import SKILLS_GUIDANCE
 
         self._home(tmp_path, monkeypatch, memory="a fact")
-        out = build_system_prompt_append()
+        out = rt.build_system_prompt_append()
+        assert rt._SDK_SKILLS_GUIDANCE.strip() in out
+        assert "Skill Safety Rule" not in out
+        assert SKILLS_GUIDANCE not in out
+
+    def test_skills_guidance_never_injected_when_writer_unexposed(self, tmp_path, monkeypatch):
+        # A profile without skill_manage must not be told to call it.
+        import agent.claude_sdk_runtime as rt
+
+        monkeypatch.setattr(rt, "_skill_writer_exposed", lambda: False)
+        self._home(tmp_path, monkeypatch, memory="a fact")
+        out = rt.build_system_prompt_append()
         assert "skill_manage" not in out
 
     def test_session_search_guidance_always_present(self, tmp_path, monkeypatch):
@@ -4029,10 +4078,12 @@ class TestSystemPromptAppend:
         monkeypatch.setattr(pb, "build_skills_system_prompt", fake_index)
         out = build_system_prompt_append()
         assert "fixture-skill: proves the wiring" in out
-        assert "skill_manage" not in out
+        # The index's skill_manage sentence is callable guidance on this
+        # profile and must survive (it was stripped while unexposed).
+        assert "fix it with skill_manage(action='patch')" in out
         tools = captured.get("available_tools") or set()
         assert "memory" in tools and "session_search" in tools
-        assert {"read_file", "search_files"} <= tools
+        assert {"read_file", "search_files", "skill_manage"} <= tools
         assert not tools & {"terminal", "shell", "write_file", "patch", "process"}
         assert set(EXPOSED_TOOLS) <= tools
 
