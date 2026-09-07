@@ -203,3 +203,4 @@ native/fts5_cjk/*.so
 .lazy-refresh-incomplete
 .hermes-test/
 .sdkprobe/
+worker-routing.json

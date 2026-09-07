@@ -23,12 +23,20 @@ Upstream moves ~180 commits a day. We merge upstream often. So:
    When that PR merges, our carry shrinks to the inventory's "cntrl-only" list.
 4. **Prefix fork commits** with `cntrl:` (docs/plugins) or `claude-sdk:`
    (additions on the SDK runtime) so `git log` separates them from upstream.
+5. **Keep the inventory current.** After every upstream sync and after any
+   commit that touches a core file, run `/fork-inventory` (or
+   `.venv/bin/python scripts/cntrl/fork_inventory.py --check`) and commit
+   the generated snapshot + log with it. An unlisted core file fails the check.
 
 ## Merging upstream (do this often)
 
+Preferred while PR #65982 is open: rebuild on its head, it is rebased onto
+fresh main every few days (`docs/cntrl/fork-inventory.md` §2 and §5).
+
 ```bash
 git fetch origin
-git merge origin/main            # merge, not rebase — see fork-inventory.md
+git fetch origin pull/65982/head:pr-65982-sep7
+git rebase --onto pr-65982-sep7 <old-pr-base> cntrl-hermes   # our commits only
 # resolve, then:
 uv sync --extra claude-agent-sdk
 .venv/bin/python -m pytest tests/agent/test_claude_sdk_runtime.py cntrl-plugins -q
