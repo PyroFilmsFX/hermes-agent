@@ -641,3 +641,46 @@ class TestSession:
         turn = session.run_turn("hi")
         assert turn.should_retire
         assert "ANTHROPIC_API_KEY" in (turn.error or "")
+
+    # --- agent.claude_agent_sdk.cli_path (cntrl carry) ---
+
+    def test_cli_path_absent_by_default(self):
+        # No config → the SDK picks its own binary (bundled, then PATH).
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "cli_path" not in session.build_option_fields()
+
+    def test_cli_path_config_opt_in_expands_home(self, monkeypatch, tmp_path):
+        # The bundled CLI lags releases; operators pin their own `claude`
+        # (2026-09-01: bundled 2.1.211 rejected claude-fable-5-1, which
+        # needs >= 2.1.251, while ~/.local/bin/claude was already 2.1.257).
+        import hermes_cli.config as cfg
+
+        launcher = tmp_path / "claude"
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"claude_agent_sdk": {"cli_path": "~/claude"}}},
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert session.build_option_fields()["cli_path"] == str(launcher)
+
+    def test_cli_path_not_executable_dropped(self, monkeypatch, tmp_path):
+        # A typo must never silently run some other binary: missing or
+        # non-executable paths fall back to the SDK default (with a warning).
+        import hermes_cli.config as cfg
+
+        plain = tmp_path / "not-a-launcher"
+        plain.write_text("")
+        for bad in (str(tmp_path / "missing"), str(plain), 42, "   "):
+            monkeypatch.setattr(
+                cfg,
+                "load_config_readonly",
+                lambda *a, _bad=bad, **k: {"agent": {"claude_agent_sdk": {"cli_path": _bad}}},
+                raising=False,
+            )
+            session, _ = _make_session(script=[ResultMessage(result="ok")])
+            assert "cli_path" not in session.build_option_fields(), bad

@@ -44,7 +44,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "provider.anthropic": ("anthropic==0.87.0",),  # CVE-2026-34450, CVE-2026-34452
     # Official Claude Agent SDK (provider=claude-agent-sdk, subscription-OAuth agent loop); bump with the
     # `claude-agent-sdk` extra in lockstep.
-    "provider.claude_agent_sdk": ("claude-agent-sdk==0.2.144",),
+    "provider.claude_agent_sdk": ("claude-agent-sdk==0.2.150",),
     "provider.bedrock": ("boto3==1.42.89",),
     # Vertex OAuth2 token minting; google-auth is NOT in [all] on purpose.
     "provider.vertex": (
