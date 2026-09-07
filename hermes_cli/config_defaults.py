@@ -294,6 +294,14 @@ DEFAULT_CONFIG = {
             # turns with nobody to answer a prompt) opt back in, e.g. ["user"]. Invalid entries are
             # dropped with a warning.
             "setting_sources": [],
+            # Claude Code binary the SDK should spawn. "" (the default) uses
+            # the CLI bundled inside claude-agent-sdk, which lags the CLI
+            # releases — a just-shipped model id can be rejected with
+            # "Claude Code X does not support this model" while `claude
+            # update` already has it. Point at the operator's launcher, e.g.
+            # "~/.local/bin/claude", to track that update instead. A path
+            # that is not an executable file is ignored with a warning.
+            "cli_path": "",
             # Soft turn budget in seconds; null = the built-in 600. Activity-aware: fires only when
             # no tool call is outstanding, no approval prompt awaits a human, AND the SDK stream has
             # been quiet >= min(30s, budget) — a turn producing output or running tools is never
