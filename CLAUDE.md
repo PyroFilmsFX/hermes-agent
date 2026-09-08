@@ -45,6 +45,21 @@ uv sync --extra claude-agent-sdk
 Conflicts land almost only in the files listed under "core edits" in the
 inventory. Keep our side for those hunks unless upstream moved the code.
 
+## This repo is PUBLIC
+
+`myfork` = https://github.com/PyroFilmsFX/hermes-agent, a public fork. GitHub
+forks of a public repo cannot be made private. So:
+
+- Never commit anything under `.hermes-test/`, `.sdkprobe/`, `.claude/state/`,
+  `docs/telemetry/`, `worker-routing.json` (all gitignored, keep it that way).
+- No tokens, no `.env`, no `config.yaml` with keys, no client names or client
+  data in docs, no internal hostnames beyond what `CNTRL-HERMES.md` already
+  has. Council ledgers and notes are fine; they read as engineering notes.
+- Before `/tb-ship`: `git diff --name-only origin/main..HEAD | xargs grep -nE
+  'sk-ant-|AIza|xoxb-|ghp_|BEGIN .*PRIVATE'` must return only fake test values.
+- Anything that must stay private goes in cntrl (private repo) or in
+  `$HERMES_HOME/plugins/`, not here.
+
 ## Environment traps
 
 - `uv sync` or a bare `uv run` without `--extra claude-agent-sdk` removes the
