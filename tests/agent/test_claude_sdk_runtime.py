@@ -1388,6 +1388,32 @@ class TestBackgroundReviewRouting:
         skipped = [r for r in caplog.records if "background review skipped" in r.getMessage()]
         assert [r.levelno for r in skipped] == [logging.WARNING, logging.DEBUG]
 
+
+    def test_rotate_closes_session_but_keeps_resume_id(self):
+        # /reload-mcp path: the SDK CLI's MCP/plugin list is fixed at process
+        # start, so the live session is closed and the NEXT turn rebuilds it —
+        # resuming, not restarting: the persisted id must survive. (cntrl carry)
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        agent._session_db = MagicMock()
+        agent.session_id = "sess-1"
+        assert rotate_claude_sdk_session(agent, "test") is True
+        live.close.assert_called_once()
+        assert agent._claude_sdk_session is None
+        agent._session_db.update_claude_sdk_session_id.assert_not_called()
+        # The live id is stashed for the rebuild even without a session row.
+        from agent.claude_sdk_runtime import _persisted_sdk_session_id
+        live._session_id = "sdk-live-1"
+        agent._claude_sdk_session = live
+        rotate_claude_sdk_session(agent, "test")
+        agent._session_db = None
+        assert _persisted_sdk_session_id(agent) == "sdk-live-1"
+        assert _persisted_sdk_session_id(agent) is None  # consumed once
+        # Idempotent when nothing is live.
+        assert rotate_claude_sdk_session(agent, "test") is False
+
     def test_skip_background_review_blocks_routed_skill_review(self, monkeypatch):
         self._route(monkeypatch, True)
         agent = _make_agent()

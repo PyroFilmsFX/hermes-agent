@@ -81,7 +81,7 @@ def _publish_tool_snapshot(
 
 def refresh_agent_mcp_tools(
     agent, *, enabled_override=None, disabled_override=None, quiet_mode: bool = True,
-    content_aware: bool = False, preserve_prefix: bool = False) -> set:
+    content_aware: bool = False, preserve_prefix: bool = False, sdk_rotate: bool = False) -> set:
     """Re-derive an already-built agent's tool snapshot from the live registry; returns the
     newly-added tool names (empty when unchanged). The agent snapshots ``agent.tools`` at build
     time, so servers that connect later (slow OAuth, ``/reload-mcp``) are invisible until
@@ -98,6 +98,7 @@ def refresh_agent_mcp_tools(
     dropped, new tools append at the tail. The caller owns the prompt-cache contract."""
     from model_tools import get_tool_definitions
     from tools.registry import registry
+    names_before = set(getattr(agent, "valid_tool_names", None) or ())
     enabled, disabled = _resolve_refresh_toolsets(agent, enabled_override, disabled_override)
     # Generation captured BEFORE the slow get_tool_definitions call (a slower caller holding an
     # OLDER set must not clobber a newer one); definitions computed OUTSIDE the lock.
@@ -119,9 +120,27 @@ def refresh_agent_mcp_tools(
         agent, new_defs, new_names, snapshot_generation=snapshot_generation,
         staged_engine_names=staged_engine_names, content_aware=content_aware, prefix_registered=prefix_registered)
     if added is None:
+        _maybe_rotate_sdk_session(agent, names_before, force=sdk_rotate)
         return set()
     persist_agent_tool_names(agent)  # re-pin so a rebuild after agent-cache eviction restores this order
+    _maybe_rotate_sdk_session(agent, names_before, force=sdk_rotate)
     return added
+
+
+def _maybe_rotate_sdk_session(agent, names_before: set, *, force: bool) -> None:
+    """claude-agent-sdk runtime only: the SDK's CLI holds its MCP/plugin list from process
+    start, so a changed Hermes tool surface (or an explicit ``/reload-mcp``, ``force``) must
+    rotate the live SDK session; the next turn resumes it in a fresh CLI. (cntrl carry)"""
+    if getattr(agent, "api_mode", None) != "claude_agent_sdk":
+        return
+    names_after = set(getattr(agent, "valid_tool_names", None) or ())
+    if not force and names_after == names_before:
+        return
+    try:
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+        rotate_claude_sdk_session(agent, "explicit /reload-mcp" if force else "tool surface changed")
+    except Exception:  # noqa: BLE001
+        logger.debug("SDK session rotation failed", exc_info=True)
 
 
 def reprobe_tool_availability() -> None:

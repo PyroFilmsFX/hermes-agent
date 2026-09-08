@@ -920,6 +920,13 @@ def _record_claude_sdk_usage(agent, turn) -> dict[str, Any]:
 
 def _persisted_sdk_session_id(agent) -> Optional[str]:
     """The SDK session id stored on the Hermes session row (or None)."""
+    # A rotation (see rotate_claude_sdk_session) stashes the live id in memory
+    # so the resume survives even for agents with no session row (bare
+    # AIAgent, forks). Consumed once. (cntrl carry)
+    stashed = getattr(agent, "_claude_sdk_rotated_resume_id", None)
+    if isinstance(stashed, str) and stashed:
+        agent._claude_sdk_rotated_resume_id = None
+        return stashed
     if getattr(agent, "_persist_disabled", False):
         return None
     if not (getattr(agent, "_session_db", None) and getattr(agent, "session_id", None)):
@@ -930,6 +937,28 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
     except Exception:
         logger.debug("resume-id read failed", exc_info=True)
         return None
+
+
+def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bool:
+    """Close the live SDK session so the NEXT turn rebuilds the CLI with fresh
+    ``mcp_servers`` / ``plugins`` / ``cli_path`` — the live-reload the SDK
+    lacks (its MCP list is fixed at process start). Unlike an error retire the
+    persisted resume id is KEPT, so the conversation continues in the rebuilt
+    CLI; only the process is new. Safe between turns; a no-op when no session
+    is live. Returns True when a session was rotated. (cntrl carry)"""
+    live = getattr(agent, "_claude_sdk_session", None)
+    if live is None:
+        return False
+    sid = getattr(live, "_session_id", None) or getattr(live, "_resume_session_id", None)
+    if isinstance(sid, str) and sid:
+        agent._claude_sdk_rotated_resume_id = sid
+    try:
+        live.close()
+    except Exception:
+        logger.debug("SDK session close during rotation raised", exc_info=True)
+    agent._claude_sdk_session = None
+    logger.info("claude-agent-sdk session rotated (%s); next turn resumes in a fresh CLI", reason)
+    return True
 
 
 def _store_sdk_session_id(agent, value: Optional[str]) -> None:

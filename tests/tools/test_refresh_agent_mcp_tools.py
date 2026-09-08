@@ -451,3 +451,29 @@ def test_snapshot_rebuild_never_grants_message_agent_to_unauthorized_sessions(
         assert _message_agent_schema_count(agent) == 0
         assert "message_agent" not in agent.valid_tool_names
         _assert_tool_snapshot_coherent(agent)
+
+
+def test_refresh_rotates_sdk_session_on_change_or_force(monkeypatch):
+    """claude-agent-sdk agents rotate their live SDK session when the tool surface changes
+    or on an explicit /reload-mcp (sdk_rotate=True); other runtimes never do. (cntrl carry)"""
+    import agent.claude_sdk_runtime as rt
+    calls = []
+    monkeypatch.setattr(rt, "rotate_claude_sdk_session", lambda a, reason="": calls.append(reason) or True)
+
+    class _A:
+        api_mode = "claude_agent_sdk"
+        valid_tool_names = {"x"}
+    a = _A()
+    # unchanged, no force → no rotation
+    _mcp_agent._maybe_rotate_sdk_session(a, {"x"}, force=False)
+    assert calls == []
+    # changed → rotation
+    _mcp_agent._maybe_rotate_sdk_session(a, {"x", "y"}, force=False)
+    assert calls == ["tool surface changed"]
+    # explicit reload → rotation even when unchanged
+    _mcp_agent._maybe_rotate_sdk_session(a, {"x"}, force=True)
+    assert calls[-1] == "explicit /reload-mcp"
+    # other runtime → never
+    a.api_mode = "chat_completions"
+    _mcp_agent._maybe_rotate_sdk_session(a, set(), force=True)
+    assert len(calls) == 2
