@@ -184,6 +184,14 @@ def _extract_title_text(content: str) -> str:
     fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.DOTALL)
     if fenced:
         raw = fenced.group(1).strip()
+    else:
+        # UNTERMINATED fence: a response cut off before its closing ``` never
+        # matched above, so the prose fallback below used to take the literal
+        # opening fence as the title — real sessions on this branch are named
+        # "```json". Strip a lone opening fence line and keep parsing.
+        unterminated = re.match(r"^```(?:json|JSON)?[ \t]*\n(.*)$", raw, re.DOTALL)
+        if unterminated:
+            raw = unterminated.group(1).strip().rstrip("`").strip()
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
@@ -201,7 +209,34 @@ def _extract_title_text(content: str) -> str:
         raw = strip_think_blocks(None, raw).strip()
     except Exception:
         logger.debug("strip_think_blocks unavailable for title output", exc_info=True)
-    return _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
+    candidate = _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
+    # A truncated JSON reply ("{\"title") reaches here with every parse having
+    # failed, and the first line IS the scaffolding. Storing it names the
+    # session "{\"title" — observed on real rows. Returning "" makes the
+    # caller keep the derived title and retry on the next exchange, which is
+    # what a failed extraction should do.
+    if _is_scaffolding(candidate):
+        logger.debug("Discarding scaffolding-shaped title output: %r", candidate[:40])
+        return ""
+    return candidate
+
+
+_SCAFFOLDING_PREFIXES = ("```", "{", "[", "</", "<think")
+
+
+def _is_scaffolding(candidate: str) -> bool:
+    """True when a fallback candidate is JSON/markdown machinery, not a title.
+
+    Only ever applied to the last-resort prose branch: a real title that
+    merely CONTAINS a brace is untouched, and a quoted title has already had
+    its quotes stripped by the caller."""
+    text = (candidate or "").strip()
+    if not text:
+        return True
+    if text.startswith(_SCAFFOLDING_PREFIXES):
+        return True
+    # A bare JSON key with no value survived a truncated reply.
+    return bool(re.fullmatch(r'"?title"?\s*:?', text, re.IGNORECASE))
 
 
 def _clean_title(text: str) -> Optional[str]:
