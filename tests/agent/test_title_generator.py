@@ -9,6 +9,7 @@ from agent.title_generator import (
     auto_title_session,
     maybe_auto_title,
     _title_language,
+    _extract_title_text,
 )
 from hermes_state import SessionDB
 
@@ -153,6 +154,45 @@ class TestGenerateTitle:
 
 
 
+
+
+class TestExtractTitleTextScaffolding:
+    """A failed extraction must yield "" so the caller keeps the derived title
+    and retries — never store the JSON machinery as the session name.
+
+    Both strings below are real titles observed on sessions in this branch's
+    state db (2026-09-07): "```json" and '{"title'."""
+
+    @pytest.mark.parametrize("content", [
+        '```json',                      # lone opening fence, nothing else
+        '```json\n{"title": "partial',   # fence + truncated json
+        '{"title',                      # truncated before the value
+        '{"title":',
+        '"title":',
+        'title:',
+        '[',
+        '<think>reasoning leaked',
+        '',
+        '   ',
+    ])
+    def test_scaffolding_is_discarded(self, content):
+        assert _extract_title_text(content) == ""
+
+    @pytest.mark.parametrize("content,expected", [
+        ('{"title": "Clean parse"}', "Clean parse"),
+        ('```json\n{"title": "Fenced"}\n```', "Fenced"),
+        # Unterminated fence around VALID json: the title is recoverable, and
+        # the old code took the fence line itself instead.
+        ('```json\n{"title": "Unterminated fence"}', "Unterminated fence"),
+        ('```\n{"title": "No lang tag"}', "No lang tag"),
+        ('Title: With a prefix', "With a prefix"),
+        ('Plain prose title', "Plain prose title"),
+        # A brace INSIDE a real title must not trip the scaffolding guard.
+        ('Refactor {the} parser', "Refactor {the} parser"),
+        ('Fix the `json` decoder', "Fix the `json` decoder"),
+    ])
+    def test_real_titles_survive(self, content, expected):
+        assert _extract_title_text(content) == expected
 
 
 class TestAutoTitleSession:
