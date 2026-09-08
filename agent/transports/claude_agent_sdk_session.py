@@ -55,6 +55,8 @@ from agent.transports.claude_agent_sdk_session_config import (
     _build_hermes_tools_mcp_config,
     _configured_cli_path,
     _configured_plugins,
+    _configured_session_name_template,
+    render_sdk_session_name,
     _configured_hybrid_exclude,
     _configured_max_buffer_size,
     _configured_permission_mode,
@@ -125,6 +127,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
+        session_name: str = "",
         resume_session_id: Optional[str] = None,
         on_stream_delta: Optional[Callable[[str], None]] = None,
         on_interim_assistant: Optional[Callable[[str], None]] = None,
@@ -175,6 +178,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Hermes-side session id, exported to the hermes-tools MCP subprocess
         # so the stateless session_search shim can exclude its own lineage.
         self._hermes_session_id = hermes_session_id
+        # Peer-addressable name for the spawned CLI session (see
+        # _configured_session_name_template). "" keeps the CLI's own naming.
+        self._session_name = (session_name or "").strip()
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -616,6 +622,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         plugins = _configured_plugins()
         if plugins:
             fields["plugins"] = plugins
+        # Name the spawned session so peers can find and message it
+        # (ListAgents/SendMessage) — the host-router seam.
+        if self._session_name:
+            extra = dict(fields.get("extra_args") or {})
+            extra.setdefault("name", self._session_name)
+            fields["extra_args"] = extra
         # Default OFF (upstream-conservative): partial messages only when the
         # operator opts in via agent.claude_agent_sdk.streaming in config.yaml.
         # Reads the __init__ snapshot so option and quiet-watchdog semantics
