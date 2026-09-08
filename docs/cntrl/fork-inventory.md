@@ -56,6 +56,7 @@ upstream moved the surrounding code.
 | `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.150`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
 | `run_agent.py` | self-improve review routed off the SDK runtime | one-shot runs killed the review at exit |
 | `.gitignore` | `.hermes-test/` | test home |
+| `tests/agent/test_title_generator.py` | 18 scaffolding cases | pins the title fix |
 | `agent/title_generator.py` | `_is_scaffolding` guard + unterminated-fence strip in `_extract_title_text` | sessions were being named ```` ```json ```` and `{"title` from truncated model replies; 9 such rows existed. Upstream-shaped fix, worth proposing back. |
 | `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py`, `hermes_cli/config_defaults.py` | `session_name` template -> the CLI's `--name` via `extra_args` | peers can address a Hermes session (host router) |
 | `tools/mcp_tool_agent.py`, `hermes_cli/cli_info_mixin.py`, `gateway/run_turn.py`, `tui_gateway/methods_tools.py` | `sdk_rotate=` on `refresh_agent_mcp_tools` + `_maybe_rotate_sdk_session`; explicit `/reload-mcp` callers pass it | live MCP reload for SDK sessions |
