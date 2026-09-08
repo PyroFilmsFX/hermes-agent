@@ -15,8 +15,19 @@ it, so upstream merges cannot break it.
 
 ## Use
 
+In a session, use the slash command:
+
+```
+/groups                     # every group with a count
+/groups ls hermes-fork      # sessions in one
+/groups tag hermes-fork <id>
+/groups resume hermes-fork
+```
+
+Outside a session, the same verbs:
+
 ```bash
-G="python3 cntrl-plugins/cntrl_groups/groups.py"
+G="python3 cntrl-plugins/cntrl_groups/groups.py"   # or: hermes groups
 
 $G ls                       # every group with a count
 $G ls hermes-fork           # sessions in one, newest first

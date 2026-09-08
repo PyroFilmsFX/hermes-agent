@@ -4,10 +4,10 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07307 |
-| vs `origin/main` | 44 ahead / 63 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 63 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 24 |
+| branch | `cntrl-hermes` @ c0deb07eca |
+| vs `origin/main` | 45 ahead / 65 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 65 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 25 |
 | core files touched | 18 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -38,6 +38,7 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb075d5 | cntrl: inventory — gateway suite result classified (9 upstream, 7 order flakes, 0 ours) | — |
 | 2026-09-07 | c0deb072a4 | claude-sdk: name the spawned session so peers can address it (host-router seam) | `agent/claude_sdk_runtime.py`, `agent/transports/claude_agent_sdk_session.py`, `hermes_cli/config_defaults.py`, `tests/agent/test_claude_sdk_runtime.py`, `website/docs/user-guide/features/claude-agent-sdk-runtime.md` |
 | 2026-09-07 | c0deb07307 | cntrl_router: out-of-tree session route registry + host-routing skill | — |
+| 2026-09-07 | c0deb07eca | cntrl_groups: session groups as a project layer, out-of-tree | — |
 
 ## Core files we touch
 

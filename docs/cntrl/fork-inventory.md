@@ -145,4 +145,10 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   `groups.py ls|tag|untag|resume|auto`; `resume <group>` prints the newest id
   for `hermes --resume`. `auto` suggests groups from git repo root and never
   writes. A Hermes skill carries the protocol. 7 tests; proven against the real
-  state db. Not done: a desktop filter (the CLI is the whole surface today).
+  state db. Surfaced three ways with zero core edits: `/groups` in-session,
+  `hermes groups` on the CLI, and an opt-in `on_session_start` hook that
+  auto-tags a new session by its git repo (never overwrites a manual tag,
+  fails open). 14 tests; proven inside the real plugin manager. Not done: a
+  desktop filter. Hook points if we ever want native filtering are
+  `hermes_cli/session_listing.py` (numbered /resume) and the `scope` dict in
+  `hermes_cli/web_routers/sessions.py` (desktop REST).
