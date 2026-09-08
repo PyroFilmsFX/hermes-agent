@@ -56,6 +56,9 @@ upstream moved the surrounding code.
 | `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.150`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
 | `run_agent.py` | self-improve review routed off the SDK runtime | one-shot runs killed the review at exit |
 | `.gitignore` | `.hermes-test/` | test home |
+| `tools/mcp_tool_agent.py`, `hermes_cli/cli_info_mixin.py`, `gateway/run_turn.py`, `tui_gateway/methods_tools.py` | `sdk_rotate=` on `refresh_agent_mcp_tools` + `_maybe_rotate_sdk_session`; explicit `/reload-mcp` callers pass it | live MCP reload for SDK sessions |
+| `agent/claude_sdk_runtime.py` | `rotate_claude_sdk_session` + in-memory resume stash in `_persisted_sdk_session_id` | same |
+| `tests/tools/test_refresh_agent_mcp_tools.py` | rotation hook test | pins the row above |
 
 ## 4. Out-of-tree (zero merge cost)
 
@@ -98,20 +101,24 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
 
 ## 7. Open items to verify on the SDK runtime (tracked here, not done)
 
-- **Session-to-session messaging — PROVEN 2026-09-07.** `ListAgents` and
-  `SendMessage` are Claude Code CLI tools, so they ride the pinned `cli_path`
-  binary (2.1.263), not the SDK package. Probe (`.sdkprobe/list_probe.py`,
-  `setting_sources=[]`): an SDK session inside Hermes listed 12 live sessions
-  on the machine (interactive, bg, tmux-attached). Not yet proven: whether
-  Hermes' own SDK sessions appear in that list for others, and `SendMessage`
-  round-trip. Goal stands: a host session in Hermes that routes work to the
-  right session.
-- **MCP parity inside the SDK runtime.** Hermes' own MCP layer has `/reload-mcp`
-  (live add, no restart). The SDK session's MCP list (`mcp_servers`, plugins) is
-  fixed at session start. To add one mid-session the runtime must rebuild the
-  SDK client with the resume id. Proven so far: `tb-workers` registers and
-  answers a tool call (2026-09-01). Not proven: live add, `hermes mcp add`
-  servers reaching the SDK session, OAuth MCP servers.
+- **Session-to-session messaging — PROVEN 2026-09-07, both ways.** `ListAgents`
+  and `SendMessage` are Claude Code CLI tools, so they ride the pinned `cli_path`
+  binary (2.1.263). Probes in `.sdkprobe/` (`setting_sources=[]`): an SDK session
+  inside Hermes listed 12 live sessions on the machine, then sent a message to
+  the interactive Claude Code session that was driving this work; it arrived as
+  a cross-session message. Goal stands: a host session in Hermes that routes
+  work to the right session. Not yet done: Hermes sessions naming themselves so
+  others can find them.
+- **Live MCP reload inside the SDK runtime — DONE 2026-09-07.** The SDK's CLI
+  holds its MCP/plugin list from process start, so `/reload-mcp` (CLI, gateway,
+  TUI RPC) now rotates the live SDK session: `rotate_claude_sdk_session` closes
+  the CLI, stashes the resume id, and the next turn rebuilds with fresh
+  `mcp_servers` / `plugins` / `cli_path` and resumes the conversation. A tool
+  surface change on any refresh path rotates too. Live proof
+  (`.sdkprobe/rotate_probe.py`): two real turns, new CLI pid between them, the
+  second turn recalled the first. Still true: `hermes mcp add` servers reach
+  the SDK session only with `hybrid_mcp_bridge: true`; without it the SDK sees
+  hermes-tools + `plugins:` only.
 - **Session groups / projects.** Hermes has profiles (one `HERMES_HOME` each)
   and sessions. No grouping of sessions into projects. Candidate seam: an
   out-of-tree plugin plus a desktop tab filter. Not started.

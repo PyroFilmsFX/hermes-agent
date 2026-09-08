@@ -4,10 +4,10 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes-v2` @ c0deb075fa |
-| vs `origin/main` | 36 ahead / 59 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 59 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 16 |
+| branch | `cntrl-hermes` @ c0deb07530 |
+| vs `origin/main` | 39 ahead / 63 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 63 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 19 |
 | core files touched | 13 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -30,6 +30,9 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb07a75 | CNTRL-HERMES: kanban sync v0 re-proven in the live desktop after relaunch; my-tasks is workspace-scoped | — |
 | 2026-09-07 | c0deb07bb1 | CNTRL-HERMES: tb-workers MCP proven inside Hermes after the conductor .mcp.json fix | — |
 | 2026-09-07 | c0deb075fa | cntrl: CLAUDE.md fork rules + docs/cntrl/fork-inventory.md (what we carry, merge procedure, open SDK-runtime c | — |
+| 2026-09-07 | c0deb07d5f | cntrl: fork-inventory generator + /fork-inventory skill + rule; inventory rebuilt on the PR #65982 head | — |
+| 2026-09-07 | c0deb079a8 | cntrl: inventory — session-to-session tools proven inside the SDK runtime (ListAgents lists 12 live sessions) | — |
+| 2026-09-07 | c0deb07530 | cntrl: public-repo rule in CLAUDE.md; ignore docs/telemetry | — |
 
 ## Core files we touch
 
