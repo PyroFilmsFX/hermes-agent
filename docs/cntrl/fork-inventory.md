@@ -98,11 +98,14 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
 
 ## 7. Open items to verify on the SDK runtime (tracked here, not done)
 
-- **Session-to-session messaging.** Claude Code can list and message other
-  local Claude sessions (`ListAgents` / `SendMessage`). Not yet checked whether
-  sessions spawned by the SDK (`CLAUDE_CODE_ENTRYPOINT=sdk-py`) register as
-  discoverable, or can see each other. Goal: a host session that routes work to
-  the right session. Test: two SDK sessions in the desktop, one lists agents.
+- **Session-to-session messaging — PROVEN 2026-09-07.** `ListAgents` and
+  `SendMessage` are Claude Code CLI tools, so they ride the pinned `cli_path`
+  binary (2.1.263), not the SDK package. Probe (`.sdkprobe/list_probe.py`,
+  `setting_sources=[]`): an SDK session inside Hermes listed 12 live sessions
+  on the machine (interactive, bg, tmux-attached). Not yet proven: whether
+  Hermes' own SDK sessions appear in that list for others, and `SendMessage`
+  round-trip. Goal stands: a host session in Hermes that routes work to the
+  right session.
 - **MCP parity inside the SDK runtime.** Hermes' own MCP layer has `/reload-mcp`
   (live add, no restart). The SDK session's MCP list (`mcp_servers`, plugins) is
   fixed at session start. To add one mid-session the runtime must rebuild the
