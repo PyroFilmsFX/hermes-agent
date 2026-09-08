@@ -4,11 +4,11 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07530 |
-| vs `origin/main` | 39 ahead / 63 behind · common base 233757037d (2026-09-07) |
+| branch | `cntrl-hermes` @ c0deb07f7d |
+| vs `origin/main` | 40 ahead / 63 behind · common base 233757037d (2026-09-07) |
 | PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 63 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 19 |
-| core files touched | 13 (0 unlisted in §3) |
+| carried commits (since pr-65982-sep7) | 20 |
+| core files touched | 18 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -33,21 +33,27 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb07d5f | cntrl: fork-inventory generator + /fork-inventory skill + rule; inventory rebuilt on the PR #65982 head | — |
 | 2026-09-07 | c0deb079a8 | cntrl: inventory — session-to-session tools proven inside the SDK runtime (ListAgents lists 12 live sessions) | — |
 | 2026-09-07 | c0deb07530 | cntrl: public-repo rule in CLAUDE.md; ignore docs/telemetry | — |
+| 2026-09-07 | c0deb07f7d | claude-sdk: live MCP reload — /reload-mcp rotates the SDK session, next turn resumes in a fresh CLI | `agent/claude_sdk_runtime.py`, `gateway/run_turn.py`, `hermes_cli/cli_info_mixin.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/tools/test_refresh_agent_mcp_tools.py`, `tools/mcp_tool_agent.py`, `tui_gateway/methods_tools.py` |
 
 ## Core files we touch
 
 | file | commits | listed in §3 |
 |---|---|---|
-| `agent/claude_sdk_runtime.py` | c0deb07f0f | yes |
+| `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d | yes |
 | `agent/model_metadata.py` | c0deb079b4 | yes |
 | `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b | yes |
 | `agent/transports/hermes_tool_exposure.py` | c0deb07f0f | yes |
+| `gateway/run_turn.py` | c0deb07f7d | yes |
+| `hermes_cli/cli_info_mixin.py` | c0deb07f7d | yes |
 | `hermes_cli/config_defaults.py` | c0deb0750f, c0deb07b3b | yes |
 | `hermes_cli/models_catalog_static.py` | c0deb079b4 | yes |
 | `pyproject.toml` | c0deb0750f | yes |
 | `run_agent.py` | c0deb0751f | yes |
-| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f | yes |
+| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d | yes |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | c0deb07f0f | yes |
+| `tests/tools/test_refresh_agent_mcp_tools.py` | c0deb07f7d | yes |
 | `tools/lazy_deps.py` | c0deb0750f | yes |
+| `tools/mcp_tool_agent.py` | c0deb07f7d | yes |
+| `tui_gateway/methods_tools.py` | c0deb07f7d | yes |
 | `uv.lock` | c0deb0750f | yes |
 | `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | c0deb07b3b, c0deb07f0f | yes |
