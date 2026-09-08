@@ -62,8 +62,23 @@ forks of a public repo cannot be made private. So:
 
 ## Environment traps
 
-- `uv sync` or a bare `uv run` without `--extra claude-agent-sdk` removes the
-  SDK and psycopg. Always pass the extra, or use `.venv/bin/python`.
+- **This checkout is shared with other Claude sessions.** They can and do
+  change the branch under you. Before any build step, confirm
+  `git rev-parse --abbrev-ref HEAD` is `cntrl-hermes`. On 2026-09-07 another
+  session checked out `main` and fast-forwarded it mid-session; nothing was
+  lost because our work was committed and pushed, which is the whole defence.
+  Commit early, push often, and re-check the branch after any long wait.
+
+- **The venv loses packages constantly.** `uv sync` on the wrong branch (main
+  has no `claude-agent-sdk` extra) or without the extras strips the SDK,
+  psycopg AND pytest — silently, so tests then fail with
+  `No module named pytest` rather than anything meaningful. Full restore:
+  ```bash
+  uv sync --extra claude-agent-sdk --extra dev --inexact
+  uv pip install "psycopg[binary]" psycopg-pool
+  ```
+  Check before trusting a test run:
+  `.venv/bin/python -c "import pytest, claude_agent_sdk, psycopg"`
 - Test home is `HERMES_HOME=$PWD/.hermes-test`.
 - Desktop dev: see "Desktop dev launch" in `CNTRL-HERMES.md`.
 - Anthropic screens SDK requests whose system-prompt append looks like another

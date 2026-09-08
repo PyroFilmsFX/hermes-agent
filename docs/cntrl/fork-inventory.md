@@ -95,6 +95,12 @@ on the pristine PR head; the other 7 (discord send, multi-image, session-store
 prune, teams dotenv, telegram polling) pass in isolation on our branch and are
 order-dependent flakes. None touch the carry. Not ours.
 
+Two traps that bit on 2026-09-07, both now in CLAUDE.md: another Claude session
+checked out `main` in this shared worktree mid-build (committed+pushed work was
+untouched, which is the defence), and a `uv sync` on that branch stripped the
+SDK, psycopg AND pytest so the next test run failed with `No module named
+pytest` rather than anything meaningful.
+
 Known: a headless one-shot (`hermes chat -q`) that calls a tool waits the full
 300 s approval timeout with nobody to answer; not a runtime fault. The title
 auxiliary lane once produced a `{"title` fragment as the session title (seen

@@ -4,11 +4,11 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07fb3 |
-| vs `origin/main` | 46 ahead / 65 behind · common base 233757037d (2026-09-07) |
+| branch | `cntrl-hermes` @ c0deb07e0c |
+| vs `origin/main` | 47 ahead / 65 behind · common base 233757037d (2026-09-07) |
 | PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 65 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 26 |
-| core files touched | 18 (0 unlisted in §3) |
+| carried commits (since pr-65982-sep7) | 27 |
+| core files touched | 20 (1 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -40,6 +40,7 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb07307 | cntrl_router: out-of-tree session route registry + host-routing skill | — |
 | 2026-09-07 | c0deb07eca | cntrl_groups: session groups as a project layer, out-of-tree | — |
 | 2026-09-07 | c0deb07fb3 | cntrl_groups: real Hermes plugin — /groups, hermes groups, opt-in auto-tag by repo | — |
+| 2026-09-07 | c0deb07e0c | fix(titles): a truncated model reply no longer becomes the session name | `agent/title_generator.py`, `tests/agent/test_title_generator.py` |
 
 ## Core files we touch
 
@@ -47,6 +48,7 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 |---|---|---|
 | `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4 | yes |
 | `agent/model_metadata.py` | c0deb079b4 | yes |
+| `agent/title_generator.py` | c0deb07e0c | yes |
 | `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4 | yes |
 | `agent/transports/hermes_tool_exposure.py` | c0deb07f0f | yes |
 | `gateway/run_turn.py` | c0deb07f7d | yes |
@@ -56,6 +58,7 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | `pyproject.toml` | c0deb0750f | yes |
 | `run_agent.py` | c0deb0751f | yes |
 | `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4 | yes |
+| `tests/agent/test_title_generator.py` | c0deb07e0c | **NO** |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | c0deb07f0f | yes |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | c0deb07f7d | yes |
 | `tools/lazy_deps.py` | c0deb0750f | yes |

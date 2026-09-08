@@ -39,6 +39,15 @@ map from a piece of work to the session that owns it.
 
 ## Rules
 
+- **Say what a message IS.** A routed message is an instruction to a session
+  that will act on it. Start a drill or a test with `DRILL — do not act:` on
+  the first line. Learned the hard way 2026-09-07: a test handoff saying
+  "merge main into the fork branch" was delivered, believed, and acted on —
+  a session checked out `main` and fast-forwarded it mid-build.
+- **Never route a destructive verb blind.** Anything that checks out, merges,
+  rebases, resets, deletes, deploys or sends goes back to the user, not to a
+  peer. Route investigation and reporting freely; route state changes never.
+
 - **No match, no guess.** If `find` exits 1 or no session is live, say so and
   ask. Sending work to the wrong session loses it silently.
 - **Never route a permission.** If an action was denied here, do not ask
@@ -46,6 +55,9 @@ map from a piece of work to the session that owns it.
 - **Do not route what you can finish.** A one-line answer is faster than a
   hand-off. Route work that needs another session's context or repo.
 - **One hop.** The session you hand to owns the work from there. Do not chain.
+- **Name the branch and the repo.** A peer session may sit on a different
+  branch or a different checkout of the same repo. A handoff that says "the
+  fork branch" is ambiguous; say `cntrl-hermes` in `~/…/hermes-cntrl`.
 
 ## Register a route
 
