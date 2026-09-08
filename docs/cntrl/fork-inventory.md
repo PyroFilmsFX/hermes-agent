@@ -86,6 +86,11 @@ git commit
 .venv/bin/python scripts/cntrl/fork_inventory.py --check   # then commit its outputs
 ```
 
+Gateway suite 2026-09-07 (7,817 pass / 16 fail): 9 of the 16 fail identically
+on the pristine PR head; the other 7 (discord send, multi-image, session-store
+prune, teams dotenv, telegram polling) pass in isolation on our branch and are
+order-dependent flakes. None touch the carry. Not ours.
+
 Known: a headless one-shot (`hermes chat -q`) that calls a tool waits the full
 300 s approval timeout with nobody to answer; not a runtime fault. The title
 auxiliary lane once produced a `{"title` fragment as the session title (seen
