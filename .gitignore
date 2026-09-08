@@ -204,3 +204,4 @@ native/fts5_cjk/*.so
 .hermes-test/
 .sdkprobe/
 worker-routing.json
+docs/telemetry/
