@@ -1,0 +1,18 @@
+name: cntrl_groups
+version: 0.1.0
+description: "Session groups — a project layer between profiles and sessions. Tag sessions into named groups, then list and resume by group. Groups live in their own table in the Hermes state db, so core schema is untouched and upstream merges cannot break it."
+author: "cntrl"
+kind: standalone
+hooks:
+  - on_session_start
+pip_dependencies: []
+requires_env: []
+config_schema:
+  auto_group_by_repo:
+    type: boolean
+    description: "Tag every new session into a group named after its git repo directory. Existing tags are never overwritten."
+    default: false
+  auto_group_prefix:
+    type: string
+    description: "Prefix for auto-created group names, e.g. 'repo:' gives 'repo:hermes-cntrl'. Empty means the bare directory name."
+    default: ""
