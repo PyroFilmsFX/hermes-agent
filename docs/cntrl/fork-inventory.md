@@ -56,6 +56,7 @@ upstream moved the surrounding code.
 | `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.150`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
 | `run_agent.py` | self-improve review routed off the SDK runtime | one-shot runs killed the review at exit |
 | `.gitignore` | `.hermes-test/` | test home |
+| `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py`, `hermes_cli/config_defaults.py` | `session_name` template -> the CLI's `--name` via `extra_args` | peers can address a Hermes session (host router) |
 | `tools/mcp_tool_agent.py`, `hermes_cli/cli_info_mixin.py`, `gateway/run_turn.py`, `tui_gateway/methods_tools.py` | `sdk_rotate=` on `refresh_agent_mcp_tools` + `_maybe_rotate_sdk_session`; explicit `/reload-mcp` callers pass it | live MCP reload for SDK sessions |
 | `agent/claude_sdk_runtime.py` | `rotate_claude_sdk_session` + in-memory resume stash in `_persisted_sdk_session_id` | same |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | rotation hook test | pins the row above |
@@ -68,6 +69,8 @@ upstream moved the surrounding code.
   not in the repo, points at cntrl Postgres `:5434/thinkscore`.
 - conductor — loaded via `agent.claude_agent_sdk.plugins`, lives in
   `~/.claude/plugins/marketplaces/…`.
+- `cntrl-plugins/cntrl_router/` — session route registry + host-routing skill.
+- `cntrl-plugins/cntrl_groups/` — session groups; own table in the state db.
 - `docs/councils/council-log.jsonl`, `CNTRL-HERMES.md`, `docs/cntrl/`.
 
 ## 5. Merge procedure
@@ -134,6 +137,12 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   "the upstream sync is behind", correctly picked `hermes-fork` over `kanban`,
   checked liveness, and the message arrived in the target session.
 
-- **Session groups / projects.** Hermes has profiles (one `HERMES_HOME` each)
-  and sessions. No grouping of sessions into projects. Candidate seam: an
-  out-of-tree plugin plus a desktop tab filter. Not started.
+- **Session groups / projects — DONE 2026-09-07.** Out-of-tree in
+  `cntrl-plugins/cntrl_groups/`: its own `cntrl_session_groups` table in the
+  Hermes state db keyed by session id, joined back against `sessions`. Hermes'
+  schema is never modified (pinned by a test), so upstream merges cannot break
+  it and it drops out cleanly if upstream ever ships grouping. CLI:
+  `groups.py ls|tag|untag|resume|auto`; `resume <group>` prints the newest id
+  for `hermes --resume`. `auto` suggests groups from git repo root and never
+  writes. A Hermes skill carries the protocol. 7 tests; proven against the real
+  state db. Not done: a desktop filter (the CLI is the whole surface today).
