@@ -124,6 +124,16 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   second turn recalled the first. Still true: `hermes mcp add` servers reach
   the SDK session only with `hybrid_mcp_bridge: true`; without it the SDK sees
   hermes-tools + `plugins:` only.
+- **Host router — DONE 2026-09-07.** Sessions are now named
+  (`agent.claude_agent_sdk.session_name`, default `hermes:{title}`), so
+  `ListAgents` / `SendMessage` can address a Hermes session. The map from work
+  to owner is out-of-tree in `cntrl-plugins/cntrl_router/`: a JSON registry in
+  `$HERMES_HOME/cntrl-routes.json`, a small CLI (`router.py list|add|find`),
+  and a Hermes skill that teaches the protocol (read registry, verify the peer
+  is live, hand off once, never guess). Live-proven: a host session matched
+  "the upstream sync is behind", correctly picked `hermes-fork` over `kanban`,
+  checked liveness, and the message arrived in the target session.
+
 - **Session groups / projects.** Hermes has profiles (one `HERMES_HOME` each)
   and sessions. No grouping of sessions into projects. Candidate seam: an
   out-of-tree plugin plus a desktop tab filter. Not started.
