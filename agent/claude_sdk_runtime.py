@@ -939,6 +939,47 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
         return None
 
 
+def _sdk_session_name(agent) -> str:
+    """Peer-addressable name for this agent's Claude Code session.
+
+    Hermes sessions are invisible to the ListAgents/SendMessage pair unless
+    they carry a name — the CLI otherwise derives one from cwd, so every
+    Hermes session on a box collides. Reads the operator template and fills it
+    from the live session row. Never raises: a naming failure must not cost a
+    turn. (cntrl carry)"""
+    try:
+        from agent.transports.claude_agent_sdk_session import (
+            _configured_session_name_template,
+            render_sdk_session_name,
+        )
+
+        session_id = str(getattr(agent, "session_id", "") or "")
+        title = ""
+        db = getattr(agent, "_session_db", None)
+        if db is not None and session_id:
+            try:
+                title = str((db.get_session(session_id) or {}).get("title") or "")
+            except Exception:
+                logger.debug("session title read failed for SDK naming", exc_info=True)
+        profile = ""
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            profile = str(get_active_profile_name() or "")
+        except Exception:
+            logger.debug("profile read failed for SDK naming", exc_info=True)
+        return render_sdk_session_name(
+            _configured_session_name_template(),
+            title=title,
+            session=session_id,
+            profile=profile,
+            model=str(getattr(agent, "model", "") or ""),
+        )
+    except Exception:
+        logger.debug("SDK session naming failed", exc_info=True)
+        return ""
+
+
 def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bool:
     """Close the live SDK session so the NEXT turn rebuilds the CLI with fresh
     ``mcp_servers`` / ``plugins`` / ``cli_path`` — the live-reload the SDK
@@ -1449,6 +1490,8 @@ def run_claude_agent_sdk_turn(
             on_tool_started=_on_tool_started,
             system_prompt_append=append,
             hermes_session_id=getattr(agent, "session_id", None),
+            # Peer-addressable CLI session name (ListAgents/SendMessage).
+            session_name=_sdk_session_name(agent),
             resume_session_id=resume_id,
             on_stream_delta=_relay_stream_delta,
             on_interim_assistant=on_interim_assistant,

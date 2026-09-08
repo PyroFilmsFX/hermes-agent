@@ -302,6 +302,12 @@ DEFAULT_CONFIG = {
             # "~/.local/bin/claude", to track that update instead. A path
             # that is not an executable file is ignored with a warning.
             "cli_path": "",
+            # --name for the spawned Claude Code session, so peers can find
+            # and message it (ListAgents/SendMessage). Without it the CLI
+            # names sessions from cwd and every Hermes session collides.
+            # Placeholders: {title} {session} {profile} {model}.
+            # "" restores the CLI's own cwd-derived naming.
+            "session_name": "hermes:{title}",
             # Claude Code plugin roots to load explicitly (--plugin-dir), e.g.
             # ["~/.claude/plugins/marketplaces/<marketplace>/plugins/<name>"].
             # Brings that plugin's skills, agents, hooks and MCP servers into

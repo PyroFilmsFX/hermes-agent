@@ -2908,6 +2908,46 @@ class TestStreaming:
             session.close()
         assert holder["client"].options["setting_sources"] == ["user", "project"]
 
+    def test_session_name_default_template_renders(self):
+        # Hermes sessions must be addressable by peers (ListAgents /
+        # SendMessage) — the host-router seam. (cntrl carry)
+        from agent.transports.claude_agent_sdk_session import (
+            _DEFAULT_SESSION_NAME_TEMPLATE,
+            render_sdk_session_name,
+        )
+
+        t = _DEFAULT_SESSION_NAME_TEMPLATE
+        assert render_sdk_session_name(t, title="kanban sync") == "hermes:kanban sync"
+        # No title yet (a brand-new row): fall back to the short session id.
+        assert render_sdk_session_name(t, session="20260907_200102_896850") == "hermes:896850"
+        # Then to the profile.
+        assert render_sdk_session_name(t, profile="work") == "hermes:work"
+        # Nothing to say -> let the CLI name it, never a bare "hermes:".
+        assert render_sdk_session_name(t) == ""
+        # Empty template is the documented opt-out.
+        assert render_sdk_session_name("", title="x") == ""
+        # Whitespace collapses and the name is capped.
+        assert render_sdk_session_name(t, title="a\n  b") == "hermes:a b"
+        assert len(render_sdk_session_name(t, title="z" * 200)) == 60
+        # An unknown placeholder falls back instead of raising.
+        assert render_sdk_session_name("{nope}", title="k") == "hermes:k"
+
+    def test_session_name_passed_as_cli_name_arg(self, monkeypatch):
+        session, holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:demo")
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert holder["client"].options["extra_args"]["name"] == "hermes:demo"
+
+    def test_session_name_absent_when_unnamed(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        assert "extra_args" not in holder["client"].options
+
     def test_plugins_absent_by_default(self):
         session, holder = _make_session(script=[ResultMessage(result="ok")])
         try:
