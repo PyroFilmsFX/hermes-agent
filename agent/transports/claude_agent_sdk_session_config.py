@@ -306,6 +306,65 @@ def _configured_plugins() -> list:
     return plugins
 
 
+_DEFAULT_SESSION_NAME_TEMPLATE = "hermes:{title}"
+# Keep well under what Claude Code shows so ListAgents rows stay readable.
+_SESSION_NAME_MAX = 60
+
+
+def _configured_session_name_template() -> str:
+    """agent.claude_agent_sdk.session_name — the ``--name`` template for the
+    spawned Claude Code session.
+
+    Without it the CLI derives a name from its cwd, so every Hermes session on
+    a machine looks like ``justin-7`` and none can be addressed by a peer.
+    Naming them makes a Hermes session a first-class target for the
+    ListAgents/SendMessage pair the CLI already ships — what the cntrl
+    host-router is built on. Placeholders: ``{title}`` (Hermes session title),
+    ``{session}`` (short session id), ``{profile}``, ``{model}``. Set to ""
+    to restore the CLI's own cwd-derived naming. (cntrl carry)"""
+    raw = _provider_config().get("session_name")
+    if raw is None:
+        return _DEFAULT_SESSION_NAME_TEMPLATE
+    if not isinstance(raw, str):
+        logger.warning(
+            "agent.claude_agent_sdk.session_name %r is not a string — using the default template.",
+            raw,
+        )
+        return _DEFAULT_SESSION_NAME_TEMPLATE
+    return raw
+
+
+def render_sdk_session_name(
+    template: str, *, title: str = "", session: str = "", profile: str = "", model: str = ""
+) -> str:
+    """Fill a session-name template, falling back title -> session -> profile.
+
+    An empty template means "let the CLI name it", and so does a template whose
+    placeholders all resolve empty: a bare ``hermes:`` row carries no identity
+    and would be worse than the CLI's own name."""
+    if not template.strip():
+        return ""
+    values = {
+        "title": (title or "").strip(),
+        "session": (session or "").strip()[-6:],
+        "profile": (profile or "").strip(),
+        "model": (model or "").strip(),
+    }
+    if not values["title"]:
+        values["title"] = values["session"] or values["profile"]
+    if not any(values.values()):
+        return ""
+    try:
+        name = template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        logger.warning(
+            "agent.claude_agent_sdk.session_name %r has an unknown placeholder — using the default.",
+            template,
+        )
+        name = _DEFAULT_SESSION_NAME_TEMPLATE.format(**values)
+    return " ".join(name.split())[:_SESSION_NAME_MAX]
+
+
 def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float]:
     """Numeric seconds from `agent.claude_agent_sdk.<key>`, validated.
 
