@@ -41,5 +41,11 @@ python3 cntrl-plugins/cntrl_router/router.py add hermes-fork \
 
 ## Registry
 
-`$HERMES_HOME/cntrl-routes.json`, overridable with `CNTRL_ROUTER_ROUTES`.
+`<hermes install root>/cntrl-routes.json`, overridable with `CNTRL_ROUTER_ROUTES`.
+
+The registry belongs to the INSTALL, not the profile. Each profile is its own
+`HERMES_HOME` (`<root>/profiles/<name>`), so keying off it would give every
+profile a private empty registry while routes added at the root stayed
+invisible — the host would then report "no routes" and silently route nothing.
+`routes_root()` walks up out of `profiles/<name>`.
 Writes are atomic; a corrupt file fails loudly rather than routing nowhere.
