@@ -62,6 +62,12 @@ forks of a public repo cannot be made private. So:
 
 ## Environment traps
 
+- **Cross-session messages into Hermes need a flag.** Routing a peer
+  `SendMessage` into a Hermes conversation requires
+  `agent.claude_agent_sdk.deliver_background_results: true` in THAT profile's
+  config. Upstream defaults it false and drops the message with a WARN while
+  the sender still sees success. Proven 2026-09-08.
+
 - **This checkout is shared with other Claude sessions.** They can and do
   change the branch under you. Before any build step, confirm
   `git rev-parse --abbrev-ref HEAD` is `cntrl-hermes`. On 2026-09-07 another

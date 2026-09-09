@@ -135,6 +135,22 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   second turn recalled the first. Still true: `hermes mcp add` servers reach
   the SDK session only with `hybrid_mcp_bridge: true`; without it the SDK sees
   hermes-tools + `plugins:` only.
+- **Hermes-to-Hermes messaging — DONE 2026-09-08.** A peer `SendMessage` into
+  a Hermes conversation needs `agent.claude_agent_sdk.deliver_background_results:
+  true` in that profile's config; upstream defaults it false and drops the
+  message with a WARN while the SENDER still sees success — silent loss, the
+  worst shape for a router. Proven both ways on a live session: off, nothing
+  arrives; on, the log shows "delivering unsolicited result burst" and the text
+  reaches the chat. Config-only, no code change. Set in the test home's root and
+  `profiles/thinkbot`.
+
+- **404 retry storm (upstream desktop bug, NOT fixed).** Deleting sessions the
+  desktop still references makes it poll `hermes:api` for a dead id forever:
+  `Error occurred in handler for 'hermes:api': 404 {"detail":"Session not
+  found"}` repeating with no backoff and no give-up. Trigger found 2026-09-08
+  (a session wipe during a live desktop). Workaround: relaunch the desktop.
+  Worth an upstream report; a permanent 404 should stop retrying.
+
 - **Host router — DONE 2026-09-07.** Sessions are now named
   (`agent.claude_agent_sdk.session_name`, default `hermes:{title}`), so
   `ListAgents` / `SendMessage` can address a Hermes session. The map from work

@@ -1,13 +1,13 @@
 # Fork inventory — generated
 
-Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
+Generated 2026-09-08 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07c57 |
-| vs `origin/main` | 48 ahead / 65 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 65 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 28 |
+| branch | `cntrl-hermes` @ c0deb077a0 |
+| vs `origin/main` | 51 ahead / 330 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 330 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 31 |
 | core files touched | 20 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -42,6 +42,9 @@ Generated 2026-09-07 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb07fb3 | cntrl_groups: real Hermes plugin — /groups, hermes groups, opt-in auto-tag by repo | — |
 | 2026-09-07 | c0deb07e0c | fix(titles): a truncated model reply no longer becomes the session name | `agent/title_generator.py`, `tests/agent/test_title_generator.py` |
 | 2026-09-07 | c0deb07c57 | cntrl: router safety rules + the two traps that bit today | — |
+| 2026-09-07 | c0deb07376 | cntrl: inventory — list the title-generator test file in section 3 | — |
+| 2026-09-08 | c0deb072ad | cntrl_groups: ls counts live sessions, not stale tags; add gc | — |
+| 2026-09-08 | c0deb077a0 | cntrl_router: registry belongs to the install, not the profile | — |
 
 ## Core files we touch
 
