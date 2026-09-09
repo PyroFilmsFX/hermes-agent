@@ -103,3 +103,48 @@ def test_hermes_schema_is_untouched(db):
     assert "group_name" not in cols and "cntrl_group" not in cols
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "cntrl_session_groups" in tables
+
+
+def test_ls_counts_live_sessions_not_stale_tags(db):
+    """A deleted session leaves its tag behind. Counting tags would report
+    members that `ls <group>` cannot show — the count must never lie."""
+    import sqlite3
+
+    run(db, "tag", "fork", "s-old", "s-new")
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM sessions WHERE id = 's-old'")
+    conn.commit()
+    conn.close()
+
+    out = run(db, "ls").stdout
+    assert "fork  1" in out.replace("   ", "  ")
+    assert "1 tag(s) point at deleted sessions" in out
+    # The listing itself already agreed; now the count does too.
+    assert "s-old" not in run(db, "ls", "fork").stdout
+
+
+def test_gc_removes_only_orphaned_tags(db):
+    import sqlite3
+
+    run(db, "tag", "fork", "s-old", "s-new")
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM sessions WHERE id = 's-old'")
+    conn.commit()
+    conn.close()
+
+    assert "removed 1" in run(db, "gc").stdout
+    assert "s-new" in run(db, "ls", "fork").stdout
+    assert "point at deleted sessions" not in run(db, "ls").stdout
+    assert "removed 0" in run(db, "gc").stdout
+
+
+def test_ls_shows_orphans_even_when_every_group_is_empty(db):
+    import sqlite3
+
+    run(db, "tag", "fork", "s-new")
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM sessions")
+    conn.commit()
+    conn.close()
+    out = run(db, "ls").stdout
+    assert "no groups yet" in out and "1 tag(s) point at deleted sessions" in out

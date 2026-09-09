@@ -14,6 +14,7 @@ merge. Membership is read back by joining against ``sessions``.
   groups.py ls                         every group with a count
   groups.py auto                       suggest groups from git repo root
   groups.py untag <session-id>...      remove from its group
+  groups.py gc                         drop tags for deleted sessions
   groups.py resume fork                print the newest id (feed to --resume)
 
 Db: $HERMES_HOME/state.db, or $CNTRL_GROUPS_DB.
@@ -116,15 +117,27 @@ def _rows_for_group(conn: sqlite3.Connection, group: str, limit: int):
 def cmd_ls(args: argparse.Namespace) -> int:
     conn = connect()
     if not args.group:
+        # JOIN, not COUNT(*) on our own table: a deleted session leaves its
+        # tag behind, and counting tags would report members that no longer
+        # exist while `ls <group>` correctly shows nothing. Orphans are
+        # reported separately so they are visible, never silently counted.
         rows = conn.execute(
-            f"SELECT group_name, COUNT(*) n FROM {TABLE} GROUP BY group_name ORDER BY n DESC"
+            f"SELECT g.group_name, COUNT(s.id) n FROM {TABLE} g "
+            "JOIN sessions s ON s.id = g.session_id "
+            "GROUP BY g.group_name ORDER BY n DESC"
         ).fetchall()
+        orphans = conn.execute(
+            f"SELECT COUNT(*) n FROM {TABLE} g "
+            "LEFT JOIN sessions s ON s.id = g.session_id WHERE s.id IS NULL"
+        ).fetchone()["n"]
         if not rows:
             print("no groups yet — groups.py tag <group> <session-id>")
-            return 0
-        width = max(len(r["group_name"]) for r in rows)
-        for r in rows:
-            print(f"{r['group_name']:<{width}}  {r['n']}")
+        else:
+            width = max(len(r["group_name"]) for r in rows)
+            for r in rows:
+                print(f"{r['group_name']:<{width}}  {r['n']}")
+        if orphans:
+            print(f"({orphans} tag(s) point at deleted sessions — groups.py gc)")
         return 0
     rows = _rows_for_group(conn, args.group, args.limit)
     if not rows:
@@ -135,6 +148,17 @@ def cmd_ls(args: argparse.Namespace) -> int:
         title = (r["title"] or "(untitled)")[:46]
         branch = f"  [{r['git_branch']}]" if r["git_branch"] else ""
         print(f"{r['id']}  {when}  {r['message_count']:>4} msg  {title}{branch}")
+    return 0
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    """Drop tags whose session no longer exists (deleted or pruned)."""
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            f"DELETE FROM {TABLE} WHERE session_id NOT IN (SELECT id FROM sessions)"
+        )
+    print(f"removed {cur.rowcount} orphaned tag(s)")
     return 0
 
 
@@ -200,6 +224,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("auto", help="suggest groups from git repo root")
     p.add_argument("--min", type=int, default=2)
     p.set_defaults(func=cmd_auto)
+
+    p = sub.add_parser("gc", help="drop tags whose session was deleted")
+    p.set_defaults(func=cmd_gc)
 
     p = sub.add_parser("path", help="print the db path")
     p.set_defaults(func=lambda a: (print(db_path()), 0)[1])
