@@ -37,6 +37,13 @@ map from a piece of work to the session that owns it.
 
 4. **Report.** Tell the user which session you handed to and why.
 
+## Before routing to a Hermes session
+
+That session's profile must have
+`agent.claude_agent_sdk.deliver_background_results: true`. Without it the send
+reports success and the message is dropped — silently. If a Hermes target never
+acks, check that key before assuming the peer is busy.
+
 ## Rules
 
 - **Say what a message IS.** A routed message is an instruction to a session
