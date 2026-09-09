@@ -80,3 +80,61 @@ def test_write_is_atomic_no_tmp_left_behind(tmp_path):
     run(p, "add", "k", "--session", "s")
     assert p.exists()
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def _path_with_home(home):
+    return subprocess.run(
+        [sys.executable, ROUTER, "path"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HERMES_HOME": str(home)},
+    ).stdout.strip()
+
+
+def test_registry_is_install_wide_not_per_profile(tmp_path):
+    """Each Hermes profile is its own HERMES_HOME. Keying the registry off it
+    gave every profile a private EMPTY registry while routes added at the root
+    stayed invisible — the host then reports 'no routes' and silently routes
+    nothing. Found live 2026-09-08 by a Hermes session reading its own
+    registry from profiles/thinkbot/."""
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "thinkbot"
+    profile.mkdir(parents=True)
+
+    assert _path_with_home(root) == str(root / "cntrl-routes.json")
+    assert _path_with_home(profile) == str(root / "cntrl-routes.json")
+
+
+def test_route_added_at_root_is_visible_from_a_profile(tmp_path):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "work"
+    profile.mkdir(parents=True)
+
+    def run_home(home, *args):
+        return subprocess.run(
+            [sys.executable, ROUTER, *args], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HERMES_HOME": str(home)},
+        )
+
+    assert run_home(root, "add", "fork", "--session", "hermes:fork").returncode == 0
+    assert "hermes:fork" in run_home(profile, "list").stdout
+    # And the reverse: a profile write lands in the shared registry.
+    run_home(profile, "add", "kanban", "--session", "hermes:kanban")
+    assert "hermes:kanban" in run_home(root, "list").stdout
+
+
+def test_explicit_override_still_wins_over_the_root_walk(tmp_path):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "work"
+    profile.mkdir(parents=True)
+    override = tmp_path / "elsewhere.json"
+    out = subprocess.run(
+        [sys.executable, ROUTER, "path"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HERMES_HOME": str(profile),
+             "CNTRL_ROUTER_ROUTES": str(override)},
+    ).stdout.strip()
+    assert out == str(override)
+
+
+def test_a_home_not_inside_profiles_is_used_as_is(tmp_path):
+    plain = tmp_path / "dot-hermes"
+    plain.mkdir()
+    assert _path_with_home(plain) == str(plain / "cntrl-routes.json")
