@@ -12,6 +12,25 @@ Hermes sessions are now named (`agent.claude_agent_sdk.session_name`, default
 them. Naming makes sessions *reachable*; this makes them *routable* — it records
 which session owns which piece of work.
 
+## Required setting
+
+Routing INTO a Hermes session needs one config key:
+
+```yaml
+agent:
+  claude_agent_sdk:
+    deliver_background_results: true
+```
+
+Upstream defaults it to `false`, which DROPS a peer message with a WARN
+("dropped unsolicited ResultMessage ... no turn in flight"). The send still
+reports success, so the message vanishes silently — the worst failure shape for
+a router. Proven 2026-09-08: with the flag on, a peer `SendMessage` arrives as
+"delivering unsolicited result burst"; with it off, nothing reaches the chat.
+
+Set it in every profile you route to, not just the root: each profile has its
+own `config.yaml`.
+
 ## Install
 
 Symlink the skill into the Hermes skills directory:
