@@ -72,5 +72,5 @@ python3 cntrl-plugins/cntrl_router/router.py add kanban \
 session's own name with `agent.claude_agent_sdk.session_name` in Hermes config,
 or `claude --name <name>` for a plain Claude Code session.
 
-Registry path: `$HERMES_HOME/cntrl-routes.json`
-(`python3 cntrl-plugins/cntrl_router/router.py path` prints it).
+Registry path: the Hermes install root (shared by every profile — run
+`python3 cntrl-plugins/cntrl_router/router.py path` to print it).

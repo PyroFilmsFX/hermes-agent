@@ -12,7 +12,7 @@ running ``router.py list``), matches a request to a route, then hands off with
 
 Registry location, in order:
   $CNTRL_ROUTER_ROUTES        explicit override
-  $HERMES_HOME/cntrl-routes.json
+  <hermes install root>/cntrl-routes.json   (NOT the profile — see routes_root)
   ~/.hermes/cntrl-routes.json
 
 Schema (one object per route):
@@ -35,13 +35,27 @@ from typing import Any, Dict, List
 SCHEMA_VERSION = 1
 
 
+def routes_root(home: Optional[str] = None) -> Path:
+    """The Hermes install root, NOT the active profile.
+
+    Each profile is its own HERMES_HOME (``<root>/profiles/<name>``), so keying
+    the registry off HERMES_HOME gives every profile a private, empty registry
+    while routes added from the root stay invisible — the host then reports "no
+    routes" and silently routes nothing. Routes name SESSIONS on this machine,
+    which are addressable across profiles, so the registry belongs to the
+    install. Walk up out of ``profiles/<name>`` when we are inside one."""
+    raw = home if home is not None else os.environ.get("HERMES_HOME", "").strip()
+    base = Path(raw).expanduser() if raw else Path.home() / ".hermes"
+    if base.parent.name == "profiles" and base.parent.parent != base.parent:
+        return base.parent.parent
+    return base
+
+
 def routes_path() -> Path:
     explicit = os.environ.get("CNTRL_ROUTER_ROUTES", "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    home = os.environ.get("HERMES_HOME", "").strip()
-    base = Path(home).expanduser() if home else Path.home() / ".hermes"
-    return base / "cntrl-routes.json"
+    return routes_root() / "cntrl-routes.json"
 
 
 def load() -> Dict[str, Any]:
