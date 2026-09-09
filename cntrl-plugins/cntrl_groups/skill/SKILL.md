@@ -35,6 +35,7 @@ $G tag hermes-fork <id>...  # put sessions in a group (re-tagging moves them)
 $G untag <id>...            # take them out
 $G resume hermes-fork       # print the newest id
 $G auto                     # suggest groups from git repo root
+$G gc                       # drop tags for deleted sessions
 ```
 
 Resume the newest session of a project:
@@ -49,6 +50,9 @@ hermes --resume "$(python3 cntrl-plugins/cntrl_groups/groups.py resume hermes-fo
   and never appear in a listing. `--force` is the escape hatch.
 - **A session belongs to one group.** Tagging again moves it.
 - **`auto` never writes.** It prints the commands and you choose.
+- **Counts come from live sessions.** A deleted session leaves its tag behind;
+  `ls` reports those separately as orphans and `gc` clears them. A count must
+  never claim members the listing cannot show.
 - **An empty group exits 1.** Do not report a project as empty without saying
   which name you looked for; the name may just be wrong.
 

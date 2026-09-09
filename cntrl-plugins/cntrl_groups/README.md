@@ -50,6 +50,7 @@ The `groups.py` CLI keeps working with no plugin context at all.
 | `untag <id>...` | remove from whatever group they are in |
 | `resume <group>` | print the newest session id, for `hermes --resume` |
 | `auto [--min N]` | suggest groups from git repo root; prints commands, never writes |
+| `gc` | drop tags whose session was deleted |
 | `path` | print the db path |
 
 Same verbs from a session (`/groups ls`, `/groups tag fork <id>`) or the CLI
