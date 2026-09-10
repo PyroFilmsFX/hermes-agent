@@ -10,6 +10,8 @@ import { $sidebarShowArchived } from '@/store/layout'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
 import { refreshActiveProfile } from '@/store/profile'
+import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
+import { isSessionGoneForBackgroundPolling } from '@/store/session-gone-latch'
 import { refreshProjectTree } from '@/store/projects'
 import {
   $activeSessionId,
@@ -143,6 +145,11 @@ export async function reconcileTileTranscripts({
   const tiles = tilesOverride ?? $sessionTiles.get()
   const openSignatureKeys = new Set(tiles.map(tileTranscriptSignatureKey))
 
+  for (const signatureKey of goneTileSignatures) {
+    if (!openSignatureKeys.has(signatureKey)) {
+      goneTileSignatures.delete(signatureKey)
+    }
+  }
   for (const signatureKey of signatureRef.current.keys()) {
     if (!openSignatureKeys.has(signatureKey)) {
       signatureRef.current.delete(signatureKey)
@@ -182,6 +189,12 @@ export async function reconcileTileTranscripts({
     const profileScope = profileScopeForTranscriptSession(tile)
 
     const signatureKey = tileTranscriptSignatureKey(tile)
+    if (goneTileSignatures.has(signatureKey)) {
+      // Answered "Session not found" from the backend it was routed to; a
+      // retry every tick cannot change that. Re-armed when the tile rebinds
+      // (its signature key changes) or is closed and reopened.
+      continue
+    }
 
     try {
       // Passive: a hidden tile's refresh must never cold-start its owner
@@ -221,10 +234,32 @@ export async function reconcileTileTranscripts({
         }),
         storedSessionId
       )
-    } catch {
-      // Non-fatal: the next change event retries.
+    } catch (error) {
+      if (isSessionGoneForBackgroundPolling(error)) {
+        goneTileSignatures.add(signatureKey)
+        continue
+      }
+      // Non-fatal (transient): the next change event retries.
     }
   }
+}
+
+/** Tile signature keys whose transcript read came back "Session not found" — skipped until the
+ *  tile's runtime binding changes. Module-level on purpose: the reconcile runs from several
+ *  effects and they must agree. */
+const goneTileSignatures = new Set<string>()
+
+/** The owning profile of a stored session as the sidebar knows it, as a request scope; undefined
+ *  when no row (or no profile stamp) is known so the request keeps its historical routing. */
+export function storedRowProfileScope(storedSessionId: string): ProfileScope {
+  for (const rows of [$sessions.get(), $cronSessions.get(), $messagingSessions.get()]) {
+    const row = rows.find(session => session.id === storedSessionId)
+    const profile = row?.profile?.trim()
+    if (profile) {
+      return row?.connection_id?.trim() ? { connectionId: row.connection_id.trim(), profile } : { profile }
+    }
+  }
+  return undefined
 }
 
 /** Reconcile one persisted transcript snapshot into the currently viewed session. */
