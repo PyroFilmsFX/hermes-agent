@@ -1,14 +1,14 @@
 # Fork inventory — generated
 
-Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
+Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb0793a |
-| vs `origin/main` | 55 ahead / 679 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 679 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 35 |
-| core files touched | 29 (2 unlisted in §3) |
+| branch | `cntrl-hermes` @ c0deb07705 |
+| vs `origin/main` | 56 ahead / 732 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 732 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 36 |
+| core files touched | 31 (3 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -49,6 +49,7 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-09 | c0deb0782d | claude-sdk desktop: peer replies display, tab renames reach peers, attachment titles, hermes: peer preference | `agent/claude_sdk_runtime.py`, `agent/title_generator.py`, `agent/transports/claude_agent_sdk_session.py`, `hermes_cli/web_routers/sessions.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/agent/test_title_generator.py`, `tests/tui_gateway/test_sdk_background_result_delivery.py`, `tools/process_registry_notifications.py`, `tui_gateway/methods_session.py`, `tui_gateway/session_notifications.py` |
 | 2026-09-09 | c0deb07b92 | desktop: stop the hermes:api 404 storm — latch a session gone when every profile 404s | `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts`, `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/runtime-gone.test.ts`, `apps/desktop/src/store/session-gone-latch.ts` |
 | 2026-09-09 | c0deb0793a | cntrl: inventory — attachment streaming stall bisected at three layers, not reproduced | — |
+| 2026-09-09 | c0deb07705 | desktop: the 404 storm's real driver — tile transcript reconcile sent no profile | `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts`, `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` |
 
 ## Core files we touch
 
@@ -59,6 +60,8 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | `agent/title_generator.py` | c0deb07e0c, c0deb0782d | yes |
 | `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb0782d | yes |
 | `agent/transports/hermes_tool_exposure.py` | c0deb07f0f | yes |
+| `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts` | c0deb07705 | **NO** |
+| `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` | c0deb07705 | yes |
 | `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts` | c0deb07b92 | **NO** |
 | `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts` | c0deb07b92 | yes |
 | `apps/desktop/src/store/runtime-gone.test.ts` | c0deb07b92 | **NO** |

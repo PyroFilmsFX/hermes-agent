@@ -252,6 +252,7 @@ def _make_turn(**overrides):
 def _make_agent():
     agent = MagicMock()
     agent._claude_sdk_session = MagicMock()
+    agent._claude_sdk_session._turn_inbox = None  # idle: no turn owns the stream
     agent._claude_sdk_session.run_turn.return_value = _make_turn()
     agent.tool_progress_callback = None
     agent._interrupt_requested = False
