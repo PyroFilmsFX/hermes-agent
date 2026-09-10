@@ -86,6 +86,76 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
         return None
 
 
+def _sdk_session_name(agent) -> str:
+    """Peer-addressable name for this agent's Claude Code session.
+
+    Hermes sessions are invisible to the ListAgents/SendMessage pair unless
+    they carry a name — the CLI otherwise derives one from cwd, so every
+    Hermes session on a box collides. Reads the operator template and fills it
+    from the live session row. Never raises: a naming failure must not cost a
+    turn. (cntrl carry)"""
+    try:
+        from agent.transports.claude_agent_sdk_session_config import (
+            _configured_session_name_template,
+            render_sdk_session_name,
+        )
+
+        session_id = str(getattr(agent, "session_id", "") or "")
+        title = ""
+        db = getattr(agent, "_session_db", None)
+        if db is not None and session_id:
+            try:
+                title = str((db.get_session(session_id) or {}).get("title") or "")
+            except Exception:
+                logger.debug("session title read failed for SDK naming", exc_info=True)
+        profile = ""
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            profile = str(get_active_profile_name() or "")
+        except Exception:
+            logger.debug("profile read failed for SDK naming", exc_info=True)
+        return render_sdk_session_name(
+            _configured_session_name_template(),
+            title=title,
+            session=session_id,
+            profile=profile,
+            model=str(getattr(agent, "model", "") or ""),
+        )
+    except Exception:
+        logger.debug("SDK session naming failed", exc_info=True)
+        return ""
+
+
+def rename_claude_sdk_session(agent, *, busy: bool = False) -> str:
+    """Apply a Hermes title change to the spawned CLI session's peer-visible name.
+
+    Recomputes the name from the (already updated) session row via _sdk_session_name, then:
+    live + idle → instant ``/rename`` (ClaudeAgentSdkSession.rename); live + busy, or the
+    rename could not be issued → mark pending so the NEXT turn rotates the session, which
+    rebuilds the CLI with the new ``--name`` and resumes; no live session → nothing to do,
+    the next build reads the row. Returns the computed name. Never raises: a naming miss
+    must not fail a rename. (cntrl carry)"""
+    try:
+        name = _sdk_session_name(agent)
+    except Exception:
+        logger.debug("SDK rename: name computation failed", exc_info=True)
+        return ""
+    live = getattr(agent, "_claude_sdk_session", None)
+    if live is None or not name:
+        return name
+    applied = False
+    if not busy:
+        try:
+            applied = bool(live.rename(name))
+        except Exception:
+            logger.debug("SDK rename failed; deferring to rotation", exc_info=True)
+    if not applied:
+        agent._claude_sdk_rename_pending = True
+        logger.info("claude-agent-sdk: rename to %r deferred to the next turn (session busy)", name)
+    return name
+
+
 def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bool:
     """Close the live SDK session so the NEXT turn rebuilds the CLI with fresh
     ``mcp_servers`` / ``plugins`` / ``cli_path`` — the live-reload the SDK

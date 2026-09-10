@@ -190,6 +190,15 @@ def _swallow_interrupt_result(future: Any) -> None:
         )
 
 
+_RENAME_ACK_PREFIX = "Session renamed to:"
+
+
+def _is_rename_ack(result_text: Any, buffered: list) -> bool:
+    """True for the CLI's ``/rename`` acknowledgement (deterministic text, proven 2026-09-09)."""
+    candidates = [result_text, *buffered]
+    return any(isinstance(t, str) and t.strip().startswith(_RENAME_ACK_PREFIX) for t in candidates)
+
+
 def _swallow_steer_result(future: Any) -> None:
     """Same contract as _swallow_interrupt_result, for the fire-and-forget
     steer query(). The caller has already returned True by the time this

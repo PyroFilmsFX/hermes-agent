@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_continuity import (
     _persist_turn,
+    rename_claude_sdk_session,
     rotate_claude_sdk_session,
 )
 from agent.claude_sdk_runtime_fallback import (
@@ -295,4 +296,4 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
     return result
 
 
-__all__ = ["run_claude_agent_sdk_turn", "rotate_claude_sdk_session"]
+__all__ = ["run_claude_agent_sdk_turn", "rename_claude_sdk_session", "rotate_claude_sdk_session"]

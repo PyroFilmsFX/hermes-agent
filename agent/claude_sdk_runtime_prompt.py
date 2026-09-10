@@ -100,7 +100,9 @@ _MCP_INSPECTION_PREFERENCE = (
     "They enforce Hermes protected-path rules. Use Bash only when the task "
     "genuinely requires a shell-only capability (for example a database "
     "client, process/service state, network operation, or an unavailable "
-    "tool); Bash remains subject to normal approval."
+    "tool); Bash remains subject to normal approval. When listing or messaging "
+    "peer sessions, Hermes sessions are the rows whose name starts with "
+    "`hermes:`; prefer those and treat other rows as unrelated unless asked."
 )
 
 
