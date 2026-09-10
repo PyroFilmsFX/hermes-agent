@@ -1058,3 +1058,37 @@ class TestSessionRotation:
         assert _persisted_sdk_session_id(agent) is None  # consumed once
         # Idempotent when nothing is live.
         assert rotate_claude_sdk_session(agent, "test") is False
+
+    def test_rename_helper_prefers_instant_rename_when_idle(self):
+        from agent.claude_sdk_runtime import rename_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live.rename.return_value = True
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "ci/cd"}
+        agent.session_id = "sess-1"
+        assert rename_claude_sdk_session(agent, busy=False) == "hermes:ci/cd"
+        live.rename.assert_called_once_with("hermes:ci/cd")
+        assert getattr(agent, "_claude_sdk_rename_pending", False) is not True
+
+    def test_rename_helper_defers_to_rotation_when_busy(self, monkeypatch):
+        import agent.claude_sdk_runtime as rt
+        import agent.claude_sdk_runtime_session as rs
+
+        agent = _make_agent()
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "manager"}
+        agent.session_id = "sess-1"
+        assert rt.rename_claude_sdk_session(agent, busy=True) == "hermes:manager"
+        agent._claude_sdk_session.rename.assert_not_called()
+        assert agent._claude_sdk_rename_pending is True
+
+        rotated = []
+        monkeypatch.setattr(rs, "rotate_claude_sdk_session", lambda a, reason="": rotated.append(reason) or True)
+        run_claude_agent_sdk_turn(
+            agent, user_message="hi", original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}], effective_task_id="task-1",
+        )
+        assert rotated == ["session renamed"]
+        assert agent._claude_sdk_rename_pending is False

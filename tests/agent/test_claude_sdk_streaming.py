@@ -26,6 +26,8 @@ from tests.agent.claude_sdk_fakes import (
     ResultMessage,
     _FakeClient,
     _make_session,
+    _make_hold_open_session,
+    _wait_for_client,
     _make_turn,
     _make_agent,
     isolate_provider_config,
@@ -1215,3 +1217,91 @@ class TestDeadStreamRetires:
             session.close()
         assert turn.error == "SDK turn ended: error_max_turns"
         assert turn.should_retire is False
+
+
+class TestSessionRename:
+    def test_rename_issues_slash_rename_and_swallows_the_ack(self):
+        # A Hermes title change must reach peers NOW: /rename is a local CLI command
+        # (proven 2026-09-09) whose ack is a CLI-initiated turn — it must never be
+        # delivered as a background result. The client persists between turns, so
+        # the hold-open fake is the honest stand-in. (cntrl carry)
+        delivered = []
+        session, holder = _make_hold_open_session(
+            script=[], session_name="hermes:old",
+            on_unsolicited_result=lambda texts: delivered.append(list(texts)),
+        )
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.05)
+            client.feed(AssistantMessage(content=[TextBlock("ok")]), ResultMessage(result="ok", uuid="u-1"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("ping", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            thread.join(timeout=5)
+            client = holder["client"]
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while "/rename hermes:new" not in client.queried and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert "/rename hermes:new" in client.queried
+            assert session._session_name == "hermes:new"
+            assert session.build_option_fields()["extra_args"]["name"] == "hermes:new"
+            # The CLI answers the rename on its own; that text is NOT a peer message.
+            client.feed(
+                AssistantMessage(content=[TextBlock("Session renamed to: hermes:new")]),
+                ResultMessage(result="Session renamed to: hermes:new", uuid="uuid-rename"),
+            )
+            time.sleep(0.3)
+            assert delivered == []
+            # A real unsolicited result afterwards still flows.
+            client.feed(
+                AssistantMessage(content=[TextBlock("PEER-OK")]),
+                ResultMessage(result="PEER-OK", uuid="uuid-peer"),
+            )
+            deadline = time.monotonic() + 3
+            while not delivered and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert delivered == [["PEER-OK"]]
+        finally:
+            session.close()
+
+    def test_rename_before_start_applies_on_first_build(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:old")
+        try:
+            assert session.rename("hermes:renamed early") is True  # no client yet: applied at build
+            session.run_turn("ping")
+            assert holder["client"].options["extra_args"]["name"] == "hermes:renamed early"
+            assert holder["client"].queried == ["ping"]  # no /rename needed — the name was baked in
+        finally:
+            session.close()
+
+    def test_rename_noop_and_invalid(self):
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:same")
+        assert session.rename("hermes:same") is True
+        assert session.rename("   ") is False
+        session.close()
+
+    def test_rename_refused_while_a_turn_is_in_flight(self):
+        session, holder = _make_hold_open_session(script=[])
+        stop = threading.Event()
+        seen = {}
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.1)
+            seen["mid_turn"] = session.rename("hermes:mid")
+            client.feed(AssistantMessage(content=[TextBlock("done")]), ResultMessage(result="done", uuid="u-d"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("big task", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+            session.close()
+        assert seen["mid_turn"] is False
+        assert "/rename hermes:mid" not in holder["client"].queried

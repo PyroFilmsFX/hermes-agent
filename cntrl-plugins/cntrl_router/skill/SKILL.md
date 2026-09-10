@@ -44,6 +44,16 @@ That session's profile must have
 reports success and the message is dropped — silently. If a Hermes target never
 acks, check that key before assuming the peer is busy.
 
+## Which rows are Hermes sessions
+
+`ListAgents` mixes every Claude session on the machine. Hermes sessions are the
+rows whose name starts with `hermes:` — the rest are plain Claude Code sessions.
+Prefer the `hermes:` rows; the rest are unrelated unless the user names one.
+
+The part after `hermes:` is the session's title, and a tab rename in the desktop
+updates it live (the CLI is renamed in place; a busy session picks it up at its
+next turn). A row still showing an old title is mid-turn — wait, do not guess.
+
 ## Rules
 
 - **Say what a message IS.** A routed message is an instruction to a session
