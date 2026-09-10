@@ -155,10 +155,17 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   in place and the ack is swallowed; busy sessions rotate at the next turn.
 - **Attachment titles — DONE 2026-09-09.** The desktop prepends
   `[The user attached an image: …]` to the typed text; titles now strip it.
-- **Streaming stalls with attachments — OPEN.** Proven not to be the runtime relay,
-  the desktop callback wiring, or the renderer's straggler guard. Needs a live
-  bisect at the JSON-RPC layer (stdio entry): count `message.delta` with and
-  without an image.
+- **Streaming stalls with attachments — NOT REPRODUCED (2026-09-09).** Bisected
+  at three layers with real turns: SDK transport (deltas flow), stdio JSON-RPC
+  (image turn: 24 deltas), and the live desktop observed through CDP on the
+  renderer's own socket with a real 3456x2168 screenshot attached: 36 deltas,
+  then a tool-instructed image turn with 96 deltas, and the DOM grew as they
+  arrived in both. What WAS seen: a 30-38 s silent lead before the first delta
+  on image turns (the model works before it writes), then normal streaming. So
+  the pipeline is proven end to end on `default`; the report came from the
+  `thinkbot` profile on Fable 5.1 at Low effort with a 17-tool turn. To capture
+  it next time it happens: `.sdkprobe/desktop_stream_repro.py` counts
+  `message.delta` on the renderer's socket and samples the DOM per second.
 
 - **Hermes-to-Hermes messaging — DONE 2026-09-08.** A peer `SendMessage` into
   a Hermes conversation needs `agent.claude_agent_sdk.deliver_background_results:
