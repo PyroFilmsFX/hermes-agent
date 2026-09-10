@@ -1092,3 +1092,20 @@ class TestSessionRotation:
         )
         assert rotated == ["session renamed"]
         assert agent._claude_sdk_rename_pending is False
+
+    def test_rotate_defers_while_a_turn_is_in_flight(self):
+        # A between-turns MCP refresh can fire from the late-binding thread while a
+        # turn is running; closing the CLI then kills the turn. Defer instead. (cntrl carry)
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live._turn_inbox = object()  # a claimed turn
+        assert rotate_claude_sdk_session(agent, "tool surface changed") is False
+        live.close.assert_not_called()
+        assert agent._claude_sdk_session is live
+        assert agent._claude_sdk_rename_pending is True
+        # Idle again: the rotation goes through.
+        live._turn_inbox = None
+        assert rotate_claude_sdk_session(agent, "tool surface changed") is True
+        live.close.assert_called_once()
