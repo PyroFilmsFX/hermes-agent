@@ -139,6 +139,31 @@ def _strip_one_wrapper(text: str) -> str:
     return text
 
 
+# Attachment preambles the desktop/CLI prepend to a user message (tui_gateway/session_history.py
+# _build_image_ref_message; hermes_cli/cli_stream_mixin.py; agent/vision_message_prep.py). They are
+# machine scaffolding, not what the user typed — titling them named live sessions
+# "[The user attached an image: Screenshot…" (seen 2026-09-09).
+_ATTACHMENT_PREAMBLE_RE = re.compile(
+    r"\[The (?:user|assistant) attached an image[^\]]*\]"      # "[The user attached an image: x.png]" / "…but it couldn't…"
+    r"|\[Examine it with the vision_analyze tool[^\]]*\]"          # the desktop's follow-up instruction line
+    r"|\[The (?:user|assistant) attached an image\. Here's what it contains:.*?\]",  # vision-prep block
+    re.DOTALL,
+)
+_ATTACHMENT_NAME_RE = re.compile(r"\[The user attached an image: ([^\]]+)\]")
+
+
+def _strip_attachment_preamble(text: str) -> str:
+    """Drop attachment scaffolding so the title comes from the user's words. An image-only
+    message keeps a small honest title ("Image: photo.png") rather than the raw marker."""
+    if not text or "attached an image" not in text:
+        return text
+    names = _ATTACHMENT_NAME_RE.findall(text)
+    stripped = _ATTACHMENT_PREAMBLE_RE.sub("", text).strip()
+    if stripped:
+        return stripped
+    return f"Image: {names[0].strip()}" if names else ""
+
+
 def _summarize_user_message(user_message: str) -> str:
     """Text worth titling: describe a ``/skill`` invocation (it embeds the whole skill body), then strip wrappers."""
     if not user_message:
@@ -149,7 +174,7 @@ def _summarize_user_message(user_message: str) -> str:
         described = describe_skill_invocation(user_message)
     except Exception:
         logger.debug("Skill-scaffolding summary failed; titling raw", exc_info=True)
-    return strip_control_wrappers(user_message if described is None else described)
+    return _strip_attachment_preamble(strip_control_wrappers(user_message if described is None else described))
 
 
 def is_titleable_user_message(user_message: str) -> bool:

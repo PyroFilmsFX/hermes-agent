@@ -181,6 +181,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Peer-addressable name for the spawned CLI session (see
         # _configured_session_name_template). "" keeps the CLI's own naming.
         self._session_name = (session_name or "").strip()
+        # Name of an in-flight /rename whose ack must be swallowed (never delivered as a
+        # background result). Cleared when the ack arrives. (cntrl carry)
+        self._pending_rename_ack: Optional[str] = None
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -301,6 +304,40 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             self._cwd,
         )
         return self._session_id or "pending"
+
+    def rename(self, name: str) -> bool:
+        """Rename the spawned CLI session so peers see the new name NOW.
+
+        ``--name`` is fixed at process start, so a Hermes title change would otherwise show
+        to ListAgents peers only after the next CLI rebuild. Claude Code's ``/rename`` is a
+        local slash command (no model call) that updates the peer registry instantly —
+        proven 2026-09-09: query("/rename X") answered "Session renamed to: X" in <0.1s and
+        the peer list showed X. Returns True when the rename was applied or will apply on the
+        next build (no client yet); False when a turn is in flight — the caller then defers
+        (rotate at the next turn boundary). The ack is a CLI-initiated turn and would be
+        delivered as a background result; it is swallowed by text match. (cntrl carry)"""
+        cleaned = " ".join((name or "").split())
+        if not cleaned:
+            return False
+        if cleaned == self._session_name:
+            return True
+        if self._turn_inbox is not None:
+            return False  # a turn owns the stream; /rename now would interleave with it
+        client, loop = self._client, self._loop
+        if client is None or loop is None:
+            self._session_name = cleaned  # applied by build_option_fields on the next start
+            return True
+        try:
+            self._pending_rename_ack = cleaned
+            future = asyncio.run_coroutine_threadsafe(client.query(f"/rename {cleaned}"), loop)
+            future.add_done_callback(_swallow_steer_result)
+        except Exception:
+            self._pending_rename_ack = None
+            logger.debug("SDK /rename scheduling failed", exc_info=True)
+            return False
+        self._session_name = cleaned
+        logger.info("claude-agent-sdk: session renamed to %r", cleaned)
+        return True
 
     def close(self) -> None:
         if self._closed:

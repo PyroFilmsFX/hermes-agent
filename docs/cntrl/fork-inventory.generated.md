@@ -1,13 +1,13 @@
 # Fork inventory — generated
 
-Generated 2026-09-08 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
+Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb077a0 |
-| vs `origin/main` | 51 ahead / 330 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 330 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 31 |
+| branch | `cntrl-hermes` @ c0deb07d24 |
+| vs `origin/main` | 52 ahead / 677 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 677 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 32 |
 | core files touched | 20 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -45,6 +45,7 @@ Generated 2026-09-08 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-07 | c0deb07376 | cntrl: inventory — list the title-generator test file in section 3 | — |
 | 2026-09-08 | c0deb072ad | cntrl_groups: ls counts live sessions, not stale tags; add gc | — |
 | 2026-09-08 | c0deb077a0 | cntrl_router: registry belongs to the install, not the profile | — |
+| 2026-09-08 | c0deb07d24 | cntrl: Hermes-to-Hermes messaging works — deliver_background_results is the missing key | — |
 
 ## Core files we touch
 

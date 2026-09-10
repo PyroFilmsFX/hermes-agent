@@ -20,6 +20,8 @@ from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
 from agent.claude_sdk_runtime_fallback import _consume_agent_interrupt
 from agent.claude_sdk_runtime_continuity import (
+    _sdk_session_name,
+    rotate_claude_sdk_session,
     _canonical_sdk_cwd,
     _persisted_sdk_session_id,
     _render_continuity_digest,
@@ -362,47 +364,6 @@ def _configured_max_budget_usd() -> Optional[float]:
     return value
 
 
-def _sdk_session_name(agent) -> str:
-    """Peer-addressable name for this agent's Claude Code session.
-
-    Hermes sessions are invisible to the ListAgents/SendMessage pair unless
-    they carry a name — the CLI otherwise derives one from cwd, so every
-    Hermes session on a box collides. Reads the operator template and fills it
-    from the live session row. Never raises: a naming failure must not cost a
-    turn. (cntrl carry)"""
-    try:
-        from agent.transports.claude_agent_sdk_session_config import (
-            _configured_session_name_template,
-            render_sdk_session_name,
-        )
-
-        session_id = str(getattr(agent, "session_id", "") or "")
-        title = ""
-        db = getattr(agent, "_session_db", None)
-        if db is not None and session_id:
-            try:
-                title = str((db.get_session(session_id) or {}).get("title") or "")
-            except Exception:
-                logger.debug("session title read failed for SDK naming", exc_info=True)
-        profile = ""
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-
-            profile = str(get_active_profile_name() or "")
-        except Exception:
-            logger.debug("profile read failed for SDK naming", exc_info=True)
-        return render_sdk_session_name(
-            _configured_session_name_template(),
-            title=title,
-            session=session_id,
-            profile=profile,
-            model=str(getattr(agent, "model", "") or ""),
-        )
-    except Exception:
-        logger.debug("SDK session naming failed", exc_info=True)
-        return ""
-
-
 def _create_session(
     agent,
     *,
@@ -552,6 +513,11 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     resumed = False
     send_input = user_input
     for attempt in (0, 1):
+        if getattr(agent, "_claude_sdk_rename_pending", False) is True:
+            # A title change landed while a turn was live; apply it now by rebuilding the CLI
+            # with the new --name (the resume id is kept, so the conversation continues).
+            agent._claude_sdk_rename_pending = False
+            rotate_claude_sdk_session(agent, "session renamed")
         if not hasattr(agent, "_claude_sdk_session") or agent._claude_sdk_session is None:
             resume_id = _persisted_sdk_session_id(agent) if attempt == 0 else None
             resumed = bool(resume_id)
