@@ -1021,6 +1021,13 @@ def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bo
     live = getattr(agent, "_claude_sdk_session", None)
     if live is None:
         return False
+    if getattr(live, "_turn_inbox", None) is not None:
+        # A turn owns the stream; closing the CLI now would kill it mid-flight (a between-turns
+        # MCP refresh can fire from the late-binding thread while a turn runs). Defer to the
+        # next turn boundary, where run_claude_agent_sdk_turn honours the pending flag.
+        agent._claude_sdk_rename_pending = True
+        logger.info("claude-agent-sdk rotation (%s) deferred: a turn is in flight", reason)
+        return False
     sid = getattr(live, "_session_id", None) or getattr(live, "_resume_session_id", None)
     if isinstance(sid, str) and sid:
         agent._claude_sdk_rotated_resume_id = sid

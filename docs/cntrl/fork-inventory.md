@@ -62,6 +62,10 @@ upstream moved the surrounding code.
 | `agent/claude_sdk_runtime.py` | `rename_claude_sdk_session` + deferred rotation when busy; `hermes:` peer preference sentence in `_MCP_INSPECTION_PREFERENCE` (harness-probed OK 2026-09-09) | same; router guidance |
 | `tui_gateway/methods_session.py`, `hermes_cli/web_routers/sessions.py` | rename hooks on `session.title` RPC and the REST PATCH the desktop uses | same |
 | `tests/tui_gateway/test_sdk_background_result_delivery.py` | 6 tests | pins the delivery row |
+| `tui_gateway/server.py` | `write_json` fans a detached session's event frames out to live WS transports (`_fan_out_detached_event`) | turns ran invisibly after a websocket reconnect |
+| `tests/tui_gateway/test_detached_event_fanout.py` | 4 tests | pins the row above |
+| `agent/claude_sdk_runtime.py` | `rotate_claude_sdk_session` defers while a turn is in flight | a between-turns MCP refresh must never close the CLI under a running turn |
+| `agent/claude_sdk_aux_client.py`, `tests/agent/test_aux_cli_path.py` | `_build_aux_option_fields` passes the pinned `cli_path` | aux one-shots spawned the SDK's bundled CLI (35 spawns in a morning) |
 | `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` | plain tiles read their transcript under the sidebar row's profile; a gone answer latches the tile | the actual 404-storm driver: a thinkbot session asked of the default backend every tick |
 | `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/session-gone-latch.ts` | `resolveStoredSession` latches an id gone when every profile answers 404; the background-polling classifier accepts the REST `404 … Session not found` shape | the `hermes:api` 404 storm: a deleted id was re-probed across every profile on every 5s poll, forever |
 | `tests/agent/test_title_generator.py` | 18 scaffolding cases | pins the title fix |
@@ -156,7 +160,32 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   in place and the ack is swallowed; busy sessions rotate at the next turn.
 - **Attachment titles — DONE 2026-09-09.** The desktop prepends
   `[The user attached an image: …]` to the typed text; titles now strip it.
-- **Streaming stalls with attachments — NOT REPRODUCED (2026-09-09).** Bisected
+- **Silent turns ("no updates on screen", "stuck", timer resets) — ROOT CAUSE
+  FOUND AND FIXED 2026-09-10.** Not attachments, not streaming. A desktop
+  websocket reconnect (09:41:47, `detached_sessions=2`) points the open tabs'
+  sessions at the disconnected-WS sentinel; `prompt.submit` re-binds only when the
+  request itself carries a transport, so those tabs' turns ran fully (7-8 min,
+  33 tool calls) while every event frame was written to the drop sentinel.
+  Proof: `session.events.since` on the live backend returned 266 and 221
+  `message.delta` frames plus start/complete for the two tabs that nobody ever
+  received. Fix in `tui_gateway/server.py` `write_json`: a detached session's
+  event frames fan out to every live WS transport (clients route by
+  `session_id`; the sentinel still records them for replay). 4 tests. Needs a
+  backend restart to take effect. This also explains yesterday's "attachments
+  stop streaming": every Vite HMR reload during my editing reconnected the
+  socket and detached the open tab.
+- **Rotation while a turn is in flight — guarded 2026-09-10.** `rotate_claude_sdk_session`
+  now defers (pending flag, applied at the next turn start) when a turn owns the
+  stream; a between-turns MCP refresh from the late-binding thread could
+  otherwise close the CLI under a running turn. 1 test.
+- **Auxiliary one-shots spawn a fresh Claude CLI each time (CPU).** The desktop
+  log shows `Using bundled Claude Code CLI` every 20-60 s: approval screening,
+  titling and vision each spawn a full CLI process (node) with the SDK's
+  bundled binary, ignoring `cli_path`. Real candidate for the "random node
+  spikes". The binary mismatch is fixed (aux now uses `cli_path`); the spawn-per-call
+  cost itself remains — a persistent aux client is the follow-up.
+
+- **Streaming stalls with attachments — SUPERSEDED (see silent turns above).** Bisected
   at three layers with real turns: SDK transport (deltas flow), stdio JSON-RPC
   (image turn: 24 deltas), and the live desktop observed through CDP on the
   renderer's own socket with a real 3456x2168 screenshot attached: 36 deltas,

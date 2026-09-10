@@ -565,8 +565,33 @@ def write_json(obj: dict) -> bool:
         params = obj.get("params")
         sid = ((params or {}).get("session_id")) if isinstance(params, dict) else ""
         if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
+            if t is _detached_ws_transport:
+                # The client that owned this session reconnected on a NEW socket and nothing re-bound
+                # the session (prompt.submit re-binds only when the request itself carried a transport).
+                # Dropping here made whole turns invisible: 2026-09-10 two desktop tabs ran 7-8 min
+                # tool-heavy turns while the replay ring collected 266 and 221 deltas nobody received.
+                # Every live socket is a client of this backend and routes frames by session_id, so
+                # fan the frame out instead of dropping it; the drop sentinel still records it for
+                # ``session.events.since``. (cntrl carry)
+                if _fan_out_detached_event(obj):
+                    return True
             return t.write(obj)
     return (current_transport() or _stdio_transport).write(obj)
+
+
+def _fan_out_detached_event(frame: dict) -> bool:
+    """Write a detached session's event frame to every live WS transport. True when at least one
+    peer took it; False (no live peers) lets the caller fall back to the sentinel."""
+    with _live_transports_lock:
+        targets = list(_live_transports)
+    delivered = False
+    for transport in targets:
+        try:
+            transport.write(frame)
+            delivered = True
+        except Exception:  # one wedged peer must not stall the rest
+            logger.debug("detached-session event fan-out write failed", exc_info=True)
+    return delivered
 
 
 def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
