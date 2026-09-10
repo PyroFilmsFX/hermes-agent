@@ -49,7 +49,14 @@ export function isSessionGoneForBackgroundPolling(error: unknown): boolean {
     .replace(/^Error invoking remote method '[^']+':\s*Error:\s*/i, '')
     .replace(/^Error:\s*/i, '')
 
-  return /^(?:4001\s*[:,-]?\s*)?session not found[.!]?$/i.test(message)
+  if (/^(?:4001\s*[:,-]?\s*)?session not found[.!]?$/i.test(message)) {
+    return true
+  }
+  // The REST shape. Electron's `hermes:api` bridge rethrows the backend's
+  // `404: {"detail":"Session not found"}`; only the JSON-RPC 4001 shape was
+  // recognised before, so a stored id that 404s on every backend re-polled
+  // forever (the `hermes:api` 404 storm, 2026-09-08/09).
+  return /^404\b/.test(message) && /session not found/i.test(message)
 }
 
 export function isSessionGone(sid: null | string | undefined): boolean {

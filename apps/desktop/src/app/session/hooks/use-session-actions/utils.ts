@@ -7,6 +7,7 @@ import { parseErrorSurface } from '@/lib/error-surface'
 import { isMessagingSource, normalizeSessionSource } from '@/lib/session-source'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
+import { latchSessionGone } from '@/store/session-gone-latch'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import {
@@ -1488,6 +1489,14 @@ export async function resolveStoredSession(
   // active profile. A 404 there used to skip that profile in the probes below,
   // so the session was never found.
   const activeKey = normalizeProfileKey($activeGatewayProfile.get())
+  // Every attempt below answering "Session not found" is the strongest proof
+  // the desktop can get that the id is gone. Without recording it, a deleted
+  // session was re-probed across every profile on every 5s status poll — the
+  // `hermes:api` 404 storm seen 2026-09-08/09 — because the REST 404 shape never
+  // reached the background-polling latch. Transient failures (ECONNREFUSED,
+  // timeouts) must NOT count: those still deserve a retry.
+  let attempts = 0
+  let goneEverywhere = true
 
   try {
     const session = await getSession(storedSessionId, activeKey)
@@ -1500,7 +1509,9 @@ export async function resolveStoredSession(
     upsertResolvedSession(session, storedSessionId)
 
     return session
-  } catch {
+  } catch (error) {
+    attempts += 1
+    goneEverywhere &&= isSessionGoneError(error)
     // Not on the active profile — fall through to the cross-profile probe.
   }
 
@@ -1526,9 +1537,17 @@ export async function resolveStoredSession(
       upsertResolvedSession(session, storedSessionId)
 
       return session
-    } catch {
+    } catch (error) {
+      attempts += 1
+      goneEverywhere &&= isSessionGoneError(error)
       // Not on this profile; try the next.
     }
+  }
+  if (attempts > 0 && goneEverywhere) {
+    // Latched, not deleted: the latch is cleared at the real rebind seams
+    // (gateway reconnect / runtime re-mint), so a race during a profile swap
+    // heals on the next reconnect instead of storming until then.
+    latchSessionGone(storedSessionId)
   }
 
   return undefined

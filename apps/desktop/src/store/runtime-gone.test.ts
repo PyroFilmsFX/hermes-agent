@@ -44,6 +44,22 @@ afterEach(() => {
   $removedSessionIds.set(new Set())
 })
 
+describe('isSessionGoneForBackgroundPolling REST shape', () => {
+  it('recognises the hermes:api 404 the Electron bridge rethrows', () => {
+    expect(
+      isSessionGoneForBackgroundPolling(
+        new Error("Error invoking remote method 'hermes:api': Error: 404: {\"detail\":\"Session not found\"}")
+      )
+    ).toBe(true)
+    expect(isSessionGoneForBackgroundPolling(new Error('404: Session not found'))).toBe(true)
+  })
+  it('still keeps transient failures retryable', () => {
+    expect(isSessionGoneForBackgroundPolling(new Error('connect ECONNREFUSED 127.0.0.1:8642'))).toBe(false)
+    expect(isSessionGoneForBackgroundPolling(new Error('404: Not Found'))).toBe(false)
+    expect(isSessionGoneForBackgroundPolling(new Error('timeout'))).toBe(false)
+  })
+})
+
 describe('markRuntimeGone', () => {
   it('unbinds the tile holding the dead runtime so its resume effect refires', () => {
     $sessionTiles.set([tile(STORED, RUNTIME), tile('stored-2', 'runtime-live')])
