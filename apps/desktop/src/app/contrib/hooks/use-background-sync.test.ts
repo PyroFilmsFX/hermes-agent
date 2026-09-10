@@ -279,6 +279,56 @@ describe('active transcript refresh', () => {
     expect(getLatestSessionMessages).toHaveBeenCalledWith(TILE_STORED_ID, undefined)
   })
 
+  it('routes a plain tile to the profile its sidebar row names', async () => {
+    const storedId = 'stored-thinkbot-tile'
+    const runtimeId = 'runtime-thinkbot-tile'
+    publishSessionState(runtimeId, createClientSessionState(storedId))
+    setSessions([{ id: storedId, profile: 'thinkbot' } as never])
+    vi.mocked(getLatestSessionMessages).mockResolvedValue(transcript('thinkbot answer', storedId) as never)
+    const updateSessionState = vi.fn((_sid: string, updater: (s: never) => never) => updater(createClientSessionState(storedId) as never))
+    await act(async () => {
+      await reconcileTileTranscriptsForTest({
+        tiles: [{ storedSessionId: storedId, runtimeId }],
+        requestSequenceRef: { current: 0 },
+        signatureRef: { current: new Map() },
+        updateSessionState: updateSessionState as never
+      })
+    })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, { profile: 'thinkbot' })
+  })
+
+  it('stops reconciling a tile whose transcript read says Session not found', async () => {
+    const storedId = 'stored-gone-tile'
+    const runtimeId = 'runtime-gone-tile'
+    publishSessionState(runtimeId, createClientSessionState(storedId))
+    setSessions([])
+    vi.mocked(getLatestSessionMessages).mockRejectedValue(
+      new Error("Error invoking remote method 'hermes:api': Error: 404: {\"detail\":\"Session not found\"}")
+    )
+    const args = {
+      tiles: [{ storedSessionId: storedId, runtimeId }],
+      requestSequenceRef: { current: 0 },
+      signatureRef: { current: new Map() },
+      updateSessionState: vi.fn() as never
+    }
+    await act(async () => {
+      await reconcileTileTranscriptsForTest(args)
+      await reconcileTileTranscriptsForTest(args)
+      await reconcileTileTranscriptsForTest(args)
+    })
+    expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+    // A transient failure keeps retrying.
+    vi.mocked(getLatestSessionMessages).mockClear()
+    vi.mocked(getLatestSessionMessages).mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:8642'))
+    const other = { ...args, tiles: [{ storedSessionId: 'stored-flaky', runtimeId: 'runtime-flaky' }] }
+    publishSessionState('runtime-flaky', createClientSessionState('stored-flaky'))
+    await act(async () => {
+      await reconcileTileTranscriptsForTest(other)
+      await reconcileTileTranscriptsForTest(other)
+    })
+    expect(getLatestSessionMessages).toHaveBeenCalledTimes(2)
+  })
+
   it('reconciles an idle tile while the main pane is busy', async () => {
     const runtimeId = 'runtime-idle-tile'
     const storedId = 'stored-idle-tile'

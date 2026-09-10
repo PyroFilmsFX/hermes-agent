@@ -62,6 +62,7 @@ upstream moved the surrounding code.
 | `agent/claude_sdk_runtime.py` | `rename_claude_sdk_session` + deferred rotation when busy; `hermes:` peer preference sentence in `_MCP_INSPECTION_PREFERENCE` (harness-probed OK 2026-09-09) | same; router guidance |
 | `tui_gateway/methods_session.py`, `hermes_cli/web_routers/sessions.py` | rename hooks on `session.title` RPC and the REST PATCH the desktop uses | same |
 | `tests/tui_gateway/test_sdk_background_result_delivery.py` | 6 tests | pins the delivery row |
+| `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` | plain tiles read their transcript under the sidebar row's profile; a gone answer latches the tile | the actual 404-storm driver: a thinkbot session asked of the default backend every tick |
 | `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/session-gone-latch.ts` | `resolveStoredSession` latches an id gone when every profile answers 404; the background-polling classifier accepts the REST `404 … Session not found` shape | the `hermes:api` 404 storm: a deleted id was re-probed across every profile on every 5s poll, forever |
 | `tests/agent/test_title_generator.py` | 18 scaffolding cases | pins the title fix |
 | `agent/title_generator.py` | `_is_scaffolding` guard + unterminated-fence strip in `_extract_title_text` | sessions were being named ```` ```json ```` and `{"title` from truncated model replies; 9 such rows existed. Upstream-shaped fix, worth proposing back. |
@@ -176,7 +177,16 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   reaches the chat. Config-only, no code change. Set in the test home's root and
   `profiles/thinkbot`.
 
-- **404 retry storm — FIXED 2026-09-09 (renderer).** Root cause: the cross-profile REST probe returned undefined when every profile 404'd but never latched the id gone, and the gone classifier only knew the JSON-RPC `4001` shape, so the 5s status poll re-probed a deleted id forever. Now the probe latches when every attempt was gone-shaped (transient errors do not count; the latch clears at the rebind seams) and the classifier accepts the REST shape. 5 vitest cases. Previously: Deleting sessions the
+- **404 retry storm — FIXED 2026-09-09 (renderer), two layers.** The REAL
+  driver, found with a debugger breakpoint on the API bridge of the live desktop:
+  the tile transcript reconcile (`use-background-sync.ts`) sent
+  `/api/sessions/<id>/messages` with NO `?profile=` for any tile without an owner
+  route, so a live `thinkbot` session ("manager") was asked of the `default`
+  backend every sync tick, 404'd, and the catch swallowed it. Plain tiles now
+  take the profile from their sidebar row, and a "Session not found" answer
+  latches that tile until it rebinds. Live-proven: after the fix (HMR) the bridge
+  showed zero transcript reads in 25 s. Second layer, same day, earlier: the
+  cross-profile probe the cross-profile REST probe returned undefined when every profile 404'd but never latched the id gone, and the gone classifier only knew the JSON-RPC `4001` shape, so the 5s status poll re-probed a deleted id forever. Now the probe latches when every attempt was gone-shaped (transient errors do not count; the latch clears at the rebind seams) and the classifier accepts the REST shape. 5 vitest cases. Previously: Deleting sessions the
   desktop still references makes it poll `hermes:api` for a dead id forever:
   `Error occurred in handler for 'hermes:api': 404 {"detail":"Session not
   found"}` repeating with no backoff and no give-up. Trigger found 2026-09-08

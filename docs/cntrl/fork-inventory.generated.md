@@ -4,10 +4,10 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07b92 |
-| vs `origin/main` | 54 ahead / 677 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 677 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 34 |
+| branch | `cntrl-hermes` @ c0deb0793a |
+| vs `origin/main` | 55 ahead / 679 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 679 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 35 |
 | core files touched | 29 (2 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -48,6 +48,7 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-08 | c0deb07d24 | cntrl: Hermes-to-Hermes messaging works — deliver_background_results is the missing key | — |
 | 2026-09-09 | c0deb0782d | claude-sdk desktop: peer replies display, tab renames reach peers, attachment titles, hermes: peer preference | `agent/claude_sdk_runtime.py`, `agent/title_generator.py`, `agent/transports/claude_agent_sdk_session.py`, `hermes_cli/web_routers/sessions.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/agent/test_title_generator.py`, `tests/tui_gateway/test_sdk_background_result_delivery.py`, `tools/process_registry_notifications.py`, `tui_gateway/methods_session.py`, `tui_gateway/session_notifications.py` |
 | 2026-09-09 | c0deb07b92 | desktop: stop the hermes:api 404 storm — latch a session gone when every profile 404s | `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts`, `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/runtime-gone.test.ts`, `apps/desktop/src/store/session-gone-latch.ts` |
+| 2026-09-09 | c0deb0793a | cntrl: inventory — attachment streaming stall bisected at three layers, not reproduced | — |
 
 ## Core files we touch
 
