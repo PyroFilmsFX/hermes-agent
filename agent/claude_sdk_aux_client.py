@@ -208,6 +208,36 @@ def _capture_aux_progress_hook() -> Callable[[], Any] | None:
     return hook if callable(hook) else None
 
 
+def _build_aux_option_fields(model: Any) -> dict[str, Any]:
+    """Option fields for one auxiliary one-shot query. Plain data so the binary
+    choice below is testable without the SDK."""
+    from agent.transports.claude_agent_sdk_session import _sdk_env_overrides
+
+    fields: dict[str, Any] = dict(
+        model=model,
+        tools=[],
+        allowed_tools=[],
+        mcp_servers={},
+        setting_sources=[],
+        permission_mode="dontAsk",
+        max_turns=1,
+        include_partial_messages=True,
+        env=_sdk_env_overrides(),
+    )
+    # Same operator-pinned Claude Code binary as the persistent lane. Without it every
+    # one-shot (approval screening, titling, vision) spawned the SDK's BUNDLED CLI —
+    # 35 spawns in one morning on the desktop, each a full node process — and a
+    # just-shipped model id could work in chat but fail in aux. (cntrl carry)
+    try:
+        from agent.transports.claude_agent_sdk_session import _configured_cli_path
+
+        if cli_path := _configured_cli_path():
+            fields["cli_path"] = cli_path
+    except Exception:
+        pass
+    return fields
+
+
 async def _collect_text(
     prompt: str,
     *,
@@ -258,17 +288,7 @@ async def _collect_text(
         with aux_progress_hook(progress_hook):
             _notify_aux_progress()
 
-    options = ClaudeAgentOptions(
-        model=model,
-        tools=[],
-        allowed_tools=[],
-        mcp_servers={},
-        setting_sources=[],
-        permission_mode="dontAsk",
-        max_turns=1,
-        include_partial_messages=True,
-        env=_sdk_env_overrides(),
-    )
+    options = ClaudeAgentOptions(**_build_aux_option_fields(model))
 
     parts: list[str] = []
     usage: Any = None
