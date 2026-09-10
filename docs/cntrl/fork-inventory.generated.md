@@ -4,11 +4,11 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07d24 |
-| vs `origin/main` | 52 ahead / 677 behind · common base 233757037d (2026-09-07) |
+| branch | `cntrl-hermes` @ c0deb0782d |
+| vs `origin/main` | 53 ahead / 677 behind · common base 233757037d (2026-09-07) |
 | PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 677 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 32 |
-| core files touched | 20 (0 unlisted in §3) |
+| carried commits (since pr-65982-sep7) | 33 |
+| core files touched | 25 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -46,28 +46,34 @@ Generated 2026-09-09 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-08 | c0deb072ad | cntrl_groups: ls counts live sessions, not stale tags; add gc | — |
 | 2026-09-08 | c0deb077a0 | cntrl_router: registry belongs to the install, not the profile | — |
 | 2026-09-08 | c0deb07d24 | cntrl: Hermes-to-Hermes messaging works — deliver_background_results is the missing key | — |
+| 2026-09-09 | c0deb0782d | claude-sdk desktop: peer replies display, tab renames reach peers, attachment titles, hermes: peer preference | `agent/claude_sdk_runtime.py`, `agent/title_generator.py`, `agent/transports/claude_agent_sdk_session.py`, `hermes_cli/web_routers/sessions.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/agent/test_title_generator.py`, `tests/tui_gateway/test_sdk_background_result_delivery.py`, `tools/process_registry_notifications.py`, `tui_gateway/methods_session.py`, `tui_gateway/session_notifications.py` |
 
 ## Core files we touch
 
 | file | commits | listed in §3 |
 |---|---|---|
-| `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4 | yes |
+| `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d | yes |
 | `agent/model_metadata.py` | c0deb079b4 | yes |
-| `agent/title_generator.py` | c0deb07e0c | yes |
-| `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4 | yes |
+| `agent/title_generator.py` | c0deb07e0c, c0deb0782d | yes |
+| `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb0782d | yes |
 | `agent/transports/hermes_tool_exposure.py` | c0deb07f0f | yes |
 | `gateway/run_turn.py` | c0deb07f7d | yes |
 | `hermes_cli/cli_info_mixin.py` | c0deb07f7d | yes |
 | `hermes_cli/config_defaults.py` | c0deb0750f, c0deb07b3b, c0deb072a4 | yes |
 | `hermes_cli/models_catalog_static.py` | c0deb079b4 | yes |
+| `hermes_cli/web_routers/sessions.py` | c0deb0782d | yes |
 | `pyproject.toml` | c0deb0750f | yes |
 | `run_agent.py` | c0deb0751f | yes |
-| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4 | yes |
-| `tests/agent/test_title_generator.py` | c0deb07e0c | yes |
+| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d | yes |
+| `tests/agent/test_title_generator.py` | c0deb07e0c, c0deb0782d | yes |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | c0deb07f0f | yes |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | c0deb07f7d | yes |
+| `tests/tui_gateway/test_sdk_background_result_delivery.py` | c0deb0782d | yes |
 | `tools/lazy_deps.py` | c0deb0750f | yes |
 | `tools/mcp_tool_agent.py` | c0deb07f7d | yes |
+| `tools/process_registry_notifications.py` | c0deb0782d | yes |
+| `tui_gateway/methods_session.py` | c0deb0782d | yes |
 | `tui_gateway/methods_tools.py` | c0deb07f7d | yes |
+| `tui_gateway/session_notifications.py` | c0deb0782d | yes |
 | `uv.lock` | c0deb0750f | yes |
 | `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | c0deb07b3b, c0deb07f0f, c0deb072a4 | yes |
