@@ -339,6 +339,11 @@ def format_process_notification(evt: dict) -> "str | None":
         return f"[IMPORTANT: {evt.get('message', '')}]"
     if evt_type == "async_delegation":
         return _format_async_delegation(evt)
+    if evt_type == "sdk_background_result":
+        # Delivered directly (gateway/run_background_results.py; tui_gateway.session_notifications).
+        # Falling through here rendered a phantom "Background process unknown exited (exit code ?)"
+        # notice with an empty Output — the reply lives in ``payloads``, not ``output``.
+        return None
     _sid, _cmd = evt.get("session_id", "unknown"), evt.get("command", "unknown")
     _attribution = _delegation_attribution_line(evt)
     attribution = f"{_attribution}\n" if _attribution else ""

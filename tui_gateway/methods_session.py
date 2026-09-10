@@ -945,6 +945,19 @@ def _title_read(session: dict, db, key: str) -> str:
     return resolved_title
 
 
+def _rename_sdk_session_for(session: dict) -> None:
+    """claude-agent-sdk lane: a title change is also the session's peer-visible name (ListAgents /
+    SendMessage), so push it to the spawned CLI. Fail-open — a rename must never break on this."""
+    agent = session.get("agent")
+    if getattr(agent, "api_mode", "") != "claude_agent_sdk":
+        return
+    try:
+        from agent.claude_sdk_runtime import rename_claude_sdk_session
+        rename_claude_sdk_session(agent, busy=bool(session.get("running")))
+    except Exception:
+        logger.debug("SDK session rename after title change failed", exc_info=True)
+
+
 @method("session.title")
 @_with_db(5007, session_scoped=True)
 def _(rid, params: dict, session: dict, db) -> dict:
@@ -972,6 +985,8 @@ def _(rid, params: dict, session: dict, db) -> dict:
         except Exception as e:
             return _err(rid, 5007, str(e))
         session["pending_title"] = value if pending else None
+        if not pending:
+            _rename_sdk_session_for(session)
         result = {"pending": pending, "title": value}
     _emit_session_info_for_session(params.get("session_id", ""), session)
     return _ok(rid, result)

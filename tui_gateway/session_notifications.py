@@ -82,7 +82,13 @@ def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool
         return True
     evt_key = str(evt.get("session_key") or "")
     current_keys = _notif_current_keys(sid, session)
-    return bool(evt_key) and (evt_key in current_keys or _notif_resolve_event_key(evt_key) in current_keys)
+    if bool(evt_key) and (evt_key in current_keys or _notif_resolve_event_key(evt_key) in current_keys):
+        return True
+    # claude-agent-sdk background results carry the hermes session id the CLI answered
+    # for; the callback fires on the SDK loop thread where the session-key contextvar
+    # can be unset, so this is the reliable owner proof for that lane. (cntrl carry)
+    parent = str(evt.get("parent_session_id") or "")
+    return bool(parent) and evt.get("type") == "sdk_background_result" and parent in current_keys
 
 
 def _notification_event_requires_owner(evt: dict) -> bool:
@@ -379,6 +385,68 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
         _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(batch), "kanban notification dispatch failed")
 
 
+def _notif_sdk_result_dedup_key(evt: dict) -> tuple:
+    return ("sdk_background_result", str(evt.get("parent_session_id") or ""), evt.get("completed_at") or "",
+            hash(tuple(p for p in (evt.get("payloads") or []) if isinstance(p, str))))
+
+
+def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue, deferred) -> bool:
+    """Show a claude-agent-sdk background result in the desktop chat as the agent's own message.
+
+    Mirrors the messaging gateway's direct-delivery lane (gateway/run_background_results.py): the
+    text is the agent's finished answer, so it is persisted as an assistant row (display_kind
+    ``sdk_background_result``, excluded from the continuity digest) and painted as a completed
+    message — never re-injected as a prompt, which made the model relay its own words. Delivered
+    only while the session is idle (a live turn owns the message stream); otherwise requeued and
+    retried, never dropped. Returns True = consumed or requeued, matching _notif_handle_event."""
+    payloads = [p for p in (evt.get("payloads") or []) if isinstance(p, str) and p.strip()]
+    if not payloads:
+        logger.warning("sdk_background_result for session %s carried no payloads — dropping", sid)
+        return True
+    dedup_key = _notif_sdk_result_dedup_key(evt)
+    if dedup_key in emitted:
+        return True
+    if not _notif_claim_turn(session):
+        (deferred.append if deferred is not None else queue.put)(evt)
+        if deferred is None:
+            time.sleep(0.25)
+        return True
+    emitted.add(dedup_key)
+    agent = session.get("agent")
+    session_id = str(getattr(agent, "session_id", None) or evt.get("parent_session_id") or session.get("session_key") or "")
+    completed_at = evt.get("completed_at")
+    try:
+        for payload in payloads:
+            row = {"role": "assistant", "content": payload, "display_kind": "sdk_background_result",
+                   "display_metadata": {"completed_at": completed_at, "source": "sdk_background_result"}}
+            # Persist FIRST: a desktop restart must not lose a delivered answer.
+            try:
+                with _session_db(session) as db:
+                    if db is not None and session_id:
+                        db.append_message(session_id=session_id, role="assistant", content=payload,
+                                          display_kind="sdk_background_result",
+                                          display_metadata=dict(row["display_metadata"]))
+            except Exception as persist_exc:
+                _notif_log_failure("sdk_background_result persist failed", persist_exc)
+            with session["history_lock"]:
+                session["history"] = list(session.get("history") or []) + [dict(row)]
+                session["history_version"] = int(session.get("history_version", 0)) + 1
+                messages = getattr(agent, "messages", None)
+                if isinstance(messages, list):
+                    messages.append(dict(row))
+            _emit("message.start", sid)
+            _emit("message.complete", sid, {
+                "text": payload, "status": "complete", "display_kind": "sdk_background_result",
+                "usage": _get_usage(agent) if agent is not None else {},
+            })
+        logger.info("sdk_background_result delivered to desktop session %s (%d message(s))", sid, len(payloads))
+    except Exception as exc:
+        _notif_log_failure("sdk_background_result delivery failed", exc)
+    finally:
+        _notif_release_turn(session)
+    return True
+
+
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
@@ -422,6 +490,13 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     if evt_type == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
         return True
+    if evt_type == "sdk_background_result":
+        # A finished CLI-initiated turn (a peer SendMessage the CLI answered, a background Agent
+        # task). Before this branch it fell through to the generic process formatter and was
+        # re-injected as "[IMPORTANT: Background process unknown exited (exit code ?) Output: ]"
+        # — the reply text was persisted but never shown, and the model was handed an empty
+        # notice. Display it directly as the agent's own message. (cntrl carry)
+        return _notif_deliver_sdk_result(sid, session, evt, emitted, queue, deferred)
     text = fmt(evt)
     if not text:
         return True

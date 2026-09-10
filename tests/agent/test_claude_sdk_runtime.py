@@ -1389,6 +1389,39 @@ class TestBackgroundReviewRouting:
         assert [r.levelno for r in skipped] == [logging.WARNING, logging.DEBUG]
 
 
+    def test_rename_helper_prefers_instant_rename_when_idle(self):
+        from agent.claude_sdk_runtime import rename_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live.rename.return_value = True
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "ci/cd"}
+        agent.session_id = "sess-1"
+        assert rename_claude_sdk_session(agent, busy=False) == "hermes:ci/cd"
+        live.rename.assert_called_once_with("hermes:ci/cd")
+        assert getattr(agent, "_claude_sdk_rename_pending", False) is not True
+
+    def test_rename_helper_defers_to_rotation_when_busy(self, monkeypatch):
+        import agent.claude_sdk_runtime as rt
+
+        agent = _make_agent()
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "manager"}
+        agent.session_id = "sess-1"
+        assert rt.rename_claude_sdk_session(agent, busy=True) == "hermes:manager"
+        agent._claude_sdk_session.rename.assert_not_called()
+        assert agent._claude_sdk_rename_pending is True
+
+        rotated = []
+        monkeypatch.setattr(rt, "rotate_claude_sdk_session", lambda a, reason="": rotated.append(reason) or True)
+        run_claude_agent_sdk_turn(
+            agent, user_message="hi", original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}], effective_task_id="task-1",
+        )
+        assert rotated == ["session renamed"]
+        assert agent._claude_sdk_rename_pending is False
+
     def test_rotate_closes_session_but_keeps_resume_id(self):
         # /reload-mcp path: the SDK CLI's MCP/plugin list is fixed at process
         # start, so the live session is closed and the NEXT turn rebuilds it —
@@ -2939,6 +2972,92 @@ class TestStreaming:
         finally:
             session.close()
         assert holder["client"].options["extra_args"]["name"] == "hermes:demo"
+
+    def test_rename_issues_slash_rename_and_swallows_the_ack(self):
+        # A Hermes title change must reach peers NOW: /rename is a local CLI command
+        # (proven 2026-09-09) whose ack is a CLI-initiated turn — it must never be
+        # delivered as a background result. The client persists between turns, so
+        # the hold-open fake is the honest stand-in. (cntrl carry)
+        delivered = []
+        session, holder = _make_hold_open_session(
+            script=[], session_name="hermes:old",
+            on_unsolicited_result=lambda texts: delivered.append(list(texts)),
+        )
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.05)
+            client.feed(AssistantMessage(content=[TextBlock("ok")]), ResultMessage(result="ok", uuid="u-1"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("ping", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            thread.join(timeout=5)
+            client = holder["client"]
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while "/rename hermes:new" not in client.queried and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert "/rename hermes:new" in client.queried
+            assert session._session_name == "hermes:new"
+            assert session.build_option_fields()["extra_args"]["name"] == "hermes:new"
+            # The CLI answers the rename on its own; that text is NOT a peer message.
+            client.feed(
+                AssistantMessage(content=[TextBlock("Session renamed to: hermes:new")]),
+                ResultMessage(result="Session renamed to: hermes:new", uuid="uuid-rename"),
+            )
+            time.sleep(0.3)
+            assert delivered == []
+            # A real unsolicited result afterwards still flows.
+            client.feed(
+                AssistantMessage(content=[TextBlock("PEER-OK")]),
+                ResultMessage(result="PEER-OK", uuid="uuid-peer"),
+            )
+            deadline = time.monotonic() + 3
+            while not delivered and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert delivered == [["PEER-OK"]]
+        finally:
+            session.close()
+
+    def test_rename_before_start_applies_on_first_build(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:old")
+        try:
+            assert session.rename("hermes:renamed early") is True  # no client yet: applied at build
+            session.run_turn("ping")
+            assert holder["client"].options["extra_args"]["name"] == "hermes:renamed early"
+            assert holder["client"].queried == ["ping"]  # no /rename needed — the name was baked in
+        finally:
+            session.close()
+
+    def test_rename_noop_and_invalid(self):
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:same")
+        assert session.rename("hermes:same") is True
+        assert session.rename("   ") is False
+        session.close()
+
+    def test_rename_refused_while_a_turn_is_in_flight(self):
+        session, holder = _make_hold_open_session(script=[])
+        stop = threading.Event()
+        seen = {}
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.1)
+            seen["mid_turn"] = session.rename("hermes:mid")
+            client.feed(AssistantMessage(content=[TextBlock("done")]), ResultMessage(result="done", uuid="u-d"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("big task", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+            session.close()
+        assert seen["mid_turn"] is False
+        assert "/rename hermes:mid" not in holder["client"].queried
 
     def test_session_name_absent_when_unnamed(self):
         session, holder = _make_session(script=[ResultMessage(result="ok")])

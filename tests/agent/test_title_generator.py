@@ -156,6 +156,43 @@ class TestGenerateTitle:
 
 
 
+class TestAttachmentPreamble:
+    """A user message that arrives with attachment scaffolding must title from the user's words.
+    The desktop's image path reference (tui_gateway/session_history.py) is prepended BEFORE the
+    typed text, so first-line titling produced "[The user attached an image: Screenshot…" on real
+    sessions (2026-09-09)."""
+
+    DESKTOP = ("[The user attached an image: Screenshot 2026-09-09.png]\n"
+               "[Examine it with the vision_analyze tool using image_url: /tmp/Screenshot 2026-09-09.png]\n\n"
+               "ok so theres a few bugs to deal with i think")
+
+    def test_desktop_preamble_is_stripped(self):
+        from agent.title_generator import derive_title, is_titleable_user_message
+        assert derive_title(self.DESKTOP) == "ok so theres a few bugs to deal with i think"
+        assert is_titleable_user_message(self.DESKTOP)
+
+    def test_multiple_attachments(self):
+        from agent.title_generator import derive_title
+        msg = ("[The user attached an image: a.png]\n[Examine it with the vision_analyze tool using image_url: /a.png]\n\n"
+               "[The user attached an image: b.png]\n[Examine it with the vision_analyze tool using image_url: /b.png]\n\n"
+               "compare these two")
+        assert derive_title(msg) == "compare these two"
+
+    def test_cli_vision_block_is_stripped(self):
+        from agent.title_generator import derive_title
+        msg = "[The user attached an image. Here's what it contains:\nA cat on a chair.]\nwhat breed is this"
+        assert derive_title(msg) == "what breed is this"
+
+    def test_image_only_message_gets_an_honest_title(self):
+        from agent.title_generator import derive_title
+        msg = "[The user attached an image: photo.png]\n[Examine it with the vision_analyze tool using image_url: /p/photo.png]"
+        assert derive_title(msg) == "Image: photo.png"
+
+    def test_plain_messages_untouched(self):
+        from agent.title_generator import derive_title
+        assert derive_title("fix the attached image loader") == "fix the attached image loader"
+
+
 class TestExtractTitleTextScaffolding:
     """A failed extraction must yield "" so the caller keeps the derived title
     and retries — never store the JSON machinery as the session name.

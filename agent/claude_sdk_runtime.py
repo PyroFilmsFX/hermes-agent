@@ -225,7 +225,9 @@ _MCP_INSPECTION_PREFERENCE = (
     "They enforce Hermes protected-path rules. Use Bash only when the task "
     "genuinely requires a shell-only capability (for example a database "
     "client, process/service state, network operation, or an unavailable "
-    "tool); Bash remains subject to normal approval."
+    "tool); Bash remains subject to normal approval. When listing or messaging "
+    "peer sessions, Hermes sessions are the rows whose name starts with "
+    "`hermes:`; prefer those and treat other rows as unrelated unless asked."
 )
 
 # Observed live twice: models write "topic word word word" discovery queries;
@@ -980,6 +982,35 @@ def _sdk_session_name(agent) -> str:
         return ""
 
 
+def rename_claude_sdk_session(agent, *, busy: bool = False) -> str:
+    """Apply a Hermes title change to the spawned CLI session's peer-visible name.
+
+    Recomputes the name from the (already updated) session row via _sdk_session_name, then:
+    live + idle → instant ``/rename`` (ClaudeAgentSdkSession.rename); live + busy, or the
+    rename could not be issued → mark pending so the NEXT turn rotates the session, which
+    rebuilds the CLI with the new ``--name`` and resumes; no live session → nothing to do,
+    the next build reads the row. Returns the computed name. Never raises: a naming miss
+    must not fail a rename. (cntrl carry)"""
+    try:
+        name = _sdk_session_name(agent)
+    except Exception:
+        logger.debug("SDK rename: name computation failed", exc_info=True)
+        return ""
+    live = getattr(agent, "_claude_sdk_session", None)
+    if live is None or not name:
+        return name
+    applied = False
+    if not busy:
+        try:
+            applied = bool(live.rename(name))
+        except Exception:
+            logger.debug("SDK rename failed; deferring to rotation", exc_info=True)
+    if not applied:
+        agent._claude_sdk_rename_pending = True
+        logger.info("claude-agent-sdk: rename to %r deferred to the next turn (session busy)", name)
+    return name
+
+
 def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bool:
     """Close the live SDK session so the NEXT turn rebuilds the CLI with fresh
     ``mcp_servers`` / ``plugins`` / ``cli_path`` — the live-reload the SDK
@@ -1598,6 +1629,11 @@ def run_claude_agent_sdk_turn(
     resumed = False
     send_input = user_input
     for attempt in (0, 1):
+        if getattr(agent, "_claude_sdk_rename_pending", False) is True:
+            # A title change landed while a turn was live; apply it now by rebuilding the CLI
+            # with the new --name (the resume id is kept, so the conversation continues).
+            agent._claude_sdk_rename_pending = False
+            rotate_claude_sdk_session(agent, "session renamed")
         if not hasattr(agent, "_claude_sdk_session") or agent._claude_sdk_session is None:
             resume_id = _persisted_sdk_session_id(agent) if attempt == 0 else None
             resumed = bool(resume_id)

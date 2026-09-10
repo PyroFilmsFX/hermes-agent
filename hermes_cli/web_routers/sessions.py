@@ -643,9 +643,35 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
                 setter(db, sid, value)
                 result[flag] = bool(value)
         result["title"] = db.get_session_title(sid) or ""
+        result["_sid"] = sid
         return result
 
-    return _with_db(body.profile, _update, read_only=False)
+    result = _with_db(body.profile, _update, read_only=False)
+    if body.title is not None and isinstance(result, dict):
+        _rename_live_sdk_session(str(result.pop("_sid", "") or ""))
+    return result
+
+
+def _rename_live_sdk_session(session_id: str) -> None:
+    """The desktop renames through this REST path (apps/desktop/src/api/sessions.ts renameSession).
+    On the claude-agent-sdk lane the title is also the peer-visible session name, so find the live
+    runtime session (same process as the JSON-RPC gateway) and push the rename. Fail-open."""
+    if not session_id:
+        return
+    import logging as _logging
+    try:
+        from tui_gateway import server as gateway_server
+        hit = gateway_server._find_live_session_by_key(session_id)
+        if not hit:
+            return
+        _sid, session = hit
+        agent = session.get("agent")
+        if getattr(agent, "api_mode", "") != "claude_agent_sdk":
+            return
+        from agent.claude_sdk_runtime import rename_claude_sdk_session
+        rename_claude_sdk_session(agent, busy=bool(session.get("running")))
+    except Exception:
+        _logging.getLogger(__name__).debug("live SDK session rename after REST title change failed", exc_info=True)
 
 
 def _compact_json(obj) -> str:

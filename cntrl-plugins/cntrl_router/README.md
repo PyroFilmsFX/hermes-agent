@@ -31,6 +31,14 @@ a router. Proven 2026-09-08: with the flag on, a peer `SendMessage` arrives as
 Set it in every profile you route to, not just the root: each profile has its
 own `config.yaml`.
 
+## Names follow titles
+
+The peer-visible name is `hermes:<title>`. Renaming a session (desktop tab, `/title`,
+REST) renames the spawned CLI in place via `/rename`, so peers see it immediately;
+if a turn is live the rename is applied at the next turn boundary. Attachment
+scaffolding (`[The user attached an image: …]`) is stripped before titling, so an
+image-led session no longer shows up as `hermes:[The user attached an image…`.
+
 ## Install
 
 Symlink the skill into the Hermes skills directory:

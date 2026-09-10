@@ -56,6 +56,12 @@ upstream moved the surrounding code.
 | `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.150`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
 | `run_agent.py` | self-improve review routed off the SDK runtime | one-shot runs killed the review at exit |
 | `.gitignore` | `.hermes-test/` | test home |
+| `tui_gateway/session_notifications.py`, `tools/process_registry_notifications.py` | `sdk_background_result` delivered directly to the desktop chat (persist + `message.complete`), formatter refuses the type, `parent_session_id` proves ownership | desktop showed a phantom "Background process unknown exited" and the peer reply never displayed |
+| `agent/title_generator.py` | `_strip_attachment_preamble` in `_summarize_user_message` | sessions were titled `[The user attached an image: …` |
+| `agent/transports/claude_agent_sdk_session.py` | `rename()` via `/rename`, ack swallowed by text (`_is_rename_ack`) | tab renames now reach peers instantly |
+| `agent/claude_sdk_runtime.py` | `rename_claude_sdk_session` + deferred rotation when busy; `hermes:` peer preference sentence in `_MCP_INSPECTION_PREFERENCE` (harness-probed OK 2026-09-09) | same; router guidance |
+| `tui_gateway/methods_session.py`, `hermes_cli/web_routers/sessions.py` | rename hooks on `session.title` RPC and the REST PATCH the desktop uses | same |
+| `tests/tui_gateway/test_sdk_background_result_delivery.py` | 6 tests | pins the delivery row |
 | `tests/agent/test_title_generator.py` | 18 scaffolding cases | pins the title fix |
 | `agent/title_generator.py` | `_is_scaffolding` guard + unterminated-fence strip in `_extract_title_text` | sessions were being named ```` ```json ```` and `{"title` from truncated model replies; 9 such rows existed. Upstream-shaped fix, worth proposing back. |
 | `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py`, `hermes_cli/config_defaults.py` | `session_name` template -> the CLI's `--name` via `extra_args` | peers can address a Hermes session (host router) |
@@ -135,6 +141,24 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   second turn recalled the first. Still true: `hermes mcp add` servers reach
   the SDK session only with `hybrid_mcp_bridge: true`; without it the SDK sees
   hermes-tools + `plugins:` only.
+- **Desktop shows peer replies — DONE 2026-09-09.** With the flag on, the
+  messaging gateway delivered bursts but the DESKTOP never did: its poller sent
+  `sdk_background_result` through the generic process formatter, painting
+  "[IMPORTANT: Background process unknown exited (exit code ?) Output: ]" and
+  re-injecting that as a prompt while the real text sat unseen. Now persisted as an
+  assistant row and painted as a completed message; the formatter refuses the type.
+- **Tab renames reach peers — DONE 2026-09-09.** `--name` is fixed at CLI start, so
+  a renamed tab kept its old peer name (`hermes:this session will be for managing
+  the ci/cd…` for a tab called "ci/cd"). Proven: `/rename` over the SDK is instant
+  and its ack is deterministic ("Session renamed to: X"), so idle sessions rename
+  in place and the ack is swallowed; busy sessions rotate at the next turn.
+- **Attachment titles — DONE 2026-09-09.** The desktop prepends
+  `[The user attached an image: …]` to the typed text; titles now strip it.
+- **Streaming stalls with attachments — OPEN.** Proven not to be the runtime relay,
+  the desktop callback wiring, or the renderer's straggler guard. Needs a live
+  bisect at the JSON-RPC layer (stdio entry): count `message.delta` with and
+  without an image.
+
 - **Hermes-to-Hermes messaging — DONE 2026-09-08.** A peer `SendMessage` into
   a Hermes conversation needs `agent.claude_agent_sdk.deliver_background_results:
   true` in that profile's config; upstream defaults it false and drops the

@@ -1208,6 +1208,15 @@ def _http_mcp_entries_from_config() -> dict[str, dict]:
     return out
 
 
+_RENAME_ACK_PREFIX = "Session renamed to:"
+
+
+def _is_rename_ack(result_text: Any, buffered: list) -> bool:
+    """True for the CLI's ``/rename`` acknowledgement (deterministic text, proven 2026-09-09)."""
+    candidates = [result_text, *buffered]
+    return any(isinstance(t, str) and t.strip().startswith(_RENAME_ACK_PREFIX) for t in candidates)
+
+
 def _swallow_steer_result(future: Any) -> None:
     """Same contract as _swallow_interrupt_result, for the fire-and-forget
     steer query(). The caller has already returned True by the time this
@@ -1610,6 +1619,9 @@ class ClaudeAgentSdkSession:
         # Peer-addressable name for the spawned CLI session (see
         # _configured_session_name_template). "" keeps the CLI's own naming.
         self._session_name = (session_name or "").strip()
+        # Name of an in-flight /rename whose ack must be swallowed (never delivered as a
+        # background result). Cleared when the ack arrives. (cntrl carry)
+        self._pending_rename_ack: Optional[str] = None
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -2066,6 +2078,40 @@ class ClaudeAgentSdkSession:
         return True
 
     # ---------- per-turn ----------
+
+    def rename(self, name: str) -> bool:
+        """Rename the spawned CLI session so peers see the new name NOW.
+
+        ``--name`` is fixed at process start, so a Hermes title change would otherwise show
+        to ListAgents peers only after the next CLI rebuild. Claude Code's ``/rename`` is a
+        local slash command (no model call) that updates the peer registry instantly —
+        proven 2026-09-09: query("/rename X") answered "Session renamed to: X" in <0.1s and
+        the peer list showed X. Returns True when the rename was applied or will apply on the
+        next build (no client yet); False when a turn is in flight — the caller then defers
+        (rotate at the next turn boundary). The ack is a CLI-initiated turn and would be
+        delivered as a background result; it is swallowed by text match. (cntrl carry)"""
+        cleaned = " ".join((name or "").split())
+        if not cleaned:
+            return False
+        if cleaned == self._session_name:
+            return True
+        if self._turn_inbox is not None:
+            return False  # a turn owns the stream; /rename now would interleave with it
+        client, loop = self._client, self._loop
+        if client is None or loop is None:
+            self._session_name = cleaned  # applied by build_option_fields on the next start
+            return True
+        try:
+            self._pending_rename_ack = cleaned
+            future = asyncio.run_coroutine_threadsafe(client.query(f"/rename {cleaned}"), loop)
+            future.add_done_callback(_swallow_steer_result)
+        except Exception:
+            self._pending_rename_ack = None
+            logger.debug("SDK /rename scheduling failed", exc_info=True)
+            return False
+        self._session_name = cleaned
+        logger.info("claude-agent-sdk: session renamed to %r", cleaned)
+        return True
 
     def run_turn(
         self,
@@ -2865,6 +2911,13 @@ class ClaudeAgentSdkSession:
             result_text = getattr(message, "result", None)
             texts = list(self._unsolicited_text)
             self._unsolicited_text.clear()
+            if _is_rename_ack(result_text, texts):
+                # The CLI's own "/rename" acknowledgement — never a background result.
+                self._pending_rename_ack = None
+                if uuid:
+                    self._unsolicited_delivered.add(uuid)
+                logger.debug("claude-agent-sdk: swallowed /rename ack %r", (result_text or "")[:60])
+                return
             if isinstance(result_text, str) and result_text.strip():
                 # The CLI's result text repeats the turn's final assistant
                 # message — never hand the same text over twice.
