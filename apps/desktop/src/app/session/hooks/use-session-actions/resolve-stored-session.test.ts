@@ -7,6 +7,7 @@ import { $projectTree } from '@/store/projects'
 import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
+import { isSessionGone, resetBackgroundPollingGuard } from '@/store/session-gone-latch'
 import { cachedSessionRow, resolveSessionProfile, resolveStoredSession } from './utils'
 
 vi.mock('@/hermes', async importActual => ({
@@ -19,6 +20,47 @@ const mockGetSession = vi.mocked(getSession)
 const session = (over: Partial<SessionInfo>): SessionInfo => over as SessionInfo
 
 const profiles = (...names: string[]) => names.map(name => ({ name }) as never)
+
+describe('resolveStoredSession gone latch', () => {
+  beforeEach(() => {
+    $cronSessions.set([])
+    $messagingSessions.set([])
+    $sessions.set([])
+    $projectTree.set([])
+    $profiles.set(profiles('default', 'meta'))
+    $activeGatewayProfile.set('meta')
+    mockGetSession.mockReset()
+    resetBackgroundPollingGuard()
+  })
+  afterEach(() => {
+    resetBackgroundPollingGuard()
+  })
+
+  it('latches the id gone when every profile answers Session not found', async () => {
+    mockGetSession.mockRejectedValue(
+      new Error("Error invoking remote method 'hermes:api': Error: 404: {\"detail\":\"Session not found\"}")
+    )
+    await expect(resolveStoredSession('dead-id')).resolves.toBeUndefined()
+    expect(mockGetSession).toHaveBeenCalledTimes(2) // active + the one other profile
+    expect(isSessionGone('dead-id')).toBe(true)
+  })
+
+  it('does not latch when one profile failed transiently', async () => {
+    mockGetSession
+      .mockRejectedValueOnce(new Error('404: Session not found'))
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED 127.0.0.1:8642'))
+    await expect(resolveStoredSession('maybe-id')).resolves.toBeUndefined()
+    expect(isSessionGone('maybe-id')).toBe(false)
+  })
+
+  it('does not latch when a profile owns the session', async () => {
+    mockGetSession
+      .mockRejectedValueOnce(new Error('404: Session not found'))
+      .mockResolvedValueOnce(session({ id: 'owned-id' }))
+    await expect(resolveStoredSession('owned-id')).resolves.toMatchObject({ id: 'owned-id', profile: 'default' })
+    expect(isSessionGone('owned-id')).toBe(false)
+  })
+})
 
 describe('resolveStoredSession profile ownership', () => {
   beforeEach(() => {
