@@ -100,7 +100,7 @@ dict. Only `message.delta` means the source is not emitting (this was the
 2026-09-11 bug). `truncated=True` with hundreds of deltas and no client means
 the transport was detached (the 2026-09-10 bug).
 
-Did the RENDERER receive them (desktop must be started with CDP on 9223):
+Did the RENDERER receive them (desktop must be started with `HERMES_DESKTOP_CDP_PORT=9223`):
 
 ```bash
 .venv/bin/python .sdkprobe/watch_events.py 25      # counts ws frames per session and type
@@ -136,10 +136,13 @@ env -u ANTHROPIC_API_KEY .venv/bin/python .sdkprobe/stream_probe.py
 
 ## 6. Things still open
 
-- The renderer logs ~40 `useClientLookup: Clamped stale index` warnings per second
-  (assistant-ui 0.14.24, `@assistant-ui/store`) while a tool-heavy turn streams.
-  Harmless per message, but it means the message list re-renders constantly;
-  candidate for the CPU-spike work.
+- The renderer logged ~40 `useClientLookup: Clamped stale index` warnings per second
+  (assistant-ui 0.14.24, `@assistant-ui/store`) on 2026-09-11 17:10 while a
+  33-tool-call turn streamed under an open Settings overlay. Not reproduced at
+  17:44 (0 warnings in 30 s of a tool turn, renderer 99.6% idle in an 8 s CPU
+  profile). Keep the recipe, do not chase it without a live repro:
+  `.venv/bin/python .sdkprobe/renderer_profile.py 8` (CDP 9223, self-time by
+  function) and the console capture in `settings_probe.py`.
 - Aux one-shot client spawns a CLI per call; a persistent aux client would
   remove that cost entirely.
 - The desktop has no group filter yet (`cntrl_groups` plugin is CLI/slash only).
