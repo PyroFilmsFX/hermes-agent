@@ -268,7 +268,14 @@ DEFAULT_CONFIG = {
             # HERMES_TERMINAL_SECURITY_MODE mapping; "default" routes SDK tool permissions through
             # Hermes' approval flow without env archaeology. Invalid values are ignored with a
             # warning (never silently loosened).
-            "permission_mode": "",
+            #
+            # cntrl fork default: "auto" — Claude Code's own classifier screens tool calls
+            # inside the CLI and the SDK invokes can_use_tool only when the flow falls
+            # through to a prompt. With "default", EVERY Bash call that passes the prefilter
+            # reaches Hermes' guardian, which on this lane is a full Claude CLI spawn per
+            # call (35 in one morning, 2026-09-10). Auto is also the CLI's own starting
+            # mode on Pro/Max. Set "default" to route everything through Hermes' guardian.
+            "permission_mode": "auto",
             # Extra environment for the spawned Claude CLI (values stringified). Metered-billing
             # vectors are rejected unless allow_metered_key is explicitly true.
             "env": {},
