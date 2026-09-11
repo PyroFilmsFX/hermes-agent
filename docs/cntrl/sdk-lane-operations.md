@@ -69,6 +69,15 @@ the user's whole desktop once).
 
 ## 4. Triage recipes (copy, paste, read)
 
+"Each step takes forever" (2026-09-11 measurement): in a 166-message Fable session
+the tool itself took a median 0.3 s, the wait for the model's next call 16.8 s.
+Context was 187k cached tokens with 1-2k output tokens (thinking on) per step, so
+that wait is the model, not Hermes. `auto` mode adds nothing measurable
+(`.sdkprobe/mode_latency_probe.py`: ~2 s per step both with and without it on a
+small context). Fix is a fresh session for a new task, or a smaller model for
+mechanical work. The vision helper's upstream auto-detect picks Haiku on this
+lane; both profile configs pin `auxiliary.vision` to `claude-sonnet-5`.
+
 Find the backend for a profile, its port and its token:
 
 ```bash
