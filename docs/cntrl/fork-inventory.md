@@ -178,6 +178,18 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
   now defers (pending flag, applied at the next turn start) when a turn owns the
   stream; a between-turns MCP refresh from the late-binding thread could
   otherwise close the CLI under a running turn. 1 test.
+- **Guardian spawns — RESOLVED by config 2026-09-10 (owner's call).** Hermes'
+  smart-approval guardian ran as an SDK one-shot for every Bash call that reached
+  `can_use_tool` (35 spawns in one morning). Claude Code's own `auto` permission
+  mode runs Anthropic's classifier inside the CLI, and the SDK invokes
+  `can_use_tool` only when the flow falls through to a prompt (docs:
+  agent-sdk/permissions, permission-modes; auto is the default starting mode on
+  Pro/Max, no flag needed on CLI >= 2.1.207). Probe: a write command invoked the
+  callback in `default` and never in `auto`. Set `agent.claude_agent_sdk.permission_mode: auto`
+  in both test-home configs; new sessions pick it up. Trade-off, stated plainly:
+  commands the classifier approves are no longer seen by Hermes' guardian or
+  `approvals.smart_policy`; Hermes' immutable floors still apply to everything
+  that does reach the callback.
 - **Auxiliary one-shots spawn a fresh Claude CLI each time (CPU).** The desktop
   log shows `Using bundled Claude Code CLI` every 20-60 s: approval screening,
   titling and vision each spawn a full CLI process (node) with the SDK's

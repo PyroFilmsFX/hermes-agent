@@ -4,11 +4,11 @@ Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07705 |
-| vs `origin/main` | 56 ahead / 732 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 732 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 36 |
-| core files touched | 31 (3 unlisted in §3) |
+| branch | `cntrl-hermes` @ c0deb07c9d |
+| vs `origin/main` | 57 ahead / 854 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 854 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 37 |
+| core files touched | 35 (3 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -50,12 +50,14 @@ Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-09 | c0deb07b92 | desktop: stop the hermes:api 404 storm — latch a session gone when every profile 404s | `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts`, `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/runtime-gone.test.ts`, `apps/desktop/src/store/session-gone-latch.ts` |
 | 2026-09-09 | c0deb0793a | cntrl: inventory — attachment streaming stall bisected at three layers, not reproduced | — |
 | 2026-09-09 | c0deb07705 | desktop: the 404 storm's real driver — tile transcript reconcile sent no profile | `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts`, `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` |
+| 2026-09-10 | c0deb07c9d | desktop: turns ran invisibly after a websocket reconnect — fan detached-session events out to live sockets | `agent/claude_sdk_aux_client.py`, `agent/claude_sdk_runtime.py`, `tests/agent/test_aux_cli_path.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/tui_gateway/test_detached_event_fanout.py`, `tui_gateway/server.py` |
 
 ## Core files we touch
 
 | file | commits | listed in §3 |
 |---|---|---|
-| `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d | yes |
+| `agent/claude_sdk_aux_client.py` | c0deb07c9d | yes |
+| `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d, c0deb07c9d | yes |
 | `agent/model_metadata.py` | c0deb079b4 | yes |
 | `agent/title_generator.py` | c0deb07e0c, c0deb0782d | yes |
 | `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb0782d | yes |
@@ -73,16 +75,19 @@ Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | `hermes_cli/web_routers/sessions.py` | c0deb0782d | yes |
 | `pyproject.toml` | c0deb0750f | yes |
 | `run_agent.py` | c0deb0751f | yes |
-| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d | yes |
+| `tests/agent/test_aux_cli_path.py` | c0deb07c9d | yes |
+| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d, c0deb07c9d | yes |
 | `tests/agent/test_title_generator.py` | c0deb07e0c, c0deb0782d | yes |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | c0deb07f0f | yes |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | c0deb07f7d | yes |
+| `tests/tui_gateway/test_detached_event_fanout.py` | c0deb07c9d | yes |
 | `tests/tui_gateway/test_sdk_background_result_delivery.py` | c0deb0782d | yes |
 | `tools/lazy_deps.py` | c0deb0750f | yes |
 | `tools/mcp_tool_agent.py` | c0deb07f7d | yes |
 | `tools/process_registry_notifications.py` | c0deb0782d | yes |
 | `tui_gateway/methods_session.py` | c0deb0782d | yes |
 | `tui_gateway/methods_tools.py` | c0deb07f7d | yes |
+| `tui_gateway/server.py` | c0deb07c9d | yes |
 | `tui_gateway/session_notifications.py` | c0deb0782d | yes |
 | `uv.lock` | c0deb0750f | yes |
 | `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | c0deb07b3b, c0deb07f0f, c0deb072a4 | yes |
