@@ -10264,3 +10264,124 @@ class TestSdkApprovalCanonicalizationHardening:
         assert result.message == "canonical request is unassessable"
         assert callback_calls == []
         assert marker not in caplog.text
+
+
+class TestSdkToolCards:
+    """SDK ToolUse/ToolResult blocks must open and close stable-id tool cards.
+
+    The gateway drops ``tool_progress_callback("tool.started", name, …)`` whenever a
+    name is present (tui_gateway.tool_progress._on_tool_progress), so the progress
+    breadcrumb alone put NOTHING on the desktop for this lane: a 9-minute turn ran
+    33 tool calls with zero ``tool.start`` events in the replay ring (2026-09-11).
+    """
+
+    def _capturing_session(self, monkeypatch):
+        import agent.transports.claude_agent_sdk_session as session_mod
+
+        captured = {}
+
+        class _CapturingSession:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run_turn(self, user_input):
+                return _make_turn(projected_messages=[], final_text="ok")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_mod, "ClaudeAgentSdkSession", _CapturingSession)
+        return captured
+
+    def test_runtime_wires_card_hooks_to_native_callbacks(self, monkeypatch):
+        captured = self._capturing_session(monkeypatch)
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        starts, completes = [], []
+        agent.tool_start_callback = lambda *a: starts.append(a)
+        agent.tool_complete_callback = lambda *a: completes.append(a)
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        captured["on_tool_use"]("toolu_1", "Bash", {"command": "ls"})
+        captured["on_tool_result"]("toolu_1", "Bash", {"command": "ls"}, "a.txt")
+        assert starts == [("toolu_1", "Bash", {"command": "ls"})]
+        assert completes == [("toolu_1", "Bash", {"command": "ls"}, "a.txt")]
+
+    def test_runtime_card_hooks_survive_missing_or_raising_callbacks(self, monkeypatch):
+        captured = self._capturing_session(monkeypatch)
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        agent.tool_start_callback = None
+        agent.tool_complete_callback = lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        captured["on_tool_use"]("toolu_1", "Bash", {})
+        captured["on_tool_result"]("toolu_1", "Bash", {}, "x")  # must not raise
+
+    def test_transport_bridges_tool_use_and_result_blocks(self):
+        from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+        ToolUseBlock = type("ToolUseBlock", (), {})
+        ToolResultBlock = type("ToolResultBlock", (), {})
+        AssistantMessage = type("AssistantMessage", (), {})
+        UserMessage = type("UserMessage", (), {})
+
+        def _blk(cls, **kw):
+            o = cls()
+            for k, v in kw.items():
+                setattr(o, k, v)
+            return o
+
+        sess = ClaudeAgentSdkSession.__new__(ClaudeAgentSdkSession)
+        uses, results = [], []
+        sess._on_tool_use = lambda *a: uses.append(a)
+        sess._on_tool_result = lambda *a: results.append(a)
+        sess._open_tool_cards = {}
+
+        assistant = _blk(
+            AssistantMessage,
+            parent_tool_use_id=None,
+            content=[
+                _blk(ToolUseBlock, id="toolu_1", name="Bash", input={"command": "ls"}),
+                _blk(ToolUseBlock, id="toolu_2", name="Read", input={"file_path": "/x"}),
+            ],
+        )
+        sess._notify_tool_use(assistant)
+        assert uses == [
+            ("toolu_1", "Bash", {"command": "ls"}),
+            ("toolu_2", "Read", {"file_path": "/x"}),
+        ]
+
+        # Subagent stream (parent_tool_use_id set) stays quiet.
+        sess._notify_tool_use(
+            _blk(AssistantMessage, parent_tool_use_id="toolu_9",
+                 content=[_blk(ToolUseBlock, id="toolu_3", name="Bash", input={})])
+        )
+        assert len(uses) == 2
+
+        user = _blk(
+            UserMessage,
+            parent_tool_use_id=None,
+            content=[
+                _blk(ToolResultBlock, tool_use_id="toolu_1", content="a.txt", is_error=False),
+                _blk(ToolResultBlock, tool_use_id="toolu_2",
+                     content=[{"type": "text", "text": "bad"}], is_error=True),
+                _blk(ToolResultBlock, tool_use_id="toolu_unknown", content="?", is_error=False),
+            ],
+        )
+        sess._notify_tool_results(user)
+        assert results == [
+            ("toolu_1", "Bash", {"command": "ls"}, "a.txt"),
+            ("toolu_2", "Read", {"file_path": "/x"}, "Error: bad"),
+        ]
+        assert sess._open_tool_cards == {}

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
@@ -18,8 +18,12 @@ vi.mock('@/hermes', () => ({
   setApiRequestProfile: () => {}
 }))
 
+// Captured so a test can fire the profile-switch reset by hand.
+let fireProfileSwitch: () => void = () => {}
 vi.mock('../hooks/use-on-profile-switch', () => ({
-  useOnProfileSwitch: () => {}
+  useOnProfileSwitch: (onSwitch: () => void) => {
+    fireProfileSwitch = onSwitch
+  }
 }))
 
 // The real stores pull in the gateway/profile stack, which needs a live
@@ -94,5 +98,24 @@ describe('ConfigSettings autosave', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('ConfigSettings profile switch', () => {
+  it('re-seeds the draft after a switch even when the refetch returns identical config', async () => {
+    // Same object every call: react-query keeps the previous reference for
+    // structurally equal data, which is exactly what left the page on its
+    // skeleton forever before the dataUpdatedAt guard (2026-09-11).
+    const record = { checkpoints: { enabled: false } }
+    getHermesConfigRecord.mockResolvedValue(record)
+
+    await renderConfigSettings()
+    await screen.findByRole('switch')
+
+    act(() => fireProfileSwitch())
+    expect(screen.queryByRole('switch')).toBeNull()
+
+    await screen.findByRole('switch')
+    expect(getHermesConfigRecord.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 })

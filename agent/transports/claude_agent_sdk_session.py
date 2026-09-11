@@ -1561,6 +1561,8 @@ class ClaudeAgentSdkSession:
         approval_callback: Optional[Callable[..., str]] = None,
         approval_bypass_provider: Optional[Callable[[], bool]] = None,
         on_tool_started: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_use: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_result: Optional[Callable[[str, str, dict, str], None]] = None,
         max_budget_usd: Optional[float] = None,
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
@@ -1608,6 +1610,15 @@ class ClaudeAgentSdkSession:
         self._approval_callback = approval_callback
         self._approval_bypass_provider = approval_bypass_provider
         self._on_tool_started = on_tool_started
+        # Stable-id tool CARD hooks (desktop/TUI tool rows), the codex-runtime
+        # pattern: ``on_tool_use(tool_use_id, name, args)`` when a ToolUseBlock
+        # issues, ``on_tool_result(tool_use_id, name, args, result)`` when its
+        # ToolResultBlock echoes back. ``on_tool_started`` is only the progress
+        # breadcrumb, which the gateway drops when a name is present — so
+        # without these the desktop showed NO tool activity on this lane.
+        self._on_tool_use = on_tool_use
+        self._on_tool_result = on_tool_result
+        self._open_tool_cards: dict[str, tuple[str, dict]] = {}
         self._on_compaction = on_compaction
         self._on_compact_boundary = on_compact_boundary
         self._max_budget_usd = max_budget_usd
@@ -2567,6 +2578,8 @@ class ClaudeAgentSdkSession:
                         out["mcp_tool_seen"] = True
                 if not interrupted and not billing_guarded:
                     self._notify_tool_started(message)
+                    self._notify_tool_use(message)
+                    self._notify_tool_results(message)
                     self._notify_interim_assistant(message)
                 projection = projector.project(message)
                 if watch is not None:
@@ -3076,6 +3089,59 @@ class ClaudeAgentSdkSession:
                 self._on_tool_started(name, preview, args)
             except Exception:  # pragma: no cover - display callback
                 logger.debug("tool-progress callback raised", exc_info=True)
+
+    def _notify_tool_use(self, message: Any) -> None:
+        """Open a stable-id tool card per top-level ToolUseBlock. Subagent
+        streams (parent_tool_use_id set) stay quiet, like the deltas."""
+        if type(message).__name__ != "AssistantMessage":
+            return
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        for block in getattr(message, "content", None) or []:
+            if type(block).__name__ != "ToolUseBlock":
+                continue
+            tool_use_id = str(getattr(block, "id", "") or "")
+            if not tool_use_id:
+                continue
+            name = getattr(block, "name", "") or "unknown"
+            args = getattr(block, "input", None) or {}
+            if not isinstance(args, dict):
+                args = {"input": args}
+            self._open_tool_cards[tool_use_id] = (name, args)
+            if self._on_tool_use is None:
+                continue
+            try:
+                self._on_tool_use(tool_use_id, name, args)
+            except Exception:  # pragma: no cover - display callback
+                logger.debug("tool-use card callback raised", exc_info=True)
+
+    def _notify_tool_results(self, message: Any) -> None:
+        """Close the matching tool card per ToolResultBlock (UserMessage echo)."""
+        if type(message).__name__ != "UserMessage":
+            return
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            return
+        from agent.transports.claude_sdk_event_projector import (
+            _flatten_tool_result_content,
+        )
+        for block in content:
+            if type(block).__name__ != "ToolResultBlock":
+                continue
+            tool_use_id = str(getattr(block, "tool_use_id", "") or "")
+            card = self._open_tool_cards.pop(tool_use_id, None)
+            if card is None or self._on_tool_result is None:
+                continue
+            name, args = card
+            result = _flatten_tool_result_content(getattr(block, "content", None))
+            if getattr(block, "is_error", False) and result:
+                result = f"Error: {result}"
+            try:
+                self._on_tool_result(tool_use_id, name, args, result)
+            except Exception:  # pragma: no cover - display callback
+                logger.debug("tool-result card callback raised", exc_info=True)
 
     def build_option_fields(self) -> dict[str, Any]:
         """The ClaudeAgentOptions field dict — plain data so tests can assert

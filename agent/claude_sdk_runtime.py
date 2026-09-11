@@ -1322,6 +1322,31 @@ def run_claude_agent_sdk_turn(
                     "claude-sdk tool-progress callback raised", exc_info=True
                 )
 
+        def _on_tool_use(tool_use_id: str, tool_name: str, args: dict) -> None:
+            # Stable-id tool CARD (desktop/TUI tool rows). The progress
+            # breadcrumb above is dropped by the gateway whenever a name is
+            # present (tool_progress._on_tool_progress), so this is the only
+            # path that puts "Running Bash: …" on screen for this lane — the
+            # same pair the codex bridge fires (make_codex_app_server_event_bridge).
+            callback = getattr(agent, "tool_start_callback", None)
+            if callback is None:
+                return
+            try:
+                callback(tool_use_id, tool_name, args)
+            except Exception:
+                logger.debug("claude-sdk tool_start_callback raised", exc_info=True)
+
+        def _on_tool_result(
+            tool_use_id: str, tool_name: str, args: dict, result: str
+        ) -> None:
+            callback = getattr(agent, "tool_complete_callback", None)
+            if callback is None:
+                return
+            try:
+                callback(tool_use_id, tool_name, args, result)
+            except Exception:
+                logger.debug("claude-sdk tool_complete_callback raised", exc_info=True)
+
         def _relay_stream_delta(text: str) -> None:
             # Late-bound: the gateway assigns stream_delta_callback per turn
             # AFTER the session exists (and clears it between turns).
@@ -1526,6 +1551,8 @@ def run_claude_agent_sdk_turn(
             approval_callback=approval_callback,
             approval_bypass_provider=_approval_bypass_active,
             on_tool_started=_on_tool_started,
+            on_tool_use=_on_tool_use,
+            on_tool_result=_on_tool_result,
             system_prompt_append=append,
             hermes_session_id=getattr(agent, "session_id", None),
             # Peer-addressable CLI session name (ListAgents/SendMessage).
