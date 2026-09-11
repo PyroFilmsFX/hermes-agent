@@ -159,6 +159,31 @@ def _on_tool_started(agent, tool_name: str, preview: str, args: dict) -> None:
         )
 
 
+def _on_tool_use(agent, tool_use_id: str, tool_name: str, args: dict) -> None:
+    # Stable-id tool CARD (desktop/TUI tool rows). The progress breadcrumb
+    # (_on_tool_started) is dropped by the gateway whenever a name is present
+    # (tool_progress._on_tool_progress), so this is the only path that puts
+    # "Running Bash: …" on screen for this lane — the same pair the codex
+    # bridge fires (make_codex_app_server_event_bridge). (cntrl carry)
+    callback = getattr(agent, "tool_start_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(tool_use_id, tool_name, args)
+    except Exception:
+        logger.debug("claude-sdk tool_start_callback raised", exc_info=True)
+
+
+def _on_tool_result(agent, tool_use_id: str, tool_name: str, args: dict, result: str) -> None:
+    callback = getattr(agent, "tool_complete_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(tool_use_id, tool_name, args, result)
+    except Exception:
+        logger.debug("claude-sdk tool_complete_callback raised", exc_info=True)
+
+
 def _relay_stream_delta(agent, text: str) -> None:
     # Late-bound: the gateway assigns stream_delta_callback per turn
     # AFTER the session exists (and clears it between turns).
@@ -397,6 +422,8 @@ def _create_session(
         approval_callback=approval_callback,
         approval_bypass_provider=functools.partial(_approval_bypass_active, agent),
         on_tool_started=functools.partial(_on_tool_started, agent),
+        on_tool_use=functools.partial(_on_tool_use, agent),
+        on_tool_result=functools.partial(_on_tool_result, agent),
         system_prompt_append=append,
         hermes_session_id=getattr(agent, "session_id", None),
         # Peer-addressable CLI session name (ListAgents/SendMessage).

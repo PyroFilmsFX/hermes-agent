@@ -554,6 +554,8 @@ class ClaudeSdkTurnMixin:
                 self._note_mcp_tool_use(message, out)
                 if not interrupted and not billing_guarded:
                     self._notify_tool_started(message)
+                    self._notify_tool_use(message)
+                    self._notify_tool_results(message)
                     self._notify_interim_assistant(message)
                 projection, _result_is_error, _result_is_contradictory_success = (
                     self._project_message_step(projector, watch, message, out)
