@@ -111,3 +111,56 @@ class ClaudeSdkNotifyMixin:
                 self._on_tool_started(name, preview, args)
             except Exception:  # pragma: no cover - display callback
                 logger.debug("tool-progress callback raised", exc_info=True)
+
+    def _notify_tool_use(self, message: Any) -> None:
+        """Open a stable-id tool card per top-level ToolUseBlock. Subagent
+        streams (parent_tool_use_id set) stay quiet, like the deltas."""
+        if type(message).__name__ != "AssistantMessage":
+            return
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        for block in getattr(message, "content", None) or []:
+            if type(block).__name__ != "ToolUseBlock":
+                continue
+            tool_use_id = str(getattr(block, "id", "") or "")
+            if not tool_use_id:
+                continue
+            name = getattr(block, "name", "") or "unknown"
+            args = getattr(block, "input", None) or {}
+            if not isinstance(args, dict):
+                args = {"input": args}
+            self._open_tool_cards[tool_use_id] = (name, args)
+            if self._on_tool_use is None:
+                continue
+            try:
+                self._on_tool_use(tool_use_id, name, args)
+            except Exception:  # pragma: no cover - display callback
+                logger.debug("tool-use card callback raised", exc_info=True)
+
+    def _notify_tool_results(self, message: Any) -> None:
+        """Close the matching tool card per ToolResultBlock (UserMessage echo)."""
+        if type(message).__name__ != "UserMessage":
+            return
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            return
+        from agent.transports.claude_sdk_event_projector import (
+            _flatten_tool_result_content,
+        )
+        for block in content:
+            if type(block).__name__ != "ToolResultBlock":
+                continue
+            tool_use_id = str(getattr(block, "tool_use_id", "") or "")
+            card = self._open_tool_cards.pop(tool_use_id, None)
+            if card is None or self._on_tool_result is None:
+                continue
+            name, args = card
+            result = _flatten_tool_result_content(getattr(block, "content", None))
+            if getattr(block, "is_error", False) and result:
+                result = f"Error: {result}"
+            try:
+                self._on_tool_result(tool_use_id, name, args, result)
+            except Exception:  # pragma: no cover - display callback
+                logger.debug("tool-result card callback raised", exc_info=True)

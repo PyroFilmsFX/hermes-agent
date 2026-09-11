@@ -62,6 +62,9 @@ forks of a public repo cannot be made private. So:
 
 ## Environment traps
 
+How the SDK lane behaves and how to look inside it (permission modes, tool
+cards, replay ring, CDP watch, CLI transcripts): `docs/cntrl/sdk-lane-operations.md`.
+
 - **Use the CLI's auto mode on the SDK lane.** `agent.claude_agent_sdk.permission_mode: auto`
   lets Claude Code's classifier screen tool calls; Hermes' guardian one-shot then
   runs only for calls that fall through to a prompt. Without it every Bash call

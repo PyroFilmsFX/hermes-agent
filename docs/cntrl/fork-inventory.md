@@ -69,12 +69,18 @@ upstream moved the surrounding code.
 | `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` | plain tiles read their transcript under the sidebar row's profile; a gone answer latches the tile | the actual 404-storm driver: a thinkbot session asked of the default backend every tick |
 | `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts`, `apps/desktop/src/store/session-gone-latch.ts` | `resolveStoredSession` latches an id gone when every profile answers 404; the background-polling classifier accepts the REST `404 … Session not found` shape | the `hermes:api` 404 storm: a deleted id was re-probed across every profile on every 5s poll, forever |
 | `tests/agent/test_title_generator.py` | 18 scaffolding cases | pins the title fix |
+| `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts`, `apps/desktop/src/store/runtime-gone.test.ts` | vitest for the gone-latch rows | pins the 404-storm fix |
+| `tests/hermes_cli/test_claude_agent_sdk_config.py` | fork defaults (`permission_mode: auto`, `session_name`) | pins the config rows |
+| `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts` | vitest for the profile-scoped tile reconcile | pins the 404-storm fix |
+| `apps/desktop/src/app/settings/config-settings.tsx` (+ test) | re-seed the draft after a profile switch by `dataUpdatedAt`, and refetch on switch | the Settings config pages sat on skeletons forever after a profile switch: react-query kept the old data reference for equal data, so the `[loadedConfig]` seed effect never re-fired (2026-09-11) |
 | `agent/title_generator.py` | `_is_scaffolding` guard + unterminated-fence strip in `_extract_title_text` | sessions were being named ```` ```json ```` and `{"title` from truncated model replies; 9 such rows existed. Upstream-shaped fix, worth proposing back. |
 | `hermes_cli/config_defaults.py`, `hermes_cli/doctor_auth.py`, `agent/transports/claude_agent_sdk_session.py` | fork default `permission_mode: auto`; `hermes doctor` reports the mode and its cost; a session started in `default` logs a warning naming the guardian-spawn cost | nobody should discover the 35-spawn tax by reading logs |
 | `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py`, `hermes_cli/config_defaults.py` | `session_name` template -> the CLI's `--name` via `extra_args` | peers can address a Hermes session (host router) |
 | `tools/mcp_tool_agent.py`, `hermes_cli/cli_info_mixin.py`, `gateway/run_turn.py`, `tui_gateway/methods_tools.py` | `sdk_rotate=` on `refresh_agent_mcp_tools` + `_maybe_rotate_sdk_session`; explicit `/reload-mcp` callers pass it | live MCP reload for SDK sessions |
 | `agent/claude_sdk_runtime.py` | `rotate_claude_sdk_session` + in-memory resume stash in `_persisted_sdk_session_id` | same |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | rotation hook test | pins the row above |
+| `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py` | `on_tool_use` / `on_tool_result` card hooks per ToolUseBlock/ToolResultBlock, routed to `tool_start_callback` / `tool_complete_callback` (2026-09-11) | the gateway drops `tool.started` progress events that carry a name, so SDK turns showed no tool activity at all in the desktop (33 calls, zero `tool.start`) |
+| `tests/agent/test_claude_sdk_runtime.py` (`TestSdkToolCards`) | 3 tests + `.sdkprobe/tool_card_probe.py` live proof | pins the row above |
 
 ## 4. Out-of-tree (zero merge cost)
 
@@ -130,6 +136,10 @@ auxiliary lane once produced a `{"title` fragment as the session title (seen
 
 ## 7. Open items to verify on the SDK runtime (tracked here, not done)
 
+- **Desktop shows SDK tool cards — DONE 2026-09-11.** Every SDK tool call now
+  opens/closes a stable-id tool row (`tool.start`/`tool.complete`), like the
+  codex bridge. Before, only text deltas reached the desktop, so a tool-heavy
+  turn looked frozen for minutes. Ops notes: `docs/cntrl/sdk-lane-operations.md`.
 - **Session-to-session messaging — PROVEN 2026-09-07, both ways.** `ListAgents`
   and `SendMessage` are Claude Code CLI tools, so they ride the pinned `cli_path`
   binary (2.1.263). Probes in `.sdkprobe/` (`setting_sources=[]`): an SDK session

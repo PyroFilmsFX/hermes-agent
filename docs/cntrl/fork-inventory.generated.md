@@ -4,11 +4,11 @@ Generated 2026-09-11 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb077ed |
-| vs `origin/main` | 58 ahead / 1043 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 1043 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 38 |
-| core files touched | 35 (3 unlisted in §3) |
+| branch | `cntrl-hermes` @ c0deb074f1 |
+| vs `origin/main` | 59 ahead / 1047 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 1047 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 39 |
+| core files touched | 37 (0 unlisted in §3) |
 
 ## Carried commits (oldest first)
 
@@ -52,6 +52,7 @@ Generated 2026-09-11 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-09 | c0deb07705 | desktop: the 404 storm's real driver — tile transcript reconcile sent no profile | `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts`, `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` |
 | 2026-09-10 | c0deb07c9d | desktop: turns ran invisibly after a websocket reconnect — fan detached-session events out to live sockets | `agent/claude_sdk_aux_client.py`, `agent/claude_sdk_runtime.py`, `tests/agent/test_aux_cli_path.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/tui_gateway/test_detached_event_fanout.py`, `tui_gateway/server.py` |
 | 2026-09-10 | c0deb077ed | cntrl: SDK lane runs Claude Code's auto mode — guardian one-shots only on prompt fall-through | — |
+| 2026-09-11 | c0deb074f1 | claude-sdk: fork default permission_mode=auto; doctor reports the mode's cost; default-mode sessions warn | `agent/transports/claude_agent_sdk_session.py`, `hermes_cli/config_defaults.py`, `hermes_cli/doctor_auth.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/hermes_cli/test_claude_agent_sdk_config.py`, `website/docs/user-guide/features/claude-agent-sdk-runtime.md` |
 
 ## Core files we touch
 
@@ -61,25 +62,27 @@ Generated 2026-09-11 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | `agent/claude_sdk_runtime.py` | c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d, c0deb07c9d | yes |
 | `agent/model_metadata.py` | c0deb079b4 | yes |
 | `agent/title_generator.py` | c0deb07e0c, c0deb0782d | yes |
-| `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb0782d | yes |
+| `agent/transports/claude_agent_sdk_session.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb0782d, c0deb074f1 | yes |
 | `agent/transports/hermes_tool_exposure.py` | c0deb07f0f | yes |
-| `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts` | c0deb07705 | **NO** |
+| `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts` | c0deb07705 | yes |
 | `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` | c0deb07705 | yes |
-| `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts` | c0deb07b92 | **NO** |
+| `apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts` | c0deb07b92 | yes |
 | `apps/desktop/src/app/session/hooks/use-session-actions/utils.ts` | c0deb07b92 | yes |
-| `apps/desktop/src/store/runtime-gone.test.ts` | c0deb07b92 | **NO** |
+| `apps/desktop/src/store/runtime-gone.test.ts` | c0deb07b92 | yes |
 | `apps/desktop/src/store/session-gone-latch.ts` | c0deb07b92 | yes |
 | `gateway/run_turn.py` | c0deb07f7d | yes |
 | `hermes_cli/cli_info_mixin.py` | c0deb07f7d | yes |
-| `hermes_cli/config_defaults.py` | c0deb0750f, c0deb07b3b, c0deb072a4 | yes |
+| `hermes_cli/config_defaults.py` | c0deb0750f, c0deb07b3b, c0deb072a4, c0deb074f1 | yes |
+| `hermes_cli/doctor_auth.py` | c0deb074f1 | yes |
 | `hermes_cli/models_catalog_static.py` | c0deb079b4 | yes |
 | `hermes_cli/web_routers/sessions.py` | c0deb0782d | yes |
 | `pyproject.toml` | c0deb0750f | yes |
 | `run_agent.py` | c0deb0751f | yes |
 | `tests/agent/test_aux_cli_path.py` | c0deb07c9d | yes |
-| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d, c0deb07c9d | yes |
+| `tests/agent/test_claude_sdk_runtime.py` | c0deb0750f, c0deb07b3b, c0deb07f0f, c0deb07f7d, c0deb072a4, c0deb0782d, c0deb07c9d, c0deb074f1 | yes |
 | `tests/agent/test_title_generator.py` | c0deb07e0c, c0deb0782d | yes |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | c0deb07f0f | yes |
+| `tests/hermes_cli/test_claude_agent_sdk_config.py` | c0deb074f1 | yes |
 | `tests/tools/test_refresh_agent_mcp_tools.py` | c0deb07f7d | yes |
 | `tests/tui_gateway/test_detached_event_fanout.py` | c0deb07c9d | yes |
 | `tests/tui_gateway/test_sdk_background_result_delivery.py` | c0deb0782d | yes |
@@ -91,4 +94,4 @@ Generated 2026-09-11 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | `tui_gateway/server.py` | c0deb07c9d | yes |
 | `tui_gateway/session_notifications.py` | c0deb0782d | yes |
 | `uv.lock` | c0deb0750f | yes |
-| `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | c0deb07b3b, c0deb07f0f, c0deb072a4 | yes |
+| `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | c0deb07b3b, c0deb07f0f, c0deb072a4, c0deb074f1 | yes |
