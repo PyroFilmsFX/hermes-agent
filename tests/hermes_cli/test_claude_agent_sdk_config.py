@@ -36,9 +36,10 @@ class TestClaudeAgentSdkDefaults:
         assert block["append_file"] == ""
         # null = the built-in 22000-character whole-append budget.
         assert block["append_total_max_chars"] is None
-        # "" = current behavior: the HERMES_TERMINAL_SECURITY_MODE mapping
-        # stands; a non-empty value is an SDK permission_mode literal.
-        assert block["permission_mode"] == ""
+        # cntrl fork: "auto" — the CLI's own classifier screens tool calls and the
+        # SDK invokes can_use_tool only on prompt fall-through; "default" routed every
+        # Bash call through a guardian one-shot (a CLI spawn each). Upstream ships "".
+        assert block["permission_mode"] == "auto"
         # No child-process environment overrides unless explicitly configured.
         assert block["env"] == {}
         # [] = full SDK settings isolation; deployments that keep tool
@@ -67,14 +68,23 @@ class TestClaudeAgentSdkDefaults:
         assert block["hybrid_mcp_bridge_exclude"] == []
         # Every default in the block must be falsy — a new key that defaults
         # truthy is a behavior change and needs its own explicit pin here.
+        # cntrl fork: two deliberate truthy defaults, each pinned to its exact value so a
+        # rebase cannot drift them silently. permission_mode="auto" hands first-line
+        # screening to the CLI's classifier (a "default" run spawned a guardian CLI per
+        # Bash call); session_name makes every Hermes session addressable by peers.
+        fork_truthy = {"permission_mode": "auto", "session_name": "hermes:{title}"}
+        for key, expected in fork_truthy.items():
+            assert block[key] == expected, f"fork default for {key!r} drifted"
         for key, value in block.items():
+            if key in fork_truthy:
+                continue
             assert not value, f"default for {key!r} must be conservative/falsy"
 
     def test_bypass_permissions_contract_documents_audited_emulation(self):
         source = inspect.getsource(config_defaults)
         permission_comment = source[
             source.index("# SDK permission mode"):
-            source.index('"permission_mode": ""')
+            source.index('"permission_mode": "auto"')
         ]
         assert "bypassPermissions" in permission_comment
         assert "not forwarded verbatim" in permission_comment
