@@ -1,13 +1,13 @@
 # Fork inventory — generated
 
-Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
+Generated 2026-09-11 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fork-inventory.md` for the why.
 
 | | |
 |---|---|
-| branch | `cntrl-hermes` @ c0deb07c9d |
-| vs `origin/main` | 57 ahead / 854 behind · common base 233757037d (2026-09-07) |
-| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 854 behind origin/main · HEAD is built on it |
-| carried commits (since pr-65982-sep7) | 37 |
+| branch | `cntrl-hermes` @ c0deb077ed |
+| vs `origin/main` | 58 ahead / 1043 behind · common base 233757037d (2026-09-07) |
+| PR #65982 | `pr-65982-sep7` = ad43250612 · 20 ahead / 1043 behind origin/main · HEAD is built on it |
+| carried commits (since pr-65982-sep7) | 38 |
 | core files touched | 35 (3 unlisted in §3) |
 
 ## Carried commits (oldest first)
@@ -51,6 +51,7 @@ Generated 2026-09-10 by `scripts/cntrl/fork_inventory.py`. Do not edit; edit `fo
 | 2026-09-09 | c0deb0793a | cntrl: inventory — attachment streaming stall bisected at three layers, not reproduced | — |
 | 2026-09-09 | c0deb07705 | desktop: the 404 storm's real driver — tile transcript reconcile sent no profile | `apps/desktop/src/app/contrib/hooks/use-background-sync.test.ts`, `apps/desktop/src/app/contrib/hooks/use-background-sync.ts` |
 | 2026-09-10 | c0deb07c9d | desktop: turns ran invisibly after a websocket reconnect — fan detached-session events out to live sockets | `agent/claude_sdk_aux_client.py`, `agent/claude_sdk_runtime.py`, `tests/agent/test_aux_cli_path.py`, `tests/agent/test_claude_sdk_runtime.py`, `tests/tui_gateway/test_detached_event_fanout.py`, `tui_gateway/server.py` |
+| 2026-09-10 | c0deb077ed | cntrl: SDK lane runs Claude Code's auto mode — guardian one-shots only on prompt fall-through | — |
 
 ## Core files we touch
 

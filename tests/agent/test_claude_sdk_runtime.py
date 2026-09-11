@@ -3077,6 +3077,36 @@ class TestStreaming:
         assert seen["mid_turn"] is False
         assert "/rename hermes:mid" not in holder["client"].queried
 
+    def test_default_mode_warns_about_guardian_spawns(self, caplog):
+        # On this lane the guardian is a full CLI spawn per Bash call; say so once. (cntrl carry)
+        import logging
+
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], permission_mode="default")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            try:
+                session.run_turn("ping")
+            finally:
+                session.close()
+        assert any("permission_mode=default" in r.getMessage() and "permission_mode: auto" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_auto_mode_is_quiet(self, caplog):
+        import logging
+
+        session, holder = _make_session(script=[ResultMessage(result="ok")], permission_mode="auto")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            try:
+                session.run_turn("ping")
+            finally:
+                session.close()
+        assert holder["client"].options["permission_mode"] == "auto"
+        assert not any("guardian one-shot" in r.getMessage() for r in caplog.records)
+
+    def test_fork_default_config_is_auto(self):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["agent"]["claude_agent_sdk"]["permission_mode"] == "auto"
+
     def test_session_name_absent_when_unnamed(self):
         session, holder = _make_session(script=[ResultMessage(result="ok")])
         try:

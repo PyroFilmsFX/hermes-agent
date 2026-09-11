@@ -1742,6 +1742,15 @@ class ClaudeAgentSdkSession:
             self._permission_mode,
             self._cwd,
         )
+        if self._permission_mode == "default":
+            # Say the cost out loud once per session: on this lane the guardian is an SDK
+            # one-shot (a full CLI spawn) per Bash call that reaches the callback. (cntrl carry)
+            logger.warning(
+                "claude-agent-sdk permission_mode=default: every Bash call that reaches the "
+                "approval callback spawns a guardian one-shot (a Claude CLI process). Set "
+                "agent.claude_agent_sdk.permission_mode: auto to let the CLI's classifier "
+                "screen first; Hermes then screens only what it will not approve."
+            )
         return self._session_id or "pending"
 
     def close(self) -> None:
