@@ -62,6 +62,11 @@ forks of a public repo cannot be made private. So:
 
 ## Environment traps
 
+- **Use the CLI's auto mode on the SDK lane.** `agent.claude_agent_sdk.permission_mode: auto`
+  lets Claude Code's classifier screen tool calls; Hermes' guardian one-shot then
+  runs only for calls that fall through to a prompt. Without it every Bash call
+  that passes the prefilter spawns a full Claude CLI just to ask "is this safe".
+
 - **Cross-session messages into Hermes need a flag.** Routing a peer
   `SendMessage` into a Hermes conversation requires
   `agent.claude_agent_sdk.deliver_background_results: true` in THAT profile's
