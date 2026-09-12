@@ -225,3 +225,29 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+# ── claude-agent-sdk lane: plugin skills the spawned CLI expands itself ───────────────────────
+
+
+def test_sdk_plugin_skill_is_not_flagged_unknown(monkeypatch):
+    """On the SDK lane a Claude Code plugin skill (/tb-ship) is "known": the reply is None so the
+    raw text forwards as the turn's prompt and the CLI expands the skill."""
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash",
+                        lambda command, **k: "/tb-ship" if command == "/tb-ship" else None)
+    runner = _make_runner()
+
+    assert runner._hm_unknown_slash_reply("tb-ship", _make_source()) is None
+
+
+def test_unknown_name_still_gets_guidance_when_resolver_declines(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash", lambda *a, **k: None)
+    runner = _make_runner()
+
+    reply = runner._hm_unknown_slash_reply("definitely-not-a-command", _make_source())
+
+    assert reply is not None and "Unknown command" in reply
