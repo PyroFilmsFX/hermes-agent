@@ -22298,3 +22298,163 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
     assert captured["row_update"] == (target, str(new_cwd))
     assert live["cwd"] == str(new_cwd)
     assert live.get("explicit_cwd") is True
+
+
+# ── SDK-lane plugin skills through slash.exec / command.dispatch ──────────────────────────────
+# `/tb-ship` typed in the desktop/TUI reached the slash worker, whose HermesCLI dispatcher knows
+# only Hermes' registries → "Unknown command". On the claude-agent-sdk lane the spawned CLI
+# expands a plugin skill itself when the PROMPT is `/name args`, so the gateway answers with a
+# `send` dispatch instead (agent.claude_sdk_slash decides; these tests pin the wiring).
+
+
+def _sdk_slash_session(provider="claude-agent-sdk", live=None):
+    sdk_session = types.SimpleNamespace(slash_commands=list(live or []))
+    agent = types.SimpleNamespace(provider=provider, model="claude-opus-4-8", _claude_sdk_session=sdk_session)
+    return _session(agent=agent, profile_home=None)
+
+
+def test_slash_exec_forwards_sdk_plugin_skill_as_send_dispatch(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    seen = {}
+
+    def fake_resolve(command, *, provider=None, live_names=None):
+        seen.update(command=command, provider=provider, live=list(live_names or []))
+        return "/tb-ship --dry-run" if command.startswith("/tb-ship") else None
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash", fake_resolve)
+
+    class _NoWorker:
+        def __init__(self, *a, **k):  # pragma: no cover - must not run
+            raise AssertionError("slash worker must not spawn for an SDK-lane plugin skill")
+
+    monkeypatch.setattr(server, "_SlashWorker", _NoWorker, raising=False)
+    server._sessions["sdk-slash"] = _sdk_slash_session(live=["conductor:tb-ship"])
+    try:
+        resp = server.handle_request({
+            "id": "x", "method": "slash.exec",
+            "params": {"command": "/tb-ship --dry-run", "session_id": "sdk-slash"},
+        })
+    finally:
+        server._sessions.pop("sdk-slash", None)
+
+    assert resp["result"] == {"type": "send", "message": "/tb-ship --dry-run", "display": "/tb-ship --dry-run"}
+    # Provider and the live init list come from the SESSION's agent, not process globals.
+    assert seen == {"command": "/tb-ship --dry-run", "provider": "claude-agent-sdk", "live": ["conductor:tb-ship"]}
+
+
+def test_slash_exec_unknown_name_still_reaches_the_worker_when_resolver_declines(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash", lambda *a, **k: None)
+
+    class _EchoWorker:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, cmd):
+            return f"worker saw {cmd}"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_SlashWorker", _EchoWorker, raising=False)
+    monkeypatch.setattr(server, "_attach_worker", lambda sid, session, worker: session.__setitem__("slash_worker", worker),
+                        raising=False)
+    server._sessions["sdk-slash-2"] = _sdk_slash_session()
+    try:
+        resp = server.handle_request({
+            "id": "x", "method": "slash.exec",
+            "params": {"command": "/tb-ship", "session_id": "sdk-slash-2"},
+        })
+    finally:
+        server._sessions.pop("sdk-slash-2", None)
+
+    assert resp["result"]["output"] == "worker saw /tb-ship"
+
+
+def test_command_dispatch_last_stage_forwards_sdk_plugin_skill(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash",
+                        lambda command, **k: "/tb-ship go" if command == "/tb-ship go" else None)
+    server._sessions["sdk-slash-3"] = _sdk_slash_session()
+    try:
+        resp = server.handle_request({
+            "id": "x", "method": "command.dispatch",
+            "params": {"name": "tb-ship", "arg": "go", "session_id": "sdk-slash-3"},
+        })
+    finally:
+        server._sessions.pop("sdk-slash-3", None)
+
+    assert resp["result"] == {"type": "send", "message": "/tb-ship go", "display": "/tb-ship go"}
+
+
+def test_command_dispatch_unknown_name_errors_when_resolver_declines(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "resolve_sdk_slash", lambda *a, **k: None)
+    server._sessions["sdk-slash-4"] = _sdk_slash_session(provider="anthropic")
+    try:
+        resp = server.handle_request({
+            "id": "x", "method": "command.dispatch",
+            "params": {"name": "tb-ship", "arg": "", "session_id": "sdk-slash-4"},
+        })
+    finally:
+        server._sessions.pop("sdk-slash-4", None)
+
+    assert resp["error"]["code"] == 4018
+    assert "not a quick/plugin/bundle/skill command" in resp["error"]["message"]
+
+
+# ── SDK-lane plugin skills in the suggestion surfaces (complete.slash / commands.catalog) ──────
+# `/tb` in the desktop composer said "No matches": the completer and catalog read only Hermes'
+# skill registries. agent.claude_sdk_slash.merged_skill_commands adds the plugin skills on the
+# claude-agent-sdk lane; these tests pin that both RPCs consume it and classify them as skills.
+
+
+def _fake_plugin_skill_commands():
+    return {"/tb-ship": {"name": "tb-ship", "description": "Ship it", "skill_dir": "/p/skills/tb-ship",
+                         "skill_md_path": "/p/skills/tb-ship/SKILL.md", "plugin": "conductor",
+                         "source": "claude-plugin"}}
+
+
+def test_complete_slash_offers_sdk_plugin_skill_as_a_skill(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "active_provider", lambda: "claude-agent-sdk")
+    monkeypatch.setattr(slash, "plugin_skill_commands", _fake_plugin_skill_commands)
+
+    resp = server.handle_request({"id": "c", "method": "complete.slash", "params": {"text": "/tb-sh"}})
+
+    items = {item["text"].lstrip("/"): item for item in resp["result"]["items"]}
+    assert "tb-ship" in items, resp["result"]
+    assert items["tb-ship"]["kind"] == "skill"
+    assert "Ship it" in items["tb-ship"]["meta"]
+
+
+def test_complete_slash_hides_sdk_plugin_skill_off_the_sdk_lane(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "active_provider", lambda: "anthropic")
+    monkeypatch.setattr(slash, "plugin_skill_commands", _fake_plugin_skill_commands)
+
+    resp = server.handle_request({"id": "c", "method": "complete.slash", "params": {"text": "/tb-sh"}})
+
+    assert all(item["text"].lstrip("/") != "tb-ship" for item in resp["result"]["items"])
+
+
+def test_commands_catalog_lists_sdk_plugin_skill_with_plugin_origin(monkeypatch):
+    import agent.claude_sdk_slash as slash
+
+    monkeypatch.setattr(slash, "active_provider", lambda: "claude-agent-sdk")
+    monkeypatch.setattr(slash, "plugin_skill_commands", _fake_plugin_skill_commands)
+
+    resp = server.handle_request({"id": "k", "method": "commands.catalog", "params": {}})
+
+    result = resp["result"]
+    assert ["/tb-ship", "Ship it"] in result["pairs"]
+    # origin "plugin": the desktop's bare-`/` browse prunes only never-used BUNDLED skills.
+    assert result["skills"]["/tb-ship"] == {"usage": 0, "origin": "plugin"}
+    # Not a registry command: the desktop keeps treating it as an extension (skill) row.
+    assert "/tb-ship" not in result["commands"]

@@ -525,7 +525,8 @@ def _sdk_env_overrides(
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
-    Metered-vector scrub first (see _METERED_ENV_DENYLIST).
+    Metered-vector scrub first (see _METERED_ENV_DENYLIST), then the
+    interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST).
     agent.claude_agent_sdk.allow_metered_key: true is the operator's explicit
     "bill me metered" opt-in (the same flag the startup guard honors), so it
     disables the scrub too — otherwise the documented escape hatch would hand
@@ -540,6 +541,10 @@ def _sdk_env_overrides(
     if metered_allowed is None:
         metered_allowed = _provider_flag("allow_metered_key")
     overrides: dict[str, str] = {} if metered_allowed else _scrubbed_sdk_env()
+    # Interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST). Applied
+    # before the operator env so a deliberate ``env: {PYTHONPATH: ...}`` in
+    # config.yaml still wins — that is a knob, not a billing vector.
+    overrides.update(_scrubbed_interpreter_env())
     for key, value in _configured_sdk_env().items():
         if not metered_allowed and _is_metered_sdk_env_value(key, value):
             logger.warning(
@@ -1431,6 +1436,34 @@ def _scrubbed_sdk_env() -> dict[str, str]:
     }
 
 
+# Interpreter-path vectors that must not reach the spawned CLI. The desktop
+# backend runs with PYTHONPATH=<repo>:<venv>/lib/python3.11/site-packages
+# (apps/desktop/electron/main.ts adds the venv path so a system python can
+# import hermes_cli). The SDK transport merges os.environ into the CLI child,
+# and the CLI hands its env to every plugin MCP server and hook it spawns — so
+# a plugin's own `uv run --python >=3.12` interpreter imported 3.11-built C
+# extensions (pydantic_core) from Hermes' site-packages and died on the ABI
+# mismatch: conductor's tb-workers "Connection closed", cached by Claude Code
+# for 15 min per process (~/.claude/mcp-needs-auth-cache.json). Nothing under
+# the CLI needs Hermes' import path: the hermes-tools MCP runs on
+# sys.executable, where Hermes is editable-installed. Proven 2026-09-11: the
+# same command with PYTHONPATH unset connected in 1.4s. Same class of fix as
+# tools/browser_use_cli.py::_base_subprocess_env.
+_CHILD_INTERPRETER_ENV_DENYLIST = ("PYTHONPATH", "PYTHONHOME")
+
+
+def _scrubbed_interpreter_env() -> dict[str, str]:
+    """Empty-string overrides for PYTHONPATH/PYTHONHOME when the parent has them
+    set. Only PRESENT keys are overridden; "" is how the SDK's ``{**os.environ,
+    **options.env}`` merge can unset a key, and CPython treats an empty
+    PYTHONPATH exactly like an absent one (verified: no path entries added)."""
+    return {
+        key: ""
+        for key in _CHILD_INTERPRETER_ENV_DENYLIST
+        if os.environ.get(key)
+    }
+
+
 # The SDK serializes the stdio MCP config — env INCLUDED — into the claude
 # CLI's --mcp-config argument, i.e. onto the subprocess argv, which any local
 # user can read via ps. Nothing secret may ever ride this dict: the env is a
@@ -1691,6 +1724,12 @@ class ClaudeAgentSdkSession:
         # because config.yaml changed while a long-lived SDK session was live.
         self._allow_metered = _provider_flag("allow_metered_key")
         self._billing_evidence: dict[str, Any] = {}
+        # ``slash_commands`` from the CLI's system/init message: built-ins,
+        # bundled skills and every user-invocable plugin skill (``plugin:name``)
+        # the spawned CLI will expand when a prompt is ``/<name> [args]``. The
+        # live half of agent.claude_sdk_slash — Hermes' slash dispatchers use it
+        # to forward plugin skills instead of printing "Unknown command".
+        self.slash_commands: list[str] = []
         self._billing_guard_error: Optional[str] = None
 
     def set_turn_visibility_callbacks(
@@ -1914,6 +1953,13 @@ class ClaudeAgentSdkSession:
         name = type(message).__name__
         if name == "SystemMessage" and getattr(message, "subtype", "") == "init":
             data = getattr(message, "data", None)
+            if isinstance(data, dict):
+                raw_slash = data.get("slash_commands")
+                if isinstance(raw_slash, list):
+                    self.slash_commands = [
+                        item.strip() for item in raw_slash
+                        if isinstance(item, str) and item.strip()
+                    ]
             if isinstance(data, dict) and (
                 "apiKeySource" in data or "api_key_source" in data
             ):

@@ -393,10 +393,17 @@ def _catalog_plugin_commands(cat: _Catalog) -> None:
 def _catalog_skills(cat: _Catalog, skills: dict[str, dict]) -> None:
     """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (every consumer ranks by them)."""
     usage, origin_of = _skill_usage_lookup()
-    for k, info in sorted(_tools_mod("agent.skill_commands").scan_skill_commands().items()):
+    # Plus the SDK lane's Claude Code plugin skills (origin "plugin": never pruned as an unused
+    # bundled skill; they are not HERMES_HOME skills and carry no usage record).
+    commands = _tools_mod("agent.claude_sdk_slash").merged_skill_commands(
+        _tools_mod("agent.skill_commands").scan_skill_commands())
+    for k, info in sorted(commands.items()):
         cat.pairs.append([k, str(info.get("description", "Skill"))])
         name = str(info.get("name") or k.lstrip("/"))
-        skills[k] = {"usage": usage(name), "origin": origin_of(name)}
+        if info.get("source") == "claude-plugin":
+            skills[k] = {"usage": 0, "origin": "plugin"}
+        else:
+            skills[k] = {"usage": usage(name), "origin": origin_of(name)}
 
 
 @_rpc("commands.catalog", 5020)
@@ -499,6 +506,42 @@ def _is_profile_skill_command(session: dict, base: str) -> bool:
                 hc.reset_hermes_home_override(token)
     except Exception:
         return False
+
+
+def _sdk_slash_prompt(session, base: str, arg: str):
+    """``/base arg`` → the prompt to forward when the session runs the claude-agent-sdk lane and
+    ``base`` is a Claude Code plugin skill that lane expands natively (agent.claude_sdk_slash); None
+    otherwise. Hermes-owned names never reach here — callers try quick/plugin/bundle/skill/built-in
+    first. HERMES_HOME is bound to the session's profile so the plugin roots come from ITS config
+    (same rule as _is_profile_skill_command); the live init list rides on the agent's SDK session."""
+    if not base:
+        return None
+    try:
+        slash = _tools_mod("agent.claude_sdk_slash")
+        agent = (session or {}).get("agent")
+        provider = getattr(agent, "provider", None) or None
+        live = getattr(getattr(agent, "_claude_sdk_session", None), "slash_commands", None)
+        hc = _tools_mod("hermes_constants")
+        profile_home = (session or {}).get("profile_home")
+        token = hc.set_hermes_home_override(profile_home) if profile_home else None
+        try:
+            return slash.resolve_sdk_slash(f"/{base} {arg}".strip(), provider=provider, live_names=live)
+        finally:
+            if token is not None:
+                hc.reset_hermes_home_override(token)
+    except Exception:
+        return None
+
+
+def _sdk_slash_dispatch(rid, sdk_prompt: str) -> dict:
+    """``send`` dispatch: the raw slash becomes the turn's prompt (desktop + TUI submit it verbatim,
+    showing ``display``); the spawned CLI expands the skill with ${CLAUDE_PLUGIN_ROOT} intact."""
+    return _ok(rid, {"type": "send", "message": sdk_prompt, "display": sdk_prompt})
+
+
+def _dispatch_sdk_slash(rid, params, session, name, arg):
+    sdk_prompt = _sdk_slash_prompt(session, name, arg)
+    return _sdk_slash_dispatch(rid, sdk_prompt) if sdk_prompt else None
 
 
 def _dispatch_plugin(rid, params, session, name, arg):
@@ -796,8 +839,10 @@ def _(rid, params: dict) -> dict:
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
     session = _sessions.get(params.get("session_id", ""))
 
-    # Stage order is load-bearing: quick > plugin > bundle > skill > built-in.
-    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_skill, _SLASH_BUILTINS.get(name))
+    # Stage order is load-bearing: quick > plugin > bundle > skill > built-in > SDK-lane plugin skill
+    # (last: a Claude Code plugin skill only fills a name Hermes itself does not own).
+    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_skill, _SLASH_BUILTINS.get(name),
+              _dispatch_sdk_slash)
     for stage in filter(None, stages):
         res = stage(rid, params, session, name, arg)
         if res is not None:
@@ -838,6 +883,11 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"output": _run_plugin_command(plugin_handler, arg) or "(no output)"})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
+    # Claude Code plugin skill on the claude-agent-sdk lane (/tb-ship …): the slash worker only knows
+    # Hermes' registries and would print "Unknown command"; hand the raw slash back as a send dispatch
+    # so the client submits it as the prompt and the spawned CLI expands the skill itself.
+    if sdk_prompt := _sdk_slash_prompt(session, parts[0] if parts else "", arg):
+        return _sdk_slash_dispatch(rid, sdk_prompt)
     worker = session.get("slash_worker")
     if not worker:
         # slash.exec runs on the RPC pool: two concurrent commands could both see slash_worker=None

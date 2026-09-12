@@ -3356,6 +3356,13 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         from hermes_cli.commands import COMMANDS
         typed_base = cmd_lower.split()[0]
         all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
+        # Claude Code plugin skills on the claude-agent-sdk lane expand by prefix too (/tb-sh → /tb-ship);
+        # the expanded name re-enters process_command and lands in the SDK seed branch below.
+        try:
+            from agent.claude_sdk_slash import sdk_slash_names
+            all_known |= {f"/{n}" for n in sdk_slash_names(getattr(self, "provider", None))}
+        except Exception:
+            logger.debug("sdk slash names unavailable for prefix expansion", exc_info=True)
         matches = [c for c in all_known if c.startswith(typed_base)]
         if len(matches) > 1:
             if typed_base in matches:
@@ -3373,10 +3380,29 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
             _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
             _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
         else:
+            # Claude Code plugin skill on the claude-agent-sdk lane (agent.claude_agent_sdk.plugins): none of
+            # Hermes' registries know it, the spawned CLI does. Seed the raw slash as the next turn's prompt so
+            # the CLI expands the skill natively (${CLAUDE_PLUGIN_ROOT} intact) instead of "Unknown command".
+            sdk_prompt = self._sdk_slash_seed(cmd_original)
+            if sdk_prompt:
+                _cprint(f"\n⚡ Claude Code skill {sdk_prompt.split()[0]} → dispatched through the SDK lane")
+                self._pending_agent_seed = sdk_prompt
+                return True
             # Exact token with no handler (never re-dispatch the same token: recursion), or no match.
             _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
             _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         return True
+
+    def _sdk_slash_seed(self, cmd_original: str):
+        """``/name args`` → prompt text when the active provider is claude-agent-sdk and ``name`` is a plugin
+        skill the spawned CLI expands (agent.claude_sdk_slash); None otherwise or on any failure."""
+        try:
+            from agent.claude_sdk_slash import resolve_sdk_slash
+            live = getattr(getattr(getattr(self, "agent", None), "_claude_sdk_session", None), "slash_commands", None)
+            return resolve_sdk_slash(cmd_original, provider=getattr(self, "provider", None), live_names=live)
+        except Exception:
+            logger.debug("sdk slash resolution failed", exc_info=True)
+            return None
 
     def _drain_interrupt_queue_to_pending_input(self) -> None:
         """Move stray ``_interrupt_queue`` messages into ``_pending_input`` after every turn.

@@ -1027,6 +1027,10 @@ class TestSession:
             "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
         ):
             monkeypatch.delenv(key, raising=False)
+        # The interpreter-path scrub is a separate default (test_claude_sdk_configured_env);
+        # isolate it so this test stays about metered vectors alone.
+        for key in ("PYTHONPATH", "PYTHONHOME"):
+            monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         assert session.build_option_fields()["env"] == {}
 
@@ -1045,6 +1049,8 @@ class TestSession:
             raising=False,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake")
+        for key in ("PYTHONPATH", "PYTHONHOME"):  # interpreter-path scrub is independent of this opt-in
+            monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         assert session.build_option_fields()["env"] == {}
 
@@ -10385,3 +10391,39 @@ class TestSdkToolCards:
             ("toolu_2", "Read", {"file_path": "/x"}, "Error: bad"),
         ]
         assert sess._open_tool_cards == {}
+
+
+class TestInitSlashCommands:
+    """system/init ``slash_commands`` → ``session.slash_commands`` (the live half of
+    agent.claude_sdk_slash: plugin skills the CLI expands when a prompt is ``/<name>``)."""
+
+    def test_init_list_is_captured_and_cleaned(self):
+        session, _holder = _make_session(
+            script=[
+                SystemMessage(
+                    data={
+                        "apiKeySource": "none",
+                        "slash_commands": ["compact", " conductor:tb-ship ", "", 7, "code-review"],
+                    },
+                    session_id="sdk-1",
+                ),
+                ResultMessage(result="ok"),
+            ]
+        )
+        try:
+            assert session.slash_commands == []
+            turn = session.run_turn("hi")
+        finally:
+            session.close()
+        assert turn.error is None
+        assert session.slash_commands == ["compact", "conductor:tb-ship", "code-review"]
+
+    def test_init_without_the_field_leaves_the_list_empty(self):
+        session, _holder = _make_session(
+            script=[SystemMessage(data={"apiKeySource": "none"}), ResultMessage(result="ok")]
+        )
+        try:
+            session.run_turn("hi")
+        finally:
+            session.close()
+        assert session.slash_commands == []

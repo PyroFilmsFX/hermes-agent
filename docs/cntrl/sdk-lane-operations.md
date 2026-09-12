@@ -158,3 +158,46 @@ env -u ANTHROPIC_API_KEY .venv/bin/python .sdkprobe/stream_probe.py
 - "Session controls unavailable" banner on a brand-new tab until the first turn.
 - Upstream candidates: 404 retry storm, never-ended session prune, title
   generator scaffolding guard, SDK tool cards (this file, §3 last row).
+
+## 7. Plugin skills and plugin MCPs on the SDK lane (2026-09-11)
+
+Two faults that looked like "the conductor plugin is not registered". The plugin WAS loaded
+(`agent.claude_agent_sdk.plugins` → `--plugin-dir`; the SessionStart hook fired, the Skill tool
+listed `conductor:tb-*`). What broke sat in front of the model and behind it.
+
+**`/tb-ship` → "Unknown command: /tb-ship".** Every Hermes slash dispatcher resolves `/name`
+against Hermes' own registries (built-ins, quick commands, plugin commands, bundles,
+HERMES_HOME skills). Claude Code plugin skills live in `~/.claude/plugins` and are known only
+to the spawned CLI. Desktop and TUI send every `/x` to `slash.exec` → slash worker →
+`HermesCLI.process_command` → the unknown branch at `cli.py::_expand_slash_prefix`. Fix:
+`agent/claude_sdk_slash.py` decides whether an unknown slash is a skill the SDK lane expands
+(static `skills/*/SKILL.md` scan of the configured plugin roots ∪ the CLI's init
+`slash_commands`, now kept on `ClaudeAgentSdkSession.slash_commands`), and each dispatcher
+forwards the raw `/name args` as the turn's prompt: `slash.exec`/`command.dispatch` answer with
+a `send` dispatch, the CLI seeds `_pending_agent_seed`, the messaging inbound path returns
+"known". The Agent SDK dispatches a user-invocable skill from a `/<name>` prompt (docs:
+agent-sdk/slash-commands). Proven through the real CLI: prompt `/tb-mode` expanded the skill.
+`skills.external_dirs` was rejected: Hermes would expand the SKILL.md itself and 23/39 conductor
+skills use `${CLAUDE_PLUGIN_ROOT}`.
+
+Suggestions: the composer popover, the bare-`/` catalog, the TUI and the CLI completer all read
+one `SlashCommandCompleter` fed by `merged_skill_commands()` — Hermes skills plus the plugin skills
+on the SDK lane (`source: claude-plugin`, catalog origin `plugin`). Hermes wins collisions (`/plan`).
+
+**tb-workers MCP "Connection closed".** Electron starts the backend with
+`PYTHONPATH=<repo>:<venv>/lib/python3.11/site-packages`; the SDK merges `os.environ` into the
+CLI child; the CLI hands that env to every plugin MCP it spawns; the plugin's
+`uv run --python >=3.12` server imports 3.11-built `pydantic_core` and dies
+(`ModuleNotFoundError: pydantic_core._pydantic_core`). Claude Code then caches the failure
+in `~/.claude/mcp-needs-auth-cache.json` and every new CLI process skips the connect for
+15 min ("recent failure cached") — including clean probes, so clear the entry before
+re-testing. Fix: `_sdk_env_overrides` blanks PYTHONPATH/PYTHONHOME when present
+(`_CHILD_INTERPRETER_ENV_DENYLIST`); "" is how the SDK's env merge unsets a key and CPython
+treats an empty PYTHONPATH as absent. Safe because hermes-tools runs on `sys.executable` where
+Hermes is editable-installed, and conductor hooks are stdlib `python3` scripts. Operator
+`env: {PYTHONPATH: …}` still wins (knob, not a billing vector). Triage:
+
+```bash
+ps -Eww -p $(pgrep -f "claude --output-format stream-json" | head -1) | tr ' ' '\n' | grep ^PYTHONPATH=
+python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude/mcp-needs-auth-cache.json'))).get('plugin:conductor:tb-workers'))"
+```

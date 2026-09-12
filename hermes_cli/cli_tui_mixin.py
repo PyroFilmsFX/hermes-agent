@@ -2087,8 +2087,17 @@ class CLITuiMixin:
         def get_prompt():
             return cli_ref._get_tui_prompt_fragments()
 
+        def _skill_commands_for_completion():
+            # HERMES_HOME skills plus, on the claude-agent-sdk lane, the Claude Code plugin skills the
+            # spawned CLI expands (/tb-ship) — process_command seeds those as the next turn.
+            try:
+                from agent.claude_sdk_slash import merged_skill_commands
+                return merged_skill_commands(get_skill_commands(), provider=getattr(cli_ref, "provider", None))
+            except Exception:
+                return get_skill_commands()
+
         _completer = SlashCommandCompleter(
-            skill_commands_provider=lambda: get_skill_commands(),
+            skill_commands_provider=_skill_commands_for_completion,
             command_filter=cli_ref._command_available,
             skill_bundles_provider=lambda: get_skill_bundles())
         input_area = TextArea(

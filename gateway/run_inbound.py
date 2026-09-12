@@ -1035,6 +1035,14 @@ class GatewayInboundMixin:
         # alias target, so the resolved def can be stale.
         if command.replace("_", "-") in GATEWAY_KNOWN_COMMANDS:
             return None
+        # Claude Code plugin skill on the claude-agent-sdk lane: the spawned CLI expands `/name` itself, so
+        # the raw text IS the right prompt. None = "known": the message forwards unchanged.
+        try:
+            from agent.claude_sdk_slash import resolve_sdk_slash
+            if resolve_sdk_slash(f"/{command}"):
+                return None
+        except Exception:
+            logger.debug("sdk slash resolution failed", exc_info=True)
         logger.warning(
             "Unrecognized slash command /%s from %s — replying with unknown-command notice",
             command, source.platform.value if source.platform else "?",

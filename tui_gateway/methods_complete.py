@@ -231,11 +231,15 @@ def _(rid, params: dict) -> dict:
     from prompt_toolkit.formatted_text import to_plain_text
     from agent.skill_commands import get_skill_commands
     from agent.skill_bundles import get_skill_bundles
+    from agent.claude_sdk_slash import merged_skill_commands
+    # HERMES_HOME skills plus, on the claude-agent-sdk lane, the Claude Code plugin skills the spawned
+    # CLI expands (/tb-ship): without them the popover said "No matches" for a name that runs fine.
+    skill_commands = merged_skill_commands(get_skill_commands())
     completer = SlashCommandCompleter(
-        skill_commands_provider=lambda: get_skill_commands(), skill_bundles_provider=lambda: get_skill_bundles())
+        skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: get_skill_bundles())
     # `kind` reaches the TUI as data (from the providers, not sniffed from ⚡/▣ glyphs):
     # skills/bundles are the only completions for an inline `/skill` typed mid-message.
-    skill_names = {key.lstrip("/").lower() for key in (*get_skill_commands(), *get_skill_bundles())}
+    skill_names = {key.lstrip("/").lower() for key in (*skill_commands, *get_skill_bundles())}
 
     def to_items(doc: Document) -> list[dict]:
         # display/display_meta are FormattedText; the TUI contract is a plain string
