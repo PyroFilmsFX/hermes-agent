@@ -29,6 +29,13 @@ class ClaudeSdkBillingMixin:
         name = type(message).__name__
         if name == "SystemMessage" and getattr(message, "subtype", "") == "init":
             data = getattr(message, "data", None)
+            if isinstance(data, dict):
+                raw_slash = data.get("slash_commands")
+                if isinstance(raw_slash, list):
+                    self.slash_commands = [
+                        item.strip() for item in raw_slash
+                        if isinstance(item, str) and item.strip()
+                    ]
             if isinstance(data, dict) and (
                 "apiKeySource" in data or "api_key_source" in data
             ):
