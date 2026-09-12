@@ -262,6 +262,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # because config.yaml changed while a long-lived SDK session was live.
         self._allow_metered = _provider_flag("allow_metered_key")
         self._billing_evidence: dict[str, Any] = {}
+        # ``slash_commands`` from the CLI's system/init message: built-ins,
+        # bundled skills and every user-invocable plugin skill (``plugin:name``)
+        # the spawned CLI will expand when a prompt is ``/<name> [args]``. The
+        # live half of agent.claude_sdk_slash — Hermes' slash dispatchers use it
+        # to forward plugin skills instead of printing "Unknown command".
+        self.slash_commands: list[str] = []
         self._billing_guard_error: Optional[str] = None
 
     # ---------- lifecycle ----------

@@ -118,3 +118,50 @@ def test_metered_anthropic_token_is_scrubbed_from_parent(monkeypatch):
     monkeypatch.setattr(M, "_is_subscription_oauth_token", lambda value: False)
 
     assert M._scrubbed_sdk_env()["ANTHROPIC_TOKEN"] == ""
+
+
+# ── Interpreter-path scrub ────────────────────────────────────────────────────
+# The desktop backend inherits PYTHONPATH=<repo>:<venv>/lib/python3.11/site-packages from
+# Electron; the SDK merges os.environ into the CLI child, which hands it to every plugin MCP it
+# spawns, and a plugin's `uv run --python >=3.12` server then imports 3.11-built pydantic_core
+# and dies (conductor tb-workers "Connection closed", 2026-09-11).
+
+
+def test_pythonpath_and_pythonhome_are_blanked_when_present(env_config, monkeypatch):
+    env_config(env=None)
+    monkeypatch.setenv("PYTHONPATH", "/repo:/repo/.venv/lib/python3.11/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/repo/.venv")
+
+    overrides = M._sdk_env_overrides()
+
+    assert overrides["PYTHONPATH"] == ""
+    assert overrides["PYTHONHOME"] == ""
+
+
+def test_absent_interpreter_vars_are_not_introduced(env_config, monkeypatch):
+    """Only PRESENT keys are overridden — an empty var the child never had is a new fact."""
+    env_config(env=None)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONHOME", raising=False)
+
+    overrides = M._sdk_env_overrides()
+
+    assert "PYTHONPATH" not in overrides
+    assert "PYTHONHOME" not in overrides
+
+
+def test_operator_env_may_still_set_pythonpath_deliberately(env_config, monkeypatch):
+    """The scrub is a default, not a security boundary: `env: {PYTHONPATH: ...}` is a knob and wins."""
+    env_config(env={"PYTHONPATH": "/deliberate"})
+    monkeypatch.setenv("PYTHONPATH", "/repo/.venv/lib/python3.11/site-packages")
+
+    assert M._sdk_env_overrides()["PYTHONPATH"] == "/deliberate"
+
+
+def test_interpreter_scrub_is_independent_of_the_metered_opt_in(env_config, monkeypatch):
+    """allow_metered_key disables the BILLING scrub only; a metered opt-in still must not
+    hand plugin MCPs a wrong-ABI import path."""
+    env_config(env=None, metered_allowed=True)
+    monkeypatch.setenv("PYTHONPATH", "/repo/.venv/lib/python3.11/site-packages")
+
+    assert M._sdk_env_overrides()["PYTHONPATH"] == ""
