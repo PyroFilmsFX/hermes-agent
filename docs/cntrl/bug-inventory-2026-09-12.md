@@ -93,3 +93,32 @@ Task*Message types ARE the background-agent lifecycle stream — that is the dat
 
 ## 6. Rebuild on the fresh #65982 head + upstream parity — `in progress`
 **Reported by:** Justin (09-13). Details + procedure in `docs/cntrl/plan-2026-09-13-sdk-parity-and-status-feeds.md` Phase 1.
+
+## 7. Transcript can't scroll while a long tool runs — `open`
+**Reported by:** Justin (screenshot 09-13 12:56, session gen_bug_fix)
+**Symptom:** During a 2m+ Bash call (`Running bash …` spinner, `Using 16 tools` rolled up) the
+transcript is pinned to the bottom, no scrollbar thumb, wheel/trackpad scroll does nothing.
+**Anchors:** `apps/desktop/src/store/thread-scroll.ts` (`$threadScrolledUp`, `setThreadAtBottom`,
+`requestScrollToBottom`), `components/assistant-ui/thread/transcript-window.tsx`, `thread/list.tsx`,
+`use-messages-below.ts`, `chat/scroll-to-bottom-button.tsx`. Likely: follow-output re-pins on every
+tool-card tick (duration counter re-render) so a user scroll-up is undone before it registers.
+
+## 8. Queued message never auto-sent — `open`
+**Reported by:** Justin (screenshot 09-13 13:21)
+**Symptom:** A prompt queued during a long turn ("1 Queued · 1 attachment") stayed queued after the
+turn ended; it only went out when the user acted (send-now/interrupt).
+**Anchors:** `apps/desktop/src/store/composer-queue.ts` (`$parkedQueueSessions`, `isSteerableEntry` —
+entries WITH attachments are never steerable), `chat/composer/hooks/use-composer-queue.ts` (auto-drain
+gated on `busy`, `drainFailuresRef` + `MAX_AUTO_DRAIN_ATTEMPTS`, park on repeated failure),
+`session/hooks/use-background-queue-drain.ts` (:164-188 busy/lineage check). Hypotheses: (a) drain
+attempts fired while the SDK turn was still busy, hit the cap and parked the queue; (b) on the SDK
+lane `busy` never flipped false between the tool-heavy turn and the next (see parity map "Steer /
+queue" row and B#3 turn-ownership). Repro: queue a prompt with an attachment during a >2m tool.
+
+## 9. Public-fork hygiene: conductor/private artifacts — `done 09-13` (verify on next push)
+`.gitignore` gains repo-level entries (`.claude/state/`, `.claude/settings.local.json`,
+`.claude/mcp-needs-auth-cache.json`, `.claude/*.json`, `docs/councils/`, `.tb-*/`) — previously only
+covered by global excludes, which teammates' clones don't have. `docs/councils/council-log.jsonl`
+(internal strategy council record) untracked. Still tracked on purpose: `CNTRL-HERMES.md`,
+`docs/cntrl/*` (incl. the conductor review, which cites private plugin file:lines — Justin to decide
+whether that stays public), `.claude/skills/fork-inventory/SKILL.md`.
