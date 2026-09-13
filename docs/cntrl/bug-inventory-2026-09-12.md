@@ -122,3 +122,21 @@ covered by global excludes, which teammates' clones don't have. `docs/councils/c
 (internal strategy council record) untracked. Still tracked on purpose: `CNTRL-HERMES.md`,
 `docs/cntrl/*` (incl. the conductor review, which cites private plugin file:lines — Justin to decide
 whether that stays public), `.claude/skills/fork-inventory/SKILL.md`.
+
+## 10. tb-workers MCP + conductor subagents dead in NEW sessions — `root-caused 09-13, mitigated`
+**Reported by:** Justin (09-13, "worked 1-2d ago, we didn't change much")
+**Evidence:** this session (CLI child spawned 09-12 14:41) still has both. The plugin loaded by
+Hermes is the marketplace clone (`~/.claude/plugins/marketplaces/thinkbot-plugin/plugins/conductor`),
+auto-updated to 3.60.2 on 09-12 22:29; its `.mcp.json` is byte-identical to 3.59.0. Probe of that
+launcher outside Hermes (PYTHONPATH unset): first run answered `tools/list` after **211.6 s**
+(uv had to build the ephemeral `--with "mcp>=2.1.1,<2.2"` env for 3.14 — `environments-v2/d22081…`
+created 13:49, wheels fetched into `archive-v0`); warm re-run: `initialize` 0.7 s, `tools/list` 0.7 s.
+Claude Code's MCP startup timeout (`MCP_TIMEOUT`, default 30 s) kills the cold launch, marks the
+server failed for ~15 min per process, and the conductor agents' MCP calls fail with it → "MCP and
+subagents dead". Intermittent by construction: any cache invalidation (new interpreter, new `mcp`
+release — 2.2.0 shipped 09-07, uv cache prune) re-arms it.
+**Mitigation (applied, profile config, no restart needed for NEW sessions):**
+`agent.claude_agent_sdk.env.MCP_TIMEOUT: "240000"` in `.hermes-test/profiles/thinkbot/config.yaml`.
+**Durable fix (plugin repo, ties to conductor review #1):** stop using an ephemeral `uv run --with`
+env for the MCP launcher — ship a locked venv inside the plugin (or `uv sync` on install) and launch
+`.venv/bin/python tb_seat_mcp.py`; pin `--python 3.12` meanwhile (2 s warm, no 3.14 wheel gaps).
