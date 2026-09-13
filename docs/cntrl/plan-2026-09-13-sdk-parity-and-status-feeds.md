@@ -65,20 +65,24 @@ Procedure = fork-inventory §5. Backup tag `backup/cntrl-hermes-pre-rebase-2026-
   are generic (cli_path, plugins list, session_name, rename seam, tool cards, rotate-while-busy
   guard, title scaffolding guard, detached-event fan-out, background-result delivery).
 
-### Phase 3 — Fixes (inventory items), each its own wave with validator ≠ implementer
-1. **Item 1** SDK engine default for new sessions (picker default + hide/demote plain group).
-2. **Items 4+5** feed the existing status-stack from the SDK lane:
-   - enable native Task tools via `agent.claude_agent_sdk.env` defaults (Task*, not TodoWrite);
-     per-session `CLAUDE_CODE_TASK_LIST_ID` mapping persisted beside `claude_sdk_session_id`;
-     emit `todo.updated` from TaskCreate/TaskUpdate results reconciled against the on-disk list.
-   - lift the `parent_tool_use_id` silence into `subagent.start/progress/complete` events carrying
-     the Agent tool's `description`/`subagent_type` as the NAME; open-to-view via the existing
-     subagent store; background Bash → background group.
-   - audit missing tool rows (item 5c).
-3. **Item 3** inbound cross-session turns render in the recipient tab + unread indicator; kill the
-   spurious background-process notice.
-4. **Item 2** sessions spawning sessions — verify what kanban dispatcher / `tui_gateway` session
-   create RPC already give a manager session; expose the minimal seam.
+### Phase 3 — Build waves (consolidated from 2A parity map + 2B bug hunt; awaiting Justin's go)
+Each wave: implementer ≠ validator, cross-model; E2E on a temp HERMES_HOME; one live desktop turn.
+Refs: `review-2026-09-13-sdk-parity-map.md` (A), `review-2026-09-13-sdk-lane-bugs.md` (B).
+
+| wave | inventory | scope | anchors | size |
+|---|---|---|---|---|
+| W1 | item 1 | SDK engine is the default for new desktop sessions; plain-Anthropic group demoted | model picker + `config_defaults` provider default | S |
+| W2 | item 3 | Cross-session turns render in the recipient tab + unread: project provenance-marked peer input and the full unsolicited turn (B#5, A row "Cross-session"); own message identity for background deliveries after Stop (B#6); ownership by `parent_session_id` before dequeue (B#1); per-payload ack (B#7). Live re-check that the phantom process notice is gone (`session_notifications.py:495`). | `_turn.py:929-1022`, `session_notifications.py:62-98,416-449`, `use-message-stream/index.ts:575` | M |
+| W3 | item 5b/5c | Tool-card fidelity: keep raw text/array results (B#8), carry `is_error` (B#10), labelled truncation + `tool_use_result` (B#11), resolve open cards before the parent filter + interrupt drains (B#9) | `tool-parts.ts:45,272,334`, `_notify.py:144-161`, `projector.py:34,183` | M |
+| W4 | item 5a | Subagent rows with NAME + open-to-view: lifecycle Task*Message → existing `subagent.*` (A#1), `goal` = Agent `description`/`subagent_type` (A row NAME), child tool/text into owned child transcripts (B#12, A#5); SDK-backed `methods_subagents` lookup/tail/cancel via `stop_task` | `projector.py:98,134`, `_notify.py:120`, `tool_progress.py:407`, `methods_subagents.py:19-78` | L |
+| W5 | item 4 | Todo feed from native Task tools: config default `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`; per-session `CLAUDE_CODE_TASK_LIST_ID` persisted beside `claude_sdk_session_id`, kept across resume/rotate, fresh on fork; reconcile `~/.claude/tasks/<list>` snapshots → `todo.updated` (A#2, B#14 name normalization at `tool_progress.py:274` / `todos.ts:23`) | `_config.py:54,109`, `claude_agent_sdk_session.py:635`, `claude_sdk_runtime_session.py:419`, `_continuity.py` | M |
+| W6 | item 5 (bg) | SDK background processes in the process view + stop via `stop_task` (A#4) | `methods_tools.py:233-243`, `projector.py:106` | M |
+| W7 | carries | cntrl-only bugs in our own carries: rotation stash honours workspace binding (B#2); rotation serialized with turn admission (B#4); rename-ack swallow requires a pending rename (B#15); hybrid identity keeps `skill_manage` (B#13); skill-cache invalidation matches namespaced name (B#16) | `_continuity.py:49,169`, `_watchdog.py:199`, `hermes_tool_exposure.py:124`, `gateway-event/tools.ts:104` | S–M |
+| W8 | item 2 | Sessions spawning sessions: verify kanban dispatcher / `session.create` RPC coverage; expose the minimal seam for a manager session | `tui_gateway/methods_session.py`, `plugins/kanban` | S (investigate) → ? |
+| W9 | parity | streaming + reasoning defaults (A#8), steer delivery accounting (A#6), `session_search detail` (A row), gateway slash uses live names (A row), `max_turns` mapping | see A | S each |
+| PR | upstream | back to #65982: fable-5-1 catalog id; B#3 #5 #8 #9 #10 #11 #12 #14; fork-inventory §3 generic rows (cli_path, plugins, session_name, rename seam, tool cards, rotate guard, detached fan-out) | — | — |
+
+Suggested order: W1 → W7 (cheap, our own bugs) → W2 → W3 → W4 → W5 → W6 → W9 → W8; PR batch after W3.
 
 ## Status log
 - 09-13: Phase 1 started. Phase 2C spawned.
@@ -98,3 +102,5 @@ Procedure = fork-inventory §5. Backup tag `backup/cntrl-hermes-pre-rebase-2026-
   fix-ups (`vi.waitFor` import; `{ passive: true }` third arg in use-background-sync). Not pushed.
 - 09-13: Phase 2C DONE → `docs/cntrl/review-2026-09-13-conductor-plugin.md` (28 findings).
   Phase 2A (cohesion map) + 2B (state/tracking bugs) spawned on the rebased tree.
+- 09-13: Phase 2A DONE → `review-2026-09-13-sdk-parity-map.md`; 2B DONE → `review-2026-09-13-sdk-lane-bugs.md`.
+  Phase 3 waves consolidated above; waiting on Justin's go + push decision.
