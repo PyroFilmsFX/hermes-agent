@@ -222,3 +222,7 @@ docs/telemetry/
 docs/councils/
 # Session handoff scratch.
 .tb-*/
+
+# Claude-authored session docs (inventories, plans, reviews, ops notes). Local only —
+# they cite private paths and plugin internals; the public fork never carries them.
+docs/cntrl/

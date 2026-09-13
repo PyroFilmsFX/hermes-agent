@@ -27,7 +27,8 @@ Keeps `docs/cntrl/fork-inventory.md` (the why) and the generated snapshot
 4. Update the "Last audit" date at the top of `fork-inventory.md`, and if a
    carried commit was dropped because upstream now has it, delete its §3 row
    and say so in §1.
-5. Commit all three files together with prefix `cntrl:`.
+5. `docs/cntrl/` is gitignored (local-only Claude docs) — do NOT commit the three files; just
+   leave them on disk. Commit only code/test changes the audit prompted, prefix `cntrl:`.
 
 ## Rules
 
