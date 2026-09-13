@@ -51,7 +51,9 @@ inventory. Keep our side for those hunks unless upstream moved the code.
 forks of a public repo cannot be made private. So:
 
 - Never commit anything under `.hermes-test/`, `.sdkprobe/`, `.claude/state/`,
-  `docs/telemetry/`, `worker-routing.json` (all gitignored, keep it that way).
+  `docs/telemetry/`, `docs/cntrl/`, `docs/councils/`, `worker-routing.json` (all gitignored,
+  keep it that way). `docs/cntrl/` is the local-only home for Claude-authored inventories,
+  plans, reviews and the fork inventory — read them, never `git add -f` them.
 - No tokens, no `.env`, no `config.yaml` with keys, no client names or client
   data in docs, no internal hostnames beyond what `CNTRL-HERMES.md` already
   has. Council ledgers and notes are fine; they read as engineering notes.
