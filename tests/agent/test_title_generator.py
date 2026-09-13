@@ -9,6 +9,7 @@ from agent.title_generator import (
     auto_title_session,
     maybe_auto_title,
     _title_language,
+    _extract_title_text,
 )
 from hermes_state import SessionDB
 
@@ -153,6 +154,82 @@ class TestGenerateTitle:
 
 
 
+
+
+class TestAttachmentPreamble:
+    """A user message that arrives with attachment scaffolding must title from the user's words.
+    The desktop's image path reference (tui_gateway/session_history.py) is prepended BEFORE the
+    typed text, so first-line titling produced "[The user attached an image: Screenshot…" on real
+    sessions (2026-09-09)."""
+
+    DESKTOP = ("[The user attached an image: Screenshot 2026-09-09.png]\n"
+               "[Examine it with the vision_analyze tool using image_url: /tmp/Screenshot 2026-09-09.png]\n\n"
+               "ok so theres a few bugs to deal with i think")
+
+    def test_desktop_preamble_is_stripped(self):
+        from agent.title_generator import derive_title, is_titleable_user_message
+        assert derive_title(self.DESKTOP) == "ok so theres a few bugs to deal with i think"
+        assert is_titleable_user_message(self.DESKTOP)
+
+    def test_multiple_attachments(self):
+        from agent.title_generator import derive_title
+        msg = ("[The user attached an image: a.png]\n[Examine it with the vision_analyze tool using image_url: /a.png]\n\n"
+               "[The user attached an image: b.png]\n[Examine it with the vision_analyze tool using image_url: /b.png]\n\n"
+               "compare these two")
+        assert derive_title(msg) == "compare these two"
+
+    def test_cli_vision_block_is_stripped(self):
+        from agent.title_generator import derive_title
+        msg = "[The user attached an image. Here's what it contains:\nA cat on a chair.]\nwhat breed is this"
+        assert derive_title(msg) == "what breed is this"
+
+    def test_image_only_message_gets_an_honest_title(self):
+        from agent.title_generator import derive_title
+        msg = "[The user attached an image: photo.png]\n[Examine it with the vision_analyze tool using image_url: /p/photo.png]"
+        assert derive_title(msg) == "Image: photo.png"
+
+    def test_plain_messages_untouched(self):
+        from agent.title_generator import derive_title
+        assert derive_title("fix the attached image loader") == "fix the attached image loader"
+
+
+class TestExtractTitleTextScaffolding:
+    """A failed extraction must yield "" so the caller keeps the derived title
+    and retries — never store the JSON machinery as the session name.
+
+    Both strings below are real titles observed on sessions in this branch's
+    state db (2026-09-07): "```json" and '{"title'."""
+
+    @pytest.mark.parametrize("content", [
+        '```json',                      # lone opening fence, nothing else
+        '```json\n{"title": "partial',   # fence + truncated json
+        '{"title',                      # truncated before the value
+        '{"title":',
+        '"title":',
+        'title:',
+        '[',
+        '<think>reasoning leaked',
+        '',
+        '   ',
+    ])
+    def test_scaffolding_is_discarded(self, content):
+        assert _extract_title_text(content) == ""
+
+    @pytest.mark.parametrize("content,expected", [
+        ('{"title": "Clean parse"}', "Clean parse"),
+        ('```json\n{"title": "Fenced"}\n```', "Fenced"),
+        # Unterminated fence around VALID json: the title is recoverable, and
+        # the old code took the fence line itself instead.
+        ('```json\n{"title": "Unterminated fence"}', "Unterminated fence"),
+        ('```\n{"title": "No lang tag"}', "No lang tag"),
+        ('Title: With a prefix', "With a prefix"),
+        ('Plain prose title', "Plain prose title"),
+        # A brace INSIDE a real title must not trip the scaffolding guard.
+        ('Refactor {the} parser', "Refactor {the} parser"),
+        ('Fix the `json` decoder', "Fix the `json` decoder"),
+    ])
+    def test_real_titles_survive(self, content, expected):
+        assert _extract_title_text(content) == expected
 
 
 class TestAutoTitleSession:

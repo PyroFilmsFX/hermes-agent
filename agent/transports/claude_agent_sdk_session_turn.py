@@ -37,6 +37,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_turn_timeout,
 )
 from agent.transports.claude_agent_sdk_session_watchdog import (
+    _is_rename_ack,
     _DEFAULT_POST_TOOL_QUIET_STREAMING,
     _DEFAULT_TURN_TIMEOUT,
     _POLL_STALL_FACTOR,
@@ -553,6 +554,8 @@ class ClaudeSdkTurnMixin:
                 self._note_mcp_tool_use(message, out)
                 if not interrupted and not billing_guarded:
                     self._notify_tool_started(message)
+                    self._notify_tool_use(message)
+                    self._notify_tool_results(message)
                     self._notify_interim_assistant(message)
                 projection, _result_is_error, _result_is_contradictory_success = (
                     self._project_message_step(projector, watch, message, out)
@@ -961,6 +964,13 @@ class ClaudeSdkTurnMixin:
             result_text = getattr(message, "result", None)
             texts = list(self._unsolicited_text)
             self._unsolicited_text.clear()
+            if _is_rename_ack(result_text, texts):
+                # The CLI's own "/rename" acknowledgement — never a background result.
+                self._pending_rename_ack = None
+                if uuid:
+                    self._unsolicited_delivered.add(uuid)
+                logger.debug("claude-agent-sdk: swallowed /rename ack %r", (result_text or "")[:60])
+                return
             if isinstance(result_text, str) and result_text.strip():
                 # The CLI's result text repeats the turn's final assistant
                 # message — never hand the same text over twice.

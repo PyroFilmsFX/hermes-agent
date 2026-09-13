@@ -1031,3 +1031,81 @@ class TestAgentCloseClosesSdkSession:
         agent.close()
         agent._claude_sdk_session = None
         agent.close()
+
+
+class TestSessionRotation:
+    def test_rotate_closes_session_but_keeps_resume_id(self):
+        # /reload-mcp path: the SDK CLI's MCP/plugin list is fixed at process
+        # start, so the live session is closed and the NEXT turn rebuilds it —
+        # resuming, not restarting: the persisted id must survive.
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+        from agent.claude_sdk_runtime_continuity import _persisted_sdk_session_id
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        agent._session_db = MagicMock()
+        agent.session_id = "sess-1"
+        assert rotate_claude_sdk_session(agent, "test") is True
+        live.close.assert_called_once()
+        assert agent._claude_sdk_session is None
+        agent._session_db.update_claude_sdk_session_id.assert_not_called()
+        # The live id is stashed for the rebuild even without a session row.
+        live._session_id = "sdk-live-1"
+        agent._claude_sdk_session = live
+        rotate_claude_sdk_session(agent, "test")
+        agent._session_db = None
+        assert _persisted_sdk_session_id(agent) == "sdk-live-1"
+        assert _persisted_sdk_session_id(agent) is None  # consumed once
+        # Idempotent when nothing is live.
+        assert rotate_claude_sdk_session(agent, "test") is False
+
+    def test_rename_helper_prefers_instant_rename_when_idle(self):
+        from agent.claude_sdk_runtime import rename_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live.rename.return_value = True
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "ci/cd"}
+        agent.session_id = "sess-1"
+        assert rename_claude_sdk_session(agent, busy=False) == "hermes:ci/cd"
+        live.rename.assert_called_once_with("hermes:ci/cd")
+        assert getattr(agent, "_claude_sdk_rename_pending", False) is not True
+
+    def test_rename_helper_defers_to_rotation_when_busy(self, monkeypatch):
+        import agent.claude_sdk_runtime as rt
+        import agent.claude_sdk_runtime_session as rs
+
+        agent = _make_agent()
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {"title": "manager"}
+        agent.session_id = "sess-1"
+        assert rt.rename_claude_sdk_session(agent, busy=True) == "hermes:manager"
+        agent._claude_sdk_session.rename.assert_not_called()
+        assert agent._claude_sdk_rename_pending is True
+
+        rotated = []
+        monkeypatch.setattr(rs, "rotate_claude_sdk_session", lambda a, reason="": rotated.append(reason) or True)
+        run_claude_agent_sdk_turn(
+            agent, user_message="hi", original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}], effective_task_id="task-1",
+        )
+        assert rotated == ["session renamed"]
+        assert agent._claude_sdk_rename_pending is False
+
+    def test_rotate_defers_while_a_turn_is_in_flight(self):
+        # A between-turns MCP refresh can fire from the late-binding thread while a
+        # turn is running; closing the CLI then kills the turn. Defer instead.
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live._turn_inbox = object()  # a claimed turn
+        assert rotate_claude_sdk_session(agent, "tool surface changed") is False
+        live.close.assert_not_called()
+        assert agent._claude_sdk_session is live
+        assert agent._claude_sdk_rename_pending is True
+        # Idle again: the rotation goes through.
+        live._turn_inbox = None
+        assert rotate_claude_sdk_session(agent, "tool surface changed") is True
+        live.close.assert_called_once()

@@ -7,6 +7,8 @@ stand-ins, fake clients and shared builders live in
 
 from unittest.mock import MagicMock
 
+import logging
+
 import pytest
 
 from agent.claude_sdk_runtime import run_claude_agent_sdk_turn
@@ -355,6 +357,21 @@ class TestBackgroundReviewRouting:
         agent = _make_agent()
         self._run(agent, want_memory=True)
         agent._spawn_background_review.assert_not_called()
+
+    def test_unrouted_skip_warns_once_per_process(self, monkeypatch, caplog):
+        # An unrouted review means auto-capture is silently dead; say so
+        # loudly once, then stay quiet.
+        import agent.claude_sdk_runtime as rt
+
+        self._route(monkeypatch, False)
+        monkeypatch.setattr(rt, "_UNROUTED_REVIEW_WARNED", False)
+        with caplog.at_level(logging.DEBUG, logger="agent.claude_sdk_runtime"):
+            for _ in range(2):
+                agent = _make_agent()
+                self._run(agent, want_memory=True)
+                agent._spawn_background_review.assert_not_called()
+        skipped = [r for r in caplog.records if "background review skipped" in r.getMessage()]
+        assert [r.levelno for r in skipped] == [logging.WARNING, logging.DEBUG]
 
     def test_unrouted_skill_nudge_does_not_spawn_but_counter_still_ticks(
         self, monkeypatch

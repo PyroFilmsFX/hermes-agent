@@ -612,6 +612,10 @@ class TestSession:
             "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
         ):
             monkeypatch.delenv(key, raising=False)
+        # The interpreter-path scrub is a separate default (test_claude_sdk_configured_env);
+        # isolate it so this test stays about metered vectors alone.
+        for key in ("PYTHONPATH", "PYTHONHOME"):
+            monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         assert session.build_option_fields()["env"] == {}
 
@@ -630,6 +634,8 @@ class TestSession:
             raising=False,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake")
+        for key in ("PYTHONPATH", "PYTHONHOME"):  # interpreter-path scrub is independent of this opt-in
+            monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         assert session.build_option_fields()["env"] == {}
 
@@ -641,3 +647,193 @@ class TestSession:
         turn = session.run_turn("hi")
         assert turn.should_retire
         assert "ANTHROPIC_API_KEY" in (turn.error or "")
+
+    # --- agent.claude_agent_sdk.cli_path ---
+
+    def test_cli_path_absent_by_default(self):
+        # No config → the SDK picks its own binary (bundled, then PATH).
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "cli_path" not in session.build_option_fields()
+
+    def test_cli_path_config_opt_in_expands_home(self, monkeypatch, tmp_path):
+        # The bundled CLI lags releases; operators pin their own `claude`
+        # (2026-09-01: bundled 2.1.211 rejected claude-fable-5-1, which
+        # needs >= 2.1.251, while ~/.local/bin/claude was already 2.1.257).
+        import hermes_cli.config as cfg
+
+        launcher = tmp_path / "claude"
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"claude_agent_sdk": {"cli_path": "~/claude"}}},
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert session.build_option_fields()["cli_path"] == str(launcher)
+
+    def test_cli_path_not_executable_dropped(self, monkeypatch, tmp_path):
+        # A typo must never silently run some other binary: missing or
+        # non-executable paths fall back to the SDK default (with a warning).
+        import hermes_cli.config as cfg
+
+        plain = tmp_path / "not-a-launcher"
+        plain.write_text("")
+        for bad in (str(tmp_path / "missing"), str(plain), 42, "   "):
+            monkeypatch.setattr(
+                cfg,
+                "load_config_readonly",
+                lambda *a, _bad=bad, **k: {"agent": {"claude_agent_sdk": {"cli_path": _bad}}},
+                raising=False,
+            )
+            session, _ = _make_session(script=[ResultMessage(result="ok")])
+            assert "cli_path" not in session.build_option_fields(), bad
+
+    # --- agent.claude_agent_sdk.plugins ---
+
+    def test_plugins_absent_by_default(self):
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "plugins" not in session.build_option_fields()
+
+    def test_plugins_config_loads_plugin_roots(self, monkeypatch, tmp_path):
+        # The isolation-preserving way to bring ONE plugin (conductor) into
+        # Hermes turns: setting_sources stays [] and the plugin root is
+        # loaded explicitly via the SDK's --plugin-dir mapping.
+        import hermes_cli.config as cfg
+
+        root = tmp_path / "conductor"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "plugin.json").write_text('{"name": "conductor"}')
+        not_a_plugin = tmp_path / "just-a-dir"
+        not_a_plugin.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {
+                "agent": {
+                    "claude_agent_sdk": {
+                        "plugins": [
+                            "~/conductor",
+                            str(root),  # duplicate after ~ expansion
+                            str(not_a_plugin),
+                            str(tmp_path / "missing"),
+                            "",
+                            7,
+                        ]
+                    }
+                }
+            },
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        fields = session.build_option_fields()
+        assert fields["plugins"] == [{"type": "local", "path": str(root)}]
+        assert fields["setting_sources"] == []
+
+    def test_plugins_all_invalid_means_absent(self, monkeypatch, tmp_path):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"claude_agent_sdk": {"plugins": [str(tmp_path / "nope"), "x"]}}},
+            raising=False,
+        )
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "plugins" not in session.build_option_fields()
+
+    # --- agent.claude_agent_sdk.session_name ---
+
+    def test_session_name_default_template_renders(self):
+        # Hermes sessions must be addressable by peers (ListAgents /
+        # SendMessage) — the host-router seam.
+        from agent.transports.claude_agent_sdk_session_config import (
+            _DEFAULT_SESSION_NAME_TEMPLATE,
+            render_sdk_session_name,
+        )
+
+        t = _DEFAULT_SESSION_NAME_TEMPLATE
+        assert render_sdk_session_name(t, title="kanban sync") == "hermes:kanban sync"
+        # No title yet (a brand-new row): fall back to the short session id.
+        assert render_sdk_session_name(t, session="20260907_200102_896850") == "hermes:896850"
+        # Then to the profile.
+        assert render_sdk_session_name(t, profile="work") == "hermes:work"
+        # Nothing to say -> let the CLI name it, never a bare "hermes:".
+        assert render_sdk_session_name(t) == ""
+        # Empty template is the documented opt-out.
+        assert render_sdk_session_name("", title="x") == ""
+        # Whitespace collapses and the name is capped.
+        assert render_sdk_session_name(t, title="a\n  b") == "hermes:a b"
+        assert len(render_sdk_session_name(t, title="z" * 200)) == 60
+        # An unknown placeholder falls back instead of raising.
+        assert render_sdk_session_name("{nope}", title="k") == "hermes:k"
+
+    def test_session_name_passed_as_cli_name_arg(self):
+        session, _ = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:demo")
+        assert session.build_option_fields()["extra_args"]["name"] == "hermes:demo"
+
+    def test_session_name_absent_when_unnamed(self):
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        assert "extra_args" not in session.build_option_fields()
+
+    # --- permission_mode cost warning ---
+
+    def test_default_mode_warns_about_guardian_spawns(self, caplog):
+        # On this lane the guardian is a full CLI spawn per Bash call; say so once.
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], permission_mode="default")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            try:
+                session.run_turn("ping")
+            finally:
+                session.close()
+        assert any("permission_mode=default" in r.getMessage() and "permission_mode: auto" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_auto_mode_is_quiet(self, caplog):
+        session, holder = _make_session(script=[ResultMessage(result="ok")], permission_mode="auto")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            try:
+                session.run_turn("ping")
+            finally:
+                session.close()
+        assert holder["client"].options["permission_mode"] == "auto"
+        assert not any("guardian one-shot" in r.getMessage() for r in caplog.records)
+
+
+class TestInitSlashCommands:
+    """system/init ``slash_commands`` → ``session.slash_commands`` (the live half of
+    agent.claude_sdk_slash: plugin skills the CLI expands when a prompt is ``/<name>``)."""
+
+    def test_init_list_is_captured_and_cleaned(self):
+        session, _holder = _make_session(
+            script=[
+                SystemMessage(
+                    data={
+                        "apiKeySource": "none",
+                        "slash_commands": ["compact", " conductor:tb-ship ", "", 7, "code-review"],
+                    },
+                    session_id="sdk-1",
+                ),
+                ResultMessage(result="ok"),
+            ]
+        )
+        try:
+            assert session.slash_commands == []
+            turn = session.run_turn("hi")
+        finally:
+            session.close()
+        assert turn.error is None
+        assert session.slash_commands == ["compact", "conductor:tb-ship", "code-review"]
+
+    def test_init_without_the_field_leaves_the_list_empty(self):
+        session, _holder = _make_session(
+            script=[SystemMessage(data={"apiKeySource": "none"}), ResultMessage(result="ok")]
+        )
+        try:
+            session.run_turn("hi")
+        finally:
+            session.close()
+        assert session.slash_commands == []

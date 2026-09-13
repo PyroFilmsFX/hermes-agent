@@ -96,7 +96,12 @@ function ConfigSettingsInner({
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
-  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(scopeProfile)
+  const {
+    data: loadedConfig,
+    dataUpdatedAt: configUpdatedAt,
+    isError: configLoadFailed,
+    refetch: refetchConfig
+  } = useHermesConfigRecord(scopeProfile)
   // Writes land on the same cache key the query above reads (base key when
   // following the active profile, suffixed when a scope override is set).
   const writeConfigCache = useMemo(() => hermesConfigCacheWriter(scopeProfile), [scopeProfile])
@@ -129,6 +134,13 @@ function ConfigSettingsInner({
   // never touched — possibly changed out-of-band by `hermes config set`
   // while this page sat open — is never resent with its stale value.
   const configBaselineRef = useRef<HermesConfigRecord | null>(null)
+  // Wall-clock of the last profile switch. The re-seed below must wait for a
+  // fetch that COMPLETED after the switch: react-query keeps the previous data
+  // reference when a refetch returns structurally equal data, so a
+  // `[loadedConfig]`-only effect never re-fired after the switch reset the draft
+  // and the page sat on its skeleton forever (seen 2026-09-11: query success,
+  // data present, draft null). `dataUpdatedAt` advances on every fetch.
+  const profileSwitchedAtRef = useRef(0)
   // Serializes autosave requests so an older save that's still in flight can't
   // resolve after a newer one and re-advance the baseline / cache with stale
   // data — each save's diff+request only starts once the previous one lands.
@@ -136,19 +148,26 @@ function ConfigSettingsInner({
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (loadedConfig && !configSeeded.current) {
-      configSeeded.current = true
-      configBaselineRef.current = loadedConfig
-      savedDiscoverySignatureRef.current = repoDiscoveryPolicySignature(repoDiscoveryPolicyFromConfig(loadedConfig))
-      setConfig(loadedConfig)
+    if (!loadedConfig || configSeeded.current) {
+      return
     }
-  }, [loadedConfig])
+    // Undefined dataUpdatedAt (a mocked hook) counts as fresh.
+    const fetchedAfterSwitch = configUpdatedAt == null || configUpdatedAt >= profileSwitchedAtRef.current
+    if (!fetchedAfterSwitch) {
+      return
+    }
+    configSeeded.current = true
+    configBaselineRef.current = loadedConfig
+    savedDiscoverySignatureRef.current = repoDiscoveryPolicySignature(repoDiscoveryPolicyFromConfig(loadedConfig))
+    setConfig(loadedConfig)
+  }, [loadedConfig, configUpdatedAt])
 
   // A profile switch invalidates (but doesn't clear) the shared config query, so
   // the local draft would otherwise keep profile A's data and autosave it into
   // B. Drop the seed + draft (re-seeds from B's refetch) and zero saveVersion so
   // the pending debounced autosave is cancelled by its effect cleanup.
   useOnProfileSwitch(() => {
+    profileSwitchedAtRef.current = Date.now()
     configSeeded.current = false
     configBaselineRef.current = null
     savedDiscoverySignatureRef.current = undefined
@@ -156,6 +175,9 @@ function ConfigSettingsInner({
     saveVersionRef.current = 0
     setSaveVersion(0)
     saveQueueRef.current = Promise.resolve()
+    // Nothing else is guaranteed to refetch the base-key record after a switch
+    // (the key does not change), so ask for the new profile's data here.
+    void refetchConfig()
   })
 
   useEffect(() => {

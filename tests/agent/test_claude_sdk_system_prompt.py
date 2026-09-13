@@ -331,7 +331,18 @@ class TestSystemPromptAppend:
         )
         from agent.prompt_builder import MEMORY_GUIDANCE
 
+        import agent.claude_sdk_runtime_prompt as rp
+
         self._home(tmp_path, monkeypatch, memory="uses trunk-based development")
+        # Writer exposed (the claude-agent-sdk profile serves skill_manage): the sentence
+        # is callable guidance and must survive verbatim.
+        assert _strip_uncallable_tool_guidance(MEMORY_GUIDANCE) == MEMORY_GUIDANCE
+        out = build_system_prompt_append()
+        assert MEMORY_GUIDANCE in out
+
+        # Writer unexposed (a profile that drops skill_manage again): the
+        # instructing sentence goes, everything else is carried verbatim.
+        monkeypatch.setattr(rp, "_skill_writer_exposed", lambda: False)
         stripped = _strip_uncallable_tool_guidance(MEMORY_GUIDANCE)
         assert "skill_manage" not in stripped
         assert "Memory is the narrow exception" in stripped
@@ -352,12 +363,27 @@ class TestSystemPromptAppend:
         assert "disposable" in out
         assert "will not be injected" not in out
 
-    def test_skills_guidance_never_injected(self, tmp_path, monkeypatch):
-        # SKILLS_GUIDANCE instructs skill_manage — unexposed by design.
-        from agent.claude_sdk_runtime_prompt import build_system_prompt_append
+    def test_compact_skills_guidance_injected_when_writer_exposed(self, tmp_path, monkeypatch):
+        # The profile serves skill_manage, so skill guidance ships — but the
+        # COMPACT sentence, never the native SKILLS_GUIDANCE block: that block
+        # trips Anthropic's third-party-harness screen on the SDK entrypoint
+        # (400 "out of extra usage", measured 2026-09-01).
+        import agent.claude_sdk_runtime_prompt as rp
+        from agent.prompt_builder import SKILLS_GUIDANCE
 
         self._home(tmp_path, monkeypatch, memory="a fact")
-        out = build_system_prompt_append()
+        out = rp.build_system_prompt_append()
+        assert rp._SDK_SKILLS_GUIDANCE.strip() in out
+        assert "Skill Safety Rule" not in out
+        assert SKILLS_GUIDANCE not in out
+
+    def test_skills_guidance_never_injected_when_writer_unexposed(self, tmp_path, monkeypatch):
+        # A profile without skill_manage must not be told to call it.
+        import agent.claude_sdk_runtime_prompt as rp
+
+        monkeypatch.setattr(rp, "_skill_writer_exposed", lambda: False)
+        self._home(tmp_path, monkeypatch, memory="a fact")
+        out = rp.build_system_prompt_append()
         assert "skill_manage" not in out
 
     def test_session_search_guidance_always_present(self, tmp_path, monkeypatch):
@@ -622,10 +648,12 @@ class TestSystemPromptAppend:
         monkeypatch.setattr(pb, "build_skills_system_prompt", fake_index)
         out = build_system_prompt_append()
         assert "fixture-skill: proves the wiring" in out
-        assert "skill_manage" not in out
+        # The index's skill_manage sentence is callable guidance on this
+        # profile and must survive (it was stripped while unexposed).
+        assert "fix it with skill_manage(action='patch')" in out
         tools = captured.get("available_tools") or set()
         assert "memory" in tools and "session_search" in tools
-        assert {"read_file", "search_files"} <= tools
+        assert {"read_file", "search_files", "skill_manage"} <= tools
         assert not tools & {"terminal", "shell", "write_file", "patch", "process"}
         assert set(EXPOSED_TOOLS) <= tools
 

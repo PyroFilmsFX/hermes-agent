@@ -62,6 +62,7 @@ All keys live under `agent.claude_agent_sdk` in `config.yaml` (see `cli-config.y
 | `permission_mode` | `""` | An SDK permission mode literal (`default`, `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`, `auto`). Empty keeps the `HERMES_TERMINAL_SECURITY_MODE` mapping (`auto` maps to the fail-closed SDK `default` mode). |
 | `env` | `{}` | Extra environment for the spawned Claude CLI. Values are stringified; metered-billing vectors are rejected unless `allow_metered_key` is true. |
 | `setting_sources` | `[]` | Filesystem settings sources (`user`, `project`, `local`). Empty keeps the SDK isolated from ambient Claude settings and `CLAUDE.md`. |
+| `permission_mode` | `auto` | Which layer screens tool calls. `auto` = Claude Code's own classifier inside the CLI; Hermes' approval callback (and its guardian one-shot) runs only for calls the classifier will not approve. `default` = every tool call routes through Hermes' approval flow, and on this lane the guardian is a full Claude CLI spawn per Bash call. `hermes doctor` reports the effective mode and its cost. |
 | `max_budget_usd` | `null` | Per-query USD cap forwarded to the SDK; the turn ends with `error_max_budget_usd` when exceeded. `null` = no budget. |
 | `max_buffer_size` | `null` | Maximum size of one CLI NDJSON message. `null` uses Hermes' 10 MiB limit rather than the SDK's 1 MiB default, which can terminate a turn on a large tool result. Positive integer overrides are accepted; invalid values warn and fall back. The pinned SDK currently measures Unicode code points despite documenting bytes. |
 | `turn_timeout` | `null` | Activity-aware soft turn budget in seconds. `null` uses 600; active tools, approvals, and stream output suspend the idle verdict. |
@@ -78,6 +79,20 @@ Headless runs (`hermes chat -q`, cron) have no approver to answer that round-tri
 
 Ambient Claude settings are isolated: the runtime pins the SDK's `setting_sources` to the empty list, so `~/.claude/settings.json` and project `.claude/settings*.json` cannot re-permission tools or add hooks underneath the configured posture. (This also means `CLAUDE.md` files are not loaded — this runtime composes its own system-prompt append from Hermes' memory, skills index, and your `append_file`.)
 
+The SDK spawns the Claude Code CLI bundled inside the `claude-agent-sdk` package, not the `claude` on your PATH. That bundle lags CLI releases, so a just-shipped model id can fail with `Claude Code X does not support this model` while `claude update` on the same machine already has it. Pin the runtime to your own launcher with `agent.claude_agent_sdk.cli_path` (for example `~/.local/bin/claude`); it then tracks `claude update`. A path that is not an executable file is ignored with a warning and the bundled CLI is used.
+
+Hermes names the spawned session so other Claude sessions on the machine can find and message it with the CLI's own `ListAgents` / `SendMessage` tools. Without a name the CLI derives one from the working directory, so every Hermes session on a box collides. The template is `agent.claude_agent_sdk.session_name` (default `hermes:{title}`); placeholders are `{title}`, `{session}`, `{profile}`, `{model}`, and it falls back title -> short session id -> profile. Set it to `""` to restore the CLI's own naming.
+
+To bring a specific Claude Code plugin into Hermes turns without opening the whole `~/.claude` (which `setting_sources: ["user"]` would do — every enabled plugin, every session-tracker hook, every MCP server, the permission allowlist), list its root under `agent.claude_agent_sdk.plugins`. Each entry is loaded through the SDK's `--plugin-dir`, so that plugin's skills, agents, hooks and MCP servers are available while isolation stays on. Entries without a `.claude-plugin/plugin.json` are ignored with a warning.
+
+```yaml
+agent:
+  claude_agent_sdk:
+    setting_sources: []
+    plugins:
+      - ~/.claude/plugins/marketplaces/thinkbot-plugin/plugins/conductor
+```
+
 ## What Hermes still provides
 
 - **hermes-tools MCP server** — a curated stdio surface: memory and `session_search` shims; browser/web/media/skills/TTS tools; and bounded `read_file` / `search_files` inspection. It does not expose shell, file mutation, process control, or generic Git tools. When `hybrid_mcp_bridge: true`, the standard surface becomes an in-process MCP server under the same name (`mcp__hermes-tools__*`) — operator grants stored in `~/.claude/settings.json` keep matching without a migration step. Extra bridge-only third-party MCP and agent-level tools are exposed separately as `mcp__hermes-hybrid__*`.
@@ -87,6 +102,6 @@ Ambient Claude settings are isolated: the runtime pins the SDK's `setting_source
 ## Limitations
 
 - Auxiliary text tasks (title generation, compression, extraction) auto-route through one-shot Agent SDK queries on the same subscription. Built-in and MCP tools are disabled for those calls. If that SDK route is unavailable, aux fails closed instead of selecting a metered fallback; an explicitly configured auxiliary provider remains an operator opt-in.
-- The background memory/skill review pass is skipped on this runtime (the review fork cannot write through the SDK's tool surface).
+- The background memory/skill review pass runs only when `auxiliary.background_review` routes it to a concrete non-SDK provider+model (there the fork is an ordinary Hermes agent with the full toolset). Unrouted, it is skipped — with a warning, once per process. The foreground session can also save skills itself: the hermes-tools profile for this runtime serves `skill_manage` (bounded to `$HERMES_HOME/skills`, gated by `write_approval` like every other origin).
 - Model names are Claude model ids (e.g. `claude-opus-4-8`); leave unset to use the CLI's default model.
 - With `model.provider: claude-agent-sdk` pinned in `config.yaml`, a bare `-m <claude-model-id>` stays on this provider — the pin survives model→provider inference, and short aliases (`-m sonnet`) resolve within it. Without a pinned provider, Claude model ids route to the native `anthropic` (metered API) provider as usual. Known residual: dot-form ids absent from the curated catalog (e.g. `claude-opus-4.8`) still leave the pin — use the dash-form ids.

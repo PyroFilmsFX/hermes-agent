@@ -22,7 +22,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from agent.redact import redact_sensitive_text
-from agent.claude_sdk_runtime_continuity import _persist_turn
+from agent.claude_sdk_runtime_continuity import (
+    _persist_turn,
+    rename_claude_sdk_session,
+    rotate_claude_sdk_session,
+)
 from agent.claude_sdk_runtime_fallback import (
     _consume_agent_interrupt,
     _reconcile_turn_outcome,
@@ -35,6 +39,9 @@ from agent.claude_sdk_runtime_state import _SdkTurnState
 from agent.claude_sdk_runtime_usage import _account_turn
 
 logger = logging.getLogger(__name__)
+
+# One-shot guard for the unrouted-review warning (see the review gate).
+_UNROUTED_REVIEW_WARNED = False
 
 
 def run_claude_agent_sdk_turn(
@@ -238,10 +245,16 @@ def _maybe_spawn_background_review(
             except Exception:
                 logger.debug("background review spawn raised", exc_info=True)
         else:
-            logger.debug(
+            # Loud once per process: an unrouted review means memory/skill
+            # auto-capture is silently dead on this runtime, which looked
+            # like "the skill auto system is broken" for weeks.
+            global _UNROUTED_REVIEW_WARNED
+            _log = logger.debug if _UNROUTED_REVIEW_WARNED else logger.warning
+            _UNROUTED_REVIEW_WARNED = True
+            _log(
                 "claude-sdk runtime: background review skipped "
-                "(memory=%s, skills=%s) — the review fork cannot write on "
-                "this runtime",
+                "(memory=%s, skills=%s) — route auxiliary.background_review "
+                "to a concrete non-SDK provider+model to enable it",
                 should_review_memory,
                 state.should_review_skills,
             )
@@ -283,4 +296,4 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
     return result
 
 
-__all__ = ["run_claude_agent_sdk_turn"]
+__all__ = ["run_claude_agent_sdk_turn", "rename_claude_sdk_session", "rotate_claude_sdk_session"]

@@ -26,6 +26,8 @@ from tests.agent.claude_sdk_fakes import (
     ResultMessage,
     _FakeClient,
     _make_session,
+    _make_hold_open_session,
+    _wait_for_client,
     _make_turn,
     _make_agent,
     isolate_provider_config,
@@ -1215,3 +1217,212 @@ class TestDeadStreamRetires:
             session.close()
         assert turn.error == "SDK turn ended: error_max_turns"
         assert turn.should_retire is False
+
+
+class TestSessionRename:
+    def test_rename_issues_slash_rename_and_swallows_the_ack(self):
+        # A Hermes title change must reach peers NOW: /rename is a local CLI command
+        # (proven 2026-09-09) whose ack is a CLI-initiated turn — it must never be
+        # delivered as a background result. The client persists between turns, so
+        # the hold-open fake is the honest stand-in.
+        delivered = []
+        session, holder = _make_hold_open_session(
+            script=[], session_name="hermes:old",
+            on_unsolicited_result=lambda texts: delivered.append(list(texts)),
+        )
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.05)
+            client.feed(AssistantMessage(content=[TextBlock("ok")]), ResultMessage(result="ok", uuid="u-1"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("ping", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            thread.join(timeout=5)
+            client = holder["client"]
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while "/rename hermes:new" not in client.queried and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert "/rename hermes:new" in client.queried
+            assert session._session_name == "hermes:new"
+            assert session.build_option_fields()["extra_args"]["name"] == "hermes:new"
+            # The CLI answers the rename on its own; that text is NOT a peer message.
+            client.feed(
+                AssistantMessage(content=[TextBlock("Session renamed to: hermes:new")]),
+                ResultMessage(result="Session renamed to: hermes:new", uuid="uuid-rename"),
+            )
+            time.sleep(0.3)
+            assert delivered == []
+            # A real unsolicited result afterwards still flows.
+            client.feed(
+                AssistantMessage(content=[TextBlock("PEER-OK")]),
+                ResultMessage(result="PEER-OK", uuid="uuid-peer"),
+            )
+            deadline = time.monotonic() + 3
+            while not delivered and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert delivered == [["PEER-OK"]]
+        finally:
+            session.close()
+
+    def test_rename_before_start_applies_on_first_build(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:old")
+        try:
+            assert session.rename("hermes:renamed early") is True  # no client yet: applied at build
+            session.run_turn("ping")
+            assert holder["client"].options["extra_args"]["name"] == "hermes:renamed early"
+            assert holder["client"].queried == ["ping"]  # no /rename needed — the name was baked in
+        finally:
+            session.close()
+
+    def test_rename_noop_and_invalid(self):
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:same")
+        assert session.rename("hermes:same") is True
+        assert session.rename("   ") is False
+        session.close()
+
+    def test_rename_refused_while_a_turn_is_in_flight(self):
+        session, holder = _make_hold_open_session(script=[])
+        stop = threading.Event()
+        seen = {}
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.1)
+            seen["mid_turn"] = session.rename("hermes:mid")
+            client.feed(AssistantMessage(content=[TextBlock("done")]), ResultMessage(result="done", uuid="u-d"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("big task", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+            session.close()
+        assert seen["mid_turn"] is False
+        assert "/rename hermes:mid" not in holder["client"].queried
+
+
+class TestSdkToolCards:
+    """SDK ToolUse/ToolResult blocks must open and close stable-id tool cards.
+
+    The gateway drops ``tool_progress_callback("tool.started", name, …)`` whenever a
+    name is present (tui_gateway.tool_progress._on_tool_progress), so the progress
+    breadcrumb alone put NOTHING on the desktop for this lane: a 9-minute turn ran
+    33 tool calls with zero ``tool.start`` events in the replay ring (2026-09-11).
+    """
+
+    def _capturing_session(self, monkeypatch):
+        import agent.transports.claude_agent_sdk_session as session_mod
+
+        captured = {}
+
+        class _CapturingSession:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run_turn(self, user_input):
+                return _make_turn(projected_messages=[], final_text="ok")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_mod, "ClaudeAgentSdkSession", _CapturingSession)
+        return captured
+
+    def test_runtime_wires_card_hooks_to_native_callbacks(self, monkeypatch):
+        captured = self._capturing_session(monkeypatch)
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        starts, completes = [], []
+        agent.tool_start_callback = lambda *a: starts.append(a)
+        agent.tool_complete_callback = lambda *a: completes.append(a)
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        captured["on_tool_use"]("toolu_1", "Bash", {"command": "ls"})
+        captured["on_tool_result"]("toolu_1", "Bash", {"command": "ls"}, "a.txt")
+        assert starts == [("toolu_1", "Bash", {"command": "ls"})]
+        assert completes == [("toolu_1", "Bash", {"command": "ls"}, "a.txt")]
+
+    def test_runtime_card_hooks_survive_missing_or_raising_callbacks(self, monkeypatch):
+        captured = self._capturing_session(monkeypatch)
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        agent.tool_start_callback = None
+        agent.tool_complete_callback = lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        captured["on_tool_use"]("toolu_1", "Bash", {})
+        captured["on_tool_result"]("toolu_1", "Bash", {}, "x")  # must not raise
+
+    def test_transport_bridges_tool_use_and_result_blocks(self):
+        from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+        ToolUseBlock = type("ToolUseBlock", (), {})
+        ToolResultBlock = type("ToolResultBlock", (), {})
+        AssistantMessage = type("AssistantMessage", (), {})
+        UserMessage = type("UserMessage", (), {})
+
+        def _blk(cls, **kw):
+            o = cls()
+            for k, v in kw.items():
+                setattr(o, k, v)
+            return o
+
+        sess = ClaudeAgentSdkSession.__new__(ClaudeAgentSdkSession)
+        uses, results = [], []
+        sess._on_tool_use = lambda *a: uses.append(a)
+        sess._on_tool_result = lambda *a: results.append(a)
+        sess._open_tool_cards = {}
+
+        assistant = _blk(
+            AssistantMessage,
+            parent_tool_use_id=None,
+            content=[
+                _blk(ToolUseBlock, id="toolu_1", name="Bash", input={"command": "ls"}),
+                _blk(ToolUseBlock, id="toolu_2", name="Read", input={"file_path": "/x"}),
+            ],
+        )
+        sess._notify_tool_use(assistant)
+        assert uses == [
+            ("toolu_1", "Bash", {"command": "ls"}),
+            ("toolu_2", "Read", {"file_path": "/x"}),
+        ]
+
+        # Subagent stream (parent_tool_use_id set) stays quiet.
+        sess._notify_tool_use(
+            _blk(AssistantMessage, parent_tool_use_id="toolu_9",
+                 content=[_blk(ToolUseBlock, id="toolu_3", name="Bash", input={})])
+        )
+        assert len(uses) == 2
+
+        user = _blk(
+            UserMessage,
+            parent_tool_use_id=None,
+            content=[
+                _blk(ToolResultBlock, tool_use_id="toolu_1", content="a.txt", is_error=False),
+                _blk(ToolResultBlock, tool_use_id="toolu_2",
+                     content=[{"type": "text", "text": "bad"}], is_error=True),
+                _blk(ToolResultBlock, tool_use_id="toolu_unknown", content="?", is_error=False),
+            ],
+        )
+        sess._notify_tool_results(user)
+        assert results == [
+            ("toolu_1", "Bash", {"command": "ls"}, "a.txt"),
+            ("toolu_2", "Read", {"file_path": "/x"}, "Error: bad"),
+        ]
+        assert sess._open_tool_cards == {}

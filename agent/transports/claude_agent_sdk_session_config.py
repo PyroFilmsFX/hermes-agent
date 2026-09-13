@@ -86,7 +86,8 @@ def _sdk_env_overrides(
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
-    Metered-vector scrub first (see _METERED_ENV_DENYLIST).
+    Metered-vector scrub first (see _METERED_ENV_DENYLIST), then the
+    interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST).
     agent.claude_agent_sdk.allow_metered_key: true is the operator's explicit
     "bill me metered" opt-in (the same flag the startup guard honors), so it
     disables the scrub too — otherwise the documented escape hatch would hand
@@ -101,6 +102,10 @@ def _sdk_env_overrides(
     if metered_allowed is None:
         metered_allowed = _provider_flag("allow_metered_key")
     overrides: dict[str, str] = {} if metered_allowed else _scrubbed_sdk_env()
+    # Interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST). Applied
+    # before the operator env so a deliberate ``env: {PYTHONPATH: ...}`` in
+    # config.yaml still wins — that is a knob, not a billing vector.
+    overrides.update(_scrubbed_interpreter_env())
     for key, value in _configured_sdk_env().items():
         if not metered_allowed and _is_metered_sdk_env_value(key, value):
             logger.warning(
@@ -242,6 +247,127 @@ def _configured_max_buffer_size() -> int:
         )
         return _DEFAULT_MAX_BUFFER_SIZE
     return value
+
+
+def _configured_cli_path() -> str:
+    """agent.claude_agent_sdk.cli_path from config.yaml, validated.
+
+    The SDK prefers its own bundled Claude Code binary over the ``claude`` on
+    PATH, and that bundle lags the CLI releases by weeks — long enough that a
+    freshly shipped model id is rejected with "Claude Code X does not support
+    this model" while ``claude update`` on the same machine already has it.
+    Pointing at the operator's launcher (``~/.local/bin/claude``) keeps the
+    runtime current with that update instead of with the SDK release cadence.
+    Empty/absent keeps the SDK default. A path that is not an executable file
+    is dropped with a warning: a typo must never silently run a different
+    binary than the one the operator asked for."""
+    raw = _provider_config().get("cli_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    path = os.path.expanduser(raw.strip())
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        logger.warning(
+            "agent.claude_agent_sdk.cli_path %r is not an executable file — "
+            "ignoring it (the SDK's bundled Claude Code CLI will be used).",
+            raw,
+        )
+        return ""
+    return path
+
+
+def _configured_plugins() -> list:
+    """agent.claude_agent_sdk.plugins from config.yaml, validated.
+
+    Explicit Claude Code plugin directories to load into the spawned CLI
+    (``--plugin-dir``), each ``{"type": "local", "path": ...}`` for the SDK.
+    This is the isolation-preserving way to bring ONE plugin (its skills,
+    agents, hooks and MCP servers) into Hermes turns: ``setting_sources``
+    stays ``[]`` so the operator's whole ``~/.claude`` — every enabled plugin,
+    every session-tracker hook, every MCP server, the permission allowlist —
+    does not ride along underneath the configured posture. Entries that are
+    not a plugin root (no ``.claude-plugin/plugin.json``) are dropped with a
+    warning: a typo must never silently load nothing while looking configured."""
+    raw = _provider_config().get("plugins")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    plugins: list = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            logger.warning(
+                "agent.claude_agent_sdk.plugins entry %r is not a path — dropping it.",
+                entry,
+            )
+            continue
+        path = os.path.expanduser(entry.strip())
+        if not os.path.isfile(os.path.join(path, ".claude-plugin", "plugin.json")):
+            logger.warning(
+                "agent.claude_agent_sdk.plugins entry %r is not a Claude Code plugin "
+                "root (no .claude-plugin/plugin.json) — dropping it.",
+                entry,
+            )
+            continue
+        if all(existing["path"] != path for existing in plugins):
+            plugins.append({"type": "local", "path": path})
+    return plugins
+
+
+_DEFAULT_SESSION_NAME_TEMPLATE = "hermes:{title}"
+# Keep well under what Claude Code shows so ListAgents rows stay readable.
+_SESSION_NAME_MAX = 60
+
+
+def _configured_session_name_template() -> str:
+    """agent.claude_agent_sdk.session_name — the ``--name`` template for the
+    spawned Claude Code session.
+
+    Without it the CLI derives a name from its cwd, so every Hermes session on
+    a machine looks like ``justin-7`` and none can be addressed by a peer.
+    Naming them makes a Hermes session a first-class target for the
+    ListAgents/SendMessage pair the CLI already ships — what a host-side
+    session router can build on. Placeholders: ``{title}`` (Hermes session title),
+    ``{session}`` (short session id), ``{profile}``, ``{model}``. Set to ""
+    to restore the CLI's own cwd-derived naming."""
+    raw = _provider_config().get("session_name")
+    if raw is None:
+        return _DEFAULT_SESSION_NAME_TEMPLATE
+    if not isinstance(raw, str):
+        logger.warning(
+            "agent.claude_agent_sdk.session_name %r is not a string — using the default template.",
+            raw,
+        )
+        return _DEFAULT_SESSION_NAME_TEMPLATE
+    return raw
+
+
+def render_sdk_session_name(
+    template: str, *, title: str = "", session: str = "", profile: str = "", model: str = ""
+) -> str:
+    """Fill a session-name template, falling back title -> session -> profile.
+
+    An empty template means "let the CLI name it", and so does a template whose
+    placeholders all resolve empty: a bare ``hermes:`` row carries no identity
+    and would be worse than the CLI's own name."""
+    if not template.strip():
+        return ""
+    values = {
+        "title": (title or "").strip(),
+        "session": (session or "").strip()[-6:],
+        "profile": (profile or "").strip(),
+        "model": (model or "").strip(),
+    }
+    if not values["title"]:
+        values["title"] = values["session"] or values["profile"]
+    if not any(values.values()):
+        return ""
+    try:
+        name = template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        logger.warning(
+            "agent.claude_agent_sdk.session_name %r has an unknown placeholder — using the default.",
+            template,
+        )
+        name = _DEFAULT_SESSION_NAME_TEMPLATE.format(**values)
+    return " ".join(name.split())[:_SESSION_NAME_MAX]
 
 
 def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float]:
@@ -558,6 +684,34 @@ def _scrubbed_sdk_env() -> dict[str, str]:
         key: ""
         for key in _METERED_ENV_DENYLIST
         if _is_metered_sdk_env_value(key, os.environ.get(key, ""))
+    }
+
+
+# Interpreter-path vectors that must not reach the spawned CLI. The desktop
+# backend runs with PYTHONPATH=<repo>:<venv>/lib/python3.11/site-packages
+# (apps/desktop/electron/main.ts adds the venv path so a system python can
+# import hermes_cli). The SDK transport merges os.environ into the CLI child,
+# and the CLI hands its env to every plugin MCP server and hook it spawns — so
+# a plugin's own `uv run --python >=3.12` interpreter imported 3.11-built C
+# extensions (pydantic_core) from Hermes' site-packages and died on the ABI
+# mismatch: conductor's tb-workers "Connection closed", cached by Claude Code
+# for 15 min per process (~/.claude/mcp-needs-auth-cache.json). Nothing under
+# the CLI needs Hermes' import path: the hermes-tools MCP runs on
+# sys.executable, where Hermes is editable-installed. Proven 2026-09-11: the
+# same command with PYTHONPATH unset connected in 1.4s. Same class of fix as
+# tools/browser_use_cli.py::_base_subprocess_env.
+_CHILD_INTERPRETER_ENV_DENYLIST = ("PYTHONPATH", "PYTHONHOME")
+
+
+def _scrubbed_interpreter_env() -> dict[str, str]:
+    """Empty-string overrides for PYTHONPATH/PYTHONHOME when the parent has them
+    set. Only PRESENT keys are overridden; "" is how the SDK's ``{**os.environ,
+    **options.env}`` merge can unset a key, and CPython treats an empty
+    PYTHONPATH exactly like an absent one (verified: no path entries added)."""
+    return {
+        key: ""
+        for key in _CHILD_INTERPRETER_ENV_DENYLIST
+        if os.environ.get(key)
     }
 
 

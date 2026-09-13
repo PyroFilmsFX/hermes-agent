@@ -294,6 +294,28 @@ DEFAULT_CONFIG = {
             # turns with nobody to answer a prompt) opt back in, e.g. ["user"]. Invalid entries are
             # dropped with a warning.
             "setting_sources": [],
+            # Claude Code binary the SDK should spawn. "" (the default) uses
+            # the CLI bundled inside claude-agent-sdk, which lags the CLI
+            # releases — a just-shipped model id can be rejected with
+            # "Claude Code X does not support this model" while `claude
+            # update` already has it. Point at the operator's launcher, e.g.
+            # "~/.local/bin/claude", to track that update instead. A path
+            # that is not an executable file is ignored with a warning.
+            "cli_path": "",
+            # --name for the spawned Claude Code session, so peers can find
+            # and message it (ListAgents/SendMessage). Without it the CLI
+            # names sessions from cwd and every Hermes session collides.
+            # Placeholders: {title} {session} {profile} {model}.
+            # "" restores the CLI's own cwd-derived naming.
+            "session_name": "hermes:{title}",
+            # Claude Code plugin roots to load explicitly (--plugin-dir), e.g.
+            # ["~/.claude/plugins/marketplaces/<marketplace>/plugins/<name>"].
+            # Brings that plugin's skills, agents, hooks and MCP servers into
+            # Hermes turns while setting_sources stays [] — so the rest of
+            # ~/.claude (other plugins, session-tracker hooks, MCP servers,
+            # permission allowlists) does NOT ride along. Entries without a
+            # .claude-plugin/plugin.json are ignored with a warning.
+            "plugins": [],
             # Soft turn budget in seconds; null = the built-in 600. Activity-aware: fires only when
             # no tool call is outstanding, no approval prompt awaits a human, AND the SDK stream has
             # been quiet >= min(30s, budget) — a turn producing output or running tools is never

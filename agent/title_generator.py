@@ -139,6 +139,31 @@ def _strip_one_wrapper(text: str) -> str:
     return text
 
 
+# Attachment preambles the desktop/CLI prepend to a user message (tui_gateway/session_history.py
+# _build_image_ref_message; hermes_cli/cli_stream_mixin.py; agent/vision_message_prep.py). They are
+# machine scaffolding, not what the user typed — titling them named live sessions
+# "[The user attached an image: Screenshot…" (seen 2026-09-09).
+_ATTACHMENT_PREAMBLE_RE = re.compile(
+    r"\[The (?:user|assistant) attached an image[^\]]*\]"      # "[The user attached an image: x.png]" / "…but it couldn't…"
+    r"|\[Examine it with the vision_analyze tool[^\]]*\]"          # the desktop's follow-up instruction line
+    r"|\[The (?:user|assistant) attached an image\. Here's what it contains:.*?\]",  # vision-prep block
+    re.DOTALL,
+)
+_ATTACHMENT_NAME_RE = re.compile(r"\[The user attached an image: ([^\]]+)\]")
+
+
+def _strip_attachment_preamble(text: str) -> str:
+    """Drop attachment scaffolding so the title comes from the user's words. An image-only
+    message keeps a small honest title ("Image: photo.png") rather than the raw marker."""
+    if not text or "attached an image" not in text:
+        return text
+    names = _ATTACHMENT_NAME_RE.findall(text)
+    stripped = _ATTACHMENT_PREAMBLE_RE.sub("", text).strip()
+    if stripped:
+        return stripped
+    return f"Image: {names[0].strip()}" if names else ""
+
+
 def _summarize_user_message(user_message: str) -> str:
     """Text worth titling: describe a ``/skill`` invocation (it embeds the whole skill body), then strip wrappers."""
     if not user_message:
@@ -149,7 +174,7 @@ def _summarize_user_message(user_message: str) -> str:
         described = describe_skill_invocation(user_message)
     except Exception:
         logger.debug("Skill-scaffolding summary failed; titling raw", exc_info=True)
-    return strip_control_wrappers(user_message if described is None else described)
+    return _strip_attachment_preamble(strip_control_wrappers(user_message if described is None else described))
 
 
 def is_titleable_user_message(user_message: str) -> bool:
@@ -184,6 +209,14 @@ def _extract_title_text(content: str) -> str:
     fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.DOTALL)
     if fenced:
         raw = fenced.group(1).strip()
+    else:
+        # UNTERMINATED fence: a response cut off before its closing ``` never
+        # matched above, so the prose fallback below used to take the literal
+        # opening fence as the title — real sessions on this branch are named
+        # "```json". Strip a lone opening fence line and keep parsing.
+        unterminated = re.match(r"^```(?:json|JSON)?[ \t]*\n(.*)$", raw, re.DOTALL)
+        if unterminated:
+            raw = unterminated.group(1).strip().rstrip("`").strip()
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
@@ -201,7 +234,34 @@ def _extract_title_text(content: str) -> str:
         raw = strip_think_blocks(None, raw).strip()
     except Exception:
         logger.debug("strip_think_blocks unavailable for title output", exc_info=True)
-    return _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
+    candidate = _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
+    # A truncated JSON reply ("{\"title") reaches here with every parse having
+    # failed, and the first line IS the scaffolding. Storing it names the
+    # session "{\"title" — observed on real rows. Returning "" makes the
+    # caller keep the derived title and retry on the next exchange, which is
+    # what a failed extraction should do.
+    if _is_scaffolding(candidate):
+        logger.debug("Discarding scaffolding-shaped title output: %r", candidate[:40])
+        return ""
+    return candidate
+
+
+_SCAFFOLDING_PREFIXES = ("```", "{", "[", "</", "<think")
+
+
+def _is_scaffolding(candidate: str) -> bool:
+    """True when a fallback candidate is JSON/markdown machinery, not a title.
+
+    Only ever applied to the last-resort prose branch: a real title that
+    merely CONTAINS a brace is untouched, and a quoted title has already had
+    its quotes stripped by the caller."""
+    text = (candidate or "").strip()
+    if not text:
+        return True
+    if text.startswith(_SCAFFOLDING_PREFIXES):
+        return True
+    # A bare JSON key with no value survived a truncated reply.
+    return bool(re.fullmatch(r'"?title"?\s*:?', text, re.IGNORECASE))
 
 
 def _clean_title(text: str) -> Optional[str]:

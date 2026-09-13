@@ -100,7 +100,9 @@ _MCP_INSPECTION_PREFERENCE = (
     "They enforce Hermes protected-path rules. Use Bash only when the task "
     "genuinely requires a shell-only capability (for example a database "
     "client, process/service state, network operation, or an unavailable "
-    "tool); Bash remains subject to normal approval."
+    "tool); Bash remains subject to normal approval. When listing or messaging "
+    "peer sessions, Hermes sessions are the rows whose name starts with "
+    "`hermes:`; prefer those and treat other rows as unrelated unless asked."
 )
 
 
@@ -113,8 +115,37 @@ _SEARCH_QUERY_ADDENDUM = (
 )
 
 
+# Skill guidance for the SDK append. NOT the native SKILLS_GUIDANCE block:
+# Anthropic's API screens Agent-SDK requests (CLAUDE_CODE_ENTRYPOINT=sdk-py)
+# for appended system prompts that read like a third-party harness and
+# rejects them with a misleading ``400 You're out of extra usage`` (the
+# interactive CLI passes the identical prompt). Measured 2026-09-01: the
+# native block on top of the rest of this append tipped every request over;
+# this one sentence passes. Keep additions to this append small and re-probe
+# (send "say ok" through ClaudeSDKClient with setting_sources=[] and the
+# built append) before shipping more tool prose.
+_SDK_SKILLS_GUIDANCE = (
+    "If you discover a reusable procedure or fix a tricky problem, save it "
+    "as a skill with skill_manage; patch a skill that turns out wrong.\n"
+)
+
+
+def _skill_writer_exposed() -> bool:
+    """True when the hermes-tools MCP profile for this runtime serves
+    ``skill_manage`` — guidance naming it ships only then (checklist #3:
+    guidance only for callable tools)."""
+    try:
+        from agent.transports.hermes_tool_exposure import exposed_tools_for_profile
+
+        return "skill_manage" in exposed_tools_for_profile("claude-agent-sdk")
+    except Exception:  # pragma: no cover
+        return False
+
+
 def _strip_uncallable_tool_guidance(text: str) -> str:
-    """Drop every sentence that instructs ``skill_manage``; the runtime cannot call it."""
+    """Drop every sentence that instructs ``skill_manage`` when the runtime cannot call it."""
+    if _skill_writer_exposed():
+        return text
     return _UNCALLABLE_TOOL_SENTENCE_RE.sub(r"\g<lead>", text)
 
 
@@ -392,6 +423,12 @@ def build_system_prompt_append(
     # SDK-specific capability preference follows general memory/search guidance
     # and stays small enough that it cannot crowd out the skills index.
     blocks.append(("SDK inspection guidance", _MCP_INSPECTION_PREFERENCE))
+
+    # Skill-writer guidance rides along only when the MCP profile actually
+    # serves skill_manage; otherwise the model would be told to call a tool
+    # it cannot see. COMPACT form on purpose — see _SDK_SKILLS_GUIDANCE.
+    if _skill_writer_exposed():
+        blocks.append(("skills guidance", _SDK_SKILLS_GUIDANCE))
 
     # Skills index for the read-side tools, filtered to the honest
     # MCP-exposed surface. `memory` joins only when the shim is actually

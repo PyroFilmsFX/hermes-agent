@@ -67,7 +67,15 @@ class TestClaudeAgentSdkDefaults:
         assert block["hybrid_mcp_bridge_exclude"] == []
         # Every default in the block must be falsy — a new key that defaults
         # truthy is a behavior change and needs its own explicit pin here.
+        # One deliberate truthy default, pinned to its exact value so a rebase cannot
+        # drift it silently: session_name makes every Hermes session addressable by
+        # peers (ListAgents/SendMessage) instead of colliding on the CLI's cwd name.
+        fork_truthy = {"session_name": "hermes:{title}"}
+        for key, expected in fork_truthy.items():
+            assert block[key] == expected, f"fork default for {key!r} drifted"
         for key, value in block.items():
+            if key in fork_truthy:
+                continue
             assert not value, f"default for {key!r} must be conservative/falsy"
 
     def test_bypass_permissions_contract_documents_audited_emulation(self):

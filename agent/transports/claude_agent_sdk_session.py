@@ -53,6 +53,10 @@ from agent.transports.claude_agent_sdk_session_input import (
 from agent.transports.claude_agent_sdk_session_config import (
     _HERMES_TO_SDK_PERMISSION_MODE,
     _build_hermes_tools_mcp_config,
+    _configured_cli_path,
+    _configured_plugins,
+    _configured_session_name_template,
+    render_sdk_session_name,
     _configured_hybrid_exclude,
     _configured_max_buffer_size,
     _configured_permission_mode,
@@ -119,10 +123,13 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         approval_callback: Optional[Callable[..., str]] = None,
         approval_bypass_provider: Optional[Callable[[], bool]] = None,
         on_tool_started: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_use: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_result: Optional[Callable[[str, str, dict, str], None]] = None,
         max_budget_usd: Optional[float] = None,
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
+        session_name: str = "",
         resume_session_id: Optional[str] = None,
         on_stream_delta: Optional[Callable[[str], None]] = None,
         on_interim_assistant: Optional[Callable[[str], None]] = None,
@@ -165,6 +172,15 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._approval_callback = approval_callback
         self._approval_bypass_provider = approval_bypass_provider
         self._on_tool_started = on_tool_started
+        # Stable-id tool CARD hooks (desktop/TUI tool rows), the codex-runtime
+        # pattern: ``on_tool_use(tool_use_id, name, args)`` when a ToolUseBlock
+        # issues, ``on_tool_result(tool_use_id, name, args, result)`` when its
+        # ToolResultBlock echoes back. ``on_tool_started`` is only the progress
+        # breadcrumb, which the gateway drops when a name is present — so
+        # without these the desktop showed NO tool activity on this lane.
+        self._on_tool_use = on_tool_use
+        self._on_tool_result = on_tool_result
+        self._open_tool_cards: dict[str, tuple[str, dict]] = {}
         self._on_compaction = on_compaction
         self._on_compact_boundary = on_compact_boundary
         self._max_budget_usd = max_budget_usd
@@ -173,6 +189,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Hermes-side session id, exported to the hermes-tools MCP subprocess
         # so the stateless session_search shim can exclude its own lineage.
         self._hermes_session_id = hermes_session_id
+        # Peer-addressable name for the spawned CLI session (see
+        # _configured_session_name_template). "" keeps the CLI's own naming.
+        self._session_name = (session_name or "").strip()
+        # Name of an in-flight /rename whose ack must be swallowed (never delivered as a
+        # background result). Cleared when the ack arrives.
+        self._pending_rename_ack: Optional[str] = None
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -240,6 +262,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # because config.yaml changed while a long-lived SDK session was live.
         self._allow_metered = _provider_flag("allow_metered_key")
         self._billing_evidence: dict[str, Any] = {}
+        # ``slash_commands`` from the CLI's system/init message: built-ins,
+        # bundled skills and every user-invocable plugin skill (``plugin:name``)
+        # the spawned CLI will expand when a prompt is ``/<name> [args]``. The
+        # live half of agent.claude_sdk_slash — Hermes' slash dispatchers use it
+        # to forward plugin skills instead of printing "Unknown command".
+        self.slash_commands: list[str] = []
         self._billing_guard_error: Optional[str] = None
 
     # ---------- lifecycle ----------
@@ -292,7 +320,50 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             self._permission_mode,
             self._cwd,
         )
+        if self._permission_mode == "default":
+            # Say the cost out loud once per session: on this lane the guardian is an SDK
+            # one-shot (a full CLI spawn) per Bash call that reaches the callback.
+            logger.warning(
+                "claude-agent-sdk permission_mode=default: every Bash call that reaches the "
+                "approval callback spawns a guardian one-shot (a Claude CLI process). Set "
+                "agent.claude_agent_sdk.permission_mode: auto to let the CLI's classifier "
+                "screen first; Hermes then screens only what it will not approve."
+            )
         return self._session_id or "pending"
+
+    def rename(self, name: str) -> bool:
+        """Rename the spawned CLI session so peers see the new name NOW.
+
+        ``--name`` is fixed at process start, so a Hermes title change would otherwise show
+        to ListAgents peers only after the next CLI rebuild. Claude Code's ``/rename`` is a
+        local slash command (no model call) that updates the peer registry instantly —
+        proven 2026-09-09: query("/rename X") answered "Session renamed to: X" in <0.1s and
+        the peer list showed X. Returns True when the rename was applied or will apply on the
+        next build (no client yet); False when a turn is in flight — the caller then defers
+        (rotate at the next turn boundary). The ack is a CLI-initiated turn and would be
+        delivered as a background result; it is swallowed by text match."""
+        cleaned = " ".join((name or "").split())
+        if not cleaned:
+            return False
+        if cleaned == self._session_name:
+            return True
+        if self._turn_inbox is not None:
+            return False  # a turn owns the stream; /rename now would interleave with it
+        client, loop = self._client, self._loop
+        if client is None or loop is None:
+            self._session_name = cleaned  # applied by build_option_fields on the next start
+            return True
+        try:
+            self._pending_rename_ack = cleaned
+            future = asyncio.run_coroutine_threadsafe(client.query(f"/rename {cleaned}"), loop)
+            future.add_done_callback(_swallow_steer_result)
+        except Exception:
+            self._pending_rename_ack = None
+            logger.debug("SDK /rename scheduling failed", exc_info=True)
+            return False
+        self._session_name = cleaned
+        logger.info("claude-agent-sdk: session renamed to %r", cleaned)
+        return True
 
     def close(self) -> None:
         if self._closed:
@@ -606,6 +677,20 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             fields["hooks"] = _compaction_hooks
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
+        # Operator-pinned Claude Code binary (see _configured_cli_path).
+        cli_path = _configured_cli_path()
+        if cli_path:
+            fields["cli_path"] = cli_path
+        # Explicitly loaded plugin roots (see _configured_plugins).
+        plugins = _configured_plugins()
+        if plugins:
+            fields["plugins"] = plugins
+        # Name the spawned session so peers can find and message it
+        # (ListAgents/SendMessage) — the host-router seam.
+        if self._session_name:
+            extra = dict(fields.get("extra_args") or {})
+            extra.setdefault("name", self._session_name)
+            fields["extra_args"] = extra
         # Default OFF (upstream-conservative): partial messages only when the
         # operator opts in via agent.claude_agent_sdk.streaming in config.yaml.
         # Reads the __init__ snapshot so option and quiet-watchdog semantics

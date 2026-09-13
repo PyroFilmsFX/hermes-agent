@@ -20,6 +20,8 @@ from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
 from agent.claude_sdk_runtime_fallback import _consume_agent_interrupt
 from agent.claude_sdk_runtime_continuity import (
+    _sdk_session_name,
+    rotate_claude_sdk_session,
     _canonical_sdk_cwd,
     _persisted_sdk_session_id,
     _render_continuity_digest,
@@ -155,6 +157,31 @@ def _on_tool_started(agent, tool_name: str, preview: str, args: dict) -> None:
         logger.debug(
             "claude-sdk tool-progress callback raised", exc_info=True
         )
+
+
+def _on_tool_use(agent, tool_use_id: str, tool_name: str, args: dict) -> None:
+    # Stable-id tool CARD (desktop/TUI tool rows). The progress breadcrumb
+    # (_on_tool_started) is dropped by the gateway whenever a name is present
+    # (tool_progress._on_tool_progress), so this is the only path that puts
+    # "Running Bash: …" on screen for this lane — the same pair the codex
+    # bridge fires (make_codex_app_server_event_bridge).
+    callback = getattr(agent, "tool_start_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(tool_use_id, tool_name, args)
+    except Exception:
+        logger.debug("claude-sdk tool_start_callback raised", exc_info=True)
+
+
+def _on_tool_result(agent, tool_use_id: str, tool_name: str, args: dict, result: str) -> None:
+    callback = getattr(agent, "tool_complete_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(tool_use_id, tool_name, args, result)
+    except Exception:
+        logger.debug("claude-sdk tool_complete_callback raised", exc_info=True)
 
 
 def _relay_stream_delta(agent, text: str) -> None:
@@ -395,8 +422,12 @@ def _create_session(
         approval_callback=approval_callback,
         approval_bypass_provider=functools.partial(_approval_bypass_active, agent),
         on_tool_started=functools.partial(_on_tool_started, agent),
+        on_tool_use=functools.partial(_on_tool_use, agent),
+        on_tool_result=functools.partial(_on_tool_result, agent),
         system_prompt_append=append,
         hermes_session_id=getattr(agent, "session_id", None),
+        # Peer-addressable CLI session name (ListAgents/SendMessage).
+        session_name=_sdk_session_name(agent),
         resume_session_id=resume_id,
         on_stream_delta=functools.partial(_relay_stream_delta, agent),
         on_interim_assistant=on_interim_assistant,
@@ -509,6 +540,11 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     resumed = False
     send_input = user_input
     for attempt in (0, 1):
+        if getattr(agent, "_claude_sdk_rename_pending", False) is True:
+            # A title change landed while a turn was live; apply it now by rebuilding the CLI
+            # with the new --name (the resume id is kept, so the conversation continues).
+            agent._claude_sdk_rename_pending = False
+            rotate_claude_sdk_session(agent, "session renamed")
         if not hasattr(agent, "_claude_sdk_session") or agent._claude_sdk_session is None:
             resume_id = _persisted_sdk_session_id(agent) if attempt == 0 else None
             resumed = bool(resume_id)
