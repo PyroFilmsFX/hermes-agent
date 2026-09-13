@@ -1,6 +1,6 @@
 # Fork inventory — what cntrl changed in Hermes, and how we keep up with upstream
 
-Last audit: 2026-09-07 (rebuilt on the PR #65982 head that day). Branch `cntrl-hermes`. Upstream `origin/main`.
+Last audit: 2026-09-13 (rebuilt on the PR #65982 head 2c458827d9, main @ 2026-09-12; SDK split re-home). Branch `cntrl-hermes`. Upstream `origin/main`.
 Machine-derived snapshot with dates: `fork-inventory.generated.md`; run history: `fork-inventory-log.md`.
 
 ## 1. Shape of the carry
@@ -53,7 +53,7 @@ upstream moved the surrounding code.
 | `tests/agent/test_claude_sdk_runtime.py`, `tests/agent/transports/test_hermes_tools_mcp_server.py` | tests for cli_path, plugins, skill guidance, warn-once | pin the rows above |
 | `website/docs/user-guide/features/claude-agent-sdk-runtime.md` | cli_path, plugins, review routing paragraphs | user docs for the rows above |
 | `hermes_cli/config_defaults.py`, `hermes_cli/inventory.py` | defaults for `plugins`, `cli_path` | config-only flags |
-| `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.150`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
+| `pyproject.toml`, `uv.lock`, `tools/lazy_deps.py` | `claude-agent-sdk==0.2.152`, exempt from the 14-day quarantine | 0.2.120 bundled a CLI that 400s on Fable 5.1 |
 | `run_agent.py` | self-improve review routed off the SDK runtime | one-shot runs killed the review at exit |
 | `.gitignore` | `.hermes-test/` | test home |
 | `tui_gateway/session_notifications.py`, `tools/process_registry_notifications.py` | `sdk_background_result` delivered directly to the desktop chat (persist + `message.complete`), formatter refuses the type, `parent_session_id` proves ownership | desktop showed a phantom "Background process unknown exited" and the peer reply never displayed |
@@ -81,6 +81,20 @@ upstream moved the surrounding code.
 | `tests/tools/test_refresh_agent_mcp_tools.py` | rotation hook test | pins the row above |
 | `agent/transports/claude_agent_sdk_session.py`, `agent/claude_sdk_runtime.py` | `on_tool_use` / `on_tool_result` card hooks per ToolUseBlock/ToolResultBlock, routed to `tool_start_callback` / `tool_complete_callback` (2026-09-11) | the gateway drops `tool.started` progress events that carry a name, so SDK turns showed no tool activity at all in the desktop (33 calls, zero `tool.start`) |
 | `tests/agent/test_claude_sdk_runtime.py` (`TestSdkToolCards`) | 3 tests + `.sdkprobe/tool_card_probe.py` live proof | pins the row above |
+| `agent/transports/claude_agent_sdk_session_config.py` | `_configured_cli_path`, `_configured_plugins`, `_configured_session_name_template` + `render_sdk_session_name`, `_CHILD_INTERPRETER_ENV_DENYLIST` + `_scrubbed_interpreter_env` (wired into `_sdk_env_overrides`) | the PR split the session facade on 2026-09-07; every config reader we carried now lives in this sibling (re-homed 2026-09-13) |
+| `agent/transports/claude_agent_sdk_session_watchdog.py` | `_RENAME_ACK_PREFIX`, `_is_rename_ack` | rename-ack swallow helper, beside `_swallow_steer_result` where it moved |
+| `agent/transports/claude_agent_sdk_session_notify.py` | `_notify_tool_use`, `_notify_tool_results` (stable-id tool cards) | the notify mixin owns the per-message notifiers now |
+| `agent/transports/claude_agent_sdk_session_turn.py` | calls the two card notifiers after `_notify_tool_started`; swallows the `/rename` ack in the unsolicited-result handler | reader loop moved here |
+| `agent/transports/claude_agent_sdk_session_billing.py` | captures `system/init.slash_commands` into `session.slash_commands` | the init-message handler moved here |
+| `agent/claude_sdk_runtime_continuity.py` | `_sdk_session_name`, `rename_claude_sdk_session`, `rotate_claude_sdk_session` (+ in-flight-turn guard), rotated-resume stash consumed in `_persisted_sdk_session_id` | the runtime split moved session-id continuity here; facade re-exports rename/rotate |
+| `agent/claude_sdk_runtime_session.py` | `_on_tool_use` / `_on_tool_result` card callbacks (functools.partial into the session), `session_name=` at construction, rename-pending rotation at the top of the attempt loop | session construction + attempt loop moved here |
+| `agent/claude_sdk_runtime_prompt.py` | `_SDK_SKILLS_GUIDANCE`, `_skill_writer_exposed`, exposure-aware `_strip_uncallable_tool_guidance`, `hermes:` peer-preference sentence in `_MCP_INSPECTION_PREFERENCE` | prompt assembly moved here |
+| `agent/claude_sdk_slash.py` | `resolve_sdk_slash`, `sdk_slash_names`, `merged_skill_commands` — Claude Code plugin skills as Hermes slash commands on the SDK lane | `/tb-ship` etc. were "Unknown command" on every Hermes slash surface |
+| `cli.py`, `hermes_cli/cli_tui_mixin.py`, `gateway/run_inbound.py`, `tui_gateway/methods_complete.py`, `tui_gateway/methods_tools.py` | slash dispatchers + completion consult `agent.claude_sdk_slash` (prefix expansion, forward `/name` unchanged, completion entries with origin `plugin`) | same |
+| `tests/agent/claude_sdk_fakes.py` | `_make_agent` seeds `_claude_sdk_session._turn_inbox = None` | the rotate guard reads it |
+| `tests/agent/test_claude_sdk_session_core.py`, `tests/agent/test_claude_sdk_streaming.py`, `tests/agent/test_claude_sdk_session_identity.py`, `tests/agent/test_claude_sdk_system_prompt.py`, `tests/agent/test_claude_sdk_runtime_glue.py`, `tests/agent/test_claude_sdk_configured_env.py` | our carried tests, re-homed from the retired monolith `test_claude_sdk_runtime.py` (cli_path, plugins, session_name, permission_mode, init slash, rename, tool cards, rotate/rename helpers, skills guidance, unrouted-review warn, interpreter scrub) | the PR split the monolith into 16 modules on 2026-09-07 |
+| `tests/agent/test_claude_sdk_slash.py`, `tests/cli/test_cli_sdk_slash.py`, `tests/gateway/test_unknown_command.py`, `tests/test_tui_gateway_server.py` | slash-forwarding tests per surface | pins the slash rows |
+| `apps/desktop/src/app/settings/config-settings.test.tsx` | profile-switch re-seed tests (import trimmed to upstream's `vi.waitFor`) | pins the settings row above |
 
 ## 4. Out-of-tree (zero merge cost)
 

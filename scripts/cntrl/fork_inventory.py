@@ -32,7 +32,7 @@ LOG = DOCS / "fork-inventory-log.md"
 HANDWRITTEN = DOCS / "fork-inventory.md"
 
 UPSTREAM = "origin/main"
-PR_REF = "pr-65982-sep7"  # refreshed by: git fetch origin pull/65982/head:<ref>
+PR_REF = "pr-65982-new"  # refreshed by: git fetch origin +pull/65982/head:<ref>  (FORCED — a non-ff fetch silently keeps a stale ref)
 
 # Paths that carry no merge cost: anything here is not a "core edit".
 OUT_OF_TREE = (
