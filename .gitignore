@@ -282,3 +282,15 @@ native/fts5_cjk/*.so
 .sdkprobe/
 worker-routing.json
 docs/telemetry/
+
+# --- cntrl / conductor artifacts (public fork: never commit these) ---
+# Conductor plugin runtime state (worker spawn logs, outcomes, ledgers, markers).
+.claude/state/
+# Per-machine Claude Code state that lands beside the repo skills.
+.claude/settings.local.json
+.claude/mcp-needs-auth-cache.json
+.claude/*.json
+# Council / deliberation records (internal strategy; live in the private plugin repo).
+docs/councils/
+# Session handoff scratch.
+.tb-*/
