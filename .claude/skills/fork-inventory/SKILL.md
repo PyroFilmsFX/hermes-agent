@@ -13,7 +13,7 @@ Keeps `docs/cntrl/fork-inventory.md` (the why) and the generated snapshot
 1. Refresh refs:
    ```bash
    git fetch origin
-   git fetch origin pull/65982/head:pr-65982-sep7
+   git fetch origin +pull/65982/head:pr-65982-new   # forced: a plain fetch silently keeps a stale local ref (bitten 2026-09-13)
    ```
 2. Run the generator (from repo root, project venv):
    ```bash
