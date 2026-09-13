@@ -339,7 +339,9 @@ describe('active transcript refresh', () => {
         updateSessionState: updateSessionState as never
       })
     })
-    expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, { profile: 'thinkbot' })
+    // Profile routed (the 404-storm fix) AND passive (upstream #103375: a hidden
+    // tile's refresh must never cold-start its owner backend).
+    expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, { profile: 'thinkbot' }, { passive: true })
   })
 
   it('stops reconciling a tile whose transcript read says Session not found', async () => {
