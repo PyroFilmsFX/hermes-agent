@@ -17,6 +17,7 @@ regress silently:
 
 from __future__ import annotations
 
+import threading
 import types
 
 
@@ -120,6 +121,9 @@ def _transport(turn_inbox, client=True, loop=True):
         _turn_inbox=turn_inbox,
         _client=fake_client if client else None,
         _loop=object() if loop else None,
+        _interrupt_commit_lock=threading.Lock(),
+        _pending_steer_results=0,
+        _terminal_result_committed=False,
     )
     return mod, stub, queried
 
@@ -175,3 +179,95 @@ def test_transport_declines_empty_text():
     assert mod.ClaudeAgentSdkSession.steer(stub, "") is False
     assert mod.ClaudeAgentSdkSession.steer(stub, "   \n ") is False
     assert queried == []
+
+
+def test_mid_turn_steer_result_stays_owned_by_live_turn():
+    """A human-origin result from query(steer) is not a background result."""
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import (
+        ResultMessage,
+        StreamEvent,
+        _FakeClient,
+    )
+
+    def result(text, uuid, origin=None):
+        message = ResultMessage(result=text, uuid=uuid)
+        message.origin = origin
+        return message
+
+    class SteerClient(_FakeClient):
+        async def query(self, text):
+            self.queried.append(text)
+            if len(self.queried) == 1:
+                self._pending.append(StreamEvent(event={
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "working"},
+                }))
+                self._pending.append(result("original", "original-result"))
+            else:
+                self._pending.append(result(
+                    "steered", "steer-result", {"kind": "human"},
+                ))
+
+    holder = {}
+    delivered = []
+    steer_sent = False
+
+    def factory(options=None):
+        holder["client"] = SteerClient(options=options)
+        return holder["client"]
+
+    def on_delta(_text):
+        nonlocal steer_sent
+        if not steer_sent:
+            steer_sent = True
+            assert session.steer("correct course") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp",
+        model="claude-opus-4-8",
+        client_factory=factory,
+        on_stream_delta=on_delta,
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+
+    assert holder["client"].queried == ["initial", "correct course"]
+    assert turn.final_text == "steered", "steer result must close the live host turn"
+    assert turn.turn_id == "steer-result", "live accounting must use the steer result once"
+    assert delivered == [], "steer result must not use unsolicited delivery"
+    assert session._unsolicited_results == 0
+
+
+def test_steer_after_terminal_result_is_not_claimed_by_next_turn():
+    """A steer racing result acceptance falls back instead of opening a stray query."""
+    mod, stub, queried = _transport(turn_inbox=object())
+    stub._terminal_result_committed = True
+
+    called = []
+    stub._client.query = lambda text: called.append(text)
+    assert mod.ClaudeAgentSdkSession.steer(stub, "late correction") is False
+    assert queried == [] and called == []
+
+
+def test_late_human_result_is_not_classified_as_unsolicited():
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import ResultMessage
+
+    delivered = []
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp",
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    message = ResultMessage(result="steered", uuid="late-steer")
+    message.origin = {"kind": "human"}
+    session._unsolicited_text.append("stale steer text")
+
+    session._handle_unsolicited(message)
+
+    assert delivered == []
+    assert session._unsolicited_results == 0
+    assert session._unsolicited_text == []

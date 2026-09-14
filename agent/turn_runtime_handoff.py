@@ -48,10 +48,14 @@ def _sdk_handoff_is_at_untouched_user_boundary(
     )
 
 
-def _with_runtime_attempt_provenance(agent: Any, result: Dict[str, Any], api_calls: int) -> Dict[str, Any]:
+def _with_runtime_attempt_provenance(
+    agent: Any, result: Dict[str, Any], api_calls: int, iteration_count: Optional[int] = None,
+) -> Dict[str, Any]:
     """Attach cumulative accounting and the runtime that produced the result."""
     enriched = dict(result)
     enriched["api_calls"] = api_calls
+    if iteration_count is not None:
+        enriched["iteration_count"] = iteration_count
     enriched["model"] = agent.model
     enriched["provider"] = agent.provider
     return enriched
@@ -62,6 +66,7 @@ class RuntimeHandoffState:
     """Cumulative accounting across the whole-turn runtime attempts of one turn."""
 
     api_calls: int = 0
+    iteration_count: int = 0
     # The first SDK result that qualified for a provider hand-off: its error and final
     # response are what the user should see if every later attempt is exhausted too.
     first_actionable_sdk_result: Optional[Dict[str, Any]] = None
@@ -139,21 +144,28 @@ def run_whole_turn_runtime(
             messages=messages, effective_task_id=effective_task_id, _should_review_memory=_should_review_memory,
         )
         sdk_calls = int(sdk_result.get("api_calls", 0) or 0)
+        sdk_iterations = int(
+            sdk_result.get("iteration_count", sdk_result.get("num_turns", sdk_calls)) or 0
+        )
         handoff.api_calls += sdk_calls
-        for _ in range(sdk_calls):
+        handoff.iteration_count += sdk_iterations
+        for _ in range(sdk_iterations):
             agent.iteration_budget.consume()
-        agent._api_call_count = handoff.api_calls
+        agent._api_call_count = handoff.iteration_count
+        api_call_count = handoff.iteration_count
         sdk_reason = _sdk_result_failover_reason(sdk_result)
         handoff.note(sdk_result, sdk_reason)
-        if sdk_reason is None or _budget_exhausted(agent, handoff.api_calls):
+        if sdk_reason is None or _budget_exhausted(agent, handoff.iteration_count):
             return _verdict("return", _with_runtime_attempt_provenance(
-                agent, handoff.exhaustion_result(sdk_result), handoff.api_calls))
+                agent, handoff.exhaustion_result(sdk_result), handoff.api_calls,
+                handoff.iteration_count))
         refreshed_prompt = _activate_fallback(agent, active_system_prompt, sdk_reason)
         if refreshed_prompt is None:
             return _verdict("return", _with_runtime_attempt_provenance(
-                agent, handoff.exhaustion_result(sdk_result), handoff.api_calls))
+                agent, handoff.exhaustion_result(sdk_result), handoff.api_calls,
+                handoff.iteration_count))
         active_system_prompt = refreshed_prompt
-    api_call_count = handoff.api_calls
+    api_call_count = handoff.iteration_count
     return _verdict("fallthrough")
 
 
@@ -223,13 +235,17 @@ def run_sdk_fallback_iteration(
         agent, user_message=user_message, original_user_message=original_user_message,
         messages=messages, effective_task_id=effective_task_id, _should_review_memory=_should_review_memory,
     )
-    sdk_calls = int(sdk_result.get("api_calls", 0) or 0)
-    if sdk_calls == 0:
+    sdk_iterations = int(
+        sdk_result.get(
+            "iteration_count", sdk_result.get("num_turns", sdk_result.get("api_calls", 0))
+        ) or 0
+    )
+    if sdk_iterations == 0:
         _refund_reserved_iteration()
-    elif sdk_calls > 1:
-        # begin_iteration already accounted for one request; the SDK may have made more.
-        api_call_count += sdk_calls - 1
-        for _ in range(sdk_calls - 1):
+    elif sdk_iterations > 1:
+        # begin_iteration already accounted for one iteration; the SDK may have made more.
+        api_call_count += sdk_iterations - 1
+        for _ in range(sdk_iterations - 1):
             agent.iteration_budget.consume()
     agent._api_call_count = api_call_count
     sdk_reason = _sdk_result_failover_reason(sdk_result)
@@ -237,10 +253,12 @@ def run_sdk_fallback_iteration(
     total_calls = api_call_count + _provider_fallback_call_refunds
     if sdk_reason is None or _budget_exhausted(agent, api_call_count):
         return _verdict("return", _with_runtime_attempt_provenance(
-            agent, handoff.exhaustion_result(sdk_result), total_calls))
+            agent, handoff.exhaustion_result(sdk_result), total_calls,
+            api_call_count))
     refreshed_prompt = _activate_fallback(agent, active_system_prompt, sdk_reason)
     if refreshed_prompt is None:
         return _verdict("return", _with_runtime_attempt_provenance(
-            agent, handoff.exhaustion_result(sdk_result), total_calls))
+            agent, handoff.exhaustion_result(sdk_result), total_calls,
+            api_call_count))
     active_system_prompt = refreshed_prompt
     return _verdict("continue")

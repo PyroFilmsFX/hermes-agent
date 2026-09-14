@@ -175,10 +175,11 @@ class InterruptControlMixin:
                 logger.debug("Failed to interrupt Codex app-server turn", exc_info=True)
 
         # claude-agent-sdk runtime: the blocking run_turn observes only the session's own
-        # interrupt event — signal it directly whenever a session is attached, regardless of
-        # the current api_mode (idempotent; schedules client.interrupt() on the session's
-        # loop). (#25267)
-        _request_sdk_interrupt = _ic_claude_sdk_session_method(self, "request_interrupt")
+        # interrupt event — signal it directly while this API mode owns the model loop.
+        # Other lanes must keep their attached SDK object untouched and use their native
+        # interrupt plumbing instead. (idempotent; schedules client.interrupt() on the
+        # session's loop). (#25267)
+        _request_sdk_interrupt = _ic_claude_sdk_method(self, "request_interrupt")
         if _request_sdk_interrupt is not None:
             try:
                 _request_sdk_interrupt()

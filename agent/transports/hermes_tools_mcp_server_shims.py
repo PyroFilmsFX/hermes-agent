@@ -129,6 +129,18 @@ def dispatch_session_search(kwargs: dict[str, Any]) -> str:
     import hermes_state
     from tools import session_search_tool
 
+    detail = kwargs.get("detail", "adaptive")
+    detail_schema = (
+        session_search_tool.SESSION_SEARCH_SCHEMA.get("parameters", {})
+        .get("properties", {})
+        .get("detail", {})
+    )
+    if detail not in detail_schema.get("enum", ()):
+        return _session_search_error(
+            f"session_search invalid detail {detail!r}; expected one of "
+            f"{', '.join(detail_schema.get('enum', ())) }"
+        )
+
     db_path = Path(
         os.environ.get(_STATE_DB_ENV, "").strip() or hermes_state.DEFAULT_DB_PATH
     )
@@ -169,6 +181,7 @@ def dispatch_session_search(kwargs: dict[str, Any]) -> str:
             window=kwargs.get("window", 5),
             sort=kwargs.get("sort"),
             profile=kwargs.get("profile"),
+            detail=detail,
             db=db,
             current_session_id=os.environ.get(_SESSION_ID_ENV, "").strip() or None,
         )
@@ -237,6 +250,7 @@ def stateless_shim_definitions() -> list[ShimDefinition]:
 
     from tools.session_search_tool import SESSION_SEARCH_SCHEMA
 
+    # This additive optional field is frozen at SDK session construction, preserving prompt caching.
     definitions.append((
         "session_search",
         SESSION_SEARCH_SCHEMA.get("description", "Search past Hermes sessions"),

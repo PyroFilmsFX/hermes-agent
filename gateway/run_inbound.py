@@ -1033,31 +1033,99 @@ class GatewayInboundMixin:
             logger.warning("Bundle dispatch failed: %s", exc)
             return False
 
-    @staticmethod
-    def _hm_unknown_slash_reply(command: str, source: SessionSource) -> Optional[str]:
+    def _hm_unknown_slash_reply(
+        self,
+        command: Any = None,
+        source: Any = None,
+        *,
+        session_key: Optional[str] = None,
+        agent: Any = None,
+        live_names: Optional[Iterable[str]] = None,
+        provider: Optional[str] = None,
+    ) -> Optional[str]:
         """Reply for a /command that is not built-in/plugin/skill; None when it is known."""
+        if isinstance(self, str):
+            command, source = self, command
+            self = None
+
         from gateway.run import _check_unavailable_skill
-        from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS
+        from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, resolve_command
+
         # Known-but-disabled or uninstalled skill → actionable guidance.
         _unavail_msg = _check_unavailable_skill(command)
         if _unavail_msg:
             return _unavail_msg
-        # Genuinely unrecognized: warn instead of forwarding to the LLM as free text (it invents
-        # tool calls). Normalize to hyphenated form first: the quick-command block may have set an
-        # alias target, so the resolved def can be stale.
-        if command.replace("_", "-") in GATEWAY_KNOWN_COMMANDS:
+
+        # Hermes built-ins / registered commands always keep precedence
+        cmd_normalized = command.replace("_", "-")
+        if cmd_normalized in GATEWAY_KNOWN_COMMANDS:
             return None
+        try:
+            if resolve_command(command) is not None or resolve_command(cmd_normalized) is not None:
+                return None
+        except Exception:
+            pass
+
+        # When on claude-agent-sdk lane: resolve against static plugin skills + live SDK commands
+        if session_key is None and self is not None and hasattr(self, "_session_key_for_source") and source is not None:
+            try:
+                session_key = self._session_key_for_source(source)
+            except Exception:
+                session_key = None
+
+        if agent is None and self is not None and session_key:
+            if hasattr(self, "_resident_agent_for"):
+                try:
+                    agent = self._resident_agent_for(session_key)
+                except Exception:
+                    agent = None
+            if agent is None and hasattr(self, "_peek_session_state"):
+                try:
+                    st = self._peek_session_state(session_key)
+                    agent = st.turn.agent if st and hasattr(st, "turn") else None
+                except Exception:
+                    agent = None
+            if agent is None and hasattr(self, "_agent_cache"):
+                try:
+                    lock = getattr(self, "_agent_cache_lock", None)
+                    cache = self._agent_cache
+                    if lock:
+                        with lock:
+                            entry = cache.get(session_key)
+                    else:
+                        entry = cache.get(session_key)
+                    agent = (entry[0] if entry else None) if isinstance(entry, (tuple, list)) else entry or None
+                except Exception:
+                    agent = None
+
+        if agent is None and self is not None and hasattr(self, "agent"):
+            agent = getattr(self, "agent", None)
+
+        if provider is None and agent is not None:
+            provider = getattr(agent, "provider", None)
+        if provider is None and self is not None and hasattr(self, "provider"):
+            provider = getattr(self, "provider", None)
+
+        if live_names is None and agent is not None:
+            live_names = getattr(getattr(agent, "_claude_sdk_session", None), "slash_commands", None)
+            if live_names is None:
+                live_names = getattr(agent, "slash_commands", None)
+        if live_names is None and self is not None and hasattr(self, "slash_commands"):
+            live_names = getattr(self, "slash_commands", None)
+
         # Claude Code plugin skill on the claude-agent-sdk lane: the spawned CLI expands `/name` itself, so
         # the raw text IS the right prompt. None = "known": the message forwards unchanged.
         try:
             from agent.claude_sdk_slash import resolve_sdk_slash
-            if resolve_sdk_slash(f"/{command}"):
+
+            if resolve_sdk_slash(f"/{command}", provider=provider, live_names=live_names):
                 return None
         except Exception:
             logger.debug("sdk slash resolution failed", exc_info=True)
         logger.warning(
             "Unrecognized slash command /%s from %s — replying with unknown-command notice",
-            command, source.platform.value if source.platform else "?",
+            command,
+            source.platform.value if source and hasattr(source, "platform") and source.platform else "?",
         )
         return (
             f"Unknown command `/{command}`. "
@@ -1081,7 +1149,7 @@ class GatewayInboundMixin:
             skill_cmds = get_skill_commands()
             cmd_key = resolve_skill_command_key(command)
             if cmd_key is None:
-                return self._hm_unknown_slash_reply(command, source)
+                return self._hm_unknown_slash_reply(command, source, session_key=_quick_key)
             _plat = source.platform.value if source.platform else None
             user_instruction = event.get_command_args().strip()
             # Stacked slash-skill invocations: `/skill-a /skill-b do XYZ` loads every leading skill
