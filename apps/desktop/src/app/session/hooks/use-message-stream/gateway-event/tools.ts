@@ -14,6 +14,15 @@ import { SUBAGENT_EVENT_TYPES, toTodoPayload } from '../utils'
 
 import type { GatewayEventContext } from './types'
 
+/** Map namespaced MCP tools back to trusted Hermes identities (`mcp__hermes-tools__X` / `mcp__hermes-hybrid__X` → `X`). */
+export function normalizeHermesToolName(name: unknown): string {
+  if (typeof name !== 'string') {
+    return ''
+  }
+  const match = /^mcp__hermes-(?:tools|hybrid)__(.+)$/.exec(name)
+  return match ? match[1] : name
+}
+
 /** tool.generating / tool.start / tool.complete / subagent.*. */
 export function handleToolEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, sessionId, isActiveEvent, occurredAt } = ctx
@@ -92,7 +101,8 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
 
       // terminal/process tool calls are the only things that spawn or reap
       // background processes — sync the composer status stack right after.
-      if (!sessionInterrupted(sessionId) && (payload?.name === 'terminal' || payload?.name === 'process')) {
+      const normalizedName = normalizeHermesToolName(payload?.name)
+      if (!sessionInterrupted(sessionId) && (normalizedName === 'terminal' || normalizedName === 'process')) {
         void refreshBackgroundProcesses(sessionId)
       }
     }
@@ -101,7 +111,7 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
     // its `/name` command. Drop the composer's cached `/` list so the new
     // skill is offerable now rather than after the hour-long TTL — and the
     // skill-suggestion provider's index with it.
-    if (payload?.name === 'skill_manage') {
+    if (normalizeHermesToolName(payload?.name) === 'skill_manage') {
       invalidateSlashCompletions()
       invalidateSkillSuggestionIndex()
     }

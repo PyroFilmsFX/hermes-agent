@@ -109,15 +109,33 @@ CLAUDE_AGENT_SDK_INSPECTION_TOOLS: Tuple[str, ...] = (
 # skill guidance when this profile actually serves the tool. (cntrl carry)
 CLAUDE_AGENT_SDK_SKILL_TOOLS: Tuple[str, ...] = ("skill_manage",)
 
+SESSION_CREATE_TOOL = "session_create"
 
-def exposed_tools_for_profile(profile: Optional[str] = None) -> Tuple[str, ...]:
+
+def session_spawn_available() -> bool:
+    """Return the construction-time verdict for the scoped SDK capability."""
+    try:
+        from tools.session_tools import check_session_spawn_requirements
+        return check_session_spawn_requirements()
+    except Exception:
+        return False
+
+
+def exposed_tools_for_profile(
+    profile: Optional[str] = None, *, include_session_spawn: Optional[bool] = None
+) -> Tuple[str, ...]:
     """Return the curated stateless surface for a trusted runtime profile.
 
     The default and every unknown value resolve to the narrower Codex surface.
     Only the fixed Claude Agent SDK profile gains bounded file inspection.
     """
     if profile == "claude-agent-sdk":
-        return CURATED_STATELESS_TOOLS + CLAUDE_AGENT_SDK_INSPECTION_TOOLS + CLAUDE_AGENT_SDK_SKILL_TOOLS
+        tools = CURATED_STATELESS_TOOLS + CLAUDE_AGENT_SDK_INSPECTION_TOOLS + CLAUDE_AGENT_SDK_SKILL_TOOLS
+        if include_session_spawn is None:
+            include_session_spawn = session_spawn_available()
+        if include_session_spawn:
+            tools += (SESSION_CREATE_TOOL,)
+        return tools
     return CURATED_STATELESS_TOOLS
 
 
@@ -131,6 +149,8 @@ HERMES_TOOLS_LEGACY_NAMES = frozenset((
     # Keep their server identity stable when hybrid mode takes over: the SDK
     # permission bridge auto-allows only the exact hermes-tools identities.
     *CLAUDE_AGENT_SDK_INSPECTION_TOOLS,
+    *CLAUDE_AGENT_SDK_SKILL_TOOLS,
+    SESSION_CREATE_TOOL,
 ))
 
 

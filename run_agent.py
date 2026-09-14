@@ -1004,7 +1004,14 @@ class AIAgent(
         """
         sdk_session = getattr(self, "_claude_sdk_session", None)
         if sdk_session is not None:
-            self._claude_sdk_session = None
+            from agent.claude_sdk_runtime_continuity import (
+                _clear_claude_sdk_session_if_current,
+            )
+
+            # Identity-checked detach under the agent's session lock: a
+            # replacement published between our read and this write must
+            # survive. The captured object is closed outside the lock.
+            _clear_claude_sdk_session_if_current(self, sdk_session)
             sdk_session.close()
 
     @staticmethod

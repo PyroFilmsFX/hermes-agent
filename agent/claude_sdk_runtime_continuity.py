@@ -5,9 +5,15 @@ Extracted from ``claude_sdk_runtime.py``.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
+import hashlib
 import logging
 import os
+import re
+import threading
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.claude_sdk_runtime_state import _SdkTurnState
@@ -17,6 +23,7 @@ logger = logging.getLogger("agent.claude_sdk_runtime")
 
 
 _SDK_RESUME_BINDING_PREFIX = "hermes-sdk-resume-v1:"
+_SDK_TASK_LIST_BY_SESSION: dict[str, str] = {}
 
 
 def _canonical_sdk_cwd(value: Optional[str] = None) -> str:
@@ -28,14 +35,95 @@ def _canonical_sdk_cwd(value: Optional[str] = None) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(str(value)))))
 
 
-def _encode_sdk_resume_binding(session_id: str, *, cwd: Optional[str] = None) -> str:
+def _task_list_profile_namespace() -> str:
+    """Use the resolved Hermes store as part of the task-list identity namespace."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home().expanduser().resolve())
+    except Exception:
+        return str(Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")).resolve())
+
+
+def _derive_sdk_task_list_id(hermes_session_id: Optional[str]) -> Optional[str]:
+    """Derive a bounded, filesystem-safe and profile-scoped Claude task-list id."""
+    raw = str(hermes_session_id or "").strip()
+    if not raw:
+        return None
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-._") or "session"
+    digest = hashlib.sha256(
+        f"{raw}\0{_task_list_profile_namespace()}".encode("utf-8")
+    ).hexdigest()[:16]
+    prefix_limit = 64 - len("hermes-") - len(digest) - 1
+    return f"hermes-{safe[:prefix_limit]}-{digest}"
+
+
+def _task_tools_enabled() -> bool:
+    try:
+        from agent.transports.claude_agent_sdk_session_config import _provider_flag
+
+        return _provider_flag("task_tools")
+    except Exception:
+        return False
+
+
+def _encode_sdk_resume_binding(
+    session_id: str,
+    *,
+    cwd: Optional[str] = None,
+    task_list: Optional[str] = None,
+) -> str:
+    task_list = task_list or _SDK_TASK_LIST_BY_SESSION.get(str(session_id))
     payload = {
         "cwd": _canonical_sdk_cwd(cwd),
         "id": str(session_id),
     }
+    if task_list:
+        task_list = str(task_list)
+        payload["task_list"] = task_list
+        _SDK_TASK_LIST_BY_SESSION[str(session_id)] = task_list
     return _SDK_RESUME_BINDING_PREFIX + json.dumps(
         payload, sort_keys=True, separators=(",", ":")
     )
+
+
+def _sdk_task_list_id(agent) -> Optional[str]:
+    """Return or derive the task-list id without changing the Claude task store."""
+    if (
+        getattr(agent, "_persist_disabled", False)
+        and getattr(agent, "_session_db", None) is None
+        and not isinstance(
+            getattr(agent, "__dict__", {}).get("_claude_sdk_rotated_resume_id"), str
+        )
+    ):
+        fork_id = getattr(agent, "_claude_sdk_fork_task_list_id", None)
+        if not isinstance(fork_id, str) or not fork_id:
+            session_id = str(getattr(agent, "session_id", "") or "")
+            fork_id = _derive_sdk_task_list_id(f"{session_id}-fork-{uuid.uuid4().hex}")
+            agent._claude_sdk_fork_task_list_id = fork_id
+        agent._claude_sdk_task_list_id = fork_id
+        return fork_id
+    current = getattr(agent, "_claude_sdk_task_list_id", None)
+    if isinstance(current, str) and current:
+        return current
+    db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", None)
+    if db is not None and session_id:
+        try:
+            raw = (db.get_session(session_id) or {}).get("claude_sdk_session_id")
+            if isinstance(raw, str) and raw.startswith(_SDK_RESUME_BINDING_PREFIX):
+                payload = json.loads(raw[len(_SDK_RESUME_BINDING_PREFIX) :])
+                task_list = payload.get("task_list")
+                if isinstance(task_list, str) and task_list:
+                    agent._claude_sdk_task_list_id = task_list
+                    _SDK_TASK_LIST_BY_SESSION[str(payload.get("id") or "")] = agent._claude_sdk_task_list_id
+                    return agent._claude_sdk_task_list_id
+        except Exception:
+            logger.debug("task-list id read failed", exc_info=True)
+    derived = _derive_sdk_task_list_id(session_id)
+    if derived:
+        agent._claude_sdk_task_list_id = derived
+    return derived
 
 
 def _persisted_sdk_session_id(agent) -> Optional[str]:
@@ -46,14 +134,21 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
     stashed = getattr(agent, "_claude_sdk_rotated_resume_id", None)
     if isinstance(stashed, str) and stashed:
         agent._claude_sdk_rotated_resume_id = None
-        return stashed
-    if getattr(agent, "_persist_disabled", False):
-        return None
-    if not (getattr(agent, "_session_db", None) and getattr(agent, "session_id", None)):
-        return None
+        raw = stashed
+        from_stash = True
+    else:
+        from_stash = False
+        if getattr(agent, "_persist_disabled", False):
+            return None
+        if not (
+            getattr(agent, "_session_db", None) and getattr(agent, "session_id", None)
+        ):
+            return None
+        raw = None
     try:
-        row = agent._session_db.get_session(agent.session_id) or {}
-        raw = row.get("claude_sdk_session_id") or None
+        if raw is None:
+            row = agent._session_db.get_session(agent.session_id) or {}
+            raw = row.get("claude_sdk_session_id") or None
         if not isinstance(raw, str) or not raw:
             return None
         current_cwd = _canonical_sdk_cwd()
@@ -66,14 +161,26 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
                     raise ValueError("empty SDK session id")
                 if not isinstance(bound_cwd, str) or not bound_cwd:
                     raise ValueError("empty SDK resume cwd")
+                task_list = payload.get("task_list")
+                if not isinstance(task_list, str) or not task_list:
+                    task_list = _derive_sdk_task_list_id(getattr(agent, "session_id", None))
+                    if task_list and _task_tools_enabled():
+                        _store_sdk_session_id(
+                            agent, session_id, cwd=bound_cwd, task_list=task_list
+                        )
+                if task_list:
+                    agent._claude_sdk_task_list_id = task_list
+                    _SDK_TASK_LIST_BY_SESSION[session_id] = agent._claude_sdk_task_list_id
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                _store_sdk_session_id(agent, None)
+                if not from_stash:
+                    _store_sdk_session_id(agent, None)
                 return None
         else:
             # Legacy raw IDs and unknown envelope versions have no trustworthy
             # creation-workspace provenance.  The session row's CWD is mutable,
             # so it cannot retroactively authorize a cross-workspace resume.
-            _store_sdk_session_id(agent, None)
+            if not from_stash:
+                _store_sdk_session_id(agent, None)
             return None
         if _canonical_sdk_cwd(bound_cwd) != current_cwd:
             logger.info(
@@ -84,6 +191,41 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
     except Exception:
         logger.debug("resume-id read failed", exc_info=True)
         return None
+
+
+_SESSION_LOCK_INIT = threading.Lock()
+
+
+def _claude_sdk_session_lock(agent):
+    """Return the agent-level session publication lock, creating it atomically.
+
+    Two first-time callers must never install different locks (a private lock
+    on one side would let publish and identity-clear race), so the lazy
+    creation is double-checked under a module-level init lock.
+    """
+    lock = getattr(agent, "_claude_sdk_session_lock", None)
+    if lock is None:
+        with _SESSION_LOCK_INIT:
+            lock = getattr(agent, "_claude_sdk_session_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                agent._claude_sdk_session_lock = lock
+    return lock
+
+
+def _publish_claude_sdk_session(agent, session: Any) -> None:
+    """Publish a newly built session under the agent's identity lock."""
+    with _claude_sdk_session_lock(agent):
+        agent._claude_sdk_session = session
+
+
+def _clear_claude_sdk_session_if_current(agent, expected: Any) -> bool:
+    """Detach an SDK session only if the agent still points at that object."""
+    with _claude_sdk_session_lock(agent):
+        if getattr(agent, "_claude_sdk_session", None) is not expected:
+            return False
+        agent._claude_sdk_session = None
+        return True
 
 
 def _sdk_session_name(agent) -> str:
@@ -166,27 +308,49 @@ def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bo
     live = getattr(agent, "_claude_sdk_session", None)
     if live is None:
         return False
-    if getattr(live, "_turn_inbox", None) is not None:
-        # A turn owns the stream; closing the CLI now would kill it mid-flight (a between-turns
-        # MCP refresh can fire from the late-binding thread while a turn runs). Defer to the
-        # next turn boundary, where run_claude_agent_sdk_turn honours the pending flag.
-        agent._claude_sdk_rename_pending = True
-        logger.info("claude-agent-sdk rotation (%s) deferred: a turn is in flight", reason)
-        return False
-    sid = getattr(live, "_session_id", None) or getattr(live, "_resume_session_id", None)
-    if isinstance(sid, str) and sid:
-        agent._claude_sdk_rotated_resume_id = sid
+    # The per-session RLock is also used by the turn's admission path. Marking the
+    # session retiring under it closes the admission window; close() must happen
+    # after releasing it because close waits on the SDK loop thread.
+    admission_lock = getattr(live, "_turn_callback_lock", None)
+    with nullcontext() if admission_lock is None else admission_lock:
+        if (
+            getattr(live, "_turn_inbox", None) is not None
+            or getattr(live, "_turn_claim_requested", False) is True
+        ):
+            # A turn owns the stream as soon as admission is requested; closing the CLI now
+            # would kill it mid-flight (a between-turns MCP refresh can fire from the
+            # late-binding thread while a turn runs). Defer to the next turn boundary,
+            # where run_claude_agent_sdk_turn honours the pending flag.
+            agent._claude_sdk_rename_pending = True
+            logger.info("claude-agent-sdk rotation (%s) deferred: a turn is in flight", reason)
+            return False
+        live._retiring = True
+        sid = getattr(live, "_session_id", None) or getattr(live, "_resume_session_id", None)
+        if isinstance(sid, str) and sid:
+            bound_cwd = getattr(live, "_cwd", None)
+            if not isinstance(bound_cwd, str):
+                bound_cwd = _canonical_sdk_cwd()
+            agent._claude_sdk_rotated_resume_id = _encode_sdk_resume_binding(
+                sid, cwd=bound_cwd
+            )
     try:
         live.close()
     except Exception:
         logger.debug("SDK session close during rotation raised", exc_info=True)
-    agent._claude_sdk_session = None
+    # A concurrent turn may have retired this object and published its
+    # replacement while close() was waiting on the SDK loop.  Never erase a
+    # newer session from the agent slot when the old rotation completes.
+    _clear_claude_sdk_session_if_current(agent, live)
     logger.info("claude-agent-sdk session rotated (%s); next turn resumes in a fresh CLI", reason)
     return True
 
 
 def _store_sdk_session_id(
-    agent, value: Optional[str], *, cwd: Optional[str] = None
+    agent,
+    value: Optional[str],
+    *,
+    cwd: Optional[str] = None,
+    task_list: Optional[str] = None,
 ) -> None:
     """Persist (or clear, with None) the SDK session id on the session row."""
     if getattr(agent, "_persist_disabled", False):
@@ -208,7 +372,15 @@ def _store_sdk_session_id(
             logger.debug("resume-id not written: turn workspace unknown")
             return
         stored = (
-            _encode_sdk_resume_binding(value, cwd=cwd) if value is not None else None
+            _encode_sdk_resume_binding(
+                value,
+                cwd=cwd,
+                task_list=(task_list or _sdk_task_list_id(agent))
+                if _task_tools_enabled()
+                else None,
+            )
+            if value is not None
+            else None
         )
         agent._session_db.update_claude_sdk_session_id(agent.session_id, stored)
     except Exception:
@@ -216,6 +388,25 @@ def _store_sdk_session_id(
 
 
 _CONTINUITY_DIGEST_MAX_CHARS = 4000
+
+_SDK_DISPLAY_ONLY_KINDS = frozenset(
+    {"peer_message", "session_lifecycle", "sdk_background_result"}
+)
+
+
+def _is_sdk_display_only_row(message: Any) -> bool:
+    """Whether a durable SDK delivery row is for the UI, not model context.
+
+    Background peer/lifecycle/tool projections share the session transcript for
+    display and recovery, but replaying them into a provider prompt would
+    mutate the cached prefix and can create invalid role sequences.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get("display_kind") in _SDK_DISPLAY_ONLY_KINDS:
+        return True
+    metadata = message.get("display_metadata")
+    return isinstance(metadata, dict) and metadata.get("source") == "sdk_background_result"
 
 
 def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
@@ -228,10 +419,7 @@ def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     # compaction pass — _digest_history may rebuild dicts and drop the mark.
     prior_messages = [
         m for m in (prior_messages or [])
-        if not (
-            isinstance(m, dict)
-            and m.get("display_kind") == "sdk_background_result"
-        )
+        if not _is_sdk_display_only_row(m)
     ]
     try:
         from agent.background_review import _digest_history
