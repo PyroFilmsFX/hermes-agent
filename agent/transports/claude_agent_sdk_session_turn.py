@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any, Optional
 
@@ -50,10 +51,53 @@ from agent.transports.claude_agent_sdk_session_watchdog import (
 logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 
 
+def _clear_unsolicited_projection(session: Any) -> None:
+    """Discard the current unsolicited burst's text and structured projections."""
+    session._unsolicited_text.clear()
+    session._unsolicited_items.clear()
+    session._unsolicited_tool_items.clear()
+    session._unsolicited_seen.clear()
+    # Keep this future-proof if a pending wake marker is added as a separate
+    # field; today it is represented by the lifecycle item above.
+    if hasattr(session, "_unsolicited_woken"):
+        session._unsolicited_woken = None
+
+
+def _claim_child_exit_emission(session: Any) -> bool:
+    """Claim the one child-exit lifecycle event shared by both emission paths."""
+    lock = getattr(session, "_child_exit_emission_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        existing = getattr(session, "_child_exit_emission_lock", None)
+        if existing is None:
+            session._child_exit_emission_lock = lock
+        else:
+            lock = existing
+    with lock:
+        if getattr(session, "_child_exited_emitted", False):
+            return False
+        session._child_exited_emitted = True
+        return True
+
+
 class ClaudeSdkTurnMixin:
     """Turn driver, stream consumer and reader loop (see module docstring)."""
 
+    _pending_rename_ack: Optional[str] = None
+
     # ---------- per-turn ----------
+
+    def _retired_before_query_result(self) -> TurnResult:
+        result = TurnResult(
+            error="SDK session is rotating; rebuilding CLI",
+            should_retire=True,
+            api_call_made=False,
+            thread_id=getattr(self, "_session_id", None),
+        )
+        result.retired_before_query = True
+        with self._interrupt_commit_lock:
+            result.interrupted = self._interrupt_event.is_set()
+        return result
 
     def run_turn(
         self,
@@ -90,8 +134,14 @@ class ClaudeSdkTurnMixin:
             result.error = result.final_text
             result.api_call_made = False
             return result
+        # Fence stale references before ensure_started: close() clears the
+        # client, so an old caller must not resurrect a loop on this object.
+        if self._admission_retired():
+            return self._retired_before_query_result()
         try:
-            self.ensure_started()
+            started = self.ensure_started()
+            if started is None:
+                return self._retired_before_query_result()
         except Exception as exc:
             safe_exc = _safe_sdk_error_text(exc)
             hint = classify_auth_failure(safe_exc)
@@ -131,8 +181,14 @@ class ClaudeSdkTurnMixin:
         # texts parked DURING the turn re-buffer via the residue drain and
         # are unaffected). Never a silent drop: WARN what is discarded.
         stale = list(self._unsolicited_text)
-        if stale:
-            self._unsolicited_text.clear()
+        stale_projection = bool(
+            stale
+            or self._unsolicited_items
+            or self._unsolicited_tool_items
+            or self._unsolicited_seen
+        )
+        if stale_projection:
+            _clear_unsolicited_projection(self)
             logger.warning(
                 "claude-agent-sdk: discarding %d stale unsolicited text(s) "
                 "(%d chars) buffered before this turn — their terminal "
@@ -168,16 +224,169 @@ class ClaudeSdkTurnMixin:
                 )
         poll = max(0.01, float(watch_poll_interval))
 
-        assert self._loop is not None, "loop thread not started"
-        watch = _TurnWatch()
-        self._turn_watch = watch
-        trip: Optional[str] = None
-        trip_elapsed = trip_idle = 0.0
-        hard_trip = False
-        turn_data: Optional[dict[str, Any]] = None
-        future = asyncio.run_coroutine_threadsafe(
-            self._consume_turn(prompt), self._loop
-        )
+        # Reserve only the check-to-handoff gap. The reservation is released
+        # once the reader acknowledges ownership; after that close()/rotation
+        # use _turn_inbox/_turn_claim_requested and can tear down a live turn.
+        reservation: Any = None
+        bootstrap_coroutine: Any = None
+        future: Any = None
+        bootstrap_holder: dict[str, Any] = {}
+        scheduled = False
+        coroutine_entered = threading.Event()
+        schedule_lock = threading.Lock()
+        schedule_state = {
+            "bootstrap_started": False,
+            "bootstrap_closed": False,
+        }
+
+        def finalize_bootstrap_on_loop() -> None:
+            with schedule_lock:
+                if (
+                    schedule_state["bootstrap_started"]
+                    or schedule_state["bootstrap_closed"]
+                ):
+                    return
+                schedule_state["bootstrap_closed"] = True
+                coroutine = bootstrap_holder.pop("coroutine", None)
+            if coroutine is not None:
+                coroutine.close()
+
+        def release_scheduled(_done: Any = None) -> None:
+            self._release_turn_admission(reservation)
+            with self._turn_callback_lock:
+                if getattr(self, "_pending_turn_admission_future", None) is future:
+                    self._pending_turn_admission_future = None
+            with schedule_lock:
+                bootstrap_started = schedule_state["bootstrap_started"]
+            if not bootstrap_started and reservation is not None:
+                # A cancelled concurrent future may settle on the caller
+                # thread before the loop callback that owns bootstrap_turn.
+                # Finalize there only by queueing the close back onto the SDK
+                # loop; never close a submitted coroutine from this thread.
+                try:
+                    reservation.loop.call_soon_threadsafe(
+                        finalize_bootstrap_on_loop
+                    )
+                except RuntimeError:
+                    # The loop's own teardown path will finalize its pending
+                    # callback; there is no safe caller-thread fallback here.
+                    logger.debug(
+                        "claude-agent-sdk bootstrap finalizer could not be queued",
+                        exc_info=True,
+                    )
+
+        async def bootstrap_turn() -> Any:
+            coroutine_entered.set()
+            with self._turn_callback_lock:
+                if getattr(self, "_pending_turn_admission_future", None) is future:
+                    self._pending_turn_admission_future = None
+            with schedule_lock:
+                if schedule_state["bootstrap_closed"]:
+                    return None
+                schedule_state["bootstrap_started"] = True
+            # The consumer coroutine is created on the loop thread. After
+            # submission the caller owns only the concurrent future, so every
+            # coroutine finalization stays on this loop's thread.
+            return await self._consume_turn_with_admission(prompt, reservation)
+
+        try:
+            # Acquire inside the try so an asynchronous KeyboardInterrupt
+            # between acquisition and cleanup cannot leak the reservation.
+            # Create the token before registration. The caller retains this
+            # reference if registration is interrupted after insertion.
+            with self._turn_callback_lock:
+                captured_loop = self._loop
+                reservation = (
+                    self._new_turn_admission_reservation(captured_loop)
+                    if not self._retiring and not self._closed and captured_loop is not None
+                    else None
+                )
+            reservation = self._reserve_turn_admission(reservation)
+            if reservation is None:
+                if self._admission_retired():
+                    return self._retired_before_query_result()
+                raise AssertionError("loop thread not started")
+            loop = reservation.loop
+            if loop.is_closed() or not loop.is_running():
+                logger.warning(
+                    "claude-agent-sdk turn admission captured a stopped loop; "
+                    "retiring before query"
+                )
+                return self._retired_before_query_result()
+            watch = _TurnWatch()
+            self._turn_watch = watch
+            trip: Optional[str] = None
+            trip_elapsed = trip_idle = 0.0
+            hard_trip = False
+            turn_data: Optional[dict[str, Any]] = None
+            bootstrap_coroutine = bootstrap_turn()
+            bootstrap_holder["coroutine"] = bootstrap_coroutine
+            try:
+                future = asyncio.run_coroutine_threadsafe(bootstrap_coroutine, loop)
+            except BaseException:
+                bootstrap_holder.pop("coroutine", bootstrap_coroutine).close()
+                bootstrap_coroutine = None
+                raise
+            finally:
+                if future is not None:
+                    future.add_done_callback(release_scheduled)
+            # From this point, only the event loop owns the coroutine object.
+            bootstrap_coroutine = None
+            # Once submitted, the loop owns bootstrap_coroutine: the caller thread
+            # must only cancel the future. release_scheduled queues any needed
+            # finalization back to the loop; closing a submitted coroutine here
+            # would tear down one the loop may already be executing.
+            scheduled = True
+            with self._turn_callback_lock:
+                retired_after_schedule = self._retiring or self._closed
+                # bootstrap_turn clears this slot on entry (under the same
+                # lock) so close() only cancels a turn that has not started.
+                # If the loop already entered it, publishing now would leave a
+                # stale handle that a later close() cancels mid-turn.
+                if (
+                    not retired_after_schedule
+                    and not future.done()
+                    and not coroutine_entered.is_set()
+                ):
+                    self._pending_turn_admission_future = future
+            if retired_after_schedule:
+                # cancel() is the atomic handshake: True means the loop never
+                # started the bootstrap, so nothing was submitted and retiring is
+                # safe. False means it is running or already settled -- the loop
+                # owns that result and the caller must harvest it below rather
+                # than return a retire verdict that would replay the prompt.
+                if not coroutine_entered.is_set() and future.cancel():
+                    self._turn_watch = None
+                    return self._retired_before_query_result()
+                # The loop has entered bootstrap_turn. Its consumer owns the
+                # decision about whether retirement preceded query submission;
+                # caller-side retirement must never discard a settled result.
+            if not coroutine_entered.wait(timeout=0.1):
+                if (
+                    loop.is_closed()
+                    or not loop.is_running()
+                    or self._admission_retired()
+                ):
+                    # A timed-out entry observation cannot authorize replay:
+                    # only a successful cancel() proves no query was submitted.
+                    if future.cancel():
+                        self._turn_watch = None
+                        return self._retired_before_query_result()
+        except RuntimeError:
+            if reservation is not None and (
+                reservation.loop.is_closed() or not reservation.loop.is_running()
+            ):
+                self._turn_watch = None
+                return self._retired_before_query_result()
+            raise
+        finally:
+            if not scheduled:
+                self._turn_watch = None
+                # Release first so close() cannot wait on a reservation while
+                # coroutine finalization is running in this caller thread.
+                self._release_turn_admission(reservation)
+                if bootstrap_coroutine is not None:
+                    bootstrap_holder.pop("coroutine", bootstrap_coroutine).close()
         try:
             pending_verdict: Optional[str] = None
             prev_poll = time.monotonic()
@@ -324,6 +533,9 @@ class ClaudeSdkTurnMixin:
         result.terminal_result_accepted = bool(
             turn_data.get("terminal_result_accepted", False)
         )
+        result.retired_before_query = bool(
+            turn_data.get("retired_before_query", False)
+        )
         result.interrupted = bool(turn_data.get("interrupt_observed", False))
         # A non-terminal turn can spend time releasing foreground ownership
         # after the stream consumer's last snapshot. Restore the live read for
@@ -412,6 +624,18 @@ class ClaudeSdkTurnMixin:
 
     # ---------- internals ----------
 
+    async def _consume_turn_with_admission(
+        self, prompt: Any, reservation: Any
+    ) -> dict[str, Any]:
+        self._turn_admission_reservation = reservation
+        try:
+            return await self._consume_turn(prompt)
+        finally:
+            self._release_turn_admission(reservation)
+            with self._turn_callback_lock:
+                if self._turn_admission_reservation is reservation:
+                    self._turn_admission_reservation = None
+
     async def _consume_turn(self, prompt: Any) -> dict[str, Any]:
         """The async side of one turn: query, then read THIS turn's messages
         off the reader loop's inbox until the ResultMessage.
@@ -435,8 +659,10 @@ class ClaudeSdkTurnMixin:
             "billing_evidence": dict(self._billing_evidence),
             "total_cost_usd": None,
             "api_call_made": True,
+            "query_submitted": False,
             "interrupt_observed": False,
             "terminal_result_accepted": False,
+            "retired_before_query": False,
         }
 
         boundary_interrupt = False
@@ -446,6 +672,21 @@ class ClaudeSdkTurnMixin:
                 observed = self._interrupt_event.is_set()
             out["interrupt_observed"] = observed
             return observed
+
+        # Rotation may already have cancelled the reader by the time this
+        # coroutine is scheduled. Prefer the retirement outcome over the
+        # reader's terminal marker so the runtime can rebuild and retry.
+        with self._turn_callback_lock:
+            retired_before_query = bool(
+                getattr(self, "_retiring", False) or getattr(self, "_closed", False)
+            )
+        if retired_before_query:
+            _snapshot_interrupt()
+            out["error"] = "SDK session is rotating; rebuilding CLI"
+            out["stream_ended"] = True
+            out["retired_before_query"] = True
+            out["api_call_made"] = False
+            return out
 
         ended = self._stream_ended
         if ended is not None:
@@ -476,15 +717,48 @@ class ClaudeSdkTurnMixin:
             out["stream_ended"] = True
             return out
         claim_ack = asyncio.get_running_loop().create_future()
-        self._turn_claim_requested = True
-        claims.put_nowait(("claim", inbox, claim_ack))
+        # Rotation shares this lock so it cannot pass the idle check between the claim
+        # request and its publication to the reader.
+        retired_before_query = False
+        stream_ended_before_query = False
+        with self._turn_callback_lock:
+            if getattr(self, "_retiring", False) or getattr(self, "_closed", False):
+                retired_before_query = True
+            elif self._stream_ended is not None:
+                stream_ended_before_query = True
+            else:
+                self._turn_claim_requested = True
+                self._turn_claim_ack = claim_ack
+                claims.put_nowait(("claim", inbox, claim_ack))
+        if retired_before_query:
+            _snapshot_interrupt()
+            out["error"] = "SDK session is rotating; rebuilding CLI"
+            out["stream_ended"] = True
+            out["retired_before_query"] = True
+            out["api_call_made"] = False
+            return out
+        if stream_ended_before_query:
+            _snapshot_interrupt()
+            out["error"] = "SDK message stream ended before this turn"
+            out["stream_ended"] = True
+            out["api_call_made"] = False
+            return out
         interrupted = False
         billing_guarded = False
         try:
             try:
                 await claim_ack
             finally:
-                self._turn_claim_requested = False
+                with self._turn_callback_lock:
+                    self._turn_claim_requested = False
+                    if self._turn_claim_ack is claim_ack:
+                        self._turn_claim_ack = None
+            # Admission protects only the check-to-handoff window. Once the
+            # reader has acknowledged this claim, ownership is expressed by
+            # _turn_inbox and close() must be free to stop the reader.
+            self._release_turn_admission(
+                getattr(self, "_turn_admission_reservation", None)
+            )
             ended = self._stream_ended
             if ended is not None:
                 with self._interrupt_commit_lock:
@@ -500,6 +774,17 @@ class ClaudeSdkTurnMixin:
                 if isinstance(prompt, list)
                 else prompt
             )
+            # This is the loop-owned admission point. Once set, a concurrent
+            # retirement can only be reported after this query's result is
+            # settled; it must never authorize replay of the side effects.
+            with self._turn_callback_lock:
+                if getattr(self, "_retiring", False) or getattr(self, "_closed", False):
+                    out["error"] = "SDK session is rotating; rebuilding CLI"
+                    out["stream_ended"] = True
+                    out["retired_before_query"] = True
+                    out["api_call_made"] = False
+                    return out
+                out["query_submitted"] = True
             await self._client.query(query_input)
             while True:
                 message = await inbox.get()
@@ -709,7 +994,7 @@ class ClaudeSdkTurnMixin:
                             self._unsolicited_delivered.add(uuid)
                         self._unsolicited_results += 1
                         buffered = len(self._unsolicited_text)
-                        self._unsolicited_text.clear()
+                        _clear_unsolicited_projection(self)
                         logger.warning(
                             "claude-agent-sdk: residue ResultMessage %s "
                             "matches this turn's own answer — suppressed, "
@@ -888,7 +1173,10 @@ class ClaudeSdkTurnMixin:
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             message_task.cancel()
             claim_task.cancel()
-            raise
+            # Cancellation is the reader's terminal edge too. A queued claim
+            # must be released below or the foreground coroutine waits until
+            # its watchdog fires against a session that is already gone.
+            end = _StreamEnd(error=None)
         except Exception as exc:  # pragma: no cover - stream torn down
             logger.debug(
                 "claude-agent-sdk reader loop ended: %s",
@@ -906,6 +1194,9 @@ class ClaudeSdkTurnMixin:
         # messages, and then lose the reader to EOF; resolving the claim makes
         # it re-check this terminal state instead of waiting out turn_timeout.
         self._stream_ended = end
+        pending_ack = self._turn_claim_ack
+        if pending_ack is not None and not pending_ack.done():
+            pending_ack.set_result(None)
         pending_claims = []
         if claim_task.done() and not claim_task.cancelled():
             try:
@@ -932,11 +1223,16 @@ class ClaudeSdkTurnMixin:
         These are real CLI output (typically a finished background Agent task
         reporting in). They answer nothing Hermes asked, so they must never
         enter a turn's result — but their CONTENT is completed work the user
-        is waiting on: with a delivery callback wired, capture each top-level
-        assistant message's text and hand the FULL burst over as an ordered
-        list on the terminal ResultMessage (uuid-deduped). Without a
-        callback, the historical WARN-drop stands."""
+        is waiting on. Capture the complete injected turn, including its peer
+        envelope and tool round, and hand the ordered projection over on the
+        terminal ResultMessage. Without a callback, the historical WARN-drop
+        stands."""
         if isinstance(message, _StreamEnd):
+            # The runtime retirement path is the sole child-exit emitter. The
+            # reader can observe EOF just before that path retires the turn;
+            # emitting here as well creates two lifecycle rows with distinct
+            # timestamps, so the shared guard cannot deduplicate them.
+            self._unsolicited_stream_end_emitted = True
             return
         sid = getattr(message, "session_id", None)
         if sid:
@@ -944,18 +1240,139 @@ class ClaudeSdkTurnMixin:
         name = type(message).__name__
         if name == "ResultMessage":
             self._unsolicited_results += 1
-            if self._on_unsolicited_result is None:
-                self._unsolicited_text.clear()
+        if getattr(message, "parent_tool_use_id", None):
+            # Subagent streams belong to the parent tool card, not to the
+            # session-level unsolicited turn.
+            return
+        if self._on_unsolicited_result is None:
+            if name == "ResultMessage":
+                _clear_unsolicited_projection(self)
                 logger.warning(
                     "claude-agent-sdk: dropped unsolicited ResultMessage (no "
                     "turn in flight, total=%d) — CLI-initiated turn; see "
                     "dasbrow-hermes-coder#2",
                     self._unsolicited_results,
                 )
+            return
+
+        items = self._unsolicited_items
+        tool_items = self._unsolicited_tool_items
+        seen = self._unsolicited_seen
+
+        def _message_text(content: Any) -> str:
+            if isinstance(content, str):
+                return content
+            parts = [
+                str(getattr(block, "text", "") or "")
+                for block in content or []
+                if type(block).__name__ == "TextBlock" and getattr(block, "text", "")
+            ]
+            return "\n".join(parts)
+
+        def _tool_args(block: Any) -> dict:
+            args = getattr(block, "input", None) or {}
+            return dict(args) if isinstance(args, dict) else {"input": args}
+
+        def _woken_source(origin: dict) -> Optional[str]:
+            kind = origin.get("kind")
+            subkind = origin.get("subkind")
+            if kind == "peer":
+                return "peer"
+            if kind == "channel":
+                return "channel"
+            if kind == "task-notification":
+                return f"{kind}/{subkind}" if subkind else kind
+            return None
+
+        def _woken_by(origin: dict, content: Any) -> str:
+            for key in ("name", "from", "task", "task_description", "taskDescription", "description", "body"):
+                value = origin.get(key)
+                if value:
+                    return str(value)
+            return _message_text(content) or "unknown"
+
+        def _append_woken(origin: dict, content: Any, uuid: str) -> None:
+            source = _woken_source(origin)
+            if source is None or any(
+                item.get("kind") == "lifecycle" and item.get("event") == "woken"
+                for item in items
+            ):
                 return
+            items.insert(0, {
+                "kind": "lifecycle",
+                "event": "woken",
+                "source": source,
+                "by": _woken_by(origin, content),
+                "uuid": uuid,
+            })
+
+        if name == "UserMessage":
+            origin = getattr(message, "origin", None)
+            if isinstance(origin, dict):
+                _append_woken(origin, getattr(message, "content", None), str(getattr(message, "uuid", None) or ""))
+            is_peer = isinstance(origin, dict) and (
+                origin.get("kind") == "peer"
+                or (
+                    origin.get("kind") == "task-notification"
+                    and origin.get("subkind") == "peer-send-message"
+                )
+            )
+            uuid = str(getattr(message, "uuid", None) or "")
+            if is_peer:
+                if uuid and uuid in seen:
+                    return
+                if uuid:
+                    seen.add(uuid)
+                text = str(origin.get("body") or _message_text(getattr(message, "content", None)))
+                if text:
+                    items.append({
+                        "kind": "peer_in",
+                        "text": text,
+                        "from": str(origin.get("from") or ""),
+                        "name": str(origin.get("name") or ""),
+                        "from_session": str(origin.get("fromSession") or ""),
+                        "uuid": uuid,
+                    })
+                return
+
+            content = getattr(message, "content", None)
+            if not isinstance(content, list):
+                return
+            from agent.transports.claude_sdk_event_projector import (
+                _flatten_tool_result_content,
+            )
+            if uuid and uuid in seen:
+                return
+            if uuid:
+                seen.add(uuid)
+            for block in content:
+                if type(block).__name__ != "ToolResultBlock":
+                    continue
+                tool_use_id = str(getattr(block, "tool_use_id", "") or "")
+                if not tool_use_id:
+                    continue
+                item = tool_items.get(tool_use_id)
+                if item is None:
+                    item = {
+                        "kind": "tool",
+                        "tool_use_id": tool_use_id,
+                        "name": "tool",
+                        "args": {},
+                        "result": "",
+                        "is_error": False,
+                    }
+                    items.append(item)
+                    tool_items[tool_use_id] = item
+                item["result"] = _flatten_tool_result_content(
+                    getattr(block, "content", None)
+                )
+                item["is_error"] = bool(getattr(block, "is_error", False))
+            return
+
+        if name == "ResultMessage":
             uuid = getattr(message, "uuid", None)
             if uuid and uuid in self._unsolicited_delivered:
-                self._unsolicited_text.clear()
+                _clear_unsolicited_projection(self)
                 logger.debug(
                     "claude-agent-sdk: duplicate unsolicited ResultMessage "
                     "%s ignored", uuid,
@@ -963,8 +1380,10 @@ class ClaudeSdkTurnMixin:
                 return
             result_text = getattr(message, "result", None)
             texts = list(self._unsolicited_text)
-            self._unsolicited_text.clear()
-            if _is_rename_ack(result_text, texts):
+            unsolicited_items = list(self._unsolicited_items)
+            _clear_unsolicited_projection(self)
+            pending_rename = getattr(self, "_pending_rename_ack", None)
+            if pending_rename and _is_rename_ack(result_text, texts, pending_rename):
                 # The CLI's own "/rename" acknowledgement — never a background result.
                 self._pending_rename_ack = None
                 if uuid:
@@ -974,26 +1393,46 @@ class ClaudeSdkTurnMixin:
             if isinstance(result_text, str) and result_text.strip():
                 # The CLI's result text repeats the turn's final assistant
                 # message — never hand the same text over twice.
-                if not texts or texts[-1] != result_text:
+                buffered_text = "\n".join(texts)
+                normalized_result = " ".join(result_text.split())
+                already_buffered = any(
+                    normalized_result == " ".join(text.split())
+                    for text in [*texts, buffered_text]
+                )
+                if not already_buffered:
                     texts.append(result_text)
+                if not already_buffered and not any(
+                    item.get("kind") == "text"
+                    and " ".join(str(item.get("text") or "").split()) == normalized_result
+                    for item in unsolicited_items
+                ):
+                    unsolicited_items.append({"kind": "text", "text": result_text})
             if uuid:
                 self._unsolicited_delivered.add(uuid)
-            if not texts:
+            if not texts and not unsolicited_items:
                 logger.warning(
                     "claude-agent-sdk: unsolicited ResultMessage carried no "
-                    "text (total=%d) — nothing to deliver",
+                    "content (total=%d) — nothing to deliver",
                     self._unsolicited_results,
                 )
                 return
             logger.info(
                 "claude-agent-sdk: delivering unsolicited result burst "
                 "(background task finished, total=%d, %d message(s), "
-                "%d chars)",
+                "%d chars, %d item(s))",
                 self._unsolicited_results, len(texts),
-                sum(len(t) for t in texts),
+                sum(len(t) for t in texts), len(unsolicited_items),
             )
             try:
-                self._on_unsolicited_result(texts)
+                import inspect
+
+                callback = self._on_unsolicited_result
+                try:
+                    inspect.signature(callback).bind(texts, unsolicited_items)
+                except (TypeError, ValueError):
+                    callback(texts)
+                else:
+                    callback(texts, unsolicited_items)
             except Exception:
                 logger.warning(
                     "claude-agent-sdk: unsolicited-result delivery callback "
@@ -1004,18 +1443,50 @@ class ClaudeSdkTurnMixin:
             # delivers in message granularity; subagent streams
             # (parent_tool_use_id set) are noise — the same gate
             # _forward_stream_delta uses.
-            if (
-                self._on_unsolicited_result is not None
-                and not getattr(message, "parent_tool_use_id", None)
-            ):
-                parts = [
-                    getattr(block, "text", "") or ""
-                    for block in getattr(message, "content", None) or []
-                    if type(block).__name__ == "TextBlock"
-                ]
-                message_text = "\n".join(p for p in parts if p)
-                if message_text:
-                    self._unsolicited_text.append(message_text)
+            message_uuid = str(getattr(message, "uuid", None) or "")
+            if message_uuid and message_uuid in seen:
+                return
+            if message_uuid:
+                seen.add(message_uuid)
+            parts = []
+            for block in getattr(message, "content", None) or []:
+                if type(block).__name__ == "TextBlock":
+                    text = getattr(block, "text", "") or ""
+                    if text:
+                        parts.append(text)
+                        items.append({"kind": "text", "text": text})
+                    continue
+                if type(block).__name__ != "ToolUseBlock":
+                    continue
+                tool_use_id = str(getattr(block, "id", "") or "")
+                if not tool_use_id:
+                    continue
+                name = str(getattr(block, "name", "") or "unknown")
+                args = _tool_args(block)
+                item = {
+                    "kind": "tool",
+                    "tool_use_id": tool_use_id,
+                    "name": name,
+                    "args": args,
+                    "result": "",
+                    "is_error": False,
+                }
+                items.append(item)
+                tool_items[tool_use_id] = item
+                if name == "SendMessage":
+                    peer_text = args.get("message") or args.get("content") or ""
+                    if not isinstance(peer_text, str):
+                        peer_text = str(peer_text)
+                    peer = args.get("to") or args.get("recipient") or ""
+                    items.append({
+                        "kind": "peer_out",
+                        "text": peer_text,
+                        "to": str(peer),
+                        "tool_use_id": tool_use_id,
+                    })
+            message_text = "\n".join(parts)
+            if message_text:
+                self._unsolicited_text.append(message_text)
             logger.info(
                 "claude-agent-sdk: unsolicited %s outside a turn", name,
             )

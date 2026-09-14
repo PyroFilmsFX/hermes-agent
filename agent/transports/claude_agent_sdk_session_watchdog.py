@@ -193,10 +193,17 @@ def _swallow_interrupt_result(future: Any) -> None:
 _RENAME_ACK_PREFIX = "Session renamed to:"
 
 
-def _is_rename_ack(result_text: Any, buffered: list) -> bool:
-    """True for the CLI's ``/rename`` acknowledgement (deterministic text, proven 2026-09-09)."""
+def _is_rename_ack(result_text: Any, buffered: list, pending_name: Optional[str] = None) -> bool:
+    """True for the CLI's ``/rename`` acknowledgement (deterministic text, proven 2026-09-09).
+
+    Swallowed only when a rename ack is pending AND the text matches the exact
+    expected ack for that target name.
+    """
+    if not pending_name:
+        return False
+    expected = f"{_RENAME_ACK_PREFIX} {pending_name}".strip()
     candidates = [result_text, *buffered]
-    return any(isinstance(t, str) and t.strip().startswith(_RENAME_ACK_PREFIX) for t in candidates)
+    return any(isinstance(t, str) and t.strip() == expected for t in candidates)
 
 
 def _swallow_steer_result(future: Any) -> None:

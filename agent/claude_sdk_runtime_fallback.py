@@ -193,11 +193,7 @@ def _reconcile_turn_outcome(agent, state: _SdkTurnState) -> None:
         if state.failover_reason is not None and agent._claude_sdk_session is not None:
             # A provider switch must never retain transport/session state from
             # the failed SDK backend.
-            try:
-                agent._claude_sdk_session.close()
-            except Exception:
-                pass
-            agent._claude_sdk_session = None
+            _retire_live_sdk_session(agent)
             _store_sdk_session_id(agent, None)
 
     # FALLBACK ONLY. _on_compact_boundary above is the real terminal edge and
@@ -232,8 +228,23 @@ def _reconcile_turn_outcome(agent, state: _SdkTurnState) -> None:
             # ResultMessage; a REUSED client would serve it as the NEXT
             # turn's answer. Retire the client — the persisted id below lets
             # the next turn RESUME the same SDK conversation cleanly.
-            try:
-                agent._claude_sdk_session.close()
-            except Exception:
-                pass
-            agent._claude_sdk_session = None
+            _retire_live_sdk_session(agent)
+
+
+def _retire_live_sdk_session(agent) -> None:
+    """Detach and close the agent's live SDK session without erasing a replacement.
+
+    Reads the slot once, clears it only if it still points at that object
+    (under the agent's session identity lock), then closes the captured
+    session outside the lock. A replacement published concurrently survives.
+    """
+    from agent.claude_sdk_runtime_continuity import _clear_claude_sdk_session_if_current
+
+    live = getattr(agent, "_claude_sdk_session", None)
+    if live is None:
+        return
+    _clear_claude_sdk_session_if_current(agent, live)
+    try:
+        live.close()
+    except Exception:
+        pass
