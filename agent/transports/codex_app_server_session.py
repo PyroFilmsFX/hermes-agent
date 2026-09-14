@@ -64,6 +64,9 @@ class TurnResult:
     # False when transport-local validation rejected the request before a
     # model call; keeps usage and iteration accounting honest.
     api_call_made: bool = True
+    # Claude SDK ResultMessage.num_turns; Codex results retain the one-request
+    # default so both whole-turn runtimes share the same accounting contract.
+    num_turns: int = 1
 
 
 # Some codex versions stream ``<turn_aborted>`` as raw agentMessage text when an

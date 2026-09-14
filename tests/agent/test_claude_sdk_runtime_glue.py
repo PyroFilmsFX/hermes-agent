@@ -5,6 +5,7 @@ stand-ins, fake clients and shared builders live in
 ``tests.agent.claude_sdk_fakes``.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import logging
@@ -65,6 +66,26 @@ class TestRuntimeGlue:
             effective_task_id="task-1",
         )
         assert result["iteration_count"] == 4
+
+    def test_real_session_result_num_turns_reaches_runtime_accounting(self):
+        session, _ = _make_session(script=[ResultMessage(result="ok", num_turns=3)])
+        session._cwd = str(Path.cwd())
+        agent = _make_agent()
+        agent._claude_sdk_session = session
+        try:
+            result = run_claude_agent_sdk_turn(
+                agent,
+                user_message="hi",
+                original_user_message="hi",
+                messages=[{"role": "user", "content": "hi"}],
+                effective_task_id="task-1",
+            )
+        finally:
+            session.close()
+
+        assert result["iteration_count"] == 3, (
+            "accepted ResultMessage.num_turns must reach runtime accounting"
+        )
 
     def test_whole_turn_budget_consumes_sdk_iterations(self):
         agent = _make_agent()

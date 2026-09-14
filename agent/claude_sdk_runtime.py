@@ -287,6 +287,7 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
         "final_response": turn.final_text,
         "messages": state.messages,
         "api_calls": int(getattr(turn, "api_call_made", True)),
+        "num_turns": iteration_count,
         "iteration_count": iteration_count,
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,

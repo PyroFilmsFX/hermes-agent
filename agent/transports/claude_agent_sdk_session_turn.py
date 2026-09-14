@@ -523,6 +523,7 @@ class ClaudeSdkTurnMixin:
         result.tool_iterations = turn_data["tool_iterations"]
         result.token_usage_last = turn_data["usage"]
         result.token_usage_total = turn_data["usage"]
+        result.num_turns = turn_data.get("num_turns", 1)
         result.model_last = turn_data.get("model")
         result.billing_mode = turn_data.get("billing_mode", "unknown")
         result.billing_evidence = turn_data.get("billing_evidence", {})
@@ -664,6 +665,7 @@ class ClaudeSdkTurnMixin:
             "billing_mode": self._reported_billing_mode(),
             "billing_evidence": dict(self._billing_evidence),
             "total_cost_usd": None,
+            "num_turns": 1,
             "api_call_made": True,
             "query_submitted": False,
             "interrupt_observed": False,
@@ -852,7 +854,12 @@ class ClaudeSdkTurnMixin:
                         is_steer_result = pending_steer > 0 and _is_human_origin(message)
                         if is_steer_result:
                             self._pending_steer_results = pending_steer - 1
-                    if pending_steer > 0 and not is_steer_result:
+                        pending_steer_after = getattr(
+                            self, "_pending_steer_results", 0
+                        )
+                    if pending_steer > 0 and (
+                        not is_steer_result or pending_steer_after > 0
+                    ):
                         continue
                 self._note_mcp_tool_use(message, out)
                 if not billing_guarded:
@@ -880,10 +887,19 @@ class ClaudeSdkTurnMixin:
                     # ResultMessage just completed, nor reclassify a genuine
                     # terminal error as an honored interrupt.
                     with self._interrupt_commit_lock:
-                        boundary_interrupt = (
-                            interrupted or self._interrupt_event.is_set()
+                        # A steer may have been admitted while projection was
+                        # running. Keep the result in this foreground turn and
+                        # wait for that steer result before committing.
+                        pending_steer_after_projection = getattr(
+                            self, "_pending_steer_results", 0
                         )
-                        self._terminal_result_committed = True
+                        if not pending_steer_after_projection:
+                            boundary_interrupt = (
+                                interrupted or self._interrupt_event.is_set()
+                            )
+                            self._terminal_result_committed = True
+                    if pending_steer_after_projection:
+                        continue
                     out["terminal_result_accepted"] = True
                 if not interrupted and not billing_guarded:
                     if projection.messages:
@@ -906,6 +922,11 @@ class ClaudeSdkTurnMixin:
                     out["total_cost_usd"] = getattr(
                         message, "total_cost_usd", None
                     )
+                    raw_num_turns = getattr(message, "num_turns", 1)
+                    try:
+                        out["num_turns"] = max(0, int(raw_num_turns))
+                    except (TypeError, ValueError, OverflowError):
+                        out["num_turns"] = 1
                     subtype = getattr(message, "subtype", "") or ""
                     if getattr(message, "is_error", False):
                         errors = getattr(message, "errors", None) or []
@@ -993,6 +1014,11 @@ class ClaudeSdkTurnMixin:
                     if self._turn_inbox is inbox:
                         self._turn_inbox = None
                     out["stream_ended"] = True
+            with self._interrupt_commit_lock:
+                # Any steer whose query was abandoned by interruption, stream
+                # death, or release must not be mistaken for a later turn's
+                # result. Completed steers already decremented this counter.
+                self._pending_steer_results = 0
             # Anything the reader parked after our ResultMessage belongs to a
             # CLI-initiated turn that overlapped ours. Route it now — left in
             # a discarded queue it would be lost, and left in the stream it

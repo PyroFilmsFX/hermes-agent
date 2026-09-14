@@ -905,7 +905,15 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             return False
         cleaned = text.strip()
         try:
-            query = client.query(cleaned)
+            async def _steer_message_stream():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": cleaned},
+                    "parent_tool_use_id": None,
+                    "origin": {"kind": "human"},
+                }
+
+            query = client.query(_steer_message_stream())
             future = asyncio.run_coroutine_threadsafe(query, loop)
 
             def _finish_steer(done: Any) -> None:
