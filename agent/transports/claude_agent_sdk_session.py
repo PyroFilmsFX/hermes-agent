@@ -61,6 +61,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     render_sdk_session_name,
     _configured_hybrid_exclude,
     _configured_max_buffer_size,
+    _configured_max_turns,
     _configured_permission_mode,
     _configured_setting_sources,
     _http_mcp_entries_from_config,
@@ -227,6 +228,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._on_compaction = on_compaction
         self._on_compact_boundary = on_compact_boundary
         self._max_budget_usd = max_budget_usd
+        # Snapshot the canonical Hermes iteration cap once. The SDK options
+        # are session-scoped and must remain byte-identical across resumes.
+        self._max_turns = _configured_max_turns()
         self._client_factory = client_factory  # test seam
         self._include_hermes_tools = include_hermes_tools
         # Hermes-side session id, exported to the hermes-tools MCP subprocess
@@ -309,6 +313,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # which is what makes "unsolicited" decidable.
         self._reader_task: Any = None
         self._turn_inbox: Any = None
+        # Number of SDK queries submitted by ``steer()`` whose terminal result
+        # still belongs to the foreground Hermes turn.  The SDK multiplexes
+        # these results on the same stream and marks them with human origin.
+        self._pending_steer_results = 0
         # The foreground coroutine owns this acknowledgement while waiting
         # for the reader to publish its claim.  Shutdown resolves it even if
         # the reader cancellation has already dequeued the claim.
@@ -832,6 +840,19 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     _safe_sdk_error_text(exc),
                 )
 
+    def stop_task(self, task_id: str) -> bool:
+        """Schedule Claude SDK's task stop on the session's loop thread."""
+        client, loop = self._client, self._loop
+        if client is None or loop is None or not hasattr(client, "stop_task"):
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(client.stop_task(task_id), loop)
+            future.add_done_callback(_swallow_interrupt_result)
+        except Exception as exc:  # pragma: no cover - loop teardown race
+            logger.debug("SDK task stop scheduling failed: %s", _safe_sdk_error_text(exc))
+            return False
+        return True
+
     def steer(self, text: str) -> bool:
         """Inject a mid-turn user message using the SDK's own streaming input.
 
@@ -864,24 +885,74 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # No claimed turn means there is nothing to steer INTO. Sending anyway
         # would open a fresh unclaimed turn on this session whose output the
         # reader routes to the unsolicited path — a reply appearing from
-        # nowhere. Decline instead and let the caller queue it normally.
-        if self._turn_inbox is None:
-            return False
+        # nowhere. Decline instead and let the caller queue it normally. The
+        # terminal fence is checked under the same lock as ResultMessage
+        # acceptance, closing the result/steer race at the ownership edge.
+        commit_lock = getattr(self, "_interrupt_commit_lock", None)
+        with commit_lock if commit_lock is not None else contextlib.nullcontext():
+            if getattr(self, "_terminal_result_committed", False):
+                return False
+            if self._turn_inbox is None:
+                return False
+            self._pending_steer_results = getattr(self, "_pending_steer_results", 0) + 1
         client = self._client
         loop = self._loop
         if client is None or loop is None:
+            with commit_lock if commit_lock is not None else contextlib.nullcontext():
+                self._pending_steer_results = max(
+                    0, getattr(self, "_pending_steer_results", 0) - 1
+                )
             return False
         cleaned = text.strip()
         try:
-            future = asyncio.run_coroutine_threadsafe(client.query(cleaned), loop)
-            future.add_done_callback(_swallow_steer_result)
+            query = client.query(cleaned)
+            future = asyncio.run_coroutine_threadsafe(query, loop)
+
+            def _finish_steer(done: Any) -> None:
+                try:
+                    done.result()
+                except Exception:
+                    # A successful query future only means the input was
+                    # accepted by the SDK; its ResultMessage is still pending.
+                    # A failed future must release the ownership reservation so
+                    # the next ordinary ResultMessage is not mistaken for a
+                    # steer result.
+                    with commit_lock if commit_lock is not None else contextlib.nullcontext():
+                        self._pending_steer_results = max(
+                            0, getattr(self, "_pending_steer_results", 0) - 1
+                        )
+                    logger.debug("SDK steer query failed after scheduling", exc_info=True)
+
+            future.add_done_callback(_finish_steer)
         except Exception:
+            if "query" in locals() and hasattr(query, "close"):
+                query.close()
+            with commit_lock if commit_lock is not None else contextlib.nullcontext():
+                self._pending_steer_results = max(
+                    0, getattr(self, "_pending_steer_results", 0) - 1
+                )
             logger.debug("SDK steer scheduling failed", exc_info=True)
             return False
         logger.info(
             "claude-agent-sdk: steered live turn via streaming input (%d chars)",
             len(cleaned),
         )
+        return True
+
+    def stop_task(self, task_id: str) -> bool:
+        """Ask the SDK to stop one Agent task on its owning loop thread."""
+        task_id = str(task_id or "").strip()
+        client, loop = self._client, self._loop
+        if not task_id or client is None or loop is None:
+            return False
+        stop = getattr(client, "stop_task", None)
+        if not callable(stop):
+            return False
+        try:
+            self._run_coro(stop(task_id), timeout=10.0)
+        except Exception:
+            logger.debug("SDK stop_task(%s) failed", task_id, exc_info=True)
+            return False
         return True
 
     def build_option_fields(self) -> dict[str, Any]:
@@ -1072,6 +1143,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # can never diverge across a mid-session config edit.
         if self._streaming:
             fields["include_partial_messages"] = True
+        if self._max_turns is not None:
+            fields["max_turns"] = self._max_turns
         return fields
 
     def _build_client(self) -> Any:

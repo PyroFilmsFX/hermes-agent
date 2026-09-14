@@ -25,6 +25,112 @@ _active_subagents: Dict[str, Dict[str, Any]] = {}
 _RECENT_SUBAGENTS_CAP = 200
 _recent_subagents: Dict[str, Dict[str, Any]] = {}
 
+
+def _register_sdk_subagent(
+    task_id: str,
+    *,
+    goal: str,
+    sdk_session: Any,
+    owner_session_id: Optional[str],
+    owner_agent: Any,
+    parent_tool_id: Optional[str] = None,
+    child_session_id: Optional[str] = None,
+) -> None:
+    """Register one Claude SDK task without changing native child records."""
+    owner_transport, owner_session_record = _capture_gateway_steer_authority(
+        owner_session_id
+    )
+    _register_subagent({
+        "kind": "sdk",
+        "subagent_id": str(task_id),
+        "parent_id": None,
+        "parent_tool_id": parent_tool_id,
+        "depth": 0,
+        "goal": str(goal or ""),
+        "delegation_id": None,
+        "model": None,
+        "started_at": time.time(),
+        "status": "running",
+        "tool_count": 0,
+        "last_tool": "",
+        "agent": None,
+        "sdk_session": sdk_session,
+        "owner_agent": owner_agent,
+        "owner_agent_session_id": owner_session_id,
+        "owner_session_id": owner_session_id,
+        "owner_transport": owner_transport,
+        "owner_session_record": owner_session_record,
+        "child_session_id": child_session_id,
+        "transcript": "",
+    })
+
+
+def update_sdk_subagent(
+    event_type: str,
+    *,
+    task_id: str,
+    goal: str = "",
+    sdk_session: Any = None,
+    owner_session_id: Optional[str] = None,
+    owner_agent: Any = None,
+    parent_tool_id: Optional[str] = None,
+    child_session_id: Optional[str] = None,
+    tool_name: str = "",
+    text: str = "",
+    status: str = "running",
+) -> None:
+    """Apply an SDK task event to the shared live registry.
+
+    The SDK task id is the public subagent id. Native delegate records never
+    take this path and retain their existing ``agent``/steering semantics.
+    """
+    sid = str(task_id or "")
+    if not sid:
+        return
+    with _active_subagents_lock:
+        record = _active_subagents.get(sid)
+        if event_type == "subagent.start":
+            if record is not None and record.get("kind") != "sdk":
+                return
+            if record is not None:
+                record.update({
+                    "goal": str(goal or record.get("goal") or ""),
+                    "parent_tool_id": parent_tool_id or record.get("parent_tool_id"),
+                    "child_session_id": child_session_id or record.get("child_session_id"),
+                })
+                return
+        elif record is None or record.get("kind") != "sdk":
+            return
+        if event_type == "subagent.progress":
+            record["status"] = "running"
+        elif event_type == "subagent.tool":
+            record["status"] = "running"
+            record["tool_count"] = int(record.get("tool_count") or 0) + 1
+            record["last_tool"] = str(tool_name or "")
+        elif event_type == "subagent.text":
+            value = str(text or "")
+            if value:
+                record["transcript"] = ((record.get("transcript") or "") + value)[-16384:]
+        elif event_type == "subagent.complete":
+            _active_subagents.pop(sid, None)
+            return
+        if record is not None:
+            if sdk_session is not None:
+                record["sdk_session"] = sdk_session
+            if child_session_id:
+                record["child_session_id"] = child_session_id
+
+    if event_type == "subagent.start" and record is None:
+        _register_sdk_subagent(
+            sid,
+            goal=goal,
+            sdk_session=sdk_session,
+            owner_session_id=owner_session_id,
+            owner_agent=owner_agent,
+            parent_tool_id=parent_tool_id,
+            child_session_id=child_session_id,
+        )
+
 def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """``{subagent_id, goal, delegation_id}`` for a process task_id that belongs to a live or recently-finished child
     (children run their terminal sessions under ``task_id == subagent_id``), else None."""
@@ -168,7 +274,10 @@ def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[A
         return None, None
 
 # Registry record fields never exposed to the TUI/RPC snapshot.
-_PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport", "owner_session_record", "accepting_steer"})
+_PRIVATE_RECORD_KEYS = frozenset({
+    "agent", "sdk_session", "owner_agent", "owner_session_id", "owner_transport",
+    "owner_session_record", "accepting_steer", "transcript",
+})
 
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Copy of the running subagent tree ({subagent_id, parent_id, depth, goal, model,

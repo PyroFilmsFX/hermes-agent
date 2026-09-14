@@ -1,0 +1,173 @@
+from types import SimpleNamespace
+
+from agent.transports.claude_agent_sdk_session_notify import ClaudeSdkNotifyMixin
+from agent.transports.claude_agent_sdk_session_turn import ClaudeSdkTurnMixin
+from tui_gateway import tool_progress
+
+
+class AssistantMessage:
+    def __init__(self, content, parent_tool_use_id=None):
+        self.content = content
+        self.parent_tool_use_id = parent_tool_use_id
+
+
+class ToolUseBlock:
+    def __init__(self, id, name, input):
+        self.id, self.name, self.input = id, name, input
+
+
+class TextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class StreamEvent:
+    def __init__(self, text, parent_tool_use_id):
+        self.event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+        self.parent_tool_use_id = parent_tool_use_id
+
+
+class TaskStartedMessage:
+    def __init__(self, task_id, description, tool_use_id="parent-tool", session_id="child-session"):
+        self.task_id = task_id
+        self.description = description
+        self.tool_use_id = tool_use_id
+        self.session_id = session_id
+
+
+class TaskProgressMessage:
+    def __init__(self, task_id, description, usage):
+        self.task_id = task_id
+        self.description = description
+        self.usage = usage
+
+
+class TaskNotificationMessage:
+    def __init__(self, task_id, status):
+        self.task_id = task_id
+        self.status = status
+
+
+class TaskUpdatedMessage:
+    def __init__(self, task_id, status):
+        self.task_id = task_id
+        self.patch = SimpleNamespace(status=status)
+
+
+def _session(events):
+    session = object.__new__(ClaudeSdkNotifyMixin)
+    session._on_subagent_event = lambda event, name, preview, args, **kw: events.append(
+        (event, name, preview, args, kw)
+    )
+    session._on_tool_started = lambda *args: None
+    session._on_tool_use = None
+    session._on_tool_result = None
+    session._open_tool_cards = {}
+    return session
+
+
+def _turn_session(events):
+    class Session(ClaudeSdkTurnMixin, ClaudeSdkNotifyMixin):
+        pass
+
+    session = object.__new__(Session)
+    session._on_subagent_event = lambda event, name, preview, args, **kw: events.append(
+        (event, name, preview, args, kw)
+    )
+    session._on_tool_started = lambda *args: None
+    session._on_tool_use = None
+    session._on_tool_result = None
+    session._open_tool_cards = {}
+    session._session_id = None
+    session._unsolicited_text = []
+    session._unsolicited_results = 0
+    session._unsolicited_delivered = set()
+    session._on_unsolicited_result = None
+    session._pending_rename_ack = None
+    return session
+
+
+def test_task_lifecycle_emits_one_complete_for_notification_then_update():
+    events = []
+    session = _session(events)
+    session._notify_tool_use(
+        AssistantMessage([
+            ToolUseBlock("parent-tool", "Agent", {"description": "inspect files"})
+        ])
+    )
+    session._notify_task_message(TaskStartedMessage("task-1", "inspect files"))
+    session._notify_task_message(TaskProgressMessage("task-1", "halfway", {"input_tokens": 4}))
+    session._notify_task_message(TaskNotificationMessage("task-1", "complete"))
+    session._notify_task_message(TaskUpdatedMessage("task-1", "completed"))
+
+    assert [event[0] for event in events] == [
+        "subagent.start", "subagent.progress", "subagent.complete"
+    ]
+    assert events[0][4]["subagent_id"] == "task-1"
+    assert events[0][4]["goal"] == "inspect files"
+    assert events[1][4]["usage"] == {"input_tokens": 4}
+    assert events[2][4]["status"] == "completed"
+
+
+def test_child_tool_and_text_are_scoped_and_not_top_level_cards():
+    events = []
+    session = _session(events)
+    session._notify_tool_use(
+        AssistantMessage([
+            ToolUseBlock("parent-tool", "Agent", {"subagent_type": "researcher"})
+        ])
+    )
+    session._notify_task_message(TaskStartedMessage("task-1", "researcher"))
+    session._notify_tool_started(
+        AssistantMessage([
+            TextBlock("child says hello"),
+            ToolUseBlock("child-tool", "Bash", {"command": "pwd"}),
+        ], parent_tool_use_id="parent-tool")
+    )
+
+    assert [event[0] for event in events] == [
+        "subagent.start", "subagent.text", "subagent.tool"
+    ]
+    assert events[1][4]["subagent_id"] == "task-1"
+    assert events[2][1] == "Bash"
+    assert events[2][4]["parent_tool_id"] == "parent-tool"
+    assert set(session._open_tool_cards) == {"parent-tool"}
+
+
+def test_child_stream_text_uses_subagent_text_without_top_level_delta():
+    events = []
+    session = _session(events)
+    session._notify_tool_use(
+        AssistantMessage([
+            ToolUseBlock("parent-tool", "Agent", {"description": "stream work"})
+        ])
+    )
+    session._notify_task_message(TaskStartedMessage("task-1", "stream work"))
+    session._forward_stream_delta(StreamEvent("partial child", "parent-tool"))
+    assert [event[0] for event in events] == ["subagent.start", "subagent.text"]
+    assert events[-1][2] == "partial child"
+
+
+def test_unsolicited_task_messages_use_the_same_lifecycle_path():
+    events = []
+    session = _turn_session(events)
+    session._notify_tool_use(
+        AssistantMessage([
+            ToolUseBlock("parent-tool", "Agent", {"description": "background work"})
+        ])
+    )
+    session._handle_unsolicited(TaskStartedMessage("task-bg", "background work"))
+    session._handle_unsolicited(TaskNotificationMessage("task-bg", "stop"))
+    assert [event[0] for event in events] == ["subagent.start", "subagent.complete"]
+    assert events[-1][4]["status"] == "interrupted"
+
+
+def test_scoped_tool_started_breadcrumb_is_not_dropped(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(tool_progress, "_progress_subagent", lambda sid, name, preview, kw, event: emitted.append((event, sid, kw)))
+
+    tool_progress._on_tool_progress(
+        "parent", "tool.started", "Bash", "pwd", None,
+        subagent_id="task-1", goal="inspect files", parent_tool_id="parent-tool",
+    )
+    assert emitted == [("subagent.tool", "parent", {"subagent_id": "task-1", "goal": "inspect files", "parent_tool_id": "parent-tool"})]

@@ -10,7 +10,7 @@ _registry = HandlerRegistry()
 method = _registry.method
 
 _SUBAGENT_SNAPSHOT_FIELDS = (
-    "subagent_id", "parent_id", "depth", "goal", "delegation_id", "model",
+    "subagent_id", "kind", "parent_id", "depth", "goal", "delegation_id", "model",
     "started_at", "status", "tool_count", "last_tool", "accepting_steer",
 )
 _SUBAGENT_TAIL_BYTES = 16384
@@ -33,10 +33,13 @@ def _(rid, params):
     if transport is None or owner is None:
         return _err(rid, 4001, "session not found or not owned by this transport")
     live = _owned_subagent_records(session_id, transport, owner)
-    return _ok(rid, {
-        "subagents": [{key: r.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS} for r in live],
-        "delegations": [],
-    })
+    snapshots = []
+    for record in live:
+        snapshot = {key: record.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS if key != "kind"}
+        if record.get("kind"):
+            snapshot["kind"] = record["kind"]
+        snapshots.append(snapshot)
+    return _ok(rid, {"subagents": snapshots, "delegations": []})
 
 
 @method("subagent.interrupt")
@@ -55,7 +58,15 @@ def _(rid, params):
     agent = record.get("agent") if record else None
     # Interrupt the authorized object, never re-resolve a globally recyclable id.
     found = False
-    if agent is not None:
+    if record and record.get("kind") == "sdk":
+        session = record.get("sdk_session")
+        stop_task = getattr(session, "stop_task", None)
+        if callable(stop_task):
+            try:
+                found = bool(stop_task(subagent_id))
+            except Exception:
+                logger.debug("SDK subagent stop failed", exc_info=True)
+    elif agent is not None:
         try:
             found = bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
         except Exception:
@@ -76,6 +87,14 @@ def _(rid, params):
     record = next((r for r in _owned_subagent_records(session_id, transport, owner)
                    if r.get("subagent_id") == subagent_id), None)
     path = getattr(record.get("agent"), "_live_transcript_path", None) if record else None
+    if record and record.get("kind") == "sdk":
+        text = str(record.get("transcript") or "")
+        return _ok(rid, {
+            **result,
+            "available": bool(text),
+            "text": text[-_SUBAGENT_TAIL_BYTES:],
+            "truncated": len(text) > _SUBAGENT_TAIL_BYTES,
+        })
     if not path:
         return _ok(rid, result)
     try:
