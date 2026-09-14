@@ -246,6 +246,25 @@ DEFAULT_CONFIG = {
         # the `agent.claude_agent_sdk` block, read by the provider through load_config_readonly();
         # config.yaml is the only interface — behavioural settings, not secrets.
         "claude_agent_sdk": {
+            # SDK sessions may create bounded sibling Hermes sessions through
+            # the owner gateway. This is config, not an environment switch.
+            # Sessions spawning sessions: lets an SDK-lane session create a sibling Hermes
+            # session in a project cwd with a seeded first task, through the service-gated
+            # hermes-tools MCP tool (only present when the owner gateway bridge is reachable).
+            # cntrl defaults this on with bounded limits; the upstream PR candidate flips
+            # enabled to false before landing upstream.
+            # Shipped DISABLED: the 2026-09-14 security review left open findings (child does not
+            # inherit caller restrictions at SDK construction, lineage not consulted by the quota,
+            # concurrent-retry reservation race). Operators opt in explicitly until those close.
+            "session_spawn": {
+                "enabled": False,
+                "max_children_per_root": 3,
+                "max_depth": 2,
+                "rate_per_minute": 5,
+            },
+            # Native Claude Task tools and the shared on-disk task feed. cntrl defaults this on;
+            # the upstream PR candidate flips it to false before landing upstream.
+            "task_tools": True,
             # Emit the SDK's partial-message deltas into the gateway streaming pipeline (the
             # top-level `streaming:` block still governs how they display). Default off —
             # upstream-conservative.

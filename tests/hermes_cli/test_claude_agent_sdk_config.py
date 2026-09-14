@@ -10,6 +10,8 @@ real config options for default-driven config tooling.
 from __future__ import annotations
 
 import inspect
+import os
+from pathlib import Path
 
 
 from hermes_cli.config import DEFAULT_CONFIG
@@ -28,6 +30,9 @@ class TestClaudeAgentSdkDefaults:
         # doesn't break unrelated pins — each key's relationship is the
         # contract, not the dict's exact shape.
         block = DEFAULT_CONFIG["agent"]["claude_agent_sdk"]
+        # cntrl enables the native Claude task feed; the upstream PR candidate
+        # intentionally flips this to false before landing upstream.
+        assert block["task_tools"] is True
         # No partial-message deltas unless the operator opts in.
         assert block["streaming"] is False
         # Refuse to start over a metered key unless explicitly allowed.
@@ -72,7 +77,22 @@ class TestClaudeAgentSdkDefaults:
         # rebase cannot drift them silently. permission_mode="auto" hands first-line
         # screening to the CLI's classifier (a "default" run spawned a guardian CLI per
         # Bash call); session_name makes every Hermes session addressable by peers.
-        fork_truthy = {"permission_mode": "auto", "session_name": "hermes:{title}"}
+        fork_truthy = {
+            "permission_mode": "auto",
+            "session_name": "hermes:{title}",
+            "task_tools": True,
+            # session_spawn: a running SDK session may create a sibling Hermes session
+            # with a seeded task (inventory item 2). Service-gated (the tool only exists
+            # when the owner gateway bridge is reachable at construction) and bounded by
+            # the pinned limits. Shipped disabled (open security findings, 2026-09-14 review); the
+            # dict itself is truthy so it is pinned here by exact value.
+            "session_spawn": {
+                "enabled": False,
+                "max_children_per_root": 3,
+                "max_depth": 2,
+                "rate_per_minute": 5,
+            },
+        }
         for key, expected in fork_truthy.items():
             assert block[key] == expected, f"fork default for {key!r} drifted"
         for key, value in block.items():
@@ -134,3 +154,32 @@ class TestUserConfigMerge:
         # Keys the user didn't set still arrive from DEFAULT_CONFIG.
         assert cfg["agent"]["claude_agent_sdk"]["allow_metered_key"] is False
         assert cfg["agent"]["claude_agent_sdk"]["append_file"] == ""
+
+
+def test_session_spawn_capability_file_is_private_from_first_open(monkeypatch, tmp_path):
+    from agent.transports import claude_agent_sdk_session_config as config
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    monkeypatch.setattr(config, "_hermes_repo_root", lambda: "/repo")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home)
+    monkeypatch.setattr("agent.transports.hermes_gateway_session_bridge.get_hermes_home", lambda: home)
+    monkeypatch.setattr(config, "_provider_config", lambda: {"session_spawn": {"enabled": True}})
+    monkeypatch.setattr(
+        "agent.transports.hermes_gateway_session_bridge.issue_scoped_capability",
+        lambda _: "secret",
+    )
+    opened = []
+    real_open = os.open
+
+    def record_open(path, flags, mode=0o777, *args, **kwargs):
+        opened.append((Path(path), flags, mode))
+        return real_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(config.os, "open", record_open)
+    config._build_hermes_tools_mcp_config("owner")
+    cap = home / "runtime" / "session-spawn" / "owner.cap"
+    assert opened and opened[-1][2] == 0o600, "capability bytes must be created with mode 0600"
+    assert cap.stat().st_mode & 0o777 == 0o600
+    assert (cap.parent.stat().st_mode & 0o777) == 0o700, "capability runtime directory must be private"
+    assert (cap.parent.parent.stat().st_mode & 0o777) == 0o700, "runtime directory must be private"

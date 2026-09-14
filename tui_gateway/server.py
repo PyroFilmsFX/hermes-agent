@@ -923,6 +923,64 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         reset_transport(token)
 
 
+def register_session_spawn_routes(application) -> None:
+    """Mount the private loopback attach handshake on the gateway app.
+
+    The route is registered by the gateway facade so the dashboard router does
+    not need a second auth implementation.  Its response contains a one-use,
+    task-create-only WebSocket ticket; it never returns the capability itself.
+    """
+    from fastapi import Request, WebSocket
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_task_handoff import reconcile_child_reservations
+        reconcile_child_reservations()
+    if (any(getattr(route, "path", "") == "/api/session-attach" for route in getattr(application, "routes", ())) and
+            any(getattr(route, "path", "") == "/api/session-spawn-ws" for route in getattr(application, "routes", ()) )):
+        return
+
+    async def session_attach(request: Request):
+        from urllib.parse import quote
+        from agent.transports.hermes_gateway_session_bridge import (
+            authorize_scoped_capability, issue_scoped_transport_ticket)
+        from hermes_cli.active_sessions import active_session_registry_snapshot
+
+        session_id = request.query_params.get("session_id", "")
+        lease_id = request.query_params.get("lease_id", "")
+        profile_home = request.query_params.get("profile_home", "")
+        cap = request.headers.get("X-Hermes-Session-Spawn-Capability", "")
+        capability = authorize_scoped_capability(cap)
+        if (capability is None or capability.profile_home != profile_home or
+                session_id != capability.owner_session_key):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "attachment refused"}, status_code=403)
+        try:
+            entries = active_session_registry_snapshot(Path(profile_home), strict=True)
+            lease = next((entry for entry in entries if entry.get("lease_id") == lease_id and
+                           entry.get("session_id") == session_id), None)
+        except Exception:
+            lease = None
+        if lease is None or (lease.get("metadata") or {}).get("live_session_id") != capability.owner_session_id:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "attachment refused"}, status_code=403)
+        ticket = issue_scoped_transport_ticket(capability)
+        scheme = "wss" if request.url.scheme == "https" else "ws"
+        host = request.url.hostname or "127.0.0.1"
+        port = f":{request.url.port}" if request.url.port else ""
+        query = f"session_spawn_ticket={quote(ticket)}"
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"session_id": session_id, "lease_id": lease_id,
+                             "profile_home": profile_home,
+                             "websocket_url": f"{scheme}://{host}{port}/api/session-spawn-ws?{query}"})
+
+    application.add_api_route("/api/session-attach", session_attach, methods=["GET"])
+
+    if not any(getattr(route, "path", "") == "/api/session-spawn-ws" for route in getattr(application, "routes", ())):
+        async def scoped_ws(websocket: WebSocket):
+            from tui_gateway.ws import handle_ws
+            await handle_ws(websocket, required_spawn_scope=True)
+        application.add_api_websocket_route("/api/session-spawn-ws", scoped_ws)
+
+
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None and not ready.wait(timeout=timeout):
@@ -1019,6 +1077,9 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
     stored runtime, or an unroutable provider → this session's picked model/effort/tier, else the default."""
     kw = {"session_db": session_db, "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(current),
           "platform_override": _session_source(current), "cwd_override": _session_cwd(current)}
+    restrictions = current.get("inherited_restrictions")
+    if isinstance(restrictions, dict) and restrictions:
+        kw["delegated_restrictions"] = restrictions
     if resume_sid := current.get("resume_session_id"):
         kw["session_id"] = resume_sid
     resume_overrides = current.get("resume_runtime_overrides")
@@ -1031,6 +1092,42 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
                                      ("service_tier_override", current.get("create_service_tier_override")))
                    if v is not None})
     return kw
+
+
+_PERMISSION_POSTURE = {"default": 0, "acceptEdits": 1, "dontAsk": 2, "bypassPermissions": 3}
+
+
+def _apply_delegated_restrictions(agent, restrictions: dict | None) -> None:
+    """Apply a caller's floors to a child agent before its first turn."""
+    if not isinstance(restrictions, dict):
+        return
+    denied_tools = set(getattr(agent, "denied_tools", ()) or ())
+    denied_tools.update(str(value) for value in restrictions.get("denied_tools") or () if str(value))
+    agent.denied_tools = sorted(denied_tools)
+    agent._denied_tools = list(agent.denied_tools)
+    disabled_toolsets = set(getattr(agent, "disabled_toolsets", ()) or ())
+    disabled_toolsets.update(str(value) for value in restrictions.get("denied_toolsets") or () if str(value))
+    agent.disabled_toolsets = sorted(disabled_toolsets)
+    requested_permission = str(restrictions.get("permission_mode") or "").strip()
+    current_permission = str(getattr(agent, "permission_mode", "") or getattr(agent, "_permission_mode", "") or "default")
+    if requested_permission not in _PERMISSION_POSTURE:
+        requested_permission = "default"
+    if current_permission not in _PERMISSION_POSTURE:
+        current_permission = "default"
+    effective_permission = min((requested_permission, current_permission), key=_PERMISSION_POSTURE.get)
+    agent.permission_mode = effective_permission
+    agent._permission_mode = effective_permission
+    agent._sdk_permission_mode_override = effective_permission
+    cap = restrictions.get("budget_cap")
+    current_budget = getattr(agent, "max_budget_usd", None)
+    values = [value for value in (cap, current_budget) if isinstance(value, (int, float)) and value > 0]
+    effective_budget = min(values) if values else None
+    agent.max_budget_usd = effective_budget
+    agent._max_budget_usd = effective_budget
+    if isinstance(getattr(agent, "tools", None), list) and agent.denied_tools:
+        denied = set(agent.denied_tools)
+        agent.tools = [tool for tool in agent.tools
+                       if ((tool.get("function") or {}).get("name") if isinstance(tool, dict) else "") not in denied]
 
 
 def _wire_session_agent(sid: str, key: str, agent) -> bool:
@@ -1071,7 +1168,7 @@ def _await_resume_history(sid: str, current: dict) -> bool:
         return _sessions.get(sid) is current
 
 
-def _attach_built_agent(current: dict, agent) -> None:
+def _attach_built_agent(sid: str, current: dict, agent) -> None:
     """Attach a freshly built agent to its live record (session DB row deferred to first run_conversation())."""
     # Bot Mode gate hint: the DB title lands post-first-turn but the system prompt builds at turn START.
     if _title_hint := str(current.get("pending_title") or "").strip():
@@ -1080,6 +1177,46 @@ def _attach_built_agent(current: dict, agent) -> None:
     # A workspace move can land while construction is still in flight.
     _register_session_cwd(current)
     _session_todo_state(current)
+    # A cold/deferred resume attaches the stored session here, before any turn creates the SDK
+    # transport. Read the authoritative task store once at this attachment point so opening a
+    # resumed chat hydrates the todo feed without importing the unbound tool_progress module.
+    if current.get("resume_session_id") and str(getattr(agent, "provider", "") or "") == "claude-agent-sdk":
+        with contextlib.suppress(Exception):
+            from agent.claude_sdk_runtime_continuity import _sdk_task_list_id, _task_tools_enabled
+            from agent.claude_sdk_runtime_session import _resolve_sdk_task_store_root
+            from agent.transports.claude_agent_sdk_session_config import (
+                _effective_sdk_task_env, _sdk_env_overrides)
+
+            if _task_tools_enabled():
+                task_list_id = _sdk_task_list_id(agent)
+                task_env = _effective_sdk_task_env(task_list_id=task_list_id)
+                task_enabled = str(task_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS", "")).strip().lower() not in {
+                    "", "0", "false", "no", "off"
+                }
+                if task_enabled:
+                    task_list_id = task_env.get("CLAUDE_CODE_TASK_LIST_ID") or None
+                else:
+                    task_list_id = None
+                agent._claude_sdk_task_list_id = task_list_id
+                if task_list_id:
+                    agent._tui_gateway_runtime_sid = str(sid)
+                    agent._claude_sdk_todo_snapshot_bootstrap = (
+                        lambda **kwargs: bootstrap_sdk_todo_snapshot(str(sid), **kwargs)
+                    )
+                    effective_env = dict(os.environ)
+                    effective_env.update(_sdk_env_overrides(task_list_id=task_list_id))
+                    task_root = getattr(agent, "_claude_sdk_task_store_root", None)
+                    if not task_root:
+                        task_root = _resolve_sdk_task_store_root(
+                            str(current.get("cwd") or os.getcwd()), effective_env
+                        )
+                    agent._claude_sdk_task_store_root = str(task_root)
+                    snapshot = bootstrap_sdk_todo_snapshot(
+                        str(sid),
+                        task_list_id=task_list_id,
+                        task_store_root=str(task_root),
+                    )
+                    agent._claude_sdk_todo_snapshot_bootstrapped = snapshot is not None
     # Baseline for the per-turn config sync (profile home override still active).
     current["config_model_seen"] = _config_model_target()
 
@@ -1169,7 +1306,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 agent = _make_agent(sid, key, **_deferred_build_agent_kwargs(current, session_db))
             finally:
                 _clear_session_context(tokens)
-            _attach_built_agent(current, agent)
+            _attach_built_agent(sid, current, agent)
             # No eager slash-worker pre-warm (slash.exec spawns on demand): each worker forks the full stdio
             # MCP fleet, and live-transport sessions are never reaped, so fleets would accumulate.
             notify_registered = _wire_session_agent(sid, key, agent)
@@ -2398,7 +2535,8 @@ def _make_agent(
     model_override: dict | str | None = None, provider_override: str | None = None,
     reasoning_config_override: dict | None = None, service_tier_override: str | None = None,
     platform_override: str | None = None, context_cwd_is_launch_artifact: bool | None = None,
-    cwd_override: str | None = None, auth_user_id: str | None = None):
+    cwd_override: str | None = None, auth_user_id: str | None = None,
+    delegated_restrictions: dict | None = None):
     # AC-4 test seam: dead unless armed by the isolated certify harness.
     from tui_gateway.synthetic_turn import maybe_build_synthetic_agent
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
@@ -2421,6 +2559,9 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
+    configured_disabled = ((cfg.get("agent") or {}).get("disabled_toolsets") or []) if isinstance(cfg, dict) else []
+    delegated_disabled = delegated_restrictions.get("denied_toolsets", []) if isinstance(delegated_restrictions, dict) else []
+    disabled_toolsets = sorted({str(value) for value in (*configured_disabled, *delegated_disabled) if str(value)})
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
         base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
@@ -2430,7 +2571,7 @@ def _make_agent(
         reasoning_config=(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
         service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(platform),
+        enabled_toolsets=_load_enabled_toolsets(platform), disabled_toolsets=disabled_toolsets or None,
         # OpenRouter provider_routing prefs (gateway + CLI parity).
         providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
         provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
@@ -2444,6 +2585,7 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
         **_agent_cbs(sid))
+    _apply_delegated_restrictions(agent, delegated_restrictions)
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
@@ -2485,8 +2627,12 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, resume_session_id: str | None = None):
     now = time.time()
+    spawn_identity = key
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_task_handoff import child_lineage_identity
+        spawn_identity = child_lineage_identity(key, profile_home)
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
@@ -2502,8 +2648,11 @@ def _init_session(
             # Async events go to the transport that created the session (stdio for Ink, WS for the dashboard).
             "transport": current_transport() or _stdio_transport,
             "auth_user_id": _transport_auth_user_id(current_transport()),
+            "resume_session_id": resume_session_id,
+            "spawn_child_stored_session_id": spawn_identity,
         }
-        _session_todo_state(_sessions[sid])
+        current = _sessions[sid]
+    _attach_built_agent(sid, current, agent)
     _hydrate_session_cwd(sid, key, session_db, profile_home)
     _register_session_cwd(_sessions[sid])
     _wire_session_agent(sid, key, agent)  # no eager slash-worker pre-warm (see _start_agent_build)
@@ -2552,6 +2701,10 @@ def _deferred_session_record(
     explicit_cwd: bool = False) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
     now = time.time()
+    spawn_identity = session_key
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_task_handoff import child_lineage_identity
+        spawn_identity = child_lineage_identity(session_key, str(profile_home) if profile_home else None)
     return {
         "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
@@ -2567,6 +2720,7 @@ def _deferred_session_record(
         "tool_started_at": {}, "todo_state": todo_state,
         "transport": current_transport() or _stdio_transport,
         "auth_user_id": _transport_auth_user_id(current_transport()),
+        "spawn_child_stored_session_id": spawn_identity,
     }
 
 
@@ -3355,3 +3509,7 @@ for _m in (
     _methods_session_control, _methods_subagents, _methods_vault, _methods_free_tier, _methods_connectors):
     _m.register(sys.modules[__name__])
 del _m
+
+with contextlib.suppress(Exception):
+    from hermes_cli.web_server import app as _gateway_web_app
+    register_session_spawn_routes(_gateway_web_app)
