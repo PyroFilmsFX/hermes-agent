@@ -24,13 +24,13 @@ from agent.transports import claude_agent_sdk_session_config as M
 def env_config(monkeypatch):
     """Drive _configured_sdk_env / the metered flag / the scrub from the test."""
 
-    def _apply(env=None, metered_allowed=False, scrubbed=None):
+    def _apply(env=None, metered_allowed=False, scrubbed=None, task_tools=False):
         monkeypatch.setattr(
             M, "_provider_config", lambda: {"env": env} if env is not None else {}
         )
-        monkeypatch.setattr(
-            M, "_provider_flag", lambda name: metered_allowed
-        )
+        monkeypatch.setattr(M, "_provider_flag", lambda name: (
+            task_tools if name == "task_tools" else metered_allowed
+        ))
         monkeypatch.setattr(M, "_scrubbed_sdk_env", lambda: dict(scrubbed or {}))
 
     return _apply
@@ -61,6 +61,56 @@ def test_configured_env_reaches_the_overrides(env_config):
     env_config(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"})
 
     assert M._sdk_env_overrides()["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "300000"
+
+
+def test_native_task_tools_inject_defaults_and_keep_operator_overrides(env_config):
+    env_config(task_tools=True)
+
+    overrides = M._sdk_env_overrides(task_list_id="hermes-session-1")
+
+    assert overrides["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == "1"
+    assert overrides["CLAUDE_CODE_TASK_LIST_ID"] == "hermes-session-1"
+
+    env_config(
+        env={
+            "CLAUDE_CODE_ENABLE_TODO_TOOLS": "operator",
+            "CLAUDE_CODE_TASK_LIST_ID": "operator-list",
+        },
+        task_tools=True,
+    )
+    overrides = M._sdk_env_overrides(task_list_id="hermes-session-1")
+    assert overrides["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == "operator"
+    assert overrides["CLAUDE_CODE_TASK_LIST_ID"] == "operator-list"
+
+
+def test_native_task_tools_disabled_injects_nothing(env_config):
+    env_config(task_tools=False)
+
+    overrides = M._sdk_env_overrides(task_list_id="hermes-session-1")
+
+    assert "CLAUDE_CODE_ENABLE_TODO_TOOLS" not in overrides
+    assert "CLAUDE_CODE_TASK_LIST_ID" not in overrides
+
+
+def test_native_task_tools_inherited_env_beats_defaults_but_yaml_wins(env_config, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "0")
+    monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "operator-list")
+    env_config(task_tools=True)
+
+    inherited = M._sdk_env_overrides(task_list_id="derived-list")
+    assert inherited["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == "0"
+    assert inherited["CLAUDE_CODE_TASK_LIST_ID"] == "operator-list"
+
+    env_config(
+        env={
+            "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
+            "CLAUDE_CODE_TASK_LIST_ID": "yaml-list",
+        },
+        task_tools=True,
+    )
+    configured = M._sdk_env_overrides(task_list_id="derived-list")
+    assert configured["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == "1"
+    assert configured["CLAUDE_CODE_TASK_LIST_ID"] == "yaml-list"
 
 
 def test_scrub_is_preserved_alongside_configured_env(env_config):

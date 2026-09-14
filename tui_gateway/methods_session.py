@@ -5,6 +5,7 @@ helpers (``_sessions``, ``_ok``, ``_err``, ...) bare; module-level helpers are p
 server.py the same way (tests monkeypatching ``server.X`` still intercept)."""
 
 import contextlib
+import os
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -54,6 +55,15 @@ def _flag(params: dict, name: str) -> bool:
     return is_truthy_value(params.get(name, False))
 
 
+def _cwd_identity_matches(path: str, identity: dict) -> bool:
+    try:
+        stat = os.stat(path)
+        return (os.path.realpath(path) == identity.get("realpath") and
+                stat.st_dev == identity.get("st_dev") and stat.st_ino == identity.get("st_ino"))
+    except (OSError, TypeError):
+        return False
+
+
 def _int_param(params: dict, key: str, default: int) -> int:
     """``int(params[key])`` with ``default`` for missing / unparsable values."""
     try:
@@ -67,6 +77,15 @@ def _new_runtime_ids(params: dict) -> tuple[str, str]:
     return uuid.uuid4().hex[:8], _resolve_session_source(_str_param(params, "source") or None)
 
 
+@method("session.task_create")
+def _(rid, params: dict) -> dict:
+    """Internal, capability-authenticated sibling-session handoff."""
+    from tui_gateway.session_task_handoff import create_task_session
+
+    return create_task_session(rid, params)
+
+
+@contextlib.contextmanager
 def _profile_build_scope(profile_home):
     """Bind HERMES_HOME + secret + terminal scope for an agent build: the same composition a turn
     binds (``_session_profile_runtime_scope``). Home alone leaves ``get_secret()`` on the LAUNCH
@@ -328,6 +347,10 @@ def _(rid, params: dict) -> dict:
     # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback is "No workspace".
     explicit_cwd = False
     raw_cwd = _str_param(params, "cwd")  # unguarded, as on BASE: only the path check is best-effort
+    if params.get("_cwd_identity"):
+        if not raw_cwd or not _cwd_identity_matches(
+                os.path.realpath(os.path.abspath(os.path.expanduser(raw_cwd))), params["_cwd_identity"]):
+            return _err(rid, 4004, "cwd changed during session creation")
     with contextlib.suppress(Exception):
         explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
     _enable_gateway_prompts()
@@ -355,7 +378,11 @@ def _(rid, params: dict) -> dict:
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
-            "auth_user_id": _transport_auth_user_id(current_transport())}
+            "auth_user_id": _transport_auth_user_id(current_transport()),
+            "session_generation": uuid.uuid4().hex,
+            "inherited_restrictions": params.get("_delegated_restrictions") if isinstance(params.get("_delegated_restrictions"), dict) else {},
+            "delegated_by": _str_param(params, "_delegated_by"),
+            "spawn_child_stored_session_id": key if params.get("_delegated_by") else None}
         _register_session_cwd(_sessions[sid])
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded sessions.
     # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop launch (and every "New agent" /
@@ -813,7 +840,8 @@ def _resume_eager(ctx: _Resume) -> dict:
         try:
             with _profile_build_scope(ctx.profile_home):
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
-                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd))
+                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd),
+                              resume_session_id=ctx.target)
                 # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
                 # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
                 # must not close it even if the transfer was refused (a leak beats "closed database" every
