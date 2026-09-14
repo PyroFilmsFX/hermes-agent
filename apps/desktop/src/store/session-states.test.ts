@@ -15,6 +15,7 @@ import {
   $activeSessionId,
   $connection,
   $selectedStoredSessionId,
+  $unreadFinishedSessionIds,
   setSessionOwnerHint,
   setSessions
 } from '@/store/session'
@@ -22,6 +23,7 @@ import type { SessionProfileRoute } from '@/store/session-request-router'
 import type { SessionTile } from '@/store/session-states'
 import type * as SessionStatesModule from '@/store/session-states'
 import {
+  $activeBackgroundSessions,
   $focusedStoredSessionId,
   $sessionStates,
   $sessionTiles,
@@ -32,8 +34,10 @@ import {
   focusOpenSession,
   focusWorkspaceOwnerSessionTile,
   foregroundSessionScopes,
+  isBackgroundDeliveryActive,
   isSessionRemote,
   knownOwnerForSession,
+  markBackgroundSessionFinished,
   markSelectionRestore,
   nextSessionTileForWorkspace,
   openSessionTile,
@@ -46,6 +50,7 @@ import {
   selectionHomesToWorkspace,
   type SessionTileDelegate,
   sessionTileOwnerRoute,
+  setBackgroundDeliveryActive,
   setSessionTileDelegate,
   setSessionTileWorkspaceScope
 } from '@/store/session-states'
@@ -1365,3 +1370,39 @@ describe('isSessionRemote (#94640)', () => {
     expect(isSessionRemote('stored-2')).toBe(true)
   })
 })
+
+describe('background delivery session tracking', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $activeBackgroundSessions.set(new Set())
+    $unreadFinishedSessionIds.set([])
+    $selectedStoredSessionId.set(null)
+  })
+
+  it('tracks background delivery active state per session', () => {
+    expect(isBackgroundDeliveryActive('sess-1')).toBe(false)
+
+    setBackgroundDeliveryActive('sess-1', true)
+    expect(isBackgroundDeliveryActive('sess-1')).toBe(true)
+    expect($activeBackgroundSessions.get().has('sess-1')).toBe(true)
+
+    setBackgroundDeliveryActive('sess-1', false)
+    expect(isBackgroundDeliveryActive('sess-1')).toBe(false)
+    expect($activeBackgroundSessions.get().has('sess-1')).toBe(false)
+  })
+
+  it('marks unread finished when background delivery finishes for an unfocused session', () => {
+    $selectedStoredSessionId.set('sess-active')
+    markBackgroundSessionFinished('sess-bg')
+
+    expect($unreadFinishedSessionIds.get()).toContain('sess-bg')
+  })
+
+  it('does not mark unread finished when background delivery finishes for the currently focused session', () => {
+    $selectedStoredSessionId.set('sess-focused')
+    markBackgroundSessionFinished('sess-focused')
+
+    expect($unreadFinishedSessionIds.get()).not.toContain('sess-focused')
+  })
+})
+

@@ -5,6 +5,7 @@ desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals
 from __future__ import annotations
 
 import contextlib
+import json
 
 from .method_ctx import bind_module
 
@@ -58,6 +59,18 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
         # Exact UI tab gone: fall through to durable session_key routing so a resumed continuation with the same
         # key/lineage can still claim it.
     evt_key = str(evt.get("session_key") or "")
+    if evt.get("type") == "sdk_background_result":
+        parent = str(evt.get("parent_session_id") or "")
+        if parent:
+            current_keys = _notif_current_keys(sid, session)
+            resolved_parent = _notif_resolve_event_key(parent, session)
+            if resolved_parent in current_keys:
+                return False
+            if _notif_live_session_matches({resolved_parent}, exclude=session):
+                return True
+            # A parent id is authoritative for this lane. If its owner is no
+            # longer live, the event must not fall through to another tab.
+            return False
     if not evt_key:
         return False
     current_keys = _notif_current_keys(sid, session)
@@ -98,8 +111,17 @@ def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool
         return False
     if str(evt.get("origin_ui_session_id") or "") == str(sid or ""):
         return True
-    evt_key = str(evt.get("session_key") or "")
     current_keys = _notif_current_keys(sid, session)
+    if evt.get("type") == "sdk_background_result":
+        parent = str(evt.get("parent_session_id") or "")
+        if parent:
+            return _notif_resolve_event_key(parent, session) in current_keys
+        evt_key = str(evt.get("session_key") or "")
+        return bool(evt_key) and (
+            evt_key in current_keys
+            or _notif_resolve_event_key(evt_key, session) in current_keys
+        )
+    evt_key = str(evt.get("session_key") or "")
     if bool(evt_key) and (evt_key in current_keys or _notif_resolve_event_key(evt_key, session) in current_keys):
         return True
     # claude-agent-sdk background results carry the hermes session id the CLI answered
@@ -111,7 +133,9 @@ def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool
 
 def _notification_event_requires_owner(evt: dict) -> bool:
     """Whether ``evt`` must be positively claimed before TUI delivery."""
-    return evt.get("type") == "async_delegation" or bool(evt.get("origin_ui_session_id") or evt.get("session_key"))
+    return evt.get("type") in {"async_delegation", "sdk_background_result"} or bool(
+        evt.get("origin_ui_session_id") or evt.get("session_key")
+    )
 
 
 # Extra dedup fields per event type. Completions are terminal (one-shot per process session); watch events are not —
@@ -438,7 +462,8 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
 
 def _notif_sdk_result_dedup_key(evt: dict) -> tuple:
     return ("sdk_background_result", str(evt.get("parent_session_id") or ""), evt.get("completed_at") or "",
-            hash(tuple(p for p in (evt.get("payloads") or []) if isinstance(p, str))))
+            hash(tuple(p for p in (evt.get("payloads") or []) if isinstance(p, str))),
+            hash(repr(evt.get("items") or [])))
 
 
 def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue, deferred) -> bool:
@@ -451,8 +476,10 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
     only while the session is idle (a live turn owns the message stream); otherwise requeued and
     retried, never dropped. Returns True = consumed or requeued, matching _notif_handle_event."""
     payloads = [p for p in (evt.get("payloads") or []) if isinstance(p, str) and p.strip()]
-    if not payloads:
-        logger.warning("sdk_background_result for session %s carried no payloads — dropping", sid)
+    raw_items = evt.get("items")
+    items = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+    if not payloads and not items:
+        logger.warning("sdk_background_result for session %s carried no payloads or items — dropping", sid)
         return True
     dedup_key = _notif_sdk_result_dedup_key(evt)
     if dedup_key in emitted:
@@ -462,37 +489,208 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
         if deferred is None:
             time.sleep(0.25)
         return True
-    emitted.add(dedup_key)
     agent = session.get("agent")
     session_id = str(getattr(agent, "session_id", None) or evt.get("parent_session_id") or session.get("session_key") or "")
     completed_at = evt.get("completed_at")
+    work_items = items or [{"kind": "text", "text": payload} for payload in payloads]
+    delivered_ids = evt.setdefault("delivered_ids", [])
+    if not isinstance(delivered_ids, list):
+        delivered_ids = evt["delivered_ids"] = list(delivered_ids) if delivered_ids else []
+    delivered = {str(value) for value in delivered_ids}
+    persisted_ids = evt.setdefault("persisted_ids", [])
+    if not isinstance(persisted_ids, list):
+        persisted_ids = evt["persisted_ids"] = list(persisted_ids) if persisted_ids else []
+    persisted = {str(value) for value in persisted_ids}
+
+    def _item_id(item: dict, index: int) -> str:
+        kind = str(item.get("kind") or "item")
+        if kind == "peer_in" and item.get("uuid"):
+            return str(item["uuid"])
+        if kind in {"tool", "peer_out"} and item.get("tool_use_id"):
+            return f"{kind}:{item['tool_use_id']}"
+        return f"{kind}:{index}"
+
+    def _peer_metadata(item: dict, direction: str) -> dict:
+        metadata = {
+            "direction": direction,
+            "peer": ((item.get("name") or item.get("from")) if direction == "in" else item.get("to")),
+            "msg_id": item.get("uuid") if direction == "in" else item.get("tool_use_id"),
+            "completed_at": completed_at,
+        }
+        if direction == "in":
+            metadata["peer_session"] = item.get("from_session")
+        return metadata
+
+    def _lifecycle_source_label(source: object) -> str:
+        value = str(source or "")
+        if value.endswith("/scheduled-trigger"):
+            return "scheduled trigger"
+        if value.endswith("/peer-send-message") or value == "peer":
+            return "peer message"
+        if value.startswith("task-notification"):
+            return "task notification"
+        if value == "channel" or value.startswith("channel/"):
+            return "channel"
+        return value or "unknown"
+
+    def _lifecycle_label(metadata: dict) -> str:
+        event = metadata.get("event")
+        if event == "child_exited":
+            exit_code = metadata.get("exit_code")
+            return (
+                f"CLI child exited (code {exit_code})"
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+                else "CLI child exited"
+            )
+        if event == "resumed":
+            count = metadata.get("digest_messages")
+            return (
+                f"session resumed · {count} messages"
+                if isinstance(count, int) and count > 0
+                else "session resumed"
+            )
+        if event == "woken":
+            source = _lifecycle_source_label(metadata.get("source"))
+            by = str(metadata.get("by") or "unknown")
+            return f"woken by {source}: {by}"
+        return "session lifecycle"
+
+    persisted_row_ids = evt.setdefault("persisted_row_ids", [])
+    event_timestamp = completed_at if completed_at is not None else time.time()
+
+    def _prepared_row(item_id: str, row: dict, *, tool_calls=None, tool_call_id=None) -> dict:
+        """Build the batch row and retain identity metadata for display restoration."""
+        prepared = dict(row)
+        prepared["timestamp"] = prepared.get("timestamp", event_timestamp)
+        if tool_calls is not None:
+            prepared["tool_calls"] = tool_calls
+        if tool_call_id is not None:
+            prepared["tool_call_id"] = tool_call_id
+        prepared["_delivery_row_key"] = f"{item_id}:{prepared['role']}"
+        return prepared
+
+    def _emit_text(item: dict, display_kind: str, metadata: dict) -> None:
+        _emit("message.start", sid, {"background": True, "display_kind": display_kind})
+        _emit("message.complete", sid, {
+            "text": str(item.get("text") or ""),
+            "status": "complete",
+            "background": True,
+            "display_kind": display_kind,
+            "display_metadata": metadata,
+            "usage": _get_usage(agent) if agent is not None else {},
+        })
+
+    prepared_items = []
+    pending_rows = []
     try:
-        for payload in payloads:
-            row = {"role": "assistant", "content": payload, "display_kind": "sdk_background_result",
-                   "display_metadata": {"completed_at": completed_at, "source": "sdk_background_result"}}
-            # Persist FIRST: a desktop restart must not lose a delivered answer.
-            try:
-                with _session_db(session) as db:
-                    if db is not None and session_id:
-                        db.append_message(session_id=session_id, role="assistant", content=payload,
-                                          display_kind="sdk_background_result",
-                                          display_metadata=dict(row["display_metadata"]))
-            except Exception as persist_exc:
-                _notif_log_failure("sdk_background_result persist failed", persist_exc)
+        for index, item in enumerate(work_items):
+            item_id = _item_id(item, index)
+            if item_id in delivered:
+                continue
+            kind = item.get("kind")
+            entry = {"item_id": item_id, "kind": kind, "item": item, "rows": []}
+            if kind == "lifecycle":
+                metadata = {key: value for key, value in item.items() if key != "kind"}
+                metadata["completed_at"] = completed_at
+                label = _lifecycle_label(metadata)
+                entry.update(text=label, display_kind="session_lifecycle", metadata=metadata)
+                if item_id not in persisted:
+                    entry["rows"].append(_prepared_row(item_id, {
+                        "role": "system", "content": label, "display_kind": "session_lifecycle",
+                        "display_metadata": metadata,
+                    }))
+            elif kind in {"peer_in", "peer_out"}:
+                direction = "in" if kind == "peer_in" else "out"
+                metadata = _peer_metadata(item, direction)
+                row = {
+                    "role": "user" if direction == "in" else "assistant",
+                    "content": str(item.get("text") or ""), "display_kind": "peer_message",
+                    "display_metadata": metadata,
+                }
+                entry.update(display_kind="peer_message", metadata=metadata)
+                if item_id not in persisted:
+                    entry["rows"].append(_prepared_row(item_id, row))
+            elif kind == "tool":
+                tool_id = str(item.get("tool_use_id") or item_id)
+                tool_name = str(item.get("name") or "tool")
+                args = item.get("args") if isinstance(item.get("args"), dict) else {}
+                result = str(item.get("result") or "")
+                is_error = bool(item.get("is_error"))
+                if is_error:
+                    result = f"[error] {result}" if result else "[error]"
+                tool_call = {
+                    "id": tool_id, "type": "function",
+                    "function": {"name": tool_name, "arguments": json.dumps(args, ensure_ascii=False, sort_keys=True)},
+                }
+                tool_metadata = {"completed_at": completed_at, "source": "sdk_background_result"}
+                entry.update(tool_id=tool_id, tool_name=tool_name, args=args, result=result, is_error=is_error)
+                if item_id not in persisted:
+                    entry["rows"].extend((
+                        _prepared_row(item_id, {"role": "assistant", "content": None, "tool_calls": [tool_call],
+                                                "display_metadata": tool_metadata}, tool_calls=[tool_call]),
+                        _prepared_row(item_id, {"role": "tool", "content": result, "tool_call_id": tool_id,
+                                                "display_metadata": tool_metadata}, tool_call_id=tool_id),
+                    ))
+            else:
+                text = str(item.get("text") or "")
+                metadata = {"completed_at": completed_at, "source": "sdk_background_result"}
+                entry.update(text=text, display_kind="sdk_background_result", metadata=metadata)
+                if item_id not in persisted:
+                    entry["rows"].append(_prepared_row(item_id, {
+                        "role": "assistant", "content": text, "display_kind": "sdk_background_result",
+                        "display_metadata": metadata,
+                    }))
+            prepared_items.append(entry)
+            pending_rows.extend(entry["rows"])
+
+        if pending_rows:
+            with _session_db(session) as db:
+                if db is None or not session_id:
+                    raise RuntimeError("SDK background result has no durable session database")
+                # Persist the entire event in one transaction. The process registry requeues in-memory on
+                # failure, so a gateway restart can still lose a queued event as it did for all background
+                # work before this fix; this wave deliberately does not add a durable delivery ledger.
+                db.append_messages_batch(session_id, pending_rows)
             with session["history_lock"]:
-                session["history"] = list(session.get("history") or []) + [dict(row)]
-                session["history_version"] = int(session.get("history_version", 0)) + 1
-                messages = getattr(agent, "messages", None)
-                if isinstance(messages, list):
-                    messages.append(dict(row))
-            _emit("message.start", sid)
-            _emit("message.complete", sid, {
-                "text": payload, "status": "complete", "display_kind": "sdk_background_result",
-                "usage": _get_usage(agent) if agent is not None else {},
-            })
-        logger.info("sdk_background_result delivered to desktop session %s (%d message(s))", sid, len(payloads))
+                history_rows = []
+                for row in pending_rows:
+                    history_row = dict(row)
+                    history_row.pop("_delivery_row_key", None)
+                    history_rows.append(history_row)
+                session["history"] = list(session.get("history") or []) + history_rows
+                session["history_version"] = int(session.get("history_version", 0)) + len(pending_rows)
+            for entry in prepared_items:
+                if not entry["rows"]:
+                    continue
+                for row in entry["rows"]:
+                    row.pop("_delivery_row_key", None)
+                    persisted_row_ids.append(row.get("_row_id"))
+                persisted_ids.append(entry["item_id"])
+                persisted.add(entry["item_id"])
+
+        for entry in prepared_items:
+            item_id, kind, item = entry["item_id"], entry["kind"], entry["item"]
+            if kind == "lifecycle":
+                _emit_text({"text": entry["text"]}, entry["display_kind"], entry["metadata"])
+            elif kind in {"peer_in", "peer_out"}:
+                _emit_text(item, entry["display_kind"], entry["metadata"])
+            elif kind == "tool":
+                _emit("message.start", sid, {"background": True})
+                _on_tool_start(sid, entry["tool_id"], entry["tool_name"], entry["args"])
+                _on_tool_complete(sid, entry["tool_id"], entry["tool_name"], entry["args"], entry["result"], is_error=entry["is_error"])
+                _emit("message.complete", sid, {"text": "", "status": "complete", "background": True})
+            else:
+                _emit_text(item, entry["display_kind"], entry["metadata"])
+            delivered_ids.append(item_id)
+            delivered.add(item_id)
+        emitted.add(dedup_key)
+        logger.info("sdk_background_result delivered to desktop session %s (%d item(s))", sid, len(work_items))
     except Exception as exc:
         _notif_log_failure("sdk_background_result delivery failed", exc)
+        if deferred is not None:
+            deferred.append(evt)
+        else:
+            queue.put(evt)
     finally:
         _notif_release_turn(session)
     return True
