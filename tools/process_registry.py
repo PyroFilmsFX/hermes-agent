@@ -443,6 +443,11 @@ class ProcessSession:
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
     systemd_unit: str = ""                      # transient scope unit name when spawned under systemd-run
     handoff_note: str = ""                      # why a subagent handed this process to its parent (rides the notice)
+    sdk_owned: bool = False                     # Claude Agent SDK task, not a host/sandbox process
+    sdk_task_id: str = ""                       # SDK task id used by ClaudeSDKClient.stop_task()
+    sdk_tool_use_id: str = ""                   # ToolUseBlock id linking Bash to TaskStartedMessage
+    output_file: str = ""                       # SDK task output file, when the SDK reports one
+    sdk_stop_task: Any = None                   # live adapter callback; never checkpointed
     # Watcher/notification routing (persisted for crash recovery)
     # systemd_unit: str = ""                      # transient scope unit name when spawned under systemd-run
     # (#70716)
@@ -1309,7 +1314,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
             if was_running:
                 # Keep the session tracked until its result is durable. A finite
                 # parent must not observe completion and exit during this write.
-                save_completed_result(session)
+                if not session.sdk_owned:
+                    save_completed_result(session)
                 self._running.pop(session.id)
             self._finished[session.id] = session
         self._write_checkpoint()
@@ -1547,6 +1553,82 @@ class ProcessRegistry(ProcessCheckpointMixin):
             session = load_completed_results(session_id).get(session_id)
         return self._refresh_detached_session(session if session is not None else self._resolve_prefix(session_id))
 
+    def find_sdk_task(self, session_key: str, *, task_id: str = "", tool_use_id: str = "") -> Optional[ProcessSession]:
+        """Find a live SDK task by its owning Hermes session and SDK identity."""
+        key, sdk_task_id, sdk_tool_use_id = str(session_key or ""), str(task_id or ""), str(tool_use_id or "")
+        with self._lock:
+            candidates = list(self._running.values()) + list(self._finished.values())
+        for session in candidates:
+            if not session.sdk_owned or session.session_key != key:
+                continue
+            if (sdk_task_id and session.sdk_task_id == sdk_task_id) or (
+                sdk_tool_use_id and session.sdk_tool_use_id == sdk_tool_use_id
+            ):
+                return session
+        return None
+
+    def register_sdk_task(
+        self, *, session_key: str, command: str, task_id: str = "", tool_use_id: str = "",
+        output_file: str = "", stop_task=None,
+    ) -> ProcessSession:
+        """Register or enrich one Claude Agent SDK background task."""
+        existing = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id)
+        if existing is not None:
+            with existing._lock:
+                if command and (not existing.command or existing.command == "SDK task"):
+                    existing.command = command
+                if task_id:
+                    existing.sdk_task_id = task_id
+                    existing.task_id = task_id
+                if tool_use_id:
+                    existing.sdk_tool_use_id = tool_use_id
+                if output_file:
+                    existing.output_file = output_file
+                if stop_task is not None:
+                    existing.sdk_stop_task = stop_task
+            return existing
+        session = self._new_session(
+            command or "SDK task", task_id, task_id, str(session_key or ""), None,
+            sdk_owned=True, sdk_task_id=str(task_id or ""), sdk_tool_use_id=str(tool_use_id or ""),
+            output_file=str(output_file or ""), sdk_stop_task=stop_task,
+        )
+        with self._lock:
+            self._prune_if_needed()
+            self._running[session.id] = session
+        return session
+
+    def update_sdk_task(
+        self, *, session_key: str, task_id: str = "", tool_use_id: str = "", status: str = "",
+        command: str = "", output_file: str = "", output: str = "", exit_code: Optional[int] = None,
+    ) -> Optional[ProcessSession]:
+        """Apply SDK task progress and move terminal tasks to the normal linger store."""
+        session = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id)
+        if session is None:
+            return None
+        with session._lock:
+            if command:
+                session.command = command
+            if task_id:
+                session.sdk_task_id = task_id
+                session.task_id = task_id
+            if tool_use_id:
+                session.sdk_tool_use_id = tool_use_id
+            if output_file:
+                session.output_file = output_file
+            if output:
+                session.output_buffer += str(output)
+                if len(session.output_buffer) > session.max_output_chars:
+                    session.output_buffer = session.output_buffer[-session.max_output_chars:]
+        terminal = str(status or "").lower() in {"completed", "failed", "stopped", "killed", "exited"}
+        if terminal and not session.exited:
+            normalized = str(status or "").lower()
+            code = exit_code if isinstance(exit_code, int) else {
+                "completed": 0, "stopped": -15, "killed": -15, "failed": 1, "exited": 0,
+            }.get(normalized, 1)
+            session.mark_exited(code, "killed" if normalized in {"stopped", "killed"} else "exited", "sdk")
+            self._move_to_finished(session)
+        return session
+
     def _resolve_prefix(self, session_id: str) -> Optional[ProcessSession]:
         """Resolve a unique session-ID prefix (a bare hex tail is normalized to
         ``proc_<tail>``); :meth:`get` tries exact first."""
@@ -1750,6 +1832,24 @@ class ProcessRegistry(ProcessCheckpointMixin):
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
+        if session.sdk_owned:
+            task_id = session.sdk_task_id
+            callback = session.sdk_stop_task
+            if not task_id or not callable(callback):
+                return {"status": "error", "error": "SDK task control is no longer available"}
+            try:
+                scheduled = callback(task_id)
+                if scheduled is False:
+                    return {"status": "error", "error": "SDK task stop was not scheduled"}
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
+            if not session.exited:
+                session.mark_exited(-15, "killed", source)
+                self._move_to_finished(session)
+            return {
+                "status": "killed", "killed": True, "session_id": session.id,
+                "task_id": task_id, "termination_source": source,
+            }
         if session.exited:
             # A double-forked descendant may still be alive in the systemd scope even
             # though the main process exited — stop the scope to reap survivors.
@@ -1963,6 +2063,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 entry["exit_code"] = s.exit_code
             if s.detached:
                 entry["detached"] = True
+            if s.sdk_owned:
+                entry.update(sdk_owned=True, sdk_task_id=s.sdk_task_id)
+                if s.output_file:
+                    entry["output_file"] = s.output_file
             result.append(entry)
         return result
 
