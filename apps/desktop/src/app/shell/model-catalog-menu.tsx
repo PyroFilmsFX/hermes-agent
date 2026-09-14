@@ -111,6 +111,28 @@ interface ProviderGroup {
   provider: ModelOptionProvider
 }
 
+export function catalogProviderSortRank(providerSlug: string, currentProvider: string): number {
+  if (currentProvider !== 'claude-agent-sdk') {
+    return 0
+  }
+
+  if (providerSlug === 'claude-agent-sdk') {
+    return -2
+  }
+
+  return providerSlug === 'anthropic' ? -1 : 0
+}
+
+export function compareCatalogProviders(
+  a: Pick<ModelOptionProvider, 'name' | 'slug'>,
+  b: Pick<ModelOptionProvider, 'name' | 'slug'>,
+  currentProvider: string
+): number {
+  const rankDifference = catalogProviderSortRank(a.slug, currentProvider) - catalogProviderSortRank(b.slug, currentProvider)
+
+  return rankDifference || a.name.localeCompare(b.name)
+}
+
 /**
  * THE model catalog menu: searchable, provider-grouped, `-fast` families
  * collapsed to one row, per-row hover submenu for thinking/effort/fast, full
@@ -751,9 +773,9 @@ function groupModels(
     }
   }
 
-  // Stable, logical group order: alphabetical by provider name. (The backend
-  // floats the current provider first, which would reshuffle on every switch.)
-  groups.sort((a, b) => a.provider.name.localeCompare(b.provider.name))
+  // Stable, logical group order: alphabetical by provider name, except the
+  // Claude Agent SDK's paired providers stay together at the top.
+  groups.sort((a, b) => compareCatalogProviders(a.provider, b.provider, current.provider))
 
   return groups
 }

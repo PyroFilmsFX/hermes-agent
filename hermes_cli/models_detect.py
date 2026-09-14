@@ -28,7 +28,7 @@ def current_provider_catalog_match(model_name: str, current_provider: str) -> Op
     Goes through :func:`hermes_cli.models.cached_provider_model_ids` (1h TTL, stale-while-
     revalidate) so a model switch does not block on a cold ``/v1/models`` round-trip in the
     common case; a fetch failure yields an empty catalog and the ladder continues unchanged."""
-    from hermes_cli.models import cached_provider_model_ids, normalize_provider
+    from hermes_cli.models import _PROVIDER_CATALOG_DELEGATES, cached_provider_model_ids, normalize_provider
 
     provider = (current_provider or "").strip().lower()
     if provider in _SKIP or provider.startswith("custom:") or normalize_provider(provider) in _SKIP:
@@ -37,7 +37,7 @@ def current_provider_catalog_match(model_name: str, current_provider: str) -> Op
     if not wanted:
         return None
     try:
-        catalog = cached_provider_model_ids(provider)
+        catalog = cached_provider_model_ids(_PROVIDER_CATALOG_DELEGATES.get(provider, provider))
     except Exception:
         return None
     return next((mid for mid in catalog if mid.lower() == wanted), None) or next(
@@ -54,7 +54,12 @@ def current_provider_owns_vendor(model_name: str, current_provider: str) -> bool
     switch there". Aggregators, custom endpoints and multi-vendor resellers (nvidia, alibaba, ...)
     have no single native vendor and are skipped."""
     from hermes_cli.model_normalize import detect_vendor
-    from hermes_cli.models import _AGGREGATOR_PROVIDERS, _PROVIDER_MODELS, normalize_provider
+    from hermes_cli.models import (
+        _AGGREGATOR_PROVIDERS,
+        _PROVIDER_CATALOG_DELEGATES,
+        _PROVIDER_MODELS,
+        normalize_provider,
+    )
 
     provider = (current_provider or "").strip().lower()
     if provider in _SKIP or provider.startswith("custom:"):
@@ -67,7 +72,8 @@ def current_provider_owns_vendor(model_name: str, current_provider: str) -> bool
         return False
     # An id the classifier cannot place (Bedrock ``us.anthropic.claude-…``) is evidence the
     # provider is NOT single-vendor; only a fully classified, single-vendor catalog owns the name.
-    native = {detect_vendor(mid) for mid in _PROVIDER_MODELS.get(normalized, ())}
+    target_provider = _PROVIDER_CATALOG_DELEGATES.get(normalized, normalized)
+    native = {detect_vendor(mid) for mid in _PROVIDER_MODELS.get(target_provider, ())}
     return native == {vendor}
 
 

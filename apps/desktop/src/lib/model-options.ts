@@ -33,6 +33,36 @@ function catalogHasModel(providers: ModelOptionProvider[] | undefined, model: st
 }
 
 /**
+ * Resolve the provider slug for a model from catalog providers, preferring
+ * the preferred (current/configured) provider if it lists the model.
+ * Returns empty string if not found.
+ */
+export function resolveProviderForModel(
+  providers: ModelOptionProvider[] | undefined,
+  model: string,
+  preferredProvider?: string
+): string {
+  if (!providers?.length || !model) {
+    return ''
+  }
+
+  const targetModel = model.trim().toLowerCase()
+  if (!targetModel) {
+    return ''
+  }
+
+  if (preferredProvider) {
+    const prefRow = providers.find(row => catalogProviderMatches(row, preferredProvider))
+    if (prefRow?.models?.some(m => m.toLowerCase() === targetModel)) {
+      return prefRow.slug
+    }
+  }
+
+  const matchingRow = providers.find(row => row.models?.some(m => m.toLowerCase() === targetModel))
+  return matchingRow ? matchingRow.slug : ''
+}
+
+/**
  * True only when a persisted **manual** composer pick has been removed from the
  * catalog (its provider still ships models, but no longer this one) — so a new
  * chat would keep 404'ing the dead model. Deliberately conservative to never

@@ -1411,11 +1411,35 @@ def _env_model_seed() -> str:
     return (os.environ.get("HERMES_MODEL", "") or os.environ.get("HERMES_INFERENCE_MODEL", "")).strip()
 
 
+def _resolve_provider(cfg: dict | None = None) -> str:
+    if explicit_provider := os.environ.get("HERMES_TUI_PROVIDER", "").strip():
+        return explicit_provider
+    if cfg is None:
+        cfg = _load_cfg()
+    m = cfg.get("model", "")
+    if isinstance(m, dict):
+        provider = str(m.get("provider") or "").strip()
+        if provider and provider.lower() != "auto":
+            return provider
+    return os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip()
+
+
 def _resolve_model() -> str:
     if env := _env_model_seed():
         return env
-    m = _load_cfg().get("model", "")
+    cfg = _load_cfg()
+    m = cfg.get("model", "")
     if isinstance(m, dict):
+        provider = _resolve_provider(cfg)
+        if provider.lower() == "claude-agent-sdk":
+            model = str(m.get("model") or m.get("default", "") or "").strip()
+            if model:
+                return model
+            with contextlib.suppress(Exception):
+                from hermes_cli.models import get_default_model_for_provider
+                if default_model := get_default_model_for_provider(provider):
+                    return default_model
+            return ""
         return str(m.get("default", "") or "").strip()
     if isinstance(m, str) and m:
         return m.strip()
@@ -1450,7 +1474,14 @@ def _config_model_target() -> tuple[str, str]:
     cfg_model = _load_cfg().get("model")
     if isinstance(cfg_model, dict):
         provider = str(cfg_model.get("provider") or "").strip()
-        return str(cfg_model.get("default", "") or "").strip(), "" if provider.lower() == "auto" else provider
+        if provider.lower() == "claude-agent-sdk":
+            # SDK block: prefer the explicit model key but keep honouring the
+            # default key that model persistence still writes (A4: config sync
+            # must not see an empty model for a default-only SDK config).
+            model = str(cfg_model.get("model") or cfg_model.get("default", "") or "").strip()
+        else:
+            model = str(cfg_model.get("default", "") or "").strip()
+        return model, "" if provider.lower() == "auto" else provider
     return (cfg_model.strip() if isinstance(cfg_model, str) else ""), ""
 
 

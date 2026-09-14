@@ -476,9 +476,10 @@ def recommended_nous_default_model() -> dict[str, Any]:
 def get_default_model_for_provider(provider: str) -> str:
     """Cost-safe default model for a provider, or "" — the NON-INTERACTIVE fallback when a provider
     is configured but no model was ever selected."""
-    models = _PROVIDER_MODELS.get(provider, [])
-    if provider in _SILENT_DEFAULT_PROVIDERS:
-        preferred = get_preferred_silent_default_model(provider)
+    target_provider = _PROVIDER_CATALOG_DELEGATES.get(provider, provider)
+    models = _PROVIDER_MODELS.get(target_provider, [])
+    if provider in _SILENT_DEFAULT_PROVIDERS or target_provider in _SILENT_DEFAULT_PROVIDERS:
+        preferred = get_preferred_silent_default_model(provider) or get_preferred_silent_default_model(target_provider)
         # Trust the preferred default even without a static catalog (OpenRouter's picker list is
         # fetched live; its curated snapshot carries the default).
         if preferred and (preferred in models or not models):
