@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import sys
+import contextlib
 from typing import Any, Optional
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
@@ -82,7 +84,7 @@ def _configured_sdk_env() -> dict:
 
 
 def _sdk_env_overrides(
-    *, metered_allowed: Optional[bool] = None
+    *, metered_allowed: Optional[bool] = None, task_list_id: Optional[str] = None
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
@@ -106,6 +108,7 @@ def _sdk_env_overrides(
     # before the operator env so a deliberate ``env: {PYTHONPATH: ...}`` in
     # config.yaml still wins — that is a knob, not a billing vector.
     overrides.update(_scrubbed_interpreter_env())
+    overrides.update(_effective_sdk_task_env(task_list_id=task_list_id))
     for key, value in _configured_sdk_env().items():
         if not metered_allowed and _is_metered_sdk_env_value(key, value):
             logger.warning(
@@ -116,6 +119,23 @@ def _sdk_env_overrides(
             continue
         overrides[key] = value
     return overrides
+
+
+def _effective_sdk_task_env(*, task_list_id: Optional[str] = None) -> dict[str, str]:
+    """Resolve task-tool env with YAML > inherited process env > injected defaults."""
+    values: dict[str, str] = {}
+    if _provider_flag("task_tools"):
+        values["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1"
+        if task_list_id:
+            values["CLAUDE_CODE_TASK_LIST_ID"] = str(task_list_id)
+    for key in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID"):
+        if key in os.environ:
+            values[key] = str(os.environ[key])
+    configured = _configured_sdk_env()
+    for key in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID"):
+        if key in configured:
+            values[key] = configured[key]
+    return values
 
 
 def _configured_permission_mode() -> Optional[str]:
@@ -797,6 +817,9 @@ def _build_hermes_tools_mcp_config(
         for key in _MCP_ENV_ALLOWLIST
         if os.environ.get(key)
     }
+    # Multiplexed gateway turns bind HERMES_HOME through a context override,
+    # not process-wide os.environ; the child must discover the same profile's
+    # owner lease and state registry.
     env["PYTHONPATH"] = _hermes_repo_root() + os.pathsep + os.environ.get("PYTHONPATH", "")
     if hermes_session_id:
         # Lets the stateless session_search shim exclude the calling
@@ -806,6 +829,16 @@ def _build_hermes_tools_mcp_config(
         # multi-session host can never leak a sibling session's id into the
         # subprocess.
         env["HERMES_SESSION_ID"] = str(hermes_session_id)
+        spawn_policy = _provider_config().get("session_spawn")
+        spawn_enabled = bool(spawn_policy.get("enabled", True)) if isinstance(spawn_policy, dict) else True
+        if spawn_enabled:
+            from agent.transports.hermes_gateway_session_bridge import capability_file_path, issue_scoped_capability
+            if capability := issue_scoped_capability(str(hermes_session_id)):
+                from hermes_constants import get_hermes_home
+                path = capability_file_path(str(hermes_session_id), get_hermes_home())
+                _publish_session_spawn_capability(path, capability)
+                env["HERMES_HOME"] = str(get_hermes_home())
+                env["HERMES_SESSION_SPAWN_CAPABILITY_FILE"] = str(path)
     return {
         "type": "stdio",
         "command": sys.executable,
@@ -817,3 +850,33 @@ def _build_hermes_tools_mcp_config(
         ],
         "env": env,
     }
+
+
+def _publish_session_spawn_capability(path: Path, value: str) -> None:
+    """Publish one capability with private directory/file permissions and no symlink follow."""
+    path.parent.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(exist_ok=True, mode=0o700)
+    for directory in (path.parent.parent, path.parent):
+        parent_st = os.lstat(directory)
+        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_uid != os.getuid():
+            raise PermissionError("session-spawn capability directory is not owner-controlled")
+        os.chmod(directory, 0o700, follow_symlinks=False)
+    with contextlib.suppress(FileNotFoundError):
+        path_st = os.lstat(path)
+        if not stat.S_ISREG(path_st.st_mode) or path_st.st_uid != os.getuid():
+            raise PermissionError("session-spawn capability path is not owner-controlled")
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise

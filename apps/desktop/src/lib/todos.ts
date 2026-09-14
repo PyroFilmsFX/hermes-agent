@@ -18,42 +18,95 @@ export interface TodoPatch {
 
 const STATUSES: readonly TodoStatus[] = ['pending', 'in_progress', 'completed', 'cancelled']
 
-/** The task tool is `todo_list` on the wire since the core-tool rename; `todo`
- *  survives as the legacy alias in stored transcripts and older backends. */
-export const isTodoToolName = (name: unknown): boolean => name === 'todo_list' || name === 'todo'
+const TRUSTED_PREFIX_RE = /^mcp__(?:hermes-tools|hermes-hybrid)__/
+
+const ACCEPTED_TODO_TOOL_NAMES = new Set([
+  'todo_list',
+  'todo',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskList',
+  'TaskGet',
+  'TodoWrite'
+])
+
+/** Core `todo_list` / legacy `todo`, Claude Agent SDK Task* tools, and
+ *  namespaced tool identities from trusted Hermes MCP servers. */
+export const isTodoToolName = (name: unknown): boolean => {
+  if (typeof name !== 'string') {
+    return false
+  }
+
+  const normalized = name.replace(TRUSTED_PREFIX_RE, '')
+
+  return ACCEPTED_TODO_TOOL_NAMES.has(normalized)
+}
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === 'object' && !Array.isArray(v))
-const isStatus = (v: unknown): v is TodoStatus => (STATUSES as readonly string[]).includes(v as string)
+
+const normalizeStatus = (v: unknown): TodoStatus | null => {
+  if (typeof v !== 'string') {
+    return null
+  }
+
+  if ((STATUSES as readonly string[]).includes(v)) {
+    return v as TodoStatus
+  }
+
+  if (v === 'canceled') {
+    return 'cancelled'
+  }
+
+  if (v === 'in-progress') {
+    return 'in_progress'
+  }
+
+  return null
+}
+
+const isStatus = (v: unknown): v is TodoStatus => normalizeStatus(v) !== null
 
 function parseArray(value: unknown[]): TodoItem[] {
   return value.flatMap(item => {
-    if (!isRecord(item) || !isStatus(item.status)) {
+    if (!isRecord(item)) {
       return []
     }
 
-    const id = String(item.id ?? '').trim()
-    const content = String(item.content ?? '').trim()
+    const status = normalizeStatus(item.status)
+
+    if (!status) {
+      return []
+    }
+
+    const id = String(item.id ?? item.taskId ?? '').trim()
+    const content = String(item.content ?? '').trim() || String(item.text ?? '').trim()
     const parent = String(item.parent ?? '').trim()
 
-    return id && content ? [{ content, id, status: item.status, ...(parent && parent !== id ? { parent } : {}) }] : []
+    return id && content ? [{ content, id, status, ...(parent && parent !== id ? { parent } : {}) }] : []
   })
 }
 
 function parsePatchArray(value: unknown[]): TodoPatch[] {
   return value.flatMap(item => {
-    if (!isRecord(item) || !isStatus(item.status)) {
+    if (!isRecord(item)) {
       return []
     }
 
-    const id = String(item.id ?? '').trim()
+    const status = normalizeStatus(item.status)
+
+    if (!status) {
+      return []
+    }
+
+    const id = String(item.id ?? item.taskId ?? '').trim()
 
     if (!id) {
       return []
     }
 
-    const content = String(item.content ?? '').trim()
+    const content = String(item.content ?? '').trim() || String(item.text ?? '').trim()
 
-    return content ? [{ content, id, status: item.status }] : [{ id, status: item.status }]
+    return content ? [{ content, id, status }] : [{ id, status }]
   })
 }
 
@@ -74,8 +127,14 @@ function parse(value: unknown, depth: number): null | TodoItem[] {
     }
   }
 
-  if (isRecord(value) && Object.hasOwn(value, 'todos')) {
-    return parse(value.todos, depth + 1)
+  if (isRecord(value)) {
+    if (Object.hasOwn(value, 'todos')) {
+      return parse(value.todos, depth + 1)
+    }
+
+    if (Object.hasOwn(value, 'tasks')) {
+      return parse(value.tasks, depth + 1)
+    }
   }
 
   return null
@@ -148,8 +207,14 @@ function parsePatch(value: unknown, depth: number): null | TodoPatch[] {
     }
   }
 
-  if (isRecord(value) && Object.hasOwn(value, 'todos')) {
-    return parsePatch(value.todos, depth + 1)
+  if (isRecord(value)) {
+    if (Object.hasOwn(value, 'todos')) {
+      return parsePatch(value.todos, depth + 1)
+    }
+
+    if (Object.hasOwn(value, 'tasks')) {
+      return parsePatch(value.tasks, depth + 1)
+    }
   }
 
   return null
@@ -189,9 +254,9 @@ export function mergeTodoItems(current: readonly TodoItem[], patch: readonly Tod
  *  start event does not wipe the rest of the checklist. */
 export function nextTodosFromToolEvent(
   current: readonly TodoItem[],
-  payload: { args?: unknown; arguments?: unknown; result?: unknown; todos?: unknown }
+  payload: { args?: unknown; arguments?: unknown; result?: unknown; tasks?: unknown; todos?: unknown }
 ): null | TodoItem[] {
-  const fromResult = parseTodos(payload.todos) ?? parseTodos(payload.result)
+  const fromResult = parseTodos(payload.todos) ?? parseTodos(payload.tasks) ?? parseTodos(payload.result)
 
   if (fromResult) {
     return fromResult
@@ -248,7 +313,8 @@ export function todosFromMessageContent(content: unknown): null | TodoItem[] {
       continue
     }
 
-    const parsed = parseTodos(part.todos) ?? parseTodos(part.result) ?? parseTodos(part.args)
+    const parsed =
+      parseTodos(part.todos) ?? parseTodos(part.tasks) ?? parseTodos(part.result) ?? parseTodos(part.args)
 
     if (parsed !== null) {
       latest = parsed

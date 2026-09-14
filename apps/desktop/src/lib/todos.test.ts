@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isTodoToolName,
   latestSessionTodos,
   mergeTodoItems,
   nextTodosFromToolEvent,
@@ -218,3 +219,137 @@ describe('parseTodoPatch', () => {
     expect(parseTodoPatch([{ id: 'c', status: 'completed' }])).toEqual([{ id: 'c', status: 'completed' }])
   })
 })
+
+describe('isTodoToolName', () => {
+  const acceptedBare = [
+    'todo_list',
+    'todo',
+    'TaskCreate',
+    'TaskUpdate',
+    'TaskList',
+    'TaskGet',
+    'TodoWrite'
+  ]
+
+  it('returns true for every accepted bare identity', () => {
+    for (const name of acceptedBare) {
+      expect(isTodoToolName(name)).toBe(true)
+    }
+  })
+
+  it('returns true for accepted identities namespaced with mcp__hermes-tools__', () => {
+    for (const name of acceptedBare) {
+      expect(isTodoToolName(`mcp__hermes-tools__${name}`)).toBe(true)
+    }
+  })
+
+  it('returns true for accepted identities namespaced with mcp__hermes-hybrid__', () => {
+    for (const name of acceptedBare) {
+      expect(isTodoToolName(`mcp__hermes-hybrid__${name}`)).toBe(true)
+    }
+  })
+
+  it('returns false for unaccepted identities and untrusted servers', () => {
+    expect(isTodoToolName('mcp__other-server__todo_list')).toBe(false)
+    expect(isTodoToolName('TaskOutput')).toBe(false)
+    expect(isTodoToolName('TaskStop')).toBe(false)
+    expect(isTodoToolName('mcp__other-server__TaskCreate')).toBe(false)
+    expect(isTodoToolName('mcp__hermes-tools__TaskOutput')).toBe(false)
+    expect(isTodoToolName('mcp__hermes-tools__TaskStop')).toBe(false)
+    expect(isTodoToolName('terminal')).toBe(false)
+    expect(isTodoToolName('')).toBe(false)
+    expect(isTodoToolName(null)).toBe(false)
+    expect(isTodoToolName(undefined)).toBe(false)
+    expect(isTodoToolName(123)).toBe(false)
+    expect(isTodoToolName({})).toBe(false)
+  })
+})
+
+describe('Task* snapshot payload normalization', () => {
+  const expectedItems = [
+    { content: 'Define requirements', id: 'task-1', status: 'pending' },
+    { content: 'Implement changes', id: 'task-2', status: 'in_progress' },
+    { content: 'Run test suite', id: 'task-3', status: 'completed' },
+    { content: 'Old approach', id: 'task-4', status: 'cancelled' }
+  ]
+
+  it('normalizes a Task* snapshot containing all four statuses with {id, content, status}', () => {
+    const snapshot = {
+      todos: [
+        { content: 'Define requirements', id: 'task-1', status: 'pending' },
+        { content: 'Implement changes', id: 'task-2', status: 'in_progress' },
+        { content: 'Run test suite', id: 'task-3', status: 'completed' },
+        { content: 'Old approach', id: 'task-4', status: 'cancelled' }
+      ]
+    }
+
+    expect(parseTodos(snapshot)).toEqual(expectedItems)
+  })
+
+  it('normalizes a Task* snapshot wrapped under tasks', () => {
+    const snapshot = {
+      tasks: [
+        { content: 'Define requirements', id: 'task-1', status: 'pending' },
+        { content: 'Implement changes', id: 'task-2', status: 'in_progress' },
+        { content: 'Run test suite', id: 'task-3', status: 'completed' },
+        { content: 'Old approach', id: 'task-4', status: 'cancelled' }
+      ]
+    }
+
+    expect(parseTodos(snapshot)).toEqual(expectedItems)
+  })
+
+  it('normalizes a Task* snapshot given as a raw array', () => {
+    const snapshot = [
+      { content: 'Define requirements', id: 'task-1', status: 'pending' },
+      { content: 'Implement changes', id: 'task-2', status: 'in_progress' },
+      { content: 'Run test suite', id: 'task-3', status: 'completed' },
+      { content: 'Old approach', id: 'task-4', status: 'cancelled' }
+    ]
+
+    expect(parseTodos(snapshot)).toEqual(expectedItems)
+  })
+
+  it('accepts text as fallback when content is not provided', () => {
+    const snapshot = {
+      todos: [
+        { id: 'task-1', status: 'pending', text: 'Define requirements' },
+        { id: 'task-2', status: 'in_progress', text: 'Implement changes' },
+        { id: 'task-3', status: 'completed', text: 'Run test suite' },
+        { id: 'task-4', status: 'cancelled', text: 'Old approach' }
+      ]
+    }
+
+    expect(parseTodos(snapshot)).toEqual(expectedItems)
+  })
+
+  it('projects todos from SDK Task tool calls in transcript messages', () => {
+    const messages = [
+      {
+        parts: [
+          {
+            args: { subject: 'Old' },
+            toolCallId: 'c1',
+            toolName: 'TaskCreate',
+            todos: [{ content: 'Created', id: '1', status: 'pending' }],
+            type: 'tool-call'
+          }
+        ]
+      },
+      {
+        parts: [
+          {
+            args: { status: 'in_progress', taskId: '1' },
+            toolCallId: 'c2',
+            toolName: 'TaskUpdate',
+            todos: [{ content: 'Created', id: '1', status: 'in_progress' }],
+            type: 'tool-call'
+          }
+        ]
+      }
+    ]
+
+    expect(latestSessionTodos(messages)).toEqual([{ content: 'Created', id: '1', status: 'in_progress' }])
+  })
+})
+
