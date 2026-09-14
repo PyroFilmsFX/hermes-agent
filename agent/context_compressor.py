@@ -4642,6 +4642,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         WITHOUT clearing it (#100661). Set by provider-proven overflow recovery, which is already bounded by
         the caller's attempt budget.
         """
+        from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+
+        # SDK background results are durable UI projections, not conversation turns. Filter only the
+        # compressor's working copy: the gateway keeps the original display rows and restores them after
+        # the model-facing transcript is compacted. This must happen before pruning, window selection,
+        # memory-checkpoint inputs, or summary serialization can turn a display answer into model context.
+        messages = [message for message in messages if not _is_sdk_display_only_row(message)]
         telemetry = self._begin_compress_attempt(current_tokens, force)
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)

@@ -221,7 +221,10 @@ def _compress_session_history(
     if before_messages is None or history_version is None:
         with session["history_lock"]:
             before_messages, history_version = list(session.get("history", [])), int(session.get("history_version", 0))
-    history = before_messages
+    original_history = before_messages
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+    from .prompt_turn import _restore_sdk_display_rows
+    history = [row for row in original_history if not _is_sdk_display_only_row(row)]
     if len(history) < 4:
         return 0, _get_usage(agent)
     partial, keep_last, focus_topic = parse_partial_compress_args(focus_topic or "")
@@ -267,7 +270,7 @@ def _compress_session_history(
             # External mutation during compaction — drop the result so we don't clobber concurrent edits.
             finalize_context_engine_compression_notification(agent, committed=False)
             return 0, _get_usage(agent)
-        session["history"] = compressed
+        session["history"] = _restore_sdk_display_rows(original_history, compressed)
         session["history_version"] = history_version + 1
     return len(history) - len(compressed), _get_usage(agent)
 
@@ -284,6 +287,8 @@ def _sync_session_key_after_compress(
     old_key = session.get("session_key", "") or ""
     if not new_session_id or new_session_id == old_key:
         return
+    # Spawn reservations are keyed by the durable child identity, not the SDK continuation id.
+    session.setdefault("spawn_child_stored_session_id", old_key)
     if not _transfer_active_session_slot(sid, session, new_session_id=new_session_id):
         logger.warning(
             "Compression session lease did not re-anchor: sid=%s old_session_id=%s new_session_id=%s",

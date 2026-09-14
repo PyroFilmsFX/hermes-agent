@@ -1048,8 +1048,18 @@ def build_api_messages(
     from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
     from agent.conversation_loop import _clone_message_for_send
 
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+
+    # SDK background deliveries are durable transcript projections for the UI, not
+    # model turns.  Filter them before building the wire list so generic providers
+    # and failover paths cannot replay their content (or let it affect alternation
+    # repair performed by a later provider-specific sanitizer).
+    sendable_messages = [
+        (idx, msg) for idx, msg in enumerate(messages)
+        if not _is_sdk_display_only_row(msg)
+    ]
     api_messages = []
-    for idx, msg in enumerate(messages):
+    for send_idx, (idx, msg) in enumerate(sendable_messages):
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
@@ -1094,7 +1104,9 @@ def build_api_messages(
         # Fill empty non-final user/assistant wire copies so the pre-call sanitizer
         # stops re-healing and flooding errors.log; durable history is untouched.
         # After the reasoning copy so thinking-only turns keep payload.
-        fill_empty_non_final_wire_payload(api_msg, is_final=(idx == len(messages) - 1))
+        fill_empty_non_final_wire_payload(
+            api_msg, is_final=(send_idx == len(sendable_messages) - 1)
+        )
         # _thinking_prefill survives intentionally: the drop pass below needs it.
         # Strip length-continuation marks; some transports keep underscore keys.
         api_msg.pop("_length_continuation_fragment", None)

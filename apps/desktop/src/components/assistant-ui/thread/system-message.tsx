@@ -16,7 +16,7 @@ const REVIEW_NOTE_RE = /^review:(?<label>[^:\n]+):?\s*(?<detail>[\s\S]*)$/
 
 export const SystemMessage: FC = () => {
   const text = useAuiState(s => messageContentText(s.message.content))
-  const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult)
+  const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult ?? s.message.metadata.custom?.peerMessage)
   const [reportOpen, setReportOpen] = useState(false)
 
   if (!text) {

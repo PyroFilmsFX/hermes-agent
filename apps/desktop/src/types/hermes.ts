@@ -644,6 +644,24 @@ export type TimelineDisplayMetadata =
       duration_seconds?: number
     }
   | { reactions: MessageReaction[] }
+  | {
+      direction?: 'in' | 'out'
+      peer?: string
+      peer_session?: string
+      msg_id?: string
+      completed_at?: number | string
+    }
+  | {
+      event: 'woken' | 'child_exited' | 'resumed'
+      source?: string
+      by?: string
+      uuid?: string
+      exit_code?: number | null
+      reason?: string
+      digest_messages?: number
+      resume_id_present?: boolean
+      completed_at?: number | string
+    }
 
 /** One emoji reaction on a message. One per author, iOS-Tapback style. */
 export interface MessageReaction {
@@ -673,7 +691,16 @@ export interface SessionMessage {
   reasoning_content?: null | string
   reasoning_details?: unknown
   display_kind?:
-    'async_delegation_complete' | 'auto_continue' | 'hidden' | 'model_switch' | 'personality_switch' | 'steer' | string
+    | 'async_delegation_complete'
+    | 'auto_continue'
+    | 'hidden'
+    | 'model_switch'
+    | 'peer_message'
+    | 'personality_switch'
+    | 'session_lifecycle'
+    | 'sdk_background_result'
+    | 'steer'
+    | string
   /**
    * A backend older than this app can still serve this as unparsed JSON text,
    * so readers must narrow before indexing into it.

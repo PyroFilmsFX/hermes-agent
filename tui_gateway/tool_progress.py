@@ -3,7 +3,14 @@ projection. Bodies are rebound onto server.py's globals (method_ctx.bind_module)
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+from pathlib import Path
+
 from .method_ctx import bind_module
+
+logger = logging.getLogger(__name__)
 
 # Verbose tool text is capped to the Ink render budget (a hair more, so the "[omitted …]" label
 # stays informative): unbounded output fed a render-tree blowup that OOM-killed the TUI parent.
@@ -16,6 +23,10 @@ _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
 
 _TODO_TOOL_NAMES = ("todo_list", "todo")  # legacy alias: pre-rename replays
+_SDK_TASK_TOOL_NAMES = frozenset(
+    {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite", *_TODO_TOOL_NAMES}
+)
+_SDK_TASK_TOOL_PREFIXES = ("mcp__hermes-tools__", "mcp__hermes-hybrid__")
 
 
 def _cap_tui_verbose_text(text: str) -> str:
@@ -123,6 +134,223 @@ def _normalize_todo_state(value: object) -> dict | None:
     if not todos and revision == 0:
         return None
     return {"todos": todos, "revision": revision}
+
+
+def _normalized_sdk_task_tool_name(name: object) -> str:
+    value = str(name or "")
+    for prefix in _SDK_TASK_TOOL_PREFIXES:
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+    return value
+
+
+def _is_sdk_task_tool(name: object) -> bool:
+    return _normalized_sdk_task_tool_name(name) in _SDK_TASK_TOOL_NAMES
+
+
+def _is_sdk_lane_session(session: dict | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    agent = session.get("agent")
+    if agent is None:
+        return False
+    return (
+        getattr(agent, "_claude_sdk_session", None) is not None
+        or str(getattr(agent, "provider", "") or "") == "claude-agent-sdk"
+    )
+
+
+def _sdk_task_snapshot(
+    *, task_list_id: str, config_dir: str | None = None,
+    task_store_root: str | None = None, revision: int = 0,
+    _supports_dir_fds: bool = (
+        os.open in getattr(os, "supports_dir_fd", ())
+        and os.listdir in getattr(os, "supports_fd", ())
+        and os.stat in getattr(os, "supports_dir_fd", ())
+    ),
+) -> dict | None:
+    """Read one Claude task list without creating, locking, or writing anything."""
+    import stat
+
+    if not task_list_id:
+        return None
+    tasks_dir = (
+        Path(task_store_root)
+        if task_store_root
+        else Path(config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    ) / "tasks"
+    raw_list_id = str(task_list_id)
+    list_id_path = Path(raw_list_id)
+    if list_id_path.is_absolute() or ".." in list_id_path.parts:
+        logger.warning("invalid Claude task list id %r; refusing snapshot read", raw_list_id)
+        return None
+    try:
+        canonical_tasks_dir = tasks_dir.resolve(strict=False)
+        root = (tasks_dir / list_id_path).resolve(strict=False)
+        if not root.is_relative_to(canonical_tasks_dir) or not root.is_dir():
+            logger.warning("invalid Claude task list path %r; refusing snapshot read", raw_list_id)
+            return None
+        tasks_stat = canonical_tasks_dir.stat()
+        root_stat = root.stat()
+        if not stat.S_ISDIR(tasks_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            return None
+    except OSError:
+        return None
+    todos: list[dict] = []
+    valid_files = 0
+
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    def _same_directory(fd: int, expected) -> bool:
+        actual = os.fstat(fd)
+        return (
+            stat.S_ISDIR(actual.st_mode)
+            and actual.st_dev == expected.st_dev
+            and actual.st_ino == expected.st_ino
+        )
+
+    def _load_json(fd: int):
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    if _supports_dir_fds:
+        tasks_fd = list_fd = None
+        try:
+            tasks_fd = os.open(str(canonical_tasks_dir), directory_flags)
+            if not _same_directory(tasks_fd, tasks_stat):
+                return None
+            list_fd = os.open(str(root), directory_flags)
+            if not _same_directory(list_fd, root_stat):
+                return None
+            names = sorted(name for name in os.listdir(list_fd) if name.endswith(".json"))
+            for name in names:
+                file_fd = None
+                try:
+                    file_fd = os.open(name, file_flags, dir_fd=list_fd)
+                    file_stat = os.fstat(file_fd)
+                    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_dev != root_stat.st_dev:
+                        continue
+                    raw = _load_json(file_fd)
+                except (OSError, UnicodeError, ValueError, TypeError):
+                    continue
+                finally:
+                    if file_fd is not None:
+                        os.close(file_fd)
+                if not isinstance(raw, dict):
+                    continue
+                task_id = raw.get("id") or Path(name).stem
+                content = raw.get("subject") or raw.get("content") or raw.get("description")
+                status = str(raw.get("status") or "pending").strip().lower()
+                if not task_id or not isinstance(content, str):
+                    continue
+                if status in {"deleted", "cancelled", "canceled"} or raw.get("deleted") is True:
+                    status = "cancelled"
+                elif status not in {"pending", "in_progress", "completed"}:
+                    continue
+                valid_files += 1
+                todos.append({"id": str(task_id), "content": content, "status": status})
+        except OSError:
+            return None
+        finally:
+            if list_fd is not None:
+                os.close(list_fd)
+            if tasks_fd is not None:
+                os.close(tasks_fd)
+        files = names
+    else:
+        # Platforms without openat-style descriptors cannot pin the directory hierarchy. Refuse
+        # symlinks and compare the opened file to its no-follow stat before parsing it.
+        try:
+            if tasks_dir.is_symlink() or root.is_symlink():
+                return None
+            names = sorted(name for name in os.listdir(root) if name.endswith(".json"))
+        except OSError:
+            return None
+        files = names
+        for name in names:
+            path = root / name
+            file_fd = None
+            try:
+                entry_stat = os.stat(path, follow_symlinks=False)
+                if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_dev != root_stat.st_dev:
+                    continue
+                file_fd = os.open(str(path), file_flags)
+                file_stat = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or file_stat.st_dev != entry_stat.st_dev
+                    or file_stat.st_ino != entry_stat.st_ino
+                ):
+                    continue
+                raw = _load_json(file_fd)
+            except (OSError, UnicodeError, ValueError, TypeError):
+                continue
+            finally:
+                if file_fd is not None:
+                    os.close(file_fd)
+            if not isinstance(raw, dict):
+                continue
+            task_id = raw.get("id") or path.stem
+            content = raw.get("subject") or raw.get("content") or raw.get("description")
+            status = str(raw.get("status") or "pending").strip().lower()
+            if not task_id or not isinstance(content, str):
+                continue
+            if status in {"deleted", "cancelled", "canceled"} or raw.get("deleted") is True:
+                status = "cancelled"
+            elif status not in {"pending", "in_progress", "completed"}:
+                continue
+            valid_files += 1
+            todos.append({"id": str(task_id), "content": content, "status": status})
+
+    # A directory with no task files is a valid empty snapshot (a clear), but a
+    # directory containing only partial/corrupt files is not evidence of one.
+    if files and not valid_files:
+        return None
+    return {"todos": todos, "revision": max(1, int(revision or 0))}
+
+
+def _refresh_sdk_todo_snapshot(
+    sid: str,
+    session: dict | None = None,
+    *,
+    task_list_id: str | None = None,
+    config_dir: str | None = None,
+    task_store_root: str | None = None,
+    emit: bool = True,
+) -> dict | None:
+    session = session if session is not None else globals().get("_sessions", {}).get(sid)
+    if not _is_sdk_lane_session(session):
+        return None
+    agent = session.get("agent")
+    task_list_id = task_list_id or getattr(agent, "_claude_sdk_task_list_id", None)
+    config_dir = config_dir or getattr(agent, "_claude_sdk_task_config_dir", None)
+    task_store_root = task_store_root or getattr(agent, "_claude_sdk_task_store_root", None)
+    cached = _normalize_todo_state(session.get("todo_state"))
+    revision = (cached or {}).get("revision", 0) + 1
+    state = _sdk_task_snapshot(
+        task_list_id=str(task_list_id or ""), config_dir=config_dir,
+        task_store_root=task_store_root, revision=revision
+    )
+    if state is None:
+        return None
+    _cache_todo_state(session, state)
+    if emit:
+        _emit("todo.updated", sid, state)
+    return state
+
+
+def bootstrap_sdk_todo_snapshot(
+    sid: str, *, task_list_id: str, config_dir: str | None = None,
+    task_store_root: str | None = None
+) -> dict | None:
+    """Emit the one resume bootstrap after the gateway session is registered."""
+    return _refresh_sdk_todo_snapshot(
+        sid, task_list_id=task_list_id, config_dir=config_dir,
+        task_store_root=task_store_root
+    )
 
 
 def _cache_todo_state(session: dict, state: dict | None) -> None:
@@ -252,10 +480,15 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         _emit_tool_lifecycle("tool.start", sid, name, args, payload)
 
 
-def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
+def _on_tool_complete(
+    sid: str, tool_call_id: str, name: str, args: dict, result: str,
+    *, is_error: bool = False, error: str | None = None,
+):
     if _connector_lifecycle_is_stale(sid, name, args):
         return
     payload = {"tool_id": tool_call_id, "name": name, "args": args}
+    if is_error or error is not None:
+        payload.update(is_error=True, error=error if error is not None else True)
     session = _sessions.get(sid)
     snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None) if session is not None else None
     started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None) if session is not None else None
@@ -271,7 +504,12 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         payload["summary"] = summary
     if _session_verbose(sid) and (result_text := _tool_result_text(result)):
         payload["result_text"] = result_text
-    todo_state = _normalize_todo_state(payload.get("result")) if name in _TODO_TOOL_NAMES else None
+    sdk_task_tool = _is_sdk_task_tool(name)
+    todo_state = None
+    if sdk_task_tool and _is_sdk_lane_session(session):
+        todo_state = _refresh_sdk_todo_snapshot(sid, session, emit=False)
+    elif name in _TODO_TOOL_NAMES:
+        todo_state = _normalize_todo_state(payload.get("result"))
     if todo_state is not None:
         payload.update(todo_state)
         if session is not None:
@@ -282,7 +520,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         if render_edit_diff_with_delta(name, result, function_args=args, snapshot=snapshot, print_fn=rendered.append):
             payload["inline_diff"] = "\n".join(rendered)
     if (_tool_progress_enabled(sid) or payload.get("inline_diff") or _tool_lifecycle_required_for_ui(name)
-            or name in _TODO_TOOL_NAMES or _connector_tool_lifecycle(name, args)):
+            or sdk_task_tool or _connector_tool_lifecycle(name, args)):
         _emit_tool_lifecycle("tool.complete", sid, name, args, payload)
     # Task state is application data, not tool-progress chrome: a dedicated full-snapshot event lets
     # every client reconcile without parsing tool args.

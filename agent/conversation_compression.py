@@ -1644,6 +1644,21 @@ def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, An
     return direct_messages
 
 
+def _split_sdk_display_rows(messages: list) -> tuple[list, list]:
+    """Keep SDK display projections out of the compression working transcript.
+
+    The caller retains the second list as the display-only sidecar; only the first
+    list crosses memory checkpoint and context-engine boundaries.
+    """
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+
+    working = []
+    display_rows = []
+    for message in messages:
+        (display_rows if _is_sdk_display_only_row(message) else working).append(message)
+    return working, display_rows
+
+
 class _CompressionLockLeaseRefresher:
     def __init__(
         self, db: Any, session_id: str, holder: str, ttl_seconds: float, refresh_interval_seconds: float | None = None
@@ -3436,6 +3451,10 @@ def _run_summary_phase(
                 # Adopted list is fully durable: re-anchor persist idx at the end so the post-
                 # compression flush skips it; run_agent marker sync realigns _session_messages.
                 agent._persist_user_message_idx = len(messages)
+        # Durable adoption reloads the parent with its UI-only SDK projections. Split
+        # them at this boundary, before checkpointing or dispatching any compressor;
+        # the caller still owns the sidecar for post-turn display restoration.
+        messages, _display_rows = _split_sdk_display_rows(messages)
         memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
         compress_fn, compress_kwargs = _resolve_compress_call(
             agent, approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,

@@ -994,6 +994,9 @@ class SessionMessagesMixin:
         messages = _strip_stale_tool_call_markers(_strip_background_review_harness(messages))
         if repair_alternation and messages:
             from agent.agent_runtime_helpers import repair_message_sequence
+            from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+
+            messages = [msg for msg in messages if not _is_sdk_display_only_row(msg)]
             repaired = repair_message_sequence(None, messages)
             if repaired:
                 logger.info("Repaired %d message-alternation violation(s) while "

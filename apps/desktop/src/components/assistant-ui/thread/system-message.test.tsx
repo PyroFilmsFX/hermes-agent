@@ -14,13 +14,21 @@ $displayTimestamps.set(true)
 const timestamp = new Date('2026-05-01T00:00:00.000Z')
 stubThreadEnvironment()
 
-function Harness({ text, asyncResult }: { text: string; asyncResult?: string }) {
+function Harness({
+  text,
+  asyncResult,
+  peerMessage
+}: {
+  text: string
+  asyncResult?: string
+  peerMessage?: string
+}) {
   const message = {
     id: 'system-1',
     role: 'system',
     content: [{ type: 'text', text }],
     createdAt: timestamp,
-    metadata: { custom: { timelineTimestamp: timestamp.getTime() / 1000, asyncResult } }
+    metadata: { custom: { timelineTimestamp: timestamp.getTime() / 1000, asyncResult, peerMessage } }
   } as unknown as ThreadMessage
 
   const runtime = useExternalStoreRuntime<ThreadMessage>({
@@ -63,6 +71,43 @@ describe('background report disclosure', () => {
     fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(container.textContent).not.toContain('blockers')
+  })
+
+  it('renders peer message scaffold row and reveals full text on click', () => {
+    const fullBody = 'Full inbound peer instructions and code snippet.'
+
+    const { container, getByRole } = render(
+      <Harness asyncResult={fullBody} text="↘ from worker · 14:30" />
+    )
+
+    expect(container.textContent).not.toContain('Full inbound peer instructions')
+    expectTimestampSeparated(container, '↘ from worker · 14:30')
+    const toggle = getByRole('button', { name: '↘ from worker · 14:30' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(container.textContent).toContain(fullBody)
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(container.textContent).not.toContain('Full inbound peer instructions')
+  })
+
+  it('supports peerMessage custom metadata slot as sibling to asyncResult', () => {
+    const fullBody = 'Sibling peerMessage text.'
+
+    const { container, getByRole } = render(
+      <Harness peerMessage={fullBody} text="↗ to worker: sending task" />
+    )
+
+    expect(container.textContent).not.toContain('Sibling peerMessage text.')
+    const toggle = getByRole('button', { name: '↗ to worker: sending task' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(container.textContent).toContain(fullBody)
   })
 })
 

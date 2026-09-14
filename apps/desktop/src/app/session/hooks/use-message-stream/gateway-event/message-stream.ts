@@ -3,6 +3,8 @@ import type { BillingBlock } from '@hermes/shared'
 import { burstVibeHearts } from '@/components/chat/vibe-hearts'
 import { reportFirstBuildTurnComplete } from '@/components/onboarding-chat/first-build'
 import { translateNow } from '@/i18n'
+import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
+import { peerMessageLabel, sessionLifecycleBody, sessionLifecycleLabel } from '@/lib/chat-messages/hydration'
 import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
 import { parseErrorSurface } from '@/lib/error-surface'
@@ -16,10 +18,28 @@ import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
 import { setCurrentUsage, setTurnStartedAt } from '@/store/session'
 import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control'
+import { markBackgroundSessionFinished, setBackgroundDeliveryActive } from '@/store/session-states'
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
 import type { GatewayEventContext } from './types'
+
+let backgroundStreamMessageSeq = 0
+const nextBackgroundMessageId = (prefix: string) => `${prefix}-${Date.now()}-${++backgroundStreamMessageSeq}`
+
+function parseDisplayMetadata(metadata: unknown): null | Record<string, unknown> {
+  let parsed: unknown = metadata
+
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed)
+    } catch {
+      return null
+    }
+  }
+
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+}
 
 function firstBillingLine(text: string): string {
   return (text || '').split('\n')[0]?.trim() ?? ''
@@ -87,7 +107,22 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       return true
     }
 
+    const isBackground = Boolean(payload && 'background' in payload && (payload as Record<string, unknown>).background)
+
     flushQueuedDeltas(sessionId)
+
+    if (isBackground) {
+      // For background:true: message.start must NOT touch busy/awaitingResponse/interrupted
+      // (it is not the user's turn) and must not be refused when interrupted.
+      setBackgroundDeliveryActive(sessionId, true)
+      updateSessionState(sessionId, state => ({
+        ...state,
+        streamId: nextBackgroundMessageId('background-stream')
+      }))
+
+      return true
+    }
+
     pruneFinishedSessionSubagents(sessionId)
     setSessionCompacting(sessionId, false)
     compactedTurnRef.current.delete(sessionId)
@@ -315,6 +350,110 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
   if (event.type === 'message.complete') {
     if (!sessionId) {
+      return true
+    }
+
+    const isBackground = Boolean(payload && 'background' in payload && (payload as Record<string, unknown>).background)
+
+    if (isBackground) {
+      // Background completions seal their own stream without affecting the
+      // foreground turn's prompts, todos, compaction state, or sound.
+      flushQueuedDeltas(sessionId)
+      setBackgroundDeliveryActive(sessionId, false)
+
+      const finalText =
+        coerceGatewayText(payload?.text) ||
+        coerceGatewayText(payload?.rendered) ||
+        (payload?.status === 'error' && typeof payload?.error === 'string' ? payload.error : '')
+
+      const displayKind =
+        payload && 'display_kind' in payload ? String((payload as Record<string, unknown>).display_kind) : undefined
+
+      const displayMetadata = parseDisplayMetadata(
+        payload && 'display_metadata' in payload ? (payload as Record<string, unknown>).display_metadata : undefined
+      )
+
+      updateSessionState(sessionId, state => {
+        const streamId = state.streamId
+        const existing = streamId ? state.messages.find(m => m.id === streamId) : null
+        const existingToolParts = existing ? existing.parts.filter(p => p.type === 'tool-call') : []
+
+        let sealedMessage: ChatMessage
+
+        if (displayKind === 'session_lifecycle') {
+          const metadata = displayMetadata ?? {}
+          const label = sessionLifecycleLabel(metadata)
+
+          sealedMessage = {
+            id: existing?.id ?? nextBackgroundMessageId('lifecycle'),
+            role: 'system',
+            parts: [{ type: 'text', text: label, timestamp: occurredAt }, ...existingToolParts],
+            asyncResult: sessionLifecycleBody(metadata),
+            timestamp: existing?.timestamp ?? occurredAt,
+            completedAt: occurredAt,
+            pending: false
+          }
+        } else if (displayKind === 'peer_message') {
+          const direction = displayMetadata?.direction === 'out' ? 'out' : 'in'
+
+          const peer =
+            typeof displayMetadata?.peer === 'string' && displayMetadata.peer.trim()
+              ? displayMetadata.peer.trim()
+              : 'peer'
+
+          const label = peerMessageLabel(direction, peer, finalText, occurredAt)
+
+          sealedMessage = {
+            id: existing?.id ?? nextBackgroundMessageId('peer'),
+            role: 'system',
+            parts: [{ type: 'text', text: label, timestamp: occurredAt }, ...existingToolParts],
+            asyncResult: finalText,
+            timestamp: existing?.timestamp ?? occurredAt,
+            completedAt: occurredAt,
+            pending: false
+          }
+        } else {
+          // sdk_background_result or general background completion
+          sealedMessage = {
+            id: existing?.id ?? nextBackgroundMessageId('assistant'),
+            role: 'assistant',
+            parts: [...existingToolParts, { ...assistantTextPart(finalText, occurredAt), completedAt: occurredAt }],
+            timestamp: existing?.timestamp ?? occurredAt,
+            completedAt: occurredAt,
+            pending: false
+          }
+        }
+
+        let nextMessages: ChatMessage[]
+
+        if (existing && streamId) {
+          nextMessages = state.messages.map(m => (m.id === streamId ? sealedMessage : m))
+        } else {
+          nextMessages = [...state.messages, sealedMessage]
+        }
+
+        return {
+          ...state,
+          messages: nextMessages,
+          streamId: null
+        }
+      })
+
+      markBackgroundSessionFinished(sessionId)
+
+      if (payload?.usage) {
+        updateSessionState(sessionId, state => ({
+          ...state,
+          usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...payload.usage }
+        }))
+
+        if (isActiveEvent) {
+          setCurrentUsage(current => ({ ...current, ...payload.usage }))
+        }
+      }
+
+      void refreshSupportedSessionControlAfterTurn(sessionId)
+
       return true
     }
 

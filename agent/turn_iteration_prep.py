@@ -175,7 +175,19 @@ def prepare_iteration(
             )
         )
 
-    messages = [msg for msg in messages if not _is_scaffold_ghost(msg)]
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+
+    # Repair merges same-role rows and discards the second row's display marker.
+    # Exclude projections first, preserving the flush boundary in the filtered list.
+    def _keep_model_row(msg: Dict[str, Any]) -> bool:
+        return not (_is_scaffold_ghost(msg) or _is_sdk_display_only_row(msg))
+
+    flush_cursor = getattr(agent, "_last_flushed_db_idx", None)
+    if isinstance(flush_cursor, int):
+        agent._last_flushed_db_idx = sum(_keep_model_row(msg) for msg in messages[:flush_cursor])
+    filtered_messages = [msg for msg in messages if _keep_model_row(msg)]
+    filtered = len(filtered_messages) != len(messages)
+    messages = filtered_messages
 
     # Repair malformed role alternation (tool→user / user→user tails): providers
     # return empty content on them and the empty-retry loop spins. The _with_cursor
@@ -188,7 +200,8 @@ def prepare_iteration(
             repaired_seq,
             agent.session_id or "-",
         )
-        # The merge shrank the list, so the index recorded at turn start can point past this
+    if repaired_seq > 0 or filtered:
+        # The filter/merge shrank the list, so the index recorded at turn start can point past this
         # turn's user row: prefetch would inject into a historical row and index-settling hosts
         # (hermes-webui) would write the current turn to the FRONT of the context. Re-anchor as
         # the compression-restart path does (last verbatim row wins, never a historical copy);
