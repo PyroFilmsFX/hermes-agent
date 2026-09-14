@@ -96,3 +96,21 @@ it('retires the live frame only after every child settles, without depending on 
   act(() => upsertSubagent('owner', { subagent_id: 'child', status: 'completed' }, false, 'subagent.complete'))
   expect(screen.queryByText('Live task')).toBeNull()
 })
+
+it('renders status-stack row title from goal for an SDK-shaped payload', () => {
+  upsertSubagent('owner', {
+    goal: 'SDK researcher goal',
+    status: 'running',
+    subagent_id: 'sdk-child-1',
+    tool_name: 'Agent'
+  })
+
+  render(
+    <MemoryRouter>
+      <ComposerStatusStack queue={null} sessionId="owner" />
+    </MemoryRouter>
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: /1 Subagent/ }))
+  expect(screen.getByText('SDK researcher goal')).toBeTruthy()
+})

@@ -211,7 +211,7 @@ function toProgress(payload: SubagentPayload, prev: SubagentProgress | undefined
   return {
     id: prev?.id ?? idOf(payload),
     parentId: str(payload.parent_id) || prev?.parentId || null,
-    goal: str(payload.goal) || prev?.goal || 'Subagent',
+    goal: str(payload.goal) || str(payload.description) || str(payload.subagent_type) || prev?.goal || 'Subagent',
     sessionId: str(payload.child_session_id) || prev?.sessionId,
     delegationId: str(payload.delegation_id) || prev?.delegationId,
     model: str(payload.model) || prev?.model,
