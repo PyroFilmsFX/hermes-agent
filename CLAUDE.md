@@ -85,6 +85,11 @@ cards, replay ring, CDP watch, CLI transcripts): `docs/cntrl/sdk-lane-operations
   lost because our work was committed and pushed, which is the whole defence.
   Commit early, push often, and re-check the branch after any long wait.
 
+- **Never run `uv` in the MAIN checkout from a build lane.** Give the lane its
+  own worktree. A lane's `uv run`/`uv sync` here rebuilds `.venv` on whatever it
+  resolves and silently strips the SDK, psycopg, psutil AND pytest — twice on
+  2026-09-13. Tripwire: `.venv/bin/python scripts/cntrl/venv_guard.py`.
+
 - **The venv loses packages constantly.** `uv sync` on the wrong branch (main
   has no `claude-agent-sdk` extra) or without the extras strips the SDK,
   psycopg AND pytest — silently, so tests then fail with

@@ -26,6 +26,7 @@ from agent.claude_sdk_runtime_continuity import (
     _publish_claude_sdk_session,
     _sdk_session_name,
     rotate_claude_sdk_session,
+    rotate_claude_sdk_session_on_model_change,
     _canonical_sdk_cwd,
     _sdk_task_list_id,
     _task_tools_enabled,
@@ -759,6 +760,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             # with the new --name (the resume id is kept, so the conversation continues).
             agent._claude_sdk_rename_pending = False
             rotate_claude_sdk_session(agent, "session renamed")
+        # The CLI binds --model at process start, so a model switch under a live
+        # session is invisible to it until the process is rebuilt. Check every
+        # attempt, at the same boundary the rename rotation uses.
+        rotate_claude_sdk_session_on_model_change(agent)
         # Snapshot the identity slot once. Rotation publishes/clears the same
         # lock; keep the lock only across this read, never across construction,
         # run_turn, or close().
