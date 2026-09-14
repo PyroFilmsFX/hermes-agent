@@ -31,9 +31,22 @@ def _claim_active_session_slot(
 ) -> tuple[Any, str | None]:
     try:
         from hermes_cli.active_sessions import try_acquire_active_session
+        metadata = {"live_session_id": live_session_id, "bot_live_delivery_consumer": True}
+        # The child MCP process discovers this exact owner endpoint from the lease.  Keep the
+        # address in lease metadata rather than in the capability or MCP argv.
+        with contextlib.suppress(Exception):
+            from hermes_cli.web_server import app
+            bound_host = getattr(getattr(app, "state", None), "bound_host", None) or "127.0.0.1"
+            port = getattr(getattr(app, "state", None), "bound_port", None)
+            if port:
+                # The attachment is strictly same-host.  A wildcard bind is reachable on
+                # loopback; a public bind is deliberately not advertised to a child process.
+                host = "127.0.0.1" if bound_host in {"0.0.0.0", "::", "localhost", "127.0.0.1", "::1"} else ""
+                if host:
+                    metadata["shared_runtime_url"] = f"http://{host}:{int(port)}"
         return try_acquire_active_session(
             session_id=session_key, surface=surface, config=_load_cfg(), registry_home=profile_home,
-            metadata={"live_session_id": live_session_id, "bot_live_delivery_consumer": True},
+            metadata=metadata,
             track_liveness=str(surface or "").strip().lower() == "desktop")
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
@@ -212,6 +225,12 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    with contextlib.suppress(Exception):
+        from agent.transports.hermes_gateway_session_bridge import revoke_scoped_capabilities_for_session
+        revoke_scoped_capabilities_for_session(session)
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_task_handoff import release_child_reservation
+        release_child_reservation(session.get("session_key"), session.get("profile_home"))
     _lock_vault_managers(session)
     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"

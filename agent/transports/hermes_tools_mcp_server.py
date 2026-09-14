@@ -16,16 +16,43 @@ widen that refusal.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import logging
 import os
 import sys
 from typing import Any, Callable, Optional
 
-from agent.transports.hermes_tool_exposure import exposed_tools_for_profile
+from agent.transports.hermes_tool_exposure import exposed_tools_for_profile, session_spawn_available
 from agent.transports.hermes_tools_mcp_server_shims import stateless_shim_definitions
 
 logger = logging.getLogger(__name__)
+_SESSION_SPAWN_EXPOSURE_CACHE: dict[str, bool] = {}
+
+
+def _session_spawn_exposure_decision(session_id: str | None) -> bool:
+    """Persist the first capability verdict for one logical SDK conversation."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return session_spawn_available()
+    if sid in _SESSION_SPAWN_EXPOSURE_CACHE:
+        return _SESSION_SPAWN_EXPOSURE_CACHE[sid]
+    try:
+        from hermes_constants import get_hermes_home
+        path = (get_hermes_home() / "runtime" / "session-spawn" / "exposure" /
+                f"{hashlib.sha256(sid.encode()).hexdigest()}.json")
+        stored = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        if isinstance(stored, dict) and isinstance(stored.get("exposed"), bool):
+            verdict = stored["exposed"]
+        else:
+            verdict = bool(session_spawn_available())
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            from utils import atomic_json_write
+            atomic_json_write(path, {"session_id": sid, "exposed": verdict}, indent=2, mode=0o600)
+    except Exception:
+        verdict = bool(session_spawn_available())
+    _SESSION_SPAWN_EXPOSURE_CACHE[sid] = verdict
+    return verdict
 
 # JSON Schema type -> Python type mapping for signature generation
 _JSON_TO_PY = {"string": str, "integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
@@ -144,19 +171,36 @@ def _build_server(profile: Optional[str] = None) -> Any:
         for td in (get_tool_definitions(quiet_mode=True) or [])
         if isinstance(td, dict) and td.get("type") == "function"
     }
-    profile_tools = exposed_tools_for_profile(profile)
+    # This is intentionally evaluated once while the MCP server is built. A
+    # later gateway outage must become a tool error, never schema churn.
+    session_id = os.environ.get("HERMES_SESSION_ID", "")
+    profile_tools = exposed_tools_for_profile(
+        profile,
+        include_session_spawn=(profile == "claude-agent-sdk" and
+                               _session_spawn_exposure_decision(session_id)),
+    )
     exposed_count = 0
     for name in profile_tools:
         spec = all_defs.get(name)
+        if spec is None and name == "session_create" and _session_spawn_exposure_decision(session_id):
+            from tools.session_tools import SESSION_CREATE_SCHEMA
+
+            spec = SESSION_CREATE_SCHEMA
         if spec is None:
             logger.debug("skipping %s — not registered in this Hermes process", name)
             continue
+        if name == "session_create":
+            from tools.session_tools import session_create
+
+            dispatch = lambda kwargs: session_create(**kwargs)
+        else:
+            dispatch = lambda kwargs, tool_name=name: handle_function_call(tool_name, kwargs)
         _register_tool(
             mcp,
             name=name,
             description=spec.get("description") or f"Hermes {name} tool",
             schema=spec.get("parameters") or {"type": "object", "properties": {}},
-            dispatch=lambda kwargs, tool_name=name: handle_function_call(tool_name, kwargs),
+            dispatch=dispatch,
         )
         exposed_count += 1
 

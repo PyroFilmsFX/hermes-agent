@@ -415,6 +415,33 @@ def _has_valid_query_token(request: Request, path: str) -> bool:
     return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
 
 
+def _session_attach_capability_principal(request: Request) -> bool:
+    """Authenticate only the private session-attach handshake with its scoped capability.
+
+    This is deliberately a separate principal from dashboard token/cookie auth: it is accepted
+    for exactly one route and is never marked ``token_authenticated`` or copied to a dashboard
+    session. The route performs the owner/lease binding again before minting its one-use ticket.
+    """
+    if request.url.path != "/api/session-attach":
+        return False
+    presented = request.headers.get("X-Hermes-Session-Spawn-Capability", "").strip()
+    if not presented:
+        return False
+    try:
+        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
+        capability = authorize_scoped_capability(presented)
+    except Exception:
+        capability = None
+    if capability is None:
+        return False
+    request.state.capability_principal = {
+        "kind": "session_spawn",
+        "owner_session_id": capability.owner_session_id,
+        "session_generation": capability.session_generation,
+    }
+    return True
+
+
 def _require_token(request: Request) -> None:
     """Authorize a sensitive endpoint, raising 401 if the caller isn't allowed.
 
@@ -630,6 +657,8 @@ async def _dashboard_auth_gate(request: Request, call_next):
     Registered between host_header and auth_middleware: host check → cookie auth → token auth.
     """
     from hermes_cli.dashboard_auth.middleware import gated_auth_middleware
+    if _session_attach_capability_principal(request):
+        return await call_next(request)
     return await gated_auth_middleware(request, call_next)
 
 
@@ -642,6 +671,8 @@ async def auth_middleware(request: Request, call_next):
     then authoritative and the loopback-only token path must not override it.
     """
     path = request.url.path
+    if _session_attach_capability_principal(request):
+        return await call_next(request)
     if (
         not getattr(request.state, "token_authenticated", False)
         and not getattr(request.app.state, "auth_required", False)
