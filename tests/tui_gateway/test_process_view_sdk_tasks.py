@@ -26,3 +26,45 @@ def test_process_view_lists_sdk_task_and_kill_uses_session_scoped_stop_task(monk
     result = server._methods["process.kill"]("rid", {"process_id": process.id})
     assert result["result"]["killed"] is True
     assert stop_calls == ["task-a"]
+
+
+def test_sdk_subagent_rpc_uses_live_gateway_owner_not_stored_agent_id(monkeypatch):
+    from agent.claude_sdk_runtime_session import _on_sdk_subagent_event
+    from tools import delegate_tool_registry
+
+    transport = SimpleNamespace(write=lambda frame: True)
+    owner = {"transport": transport}
+    adapter = SimpleNamespace(stop_task=lambda task_id: True)
+    agent = SimpleNamespace(
+        session_id="stored-agent-sid",
+        _tui_gateway_runtime_sid="live-gateway-sid",
+        _claude_sdk_session=adapter,
+        tool_progress_callback=None,
+    )
+    monkeypatch.setattr(server, "_current_session_steer_authority", lambda sid: (transport, owner))
+    monkeypatch.setattr(delegate_tool_registry, "_active_subagents", {})
+    monkeypatch.setattr(delegate_tool_registry, "_recent_subagents", {})
+
+    _on_sdk_subagent_event(
+        agent,
+        "subagent.start",
+        subagent_id="sdk-task",
+        goal="inspect files",
+    )
+    delegate_tool_registry.update_sdk_subagent(
+        "subagent.text",
+        task_id="sdk-task",
+        text="child output",
+    )
+
+    listed = server._methods["subagent.list"]("rid", {"session_id": "live-gateway-sid"})
+    tailed = server._methods["subagent.tail"](
+        "rid", {"session_id": "live-gateway-sid", "subagent_id": "sdk-task"}
+    )
+    interrupted = server._methods["subagent.interrupt"](
+        "rid", {"session_id": "live-gateway-sid", "subagent_id": "sdk-task"}
+    )
+
+    assert [row["subagent_id"] for row in listed["result"]["subagents"]] == ["sdk-task"]
+    assert tailed["result"]["text"] == "child output"
+    assert interrupted["result"] == {"found": True, "subagent_id": "sdk-task"}

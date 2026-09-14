@@ -39,6 +39,18 @@ class TaskNotificationMessage:
     output_file: str = ""
 
 
+@dataclass
+class ToolResultBlock:
+    tool_use_id: str
+    content: object = ""
+    is_error: bool = False
+
+
+@dataclass
+class UserMessage:
+    content: list
+
+
 def test_background_bash_and_task_lifecycle_are_projected_and_scoped(monkeypatch):
     registry = ProcessRegistry()
     monkeypatch.setattr("agent.transports.claude_sdk_background_tasks.process_registry", registry)
@@ -82,3 +94,71 @@ def test_background_bash_and_task_lifecycle_are_projected_and_scoped(monkeypatch
     assert visible_a[0]["exit_code"] == 0
     assert visible_a[0]["output_file"] == "/tmp/task-7.txt"
     assert registry.list_sessions(session_key="session-b") == []
+
+
+def test_failed_background_bash_result_finishes_provisional_record(monkeypatch):
+    registry = ProcessRegistry()
+    monkeypatch.setattr("agent.transports.claude_sdk_background_tasks.process_registry", registry)
+
+    observe_sdk_message(
+        AssistantMessage([
+            ToolUseBlock(
+                id="toolu-denied",
+                name="Bash",
+                input={"command": "rm -rf /tmp/nope", "run_in_background": True},
+            )
+        ]),
+        session_key="session-a",
+    )
+    observe_sdk_message(
+        UserMessage([
+            ToolResultBlock("toolu-denied", "permission denied", is_error=True),
+        ]),
+        session_key="session-a",
+    )
+
+    records = registry.list_sessions(session_key="session-a")
+    assert records[0]["status"] == "exited"
+    assert records[0]["exit_code"] == 1
+
+
+def test_provisional_sdk_record_expires_without_task_started(monkeypatch):
+    registry = ProcessRegistry()
+    monkeypatch.setattr("agent.transports.claude_sdk_background_tasks.process_registry", registry)
+    observe_sdk_message(
+        AssistantMessage([
+            ToolUseBlock("toolu-never-started", "Bash", {
+                "command": "npm run dev", "run_in_background": True,
+            }),
+        ]),
+        session_key="session-a",
+    )
+    record = registry.list_sessions(session_key="session-a")[0]
+    session = registry.get(record["session_id"])
+    session.started_at = 0
+
+    registry.prune_sdk_tasks(now=31)
+
+    assert registry.list_sessions(session_key="session-a") == []
+
+
+def test_successful_background_bash_result_resolves_task_id(monkeypatch):
+    registry = ProcessRegistry()
+    monkeypatch.setattr("agent.transports.claude_sdk_background_tasks.process_registry", registry)
+    observe_sdk_message(
+        AssistantMessage([
+            ToolUseBlock("toolu-started-late", "Bash", {
+                "command": "npm run dev", "run_in_background": True,
+            }),
+        ]),
+        session_key="session-a",
+    )
+    observe_sdk_message(
+        UserMessage([
+            ToolResultBlock("toolu-started-late", {"task_id": "task-late"}),
+        ]),
+        session_key="session-a",
+    )
+
+    records = registry.list_sessions(session_key="session-a")
+    assert records[0]["sdk_task_id"] == "task-late"

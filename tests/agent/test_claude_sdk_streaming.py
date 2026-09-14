@@ -88,6 +88,42 @@ class TestStreamOwnership:
         assert turn.final_text == "fresh answer"
         assert getattr(session, "_unsolicited_results", None) == 1
 
+    def test_close_finalizes_live_sdk_tasks_once(self):
+        from tools import delegate_tool_registry
+
+        session, _holder = _make_session(script=[ResultMessage(result="ok")])
+        events = []
+        session._on_subagent_event = lambda event, name, preview, args, **kw: (
+            events.append((event, kw)),
+            delegate_tool_registry.update_sdk_subagent(
+                event,
+                task_id=kw.get("subagent_id"),
+                goal=kw.get("goal"),
+                sdk_session=session,
+                owner_session_id="session-1",
+            ),
+        )
+        session._sdk_task_records = {
+            "live-task": {
+                "goal": "live task",
+                "parent_tool_id": None,
+                "child_session_id": None,
+            }
+        }
+        delegate_tool_registry.update_sdk_subagent(
+            "subagent.start", task_id="live-task", goal="live task", sdk_session=session,
+            owner_session_id="session-1",
+        )
+        try:
+            session.close()
+            session.close()
+        finally:
+            session.close()
+
+        assert session._sdk_task_records == {}
+        assert [event for event, _kw in events].count("subagent.complete") == 1
+        assert "live-task" not in delegate_tool_registry._active_subagents
+
     def test_preloaded_stale_burst_is_drained_before_foreground_claim(self):
         """A resumed client's already-buffered FIFO stays background-owned.
 

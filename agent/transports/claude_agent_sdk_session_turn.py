@@ -817,6 +817,10 @@ class ClaudeSdkTurnMixin:
                 if early_sid:
                     self._session_id = early_sid
                 self._handle_compact_boundary(message)
+                # Task lifecycle and provisional Bash records are stream
+                # concerns, not foreground-turn visibility. Observe before
+                # interrupt/billing gates so draining turns cannot orphan them.
+                self._observe_sdk_lifecycle(message)
                 if self._billing_guard_error is not None and not billing_guarded:
                     billing_guarded = True
                     out["error"] = self._billing_guard_error
@@ -1242,6 +1246,7 @@ class ClaudeSdkTurnMixin:
         # messages, and then lose the reader to EOF; resolving the claim makes
         # it re-check this terminal state instead of waiting out turn_timeout.
         self._stream_ended = end
+        self._finalize_sdk_tasks()
         pending_ack = self._turn_claim_ack
         if pending_ack is not None and not pending_ack.done():
             pending_ack.set_result(None)
@@ -1297,7 +1302,7 @@ class ClaudeSdkTurnMixin:
                 getattr(message, "uuid", None),
             )
             return
-        self._notify_task_message(message)
+        self._observe_sdk_lifecycle(message)
         if name == "StreamEvent":
             self._forward_stream_delta(message)
         if name == "AssistantMessage":

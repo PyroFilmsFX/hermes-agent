@@ -148,6 +148,55 @@ def test_child_stream_text_uses_subagent_text_without_top_level_delta():
     assert events[-1][2] == "partial child"
 
 
+def test_child_completed_text_reconciles_streamed_deltas():
+    events = []
+    session = _session(events)
+    session._notify_tool_use(
+        AssistantMessage([
+            ToolUseBlock("parent-tool", "Agent", {"description": "stream work"})
+        ])
+    )
+    session._notify_task_message(TaskStartedMessage("task-1", "stream work"))
+    session._forward_stream_delta(StreamEvent("hel", "parent-tool"))
+    session._forward_stream_delta(StreamEvent("lo", "parent-tool"))
+    session._notify_child_text(
+        AssistantMessage([TextBlock("hello")], parent_tool_use_id="parent-tool")
+    )
+
+    assert [event[2] for event in events if event[0] == "subagent.text"] == ["hel", "lo"]
+
+
+def test_foreground_task_update_after_interrupt_still_finalizes_once():
+    from tests.agent.claude_sdk_fakes import ResultMessage, _make_session
+
+    class TaskStartedMessage:
+        task_id = "task-interrupted"
+        description = "background work"
+        tool_use_id = "parent-tool"
+
+    class TaskUpdatedMessage:
+        task_id = "task-interrupted"
+        patch = type("Patch", (), {"status": "killed"})()
+
+    events = []
+    session, _holder = _make_session(
+        script=[TaskStartedMessage(), TaskUpdatedMessage(), ResultMessage(result="stopped")],
+        on_unsolicited_result=None,
+    )
+    session._on_subagent_event = lambda event, name, preview, args, **kw: (
+        events.append((event, kw)),
+        session._interrupt_event.set() if event == "subagent.start" else None,
+    )
+    try:
+        turn = session.run_turn("start")
+    finally:
+        session.close()
+
+    assert [event for event, _kw in events].count("subagent.complete") == 1
+    assert events[-1][1]["status"] == "interrupted"
+    assert session._sdk_task_records == {}
+
+
 def test_unsolicited_task_messages_use_the_same_lifecycle_path():
     events = []
     session = _turn_session(events)
