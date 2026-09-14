@@ -262,7 +262,8 @@ class _SendFailed(Exception):
     """Raised by handle_ws._reply when a reply could not be written: ends the read loop."""
 
 
-async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None) -> None:
+async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None,
+                    required_spawn_scope: bool = False) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``. *auth_identity* is the server-minted
     ``{user_id, provider}`` recorded at WS-upgrade auth, stored as ``WSTransport.auth_identity`` (the only identity
     authority for browser-controller registration); callers that omit it (harnesses, embedded TUI child) get None."""
@@ -282,6 +283,31 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
     def _error(code: int, message: str, req_id: Any) -> dict:
         return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id}
 
+    scoped_capability = None
+    if required_spawn_scope:
+        ticket = str(getattr(ws, "query_params", {}).get("session_spawn_ticket", "") or "").strip()
+        if not ticket:
+            await ws.close(code=4401, reason="session-spawn ticket required")
+            return
+        try:
+            from agent.transports.hermes_gateway_session_bridge import consume_scoped_transport_ticket
+            scoped_capability = consume_scoped_transport_ticket(ticket)
+        except Exception:
+            scoped_capability = None
+        if scoped_capability is None:
+            await ws.close(code=4401, reason="invalid session-spawn ticket")
+            return
+        try:
+            from hermes_cli.web_server_chat import _ws_client_reason, _ws_host_origin_reason
+            if (reason := _ws_client_reason(ws)) is not None:
+                await ws.close(code=4403, reason=reason)
+                return
+            if (reason := _ws_host_origin_reason(ws)) is not None:
+                await ws.close(code=4403, reason=reason)
+                return
+        except Exception:
+            await ws.close(code=4403, reason="session-spawn peer/origin check unavailable")
+            return
     try:
         await (ws.accept(subprotocol=subprotocol) if subprotocol else ws.accept())
         disconnect_reason = "connected"
@@ -290,6 +316,16 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
+        if scoped_capability is not None:
+            transport.session_spawn_capability = scoped_capability
+        else:
+            scope_ticket = getattr(ws, "query_params", {}).get("session_spawn_ticket", "")
+        if scoped_capability is None and scope_ticket:
+            from agent.transports.hermes_gateway_session_bridge import consume_scoped_transport_ticket
+            transport.session_spawn_capability = consume_scoped_transport_ticket(scope_ticket)
+            if transport.session_spawn_capability is None:
+                await ws.close(code=4403, reason="invalid session-spawn attachment")
+                return
         # resolve_skin() is sync I/O + CPU; pooled so the read loop can drain the frontend's initial RPC burst.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
         # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote legacy
@@ -301,9 +337,11 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 "skin": skin_payload, "change_events": True, "heartbeat": True, "replay_epoch": replay_epoch(),
             }},
         })
-        if ready_ok:
+        if ready_ok and getattr(transport, "session_spawn_capability", None) is None:
             # Live-apply skins Hermes activates mid-conversation, and track this peer for session-less
-            # global broadcasts write_json can't route.
+            # global broadcasts write_json can't route. A task-create-only spawn transport must NOT
+            # join this pool: the pool receives every detached session's event fan-out, which would
+            # hand a scoped capability passive access to unrelated sessions (W8 review A8-25).
             server._ensure_skin_watcher()
             server.register_live_transport(transport)
         # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
@@ -348,6 +386,14 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 continue
             req_id = req.get("id") if isinstance(req, dict) else None
             req_method = req.get("method") if isinstance(req, dict) else None
+            scoped_capability = getattr(transport, "session_spawn_capability", None)
+            if scoped_capability is not None and req_method != "session.task_create":
+                await _reply(_error(4403, "session-spawn connection permits session.task_create only", req_id),
+                             "scoped_method_rejected", "scoped session-spawn method rejected peer=%s method=%s", peer, req_method)
+                continue
+            if scoped_capability is not None:
+                req = dict(req)
+                req["params"] = {**(req.get("params") or {}), "_session_spawn_capability": scoped_capability.token}
             if req_method == "gateway.ping":
                 await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
                              "ws heartbeat reply send failed peer=%s id=%s", peer, req_id)

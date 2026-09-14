@@ -130,6 +130,17 @@ class TestModuleSurface:
 
         assert exposed_tools_for_profile("not-a-profile") == EXPOSED_TOOLS
 
+    def test_session_spawn_exposure_is_stable_across_reconstruction(self, monkeypatch, tmp_path):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        verdicts = iter([True, False])
+        monkeypatch.setattr(m, "session_spawn_available", lambda: next(verdicts))
+        first = m._session_spawn_exposure_decision("resume-session")
+        second = m._session_spawn_exposure_decision("resume-session")
+        assert first is True
+        assert second is True, "MCP reconstruction must reuse the logical conversation's exposure decision"
+
 
 
 
