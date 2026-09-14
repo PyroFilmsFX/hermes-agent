@@ -251,3 +251,50 @@ def test_unknown_name_still_gets_guidance_when_resolver_declines(monkeypatch):
     reply = runner._hm_unknown_slash_reply("definitely-not-a-command", _make_source())
 
     assert reply is not None and "Unknown command" in reply
+
+
+def test_gateway_resolves_live_sdk_only_command_when_live_list_has_it():
+    """Gateway recognizes a live SDK-only command when the active provider is claude-agent-sdk."""
+    runner = _make_runner()
+    runner.provider = "claude-agent-sdk"
+    runner.slash_commands = ["my-live-sdk-tool"]
+
+    assert runner._hm_unknown_slash_reply("my-live-sdk-tool", _make_source()) is None
+
+
+def test_gateway_resolves_live_sdk_command_from_session_agent():
+    """Gateway discovers live SDK slash commands from the session's resident/cached agent."""
+    from unittest.mock import MagicMock
+
+    runner = _make_runner()
+    agent = MagicMock()
+    agent.provider = "claude-agent-sdk"
+    agent._claude_sdk_session = MagicMock()
+    agent._claude_sdk_session.slash_commands = ["live-agent-cmd"]
+
+    # Passed explicitly as agent or found on runner
+    assert runner._hm_unknown_slash_reply("live-agent-cmd", _make_source(), agent=agent) is None
+
+
+def test_gateway_keeps_builtin_precedence_on_collision():
+    """Built-in Hermes commands take precedence over colliding SDK live commands."""
+    runner = _make_runner()
+    runner.provider = "claude-agent-sdk"
+    # Live commands contain built-ins "help" and "status" alongside custom command
+    runner.slash_commands = ["help", "status", "sdk-live-only"]
+
+    # Both built-in and live commands resolve as known (reply is None)
+    assert runner._hm_unknown_slash_reply("help", _make_source()) is None
+    assert runner._hm_unknown_slash_reply("status", _make_source()) is None
+    assert runner._hm_unknown_slash_reply("sdk-live-only", _make_source()) is None
+
+
+def test_gateway_unchanged_for_non_sdk_provider():
+    """Off the SDK lane (non-SDK provider), live SDK commands are not recognized."""
+    runner = _make_runner()
+    runner.provider = "openai"
+    runner.slash_commands = ["my-live-sdk-tool"]
+
+    reply = runner._hm_unknown_slash_reply("my-live-sdk-tool", _make_source())
+    assert reply is not None and "Unknown command `/my-live-sdk-tool`" in reply
+

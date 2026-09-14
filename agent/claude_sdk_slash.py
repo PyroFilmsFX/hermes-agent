@@ -176,7 +176,12 @@ def plugin_skill_commands(plugin_roots: Optional[Iterable[str]] = None) -> dict[
     return out
 
 
-def merged_skill_commands(base, *, provider: Optional[str] = None) -> dict[str, dict]:
+def merged_skill_commands(
+    base,
+    *,
+    provider: Optional[str] = None,
+    live_names: Optional[Iterable[str]] = None,
+) -> dict[str, dict]:
     """``base`` (Hermes' own skill commands) plus the SDK lane's plugin skills, for
     completion surfaces. Off the SDK lane it is just ``dict(base)``. Hermes wins
     every collision: an existing ``base`` key, or a name the command registry
@@ -198,15 +203,41 @@ def merged_skill_commands(base, *, provider: Optional[str] = None) -> dict[str, 
             except Exception:
                 pass
         merged[key] = info
+    if live_names:
+        for name in live_names:
+            clean = str(name).strip()
+            if not clean:
+                continue
+            key = f"/{clean}" if not clean.startswith("/") else clean
+            bare = key.lstrip("/")
+            if key in merged:
+                continue
+            if resolve_command is not None:
+                try:
+                    if resolve_command(bare) is not None:
+                        continue
+                except Exception:
+                    pass
+            merged[key] = {
+                "name": bare,
+                "description": "SDK slash command",
+                "source": "claude-agent-sdk",
+            }
     return merged
 
 
-def sdk_slash_names(provider: Optional[str] = None) -> set[str]:
+def sdk_slash_names(
+    provider: Optional[str] = None,
+    live_names: Optional[Iterable[str]] = None,
+) -> set[str]:
     """Bare + namespaced plugin skill names when the SDK lane is active; empty otherwise.
     For prefix expansion (``/tb-sh`` → ``/tb-ship``) alongside Hermes' own registries."""
     if not is_claude_sdk_provider(provider if provider is not None else active_provider()):
         return set()
-    return plugin_skill_slash_names()
+    names = set(plugin_skill_slash_names())
+    if live_names:
+        names |= {str(n).strip() for n in live_names if str(n).strip()}
+    return names
 
 
 def resolve_sdk_slash(

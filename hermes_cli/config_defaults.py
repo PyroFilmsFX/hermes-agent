@@ -266,9 +266,10 @@ DEFAULT_CONFIG = {
             # the upstream PR candidate flips it to false before landing upstream.
             "task_tools": True,
             # Emit the SDK's partial-message deltas into the gateway streaming pipeline (the
-            # top-level `streaming:` block still governs how they display). Default off —
-            # upstream-conservative.
-            "streaming": False,
+            # top-level `streaming:` block still governs how they display). cntrl defaults this on
+            # so SDK turns prove liveness; the upstream PR candidate flips it to false before
+            # landing upstream.
+            "streaming": True,
             # The provider defaults to the Claude subscription and refuses known metered lanes:
             # API-key sources and enabled/active Extra Usage reported by the CLI. true allows
             # metering explicitly (reported metered turns are labelled honestly).

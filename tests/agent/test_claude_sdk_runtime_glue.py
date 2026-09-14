@@ -12,6 +12,7 @@ import logging
 import pytest
 
 from agent.claude_sdk_runtime import run_claude_agent_sdk_turn
+from agent.turn_runtime_handoff import RuntimeHandoffState, run_whole_turn_runtime
 from tests.agent.claude_sdk_fakes import (
     TextBlock,
     AssistantMessage,
@@ -34,6 +35,73 @@ def _isolate_provider_config(monkeypatch):
 # ---------- runtime glue ----------
 
 class TestRuntimeGlue:
+    def test_turn_result_carries_last_reasoning(self):
+        agent = _make_agent()
+        agent._claude_sdk_session.run_turn.return_value = _make_turn(
+            projected_messages=[
+                {"role": "assistant", "content": None, "reasoning": "first thought"},
+                {"role": "assistant", "content": "answer", "reasoning": "final thought"},
+            ]
+        )
+        result = run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        assert result["last_reasoning"] == "final thought"
+
+    def test_turn_result_reports_sdk_iteration_count(self):
+        agent = _make_agent()
+        agent._claude_sdk_session.run_turn.return_value = _make_turn(
+            num_turns=4,
+        )
+        result = run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+        assert result["iteration_count"] == 4
+
+    def test_whole_turn_budget_consumes_sdk_iterations(self):
+        agent = _make_agent()
+        agent.api_mode = "claude_agent_sdk"
+        agent.max_iterations = 3
+        agent._run_claude_agent_sdk_turn.return_value = {
+            "api_calls": 1,
+            "num_turns": 4,
+            "failed": False,
+            "interrupted": False,
+        }
+        agent.iteration_budget = MagicMock()
+        agent.iteration_budget.remaining = 0
+        verdict = run_whole_turn_runtime(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+            _should_review_memory=False,
+            active_system_prompt="system",
+            api_call_count=0,
+            _runtime_handoff=RuntimeHandoffState(),
+        )
+        assert verdict.action == "return"
+        assert verdict.api_call_count == 4
+        assert agent.iteration_budget.consume.call_count == 4
+
+    def test_reasoning_progress_uses_native_event_shape(self):
+        from agent.claude_sdk_runtime_session import _on_tool_started
+
+        agent = _make_agent()
+        progress = []
+        agent.tool_progress_callback = lambda *args: progress.append(args)
+        _on_tool_started(agent, "reasoning.available", "thinking text", {})
+        assert progress == [("reasoning.available", "_thinking", "thinking text", None)]
+
     def test_turn_contract(self):
         agent = _make_agent()
         messages = [{"role": "user", "content": "hi"}]
