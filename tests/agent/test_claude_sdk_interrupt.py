@@ -7,6 +7,7 @@ stand-ins, fake clients and shared builders live in
 
 import threading
 import types
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,10 @@ from agent.transports.claude_agent_sdk_session import (
     ClaudeAgentSdkSession,
 )
 from tests.agent.claude_sdk_fakes import (
+    AssistantMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
     SystemMessage,
     ResultMessage,
     _EOS,
@@ -57,6 +62,7 @@ class TestInterruptRoutesToSdkSession:
 
     def test_interrupt_reaches_live_sdk_session(self):
         agent = self._make_real_agent()
+        agent.api_mode = "claude_agent_sdk"
         agent._claude_sdk_session = MagicMock()
         agent.interrupt()
         agent._claude_sdk_session.request_interrupt.assert_called_once()
@@ -65,6 +71,13 @@ class TestInterruptRoutesToSdkSession:
         agent = self._make_real_agent()
         agent._claude_sdk_session = None
         agent.interrupt()  # must not raise
+
+    def test_interrupt_does_not_use_sdk_session_on_other_lanes(self):
+        agent = self._make_real_agent()
+        agent.api_mode = "chat_completions"
+        agent._claude_sdk_session = MagicMock()
+        agent.interrupt()
+        agent._claude_sdk_session.request_interrupt.assert_not_called()
 
     def test_release_clients_disconnects_sdk_session(self):
         # Adversarial-review HIGH: the gateway's ROUTINE evictions (LRU cap,
@@ -176,6 +189,56 @@ class TestInterruptRoutesToSdkSession:
             assert holder["client"].queried == ["first"]
         finally:
             session.close()
+
+    def test_interrupt_drain_closes_parent_tagged_open_tool_card(self):
+        holder = {}
+        completions = []
+
+        class DrainClient(_FakeClient):
+            async def query(self, text):
+                self.queried.append(text)
+
+            async def receive_messages(self):
+                yield AssistantMessage(content=[
+                    ToolUseBlock(id="top", name="Bash", input={})
+                ])
+                await asyncio.sleep(0.5)
+                holder["session"]._interrupt_event.set()
+                result = UserMessage(content=[
+                    ToolResultBlock(tool_use_id="top", content="done")
+                ])
+                result.parent_tool_use_id = "parent"
+                yield result
+                yield ResultMessage(result="stopped")
+
+        def factory(options=None):
+            holder["client"] = DrainClient(options=options)
+            return holder["client"]
+
+        session = ClaudeAgentSdkSession(
+            cwd="/tmp",
+            client_factory=factory,
+            on_tool_use=lambda *args: None,
+            on_tool_result=lambda *args, **kwargs: completions.append((args, kwargs)),
+        )
+        holder["session"] = session
+        # The preceding ToolUseBlock opened this card before the stop was
+        # admitted; the test focuses on the result drain after interruption.
+        session._open_tool_cards["top"] = ("Bash", {})
+        try:
+            turn = session.run_turn("hi")
+        finally:
+            session.close()
+        assert turn.interrupted is True
+        assert completions == [
+            (("top", "Bash", {}, "done"), {
+                "is_error": False,
+                "error": None,
+                "tool_use_result": None,
+                "truncated": None,
+            })
+        ]
+        assert session._open_tool_cards == {}
 
 
     def test_stop_between_turns_still_reaches_the_cli(self):

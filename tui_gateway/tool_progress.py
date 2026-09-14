@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # parent (#34095).
 _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
+_SDK_LIVE_RESULT_MAX_CHARS = 4_000
 
 _TODO_TOOL_NAMES = ("todo_list", "todo")  # legacy alias: pre-rename replays
 _SDK_TASK_TOOL_NAMES = frozenset(
@@ -483,10 +484,28 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
 def _on_tool_complete(
     sid: str, tool_call_id: str, name: str, args: dict, result: str,
     *, is_error: bool = False, error: str | None = None,
+    tool_use_result: dict | None = None, truncated: dict | None = None,
 ):
     if _connector_lifecycle_is_stale(sid, name, args):
         return
+    sdk_result = bool(getattr(result, "_sdk_tool_result", False))
+    result_text = str(result)
+    if sdk_result:
+        is_error = bool(is_error or getattr(result, "_sdk_is_error", False))
+        if error is None:
+            error = getattr(result, "_sdk_error", None)
+        if tool_use_result is None:
+            tool_use_result = getattr(result, "_sdk_tool_use_result", None)
+        if truncated is None:
+            truncated = getattr(result, "_sdk_truncated", None)
+        if len(result_text) > _SDK_LIVE_RESULT_MAX_CHARS:
+            truncated = truncated or {
+                "shown": _SDK_LIVE_RESULT_MAX_CHARS,
+                "total": len(result_text),
+            }
     payload = {"tool_id": tool_call_id, "name": name, "args": args}
+    if sdk_result:
+        payload["is_error"] = bool(is_error)
     if is_error or error is not None:
         payload.update(is_error=True, error=error if error is not None else True)
     session = _sessions.get(sid)
@@ -495,10 +514,22 @@ def _on_tool_complete(
     duration_s = time.time() - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
-    try:
-        payload["result"] = json.loads(result)
-    except Exception:
-        payload["result"] = result
+    if sdk_result:
+        # Verbatim (capped) string: JSON-decoding here turned scalar outputs
+        # such as "42\n" / "null\n" into values the desktop card drops, and
+        # stripped quotes/whitespace from quoted strings (W3 review A3-1).
+        payload["result"] = result_text[:_SDK_LIVE_RESULT_MAX_CHARS]
+    else:
+        try:
+            payload["result"] = json.loads(result)
+        except Exception:
+            payload["result"] = result
+    if sdk_result and truncated and len(result_text) <= _SDK_LIVE_RESULT_MAX_CHARS:
+        truncated = None
+    if sdk_result and truncated:
+        payload["truncated"] = truncated
+    if sdk_result and isinstance(tool_use_result, dict):
+        payload["tool_use_result"] = tool_use_result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
@@ -600,13 +631,14 @@ def _int_or_skip(v):
 # are all optional: older emitters omit them and the TUI spawn tree falls back to flat rendering.
 # `tool_name`/`text` are fed from the positional name/preview; `output_tail` is a list of dicts.
 _SUBAGENT_FIELDS = (
-    ("subagent_id", bool, str), ("parent_id", bool, str), ("child_session_id", bool, str),
+    ("subagent_id", bool, str), ("parent_id", bool, str), ("parent_tool_id", bool, str),
+    ("child_session_id", bool, str),
     ("delegation_id", bool, str), ("depth", _not_none, int), ("model", bool, str), ("tool_count", _not_none, int),
     ("toolsets", bool, _str_list), ("input_tokens", _not_none, _int_or_skip), ("output_tokens", _not_none, _int_or_skip),
     ("reasoning_tokens", _not_none, _int_or_skip), ("api_calls", _not_none, _int_or_skip),
     ("files_read", bool, _str_list), ("files_written", bool, _str_list), ("output_tail", bool, list),
     ("tool_name", bool, str), ("text", bool, str), ("status", bool, str), ("summary", bool, str),
-    ("duration_seconds", _not_none, float),
+    ("duration_seconds", _not_none, float), ("usage", bool, dict),
 )
 
 
@@ -643,6 +675,11 @@ def _on_tool_progress(
     _args: dict | None = None, **_kwargs,
 ):
     if event_type == "tool.started" and name:
+        # SDK child ToolUseBlocks arrive through the legacy breadcrumb
+        # callback too. Preserve their scope in the existing subagent feed;
+        # only unscoped breadcrumbs remain redundant with tool.start.
+        if _kwargs.get("subagent_id"):
+            return _progress_subagent(sid, name, preview, _kwargs, "subagent.tool")
         return
     # Subagent lifecycle is application state (Desktop status stack, TUI spawn tree), not
     # tool-progress chrome: it must survive display.tool_progress=off like todo.updated does.

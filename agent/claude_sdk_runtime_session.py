@@ -144,6 +144,15 @@ def _approval_bypass_active(agent) -> bool:
 
 
 def _on_tool_started(agent, tool_name: str, preview: str, args: dict) -> None:
+    if tool_name == "reasoning.available":
+        progress_callback = getattr(agent, "tool_progress_callback", None)
+        if progress_callback is None:
+            return
+        try:
+            progress_callback("reasoning.available", "_thinking", preview, None)
+        except Exception:
+            logger.debug("claude-sdk reasoning callback raised", exc_info=True)
+        return
     # Claude SDK tool calls bypass the native tool executor, so mirror
     # its shared activity updates here. The gateway heartbeat reads
     # get_activity_summary(), which derives its useful current action
@@ -181,14 +190,80 @@ def _on_tool_use(agent, tool_use_id: str, tool_name: str, args: dict) -> None:
         logger.debug("claude-sdk tool_start_callback raised", exc_info=True)
 
 
-def _on_tool_result(agent, tool_use_id: str, tool_name: str, args: dict, result: str) -> None:
+def _on_tool_result(
+    agent,
+    tool_use_id: str,
+    tool_name: str,
+    args: dict,
+    result: str,
+    *,
+    is_error: bool = False,
+    error: str | None = None,
+    tool_use_result: dict | None = None,
+    truncated: dict | None = None,
+) -> None:
     callback = getattr(agent, "tool_complete_callback", None)
     if callback is None:
         return
+    class _SdkToolResult(str):
+        def __new__(cls, value: str):
+            wrapped = str.__new__(cls, value)
+            wrapped._sdk_tool_result = True
+            wrapped._sdk_is_error = is_error
+            wrapped._sdk_error = error
+            wrapped._sdk_tool_use_result = tool_use_result
+            wrapped._sdk_truncated = truncated
+            return wrapped
+
+    wrapped_result = _SdkToolResult(result)
+    callback_kwargs = {
+        "is_error": is_error,
+        "error": error,
+        "tool_use_result": tool_use_result,
+        "truncated": truncated,
+    }
     try:
-        callback(tool_use_id, tool_name, args, result)
+        import inspect
+
+        parameters = inspect.signature(callback).parameters
+        accepts_keywords = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ) or all(key in parameters for key in callback_kwargs)
+        if accepts_keywords:
+            callback(tool_use_id, tool_name, args, wrapped_result, **callback_kwargs)
+        else:
+            callback(tool_use_id, tool_name, args, wrapped_result)
     except Exception:
         logger.debug("claude-sdk tool_complete_callback raised", exc_info=True)
+
+
+def _on_sdk_subagent_event(agent, event_type: str, tool_name: str = "", preview: str = "",
+                           args: Optional[dict] = None, **kwargs) -> None:
+    """Bridge SDK Task/child events into the shared registry and feed."""
+    from tools.delegate_tool_registry import update_sdk_subagent
+
+    session = getattr(agent, "_claude_sdk_session", None)
+    update_sdk_subagent(
+        event_type,
+        task_id=str(kwargs.get("subagent_id") or ""),
+        goal=str(kwargs.get("goal") or ""),
+        sdk_session=session,
+        owner_session_id=getattr(agent, "session_id", None),
+        owner_agent=agent,
+        parent_tool_id=kwargs.get("parent_tool_id"),
+        child_session_id=kwargs.get("child_session_id"),
+        tool_name=tool_name,
+        text=preview,
+        status=str(kwargs.get("status") or "running"),
+    )
+    callback = getattr(agent, "tool_progress_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(event_type, tool_name, preview, args, **kwargs)
+    except Exception:
+        logger.debug("claude-sdk subagent-progress callback raised", exc_info=True)
 
 
 def _relay_stream_delta(agent, text: str) -> None:
@@ -531,6 +606,17 @@ def _create_session(
         ),
     )
     _publish_claude_sdk_session(agent, session)
+    # The SDK session owns Task* parsing; this bridge supplies the Hermes
+    # owner/registry identity without changing native delegate registration.
+    agent._claude_sdk_session._on_subagent_event = functools.partial(
+        _on_sdk_subagent_event, agent
+    )
+    from agent.transports.claude_sdk_background_tasks import register_sdk_session_control
+
+    register_sdk_session_control(
+        getattr(agent, "_gateway_session_key", None) or getattr(agent, "session_id", None),
+        agent._claude_sdk_session,
+    )
     if resume_id and task_list_id and getattr(
         agent, "_claude_sdk_todo_snapshot_bootstrapped", False
     ) is not True:

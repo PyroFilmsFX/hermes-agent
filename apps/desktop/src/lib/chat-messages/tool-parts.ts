@@ -47,6 +47,42 @@ function parseMaybeJsonObject(value: unknown): Record<string, unknown> {
   }
 }
 
+interface ToolPayloadContract extends GatewayEventPayload {
+  is_error?: boolean
+  truncated?: { shown: number; total: number }
+  tool_use_result?: Record<string, unknown>
+}
+
+function parseToolResultPayload(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object') {
+    if (Array.isArray(value)) {
+      return { output: value }
+    }
+
+    return value as Record<string, unknown>
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(value)
+
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>
+        }
+      } catch {
+        // Fall through to non-JSON string
+      }
+    }
+
+    return { output: value }
+  }
+
+  return {}
+}
+
 function firstNonEmptyObject(...values: unknown[]): Record<string, unknown> {
   for (const value of values) {
     const parsed = parseMaybeJsonObject(value)
@@ -289,6 +325,8 @@ function toolResultMetadata(
   prevResult?: unknown,
   prevArgs?: unknown
 ): ToolResultMetadata {
+  const extended = payload as ToolPayloadContract | undefined
+
   return {
     ...previous,
     ...(payload?.inline_diff !== undefined ? { inline_diff: payload.inline_diff } : {}),
@@ -297,7 +335,11 @@ function toolResultMetadata(
     ...(payload?.preview !== undefined ? { preview: payload.preview } : {}),
     ...(payload?.duration_s !== undefined ? { duration_s: payload.duration_s } : {}),
     ...carryTodos(payload, prevResult, prevArgs),
-    ...(payload?.error !== undefined ? { error: payload.error } : {})
+    ...(payload?.error !== undefined ? { error: payload.error } : {}),
+    // SDK lane: a structured failure flag without error text still marks the card failed.
+    ...(extended?.is_error === true && payload?.error === undefined ? { error: true } : {}),
+    ...(extended?.truncated ? { truncated: extended.truncated } : {}),
+    ...(extended?.tool_use_result !== undefined ? { tool_use_result: extended.tool_use_result } : {})
   }
 }
 
@@ -351,7 +393,8 @@ export function upsertToolPart(
       result: payload?.result !== undefined ? payload.result : prevResult,
       toolResultMetadata: toolResultMetadata(payload, prev?.toolResultMetadata, prevResult, prevArgs),
       isError:
-        payload?.error !== undefined ? Boolean(payload.error) : Boolean(prev && 'isError' in prev && prev.isError)
+        (payload as ToolPayloadContract | undefined)?.is_error === true ||
+        (payload?.error !== undefined ? Boolean(payload.error) : Boolean(prev && 'isError' in prev && prev.isError))
     })
   } satisfies ChatMessagePart
 
