@@ -329,6 +329,101 @@ class TestRuntimeGlue:
         assert agent._claude_sdk_session is None
         assert result["partial"] is True
 
+    def test_interrupted_retire_does_not_emit_child_exited(self, monkeypatch):
+        import agent.claude_sdk_runtime_session as session_mod
+
+        events = []
+        sink = MagicMock()
+        sink.lifecycle.side_effect = lambda event, **kwargs: events.append(event)
+        monkeypatch.setattr(session_mod, "_background_result_sink", lambda _agent: sink)
+
+        agent = _make_agent()
+        session = agent._claude_sdk_session
+        session._child_exit_emission_lock = None
+        session._child_exited_emitted = False
+        agent._interrupt_requested = True
+        session.run_turn.return_value = _make_turn(
+            interrupted=True,
+            should_retire=True,
+            error="user stopped",
+            projected_messages=[],
+            final_text="",
+        )
+
+        result = run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+
+        assert result["interrupted"] is True
+        assert events == []
+
+    def test_noninterrupted_retire_emits_one_child_exited(self, monkeypatch):
+        import agent.claude_sdk_runtime_session as session_mod
+
+        events = []
+        sink = MagicMock()
+        sink.lifecycle.side_effect = lambda event, **kwargs: events.append(event)
+        monkeypatch.setattr(session_mod, "_background_result_sink", lambda _agent: sink)
+
+        agent = _make_agent()
+        session = agent._claude_sdk_session
+        session._child_exit_emission_lock = None
+        session._child_exited_emitted = False
+        session.run_turn.return_value = _make_turn(
+            should_retire=True,
+            error="stream ended",
+            projected_messages=[],
+            final_text="",
+        )
+
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="hi",
+            original_user_message="hi",
+            messages=[{"role": "user", "content": "hi"}],
+            effective_task_id="task-1",
+        )
+
+        assert events == ["child_exited"]
+
+    def test_resumed_lifecycle_requires_dead_turn_recovery(self, monkeypatch):
+        import agent.claude_sdk_runtime_session as session_mod
+
+        events = []
+        sink = MagicMock()
+        sink.lifecycle.side_effect = lambda event, **kwargs: events.append(event)
+        monkeypatch.setattr(session_mod, "_background_result_sink", lambda _agent: sink)
+        monkeypatch.setattr(session_mod, "_persisted_sdk_session_id", lambda _agent: None)
+        monkeypatch.setattr(session_mod, "_render_continuity_digest", lambda _messages: "prior context")
+
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        created = MagicMock()
+        created._cwd = "/tmp"
+        created.run_turn.return_value = _make_turn()
+
+        def create_session(agent_, **_kwargs):
+            agent_._claude_sdk_session = created
+            return created
+
+        monkeypatch.setattr(session_mod, "_create_session", create_session)
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="new question",
+            original_user_message="new question",
+            messages=[
+                {"role": "user", "content": "prior question"},
+                {"role": "user", "content": "new question"},
+            ],
+            effective_task_id="task-1",
+        )
+
+        assert "resumed" not in events
+
 
 # ---------- background review spawns only when routed off this runtime ----------
 

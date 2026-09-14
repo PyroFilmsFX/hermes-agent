@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -20,9 +21,14 @@ from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
 from agent.claude_sdk_runtime_fallback import _consume_agent_interrupt
 from agent.claude_sdk_runtime_continuity import (
+    _claude_sdk_session_lock,
+    _clear_claude_sdk_session_if_current,
+    _publish_claude_sdk_session,
     _sdk_session_name,
     rotate_claude_sdk_session,
     _canonical_sdk_cwd,
+    _sdk_task_list_id,
+    _task_tools_enabled,
     _persisted_sdk_session_id,
     _render_continuity_digest,
     _store_sdk_session_id,
@@ -33,6 +39,7 @@ from agent.claude_sdk_runtime_tools import (
     _hybrid_bridge_enabled,
     _snapshot_agent_tools_with_mcp_refresh,
 )
+from agent.transports.claude_agent_sdk_session_turn import _claim_child_exit_emission
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
 logger = logging.getLogger("agent.claude_sdk_runtime")
@@ -246,7 +253,7 @@ class _BackgroundResultDelivery:
     parent_session_id: Any
     model: Any
 
-    def __call__(self, texts: list[str]) -> None:
+    def __call__(self, texts: list[str], items: Optional[list[dict]] = None) -> None:
         agent = self.agent
         try:
             from tools.approval_context import (
@@ -271,7 +278,7 @@ class _BackgroundResultDelivery:
             from tools.process_registry import process_registry
 
             now = _time.time()
-            process_registry.completion_queue.put({
+            event = {
                 "type": "sdk_background_result",
                 "payloads": list(texts),
                 "session_key": session_key,
@@ -279,12 +286,19 @@ class _BackgroundResultDelivery:
                 "model": model,
                 "dispatched_at": now,
                 "completed_at": now,
-            })
+            }
+            if items is not None:
+                event["items"] = list(items)
+            process_registry.completion_queue.put(event)
         except Exception:
             logger.warning(
                 "claude-sdk background-result enqueue failed — "
                 "answer may be lost", exc_info=True,
             )
+
+    def lifecycle(self, event: str, **metadata: Any) -> None:
+        """Enqueue one lifecycle item without changing the payload burst."""
+        self([], [{"kind": "lifecycle", "event": event, **metadata}])
 
 
 def _build_approval_callback(agent):
@@ -389,13 +403,35 @@ def _configured_max_budget_usd() -> Optional[float]:
     return value
 
 
+def _resolve_sdk_task_store_root(child_cwd: str, child_env: dict[str, str]) -> "Path":
+    """Resolve the Claude task root exactly as the child CLI sees HOME/config-dir/cwd."""
+    from pathlib import Path
+
+    cwd = Path(child_cwd).expanduser().resolve()
+    home = str(child_env.get("HOME") or Path.home())
+    home_path = cwd if home == "~" else cwd / home[2:] if home.startswith("~/") else Path(home)
+    if not home_path.is_absolute():
+        home_path = cwd / home_path
+    config_dir = str(child_env.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if config_dir:
+        if config_dir == "~":
+            config_dir = str(home_path)
+        elif config_dir.startswith("~/"):
+            config_dir = str(home_path / config_dir[2:])
+        config_path = Path(config_dir)
+        if not config_path.is_absolute():
+            config_path = cwd / config_path
+        return config_path.resolve()
+    return (home_path / ".claude").resolve()
+
+
 def _create_session(
     agent,
     *,
     resume_id: Optional[str],
     on_interim_assistant,
     on_tool_iteration,
-) -> None:
+) -> Any:
     """Build the SDK session for this agent (session-creation work, not per turn)."""
     from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
     from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
@@ -415,8 +451,35 @@ def _create_session(
     )
 
     on_unsolicited_result = _background_result_sink(agent)
+    task_list_id = _sdk_task_list_id(agent) if _task_tools_enabled() else None
+    from agent.transports.claude_agent_sdk_session_config import (
+        _configured_sdk_env,
+        _effective_sdk_task_env,
+        _sdk_env_overrides,
+    )
 
-    agent._claude_sdk_session = ClaudeAgentSdkSession(
+    configured_sdk_env = _configured_sdk_env()
+    task_env = _effective_sdk_task_env(task_list_id=task_list_id)
+    task_enabled = str(task_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS", "")).strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if task_enabled:
+        task_list_id = task_env.get("CLAUDE_CODE_TASK_LIST_ID") or None
+    else:
+        task_list_id = None
+    task_config_dir = configured_sdk_env.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    effective_child_env = dict(os.environ)
+    effective_child_env.update(_sdk_env_overrides(task_list_id=task_list_id))
+    task_store_root = _resolve_sdk_task_store_root(cwd, effective_child_env)
+    agent._claude_sdk_task_list_id = task_list_id
+    agent._claude_sdk_task_config_dir = task_config_dir
+    agent._claude_sdk_task_store_root = str(task_store_root)
+
+    session = ClaudeAgentSdkSession(
         cwd=cwd,
         model=getattr(agent, "model", None) or None,
         approval_callback=approval_callback,
@@ -426,6 +489,7 @@ def _create_session(
         on_tool_result=functools.partial(_on_tool_result, agent),
         system_prompt_append=append,
         hermes_session_id=getattr(agent, "session_id", None),
+        task_list_id=task_list_id,
         # Peer-addressable CLI session name (ListAgents/SendMessage).
         session_name=_sdk_session_name(agent),
         resume_session_id=resume_id,
@@ -466,6 +530,23 @@ def _create_session(
             else None
         ),
     )
+    _publish_claude_sdk_session(agent, session)
+    if resume_id and task_list_id and getattr(
+        agent, "_claude_sdk_todo_snapshot_bootstrapped", False
+    ) is not True:
+        # The Claude task store is authoritative. Bootstrap only after the SDK
+        # session object exists and only on a true resume; later tool activity
+        # refreshes the same read-only snapshot path.
+        try:
+            bootstrap = getattr(agent, "_claude_sdk_todo_snapshot_bootstrap", None)
+            if callable(bootstrap):
+                snapshot = bootstrap(
+                    task_list_id=task_list_id, task_store_root=str(task_store_root)
+                )
+                if snapshot is not None:
+                    agent._claude_sdk_todo_snapshot_bootstrapped = True
+        except Exception:
+            logger.debug("SDK task snapshot bootstrap failed", exc_info=True)
     # The prologue persisted Hermes' native composed prompt — a prompt
     # this runtime never sends. Overwrite the snapshot with the
     # EFFECTIVE prompt so the audit trail tells the truth.
@@ -476,6 +557,7 @@ def _create_session(
             )
     except Exception:
         logger.debug("effective-prompt snapshot failed", exc_info=True)
+    return session
 
 
 def _refresh_turn_visibility(agent, state: _SdkTurnState) -> None:
@@ -513,7 +595,7 @@ def _refresh_turn_visibility(agent, state: _SdkTurnState) -> None:
                 live_session.close()
             except Exception:
                 logger.debug("workspace-change session close failed", exc_info=True)
-            agent._claude_sdk_session = None
+            _clear_claude_sdk_session_if_current(agent, live_session)
             live_session = None
     if live_session is not None:
         try:
@@ -539,14 +621,51 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     turn = None
     resumed = False
     send_input = user_input
+    retry_retired_before_query = False
+    recovering_dead_turn = False
+
+    def _emit_child_exited(session, reason: Any, turn: Any = None) -> None:
+        sink = _background_result_sink(agent)
+        if (
+            sink is None
+            or getattr(turn, "interrupted", False)
+            or getattr(agent, "_interrupt_requested", False)
+            or not _claim_child_exit_emission(session)
+        ):
+            return
+        safe_reason = redact_sensitive_text(
+            str(reason or "SDK message stream ended unexpectedly"), force=True
+        ).strip()
+        if len(safe_reason) > 240:
+            safe_reason = safe_reason[:237].rstrip() + "..."
+        exit_code = None
+        for owner in (turn, session, getattr(session, "_client", None)):
+            for attribute in ("exit_code", "returncode", "return_code"):
+                value = getattr(owner, attribute, None)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    exit_code = value
+                    break
+            if exit_code is not None:
+                break
+        sink.lifecycle("child_exited", exit_code=exit_code, reason=safe_reason)
+
     for attempt in (0, 1):
         if getattr(agent, "_claude_sdk_rename_pending", False) is True:
             # A title change landed while a turn was live; apply it now by rebuilding the CLI
             # with the new --name (the resume id is kept, so the conversation continues).
             agent._claude_sdk_rename_pending = False
             rotate_claude_sdk_session(agent, "session renamed")
-        if not hasattr(agent, "_claude_sdk_session") or agent._claude_sdk_session is None:
-            resume_id = _persisted_sdk_session_id(agent) if attempt == 0 else None
+        # Snapshot the identity slot once. Rotation publishes/clears the same
+        # lock; keep the lock only across this read, never across construction,
+        # run_turn, or close().
+        with _claude_sdk_session_lock(agent):
+            live_session = getattr(agent, "_claude_sdk_session", None)
+        if live_session is None:
+            resume_id = (
+                _persisted_sdk_session_id(agent)
+                if attempt == 0 or retry_retired_before_query
+                else None
+            )
             resumed = bool(resume_id)
             send_input = user_input
             if not resume_id and len(messages) > 1:
@@ -559,14 +678,38 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                         ]
                     else:
                         send_input = digest + user_input
-            _create_session(
+                    if recovering_dead_turn:
+                        sink = _background_result_sink(agent)
+                        if sink is not None:
+                            sink.lifecycle(
+                                "resumed",
+                                digest_messages=len(messages) - 1,
+                                resume_id_present=False,
+                            )
+            elif resume_id and recovering_dead_turn:
+                sink = _background_result_sink(agent)
+                if sink is not None:
+                    sink.lifecycle(
+                        "resumed",
+                        digest_messages=0,
+                        resume_id_present=True,
+                    )
+            session = _create_session(
                 agent,
                 resume_id=resume_id,
                 on_interim_assistant=state.on_interim_assistant,
                 on_tool_iteration=state.on_tool_iteration,
             )
+            # Keep compatibility with narrow test seams and third-party
+            # wrappers that perform the assignment but return nothing.
+            if session is None:
+                session = agent._claude_sdk_session
+        else:
+            session = live_session
 
-        turn_session_cwd = getattr(agent._claude_sdk_session, "_cwd", None)
+        # Keep the exact object used for this attempt. Rotation/cleanup may
+        # replace the agent slot while this turn is unwinding.
+        turn_session_cwd = getattr(session, "_cwd", None)
         if not isinstance(turn_session_cwd, str):
             # The live session is the authority, but it can be absent here (a
             # retired client, a stand-in). Resolve the fallback NOW rather than
@@ -585,9 +728,11 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 turn_session_cwd = None
         state.turn_session_cwd = turn_session_cwd
         try:
-            turn = agent._claude_sdk_session.run_turn(user_input=send_input)
+            turn = session.run_turn(user_input=send_input)
         except Exception as exc:
             safe_exc = redact_sensitive_text(str(exc), force=True)
+            _emit_child_exited(session, safe_exc)
+            recovering_dead_turn = True
             interrupted = bool(getattr(agent, "_interrupt_requested", False))
             # A PreCompact hook may have opened a transient user-visible status.
             # This exception bypasses the normal terminal edge below; clear it
@@ -604,10 +749,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             # string after the redacted message to the log record.
             logger.error("claude-agent-sdk turn failed: %s", safe_exc)
             try:
-                agent._claude_sdk_session.close()
+                session.close()
             except Exception:
                 pass
-            agent._claude_sdk_session = None
+            _clear_claude_sdk_session_if_current(agent, session)
             # The sample above was taken BEFORE close(). Tearing the transport
             # down is not instantaneous, so a stop admitted during cleanup is
             # still a stop against this turn — re-read the flag now that the
@@ -647,16 +792,45 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 "error": safe_exc,
             }
 
-        if getattr(turn, "should_retire", False):
+        if getattr(turn, "retired_before_query", False):
+            interrupted = bool(
+                getattr(turn, "interrupted", False)
+                or getattr(agent, "_interrupt_requested", False)
+            )
+            if interrupted:
+                turn.interrupted = True
+            try:
+                session.close()
+            except Exception:
+                pass
+            # The stop can arrive during cleanup. Re-read after close so a
+            # retired-before-query prompt is never replayed by attempt 1.
+            interrupted = interrupted or bool(
+                getattr(turn, "interrupted", False)
+                or getattr(agent, "_interrupt_requested", False)
+            )
+            if interrupted:
+                turn.interrupted = True
+            _clear_claude_sdk_session_if_current(agent, session)
+            if attempt == 0 and not interrupted:
+                # Rotation already stashed the cwd-bound resume envelope. Keep
+                # it intact and consume it when the replacement session builds;
+                # this is a benign pre-query retirement, not a failed resume.
+                retry_retired_before_query = True
+                resumed = False
+                continue
+        elif getattr(turn, "should_retire", False):
+            _emit_child_exited(session, getattr(turn, "error", None), turn)
+            recovering_dead_turn = True
             logger.warning(
                 "claude-agent-sdk session retired (turn error: %s)",
                 redact_sensitive_text(str(turn.error or ""), force=True),
             )
             try:
-                agent._claude_sdk_session.close()
+                session.close()
             except Exception:
                 pass
-            agent._claude_sdk_session = None
+            _clear_claude_sdk_session_if_current(agent, session)
             # Error/timeout retire always clears the persisted resume id —
             # never resume a conversation that just failed.
             _store_sdk_session_id(agent, None)

@@ -27,7 +27,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import contextlib
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from agent.transports.claude_agent_sdk_session_availability import (
@@ -92,6 +94,46 @@ from agent.transports.claude_agent_sdk_session_turn import (
 
 logger = logging.getLogger(__name__)
 
+
+def _run_disconnect_without_loop(disconnect_coro: Any) -> bool:
+    """Run late cleanup without letting an uncooperative coroutine pin teardown."""
+    error: list[BaseException] = []
+
+    def run() -> None:
+        async def bounded_disconnect() -> Any:
+            return await asyncio.wait_for(
+                disconnect_coro, timeout=_SDK_DISCONNECT_TIMEOUT_S
+            )
+
+        try:
+            asyncio.run(bounded_disconnect())
+        except BaseException as exc:
+            error.append(exc)
+
+    worker = threading.Thread(
+        target=run, name="claude-sdk-late-disconnect", daemon=True
+    )
+    worker.start()
+    worker.join(timeout=_SDK_DISCONNECT_TIMEOUT_S)
+    if worker.is_alive():
+        logger.warning(
+            "claude-agent-sdk late disconnect exceeded %.1fs; abandoning daemon cleanup",
+            _SDK_DISCONNECT_TIMEOUT_S,
+        )
+        return False
+    if error:
+        raise error[0]
+    return True
+
+
+class _TurnAdmissionReservation:
+    __slots__ = ("loop", "released")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.released = False
+
+
 # The names other packages import through this facade (the class, the runtime's and the
 # auxiliary client's config/input entry points, the approval gateway's validators).
 __all__ = [
@@ -129,12 +171,13 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
+        task_list_id: Optional[str] = None,
         session_name: str = "",
         resume_session_id: Optional[str] = None,
         on_stream_delta: Optional[Callable[[str], None]] = None,
         on_interim_assistant: Optional[Callable[[str], None]] = None,
         on_tool_iteration: Optional[Callable[[], None]] = None,
-        on_unsolicited_result: Optional[Callable[[list[str]], None]] = None,
+        on_unsolicited_result: Optional[Callable[[list[str], Optional[list[dict]]], None]] = None,
         on_compaction: Optional[Callable[[str], None]] = None,
         on_compact_boundary: Optional[Callable[[str], None]] = None,
         # Hybrid MCP bridge (ported from PR #56413): the explicit config
@@ -189,6 +232,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Hermes-side session id, exported to the hermes-tools MCP subprocess
         # so the stateless session_search shim can exclude its own lineage.
         self._hermes_session_id = hermes_session_id
+        self._task_list_id = task_list_id
         # Peer-addressable name for the spawned CLI session (see
         # _configured_session_name_template). "" keeps the CLI's own naming.
         self._session_name = (session_name or "").strip()
@@ -230,6 +274,27 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._terminal_result_committed = False
         self._post_terminal_interrupt_pending = False
         self._closed = False
+        self._retiring = False
+        # Startup and admission reservations close the check-to-use windows
+        # without holding _turn_callback_lock across blocking work. A close
+        # waits on the corresponding events before teardown can publish or
+        # destroy resources owned by the reservation.
+        self._starting = False
+        self._startup_done = threading.Event()
+        self._startup_done.set()
+        self._admission_inflight = 0
+        self._admission_reservations: set[_TurnAdmissionReservation] = set()
+        self._admission_done = threading.Event()
+        self._admission_done.set()
+        self._turn_admission_reservation: Optional[_TurnAdmissionReservation] = None
+        self._pending_turn_admission_future: Any = None
+        # A close that has passed its bounded startup wait owns these objects.
+        # Keep the identity markers until startup has signalled completion so a
+        # late starter cannot disconnect or stop a resource twice.
+        self._close_owned_client: Any = None
+        self._close_owned_loop: Any = None
+        self._close_owned_loop_thread: Any = None
+        self._close_owned_reader_task: Any = None
         # Activity evidence for the in-flight turn (None between turns).
         self._turn_watch: Optional[_TurnWatch] = None
         # Snapshot the streaming posture once: the quiet-watchdog default is
@@ -244,6 +309,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # which is what makes "unsolicited" decidable.
         self._reader_task: Any = None
         self._turn_inbox: Any = None
+        # The foreground coroutine owns this acknowledgement while waiting
+        # for the reader to publish its claim.  Shutdown resolves it even if
+        # the reader cancellation has already dequeued the claim.
+        self._turn_claim_ack: Any = None
         self._turn_claims: Any = None
         self._turn_claim_requested = False
         self._unsolicited_results = 0
@@ -256,6 +325,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # operator poked). No callback wired = the historical drop semantics.
         self._on_unsolicited_result = on_unsolicited_result
         self._unsolicited_text: list[str] = []
+        self._unsolicited_items: list[dict] = []
+        self._unsolicited_tool_items: dict[str, dict] = {}
+        self._unsolicited_seen: set[str] = set()
         self._unsolicited_delivered: set[str] = set()
         # One immutable billing posture per child. The startup environment,
         # post-start evidence guard, and accounting label must never disagree
@@ -272,64 +344,292 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
 
     # ---------- lifecycle ----------
 
-    def ensure_started(self) -> str:
+    def _admission_retired(self) -> bool:
+        """Return whether this session must reject a new SDK turn."""
+        with self._turn_callback_lock:
+            return bool(self._retiring or self._closed)
+
+    def _reserve_turn_admission(
+        self, reservation: Optional[_TurnAdmissionReservation] = None
+    ) -> Optional[_TurnAdmissionReservation]:
+        """Register a caller-owned token for the check-to-schedule gap.
+
+        The normal caller creates ``reservation`` before entering this helper so
+        an interrupt after insertion still leaves the caller with a token it can
+        release. The no-argument form remains for narrow legacy/test seams.
+        """
+        with self._turn_callback_lock:
+            if self._retiring or self._closed or self._loop is None:
+                return None
+            if reservation is None:
+                reservation = _TurnAdmissionReservation(self._loop)
+            reservations = self._admission_reservations
+            try:
+                self._admission_done.clear()
+                reservations.add(reservation)
+            finally:
+                # The token set is the source of truth. Repair the event/count
+                # pair even if an interrupt lands during either mutation.
+                self._admission_inflight = len(reservations)
+                if not reservations:
+                    self._admission_done.set()
+            return reservation
+
+    @staticmethod
+    def _new_turn_admission_reservation(
+        loop: asyncio.AbstractEventLoop,
+    ) -> _TurnAdmissionReservation:
+        """Create an unregistered token for the caller-owned admission path."""
+        return _TurnAdmissionReservation(loop)
+
+    def _release_turn_admission(
+        self, reservation: Optional[_TurnAdmissionReservation]
+    ) -> None:
+        if reservation is None:
+            return
+        with self._turn_callback_lock:
+            reservations = self._admission_reservations
+            if reservation.released and reservation not in reservations:
+                if not reservations:
+                    self._admission_done.set()
+                return
+            try:
+                reservations.discard(reservation)
+            finally:
+                self._admission_inflight = len(reservations)
+                reservation.released = reservation not in reservations
+            if not reservations:
+                self._admission_done.set()
+
+    def _startup_is_retired(self) -> bool:
+        with self._turn_callback_lock:
+            return bool(self._retiring or self._closed)
+
+    def _claim_startup_resource(self, attr: str, resource: Any) -> bool:
+        """Claim a late startup resource unless close already owns it."""
+        if resource is None:
+            return False
+        owned_attr = f"_close_owned{attr}"
+        with self._turn_callback_lock:
+            if getattr(self, owned_attr, None) is resource:
+                return False
+            current = getattr(self, attr, None)
+            if current is resource:
+                setattr(self, attr, None)
+            return True
+
+    def _cleanup_startup_resources(
+        self,
+        *,
+        client: Any = None,
+        loop: Any = None,
+        loop_thread: Any = None,
+        reader_task: Any = None,
+    ) -> None:
+        """Reap resources published after close() completed its cleanup."""
+        claimed_client = self._claim_startup_resource("_client", client)
+        claimed_loop = self._claim_startup_resource("_loop", loop)
+        claimed_thread = self._claim_startup_resource("_loop_thread", loop_thread)
+        claimed_reader = self._claim_startup_resource("_reader_task", reader_task)
+        if claimed_reader and reader_task is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(reader_task.cancel)
+            except Exception:
+                pass
+        if claimed_reader and reader_task is not None and loop is not None:
+            async def wait_reader() -> None:
+                try:
+                    await reader_task
+                except asyncio.CancelledError:
+                    pass
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(wait_reader(), loop)
+                future.result(timeout=min(1.0, _SDK_DISCONNECT_TIMEOUT_S))
+            except Exception:
+                pass
+        if claimed_client and client is not None:
+            pid = _sdk_child_pid(client)
+            child_process = _own_sdk_child_process(pid) if pid else None
+            disconnect_future = None
+            try:
+                disconnect_coro = client.disconnect()
+                if loop is not None and loop.is_running():
+                    disconnect_future = asyncio.run_coroutine_threadsafe(
+                        disconnect_coro, loop
+                    )
+                    disconnect_future.result(timeout=_SDK_DISCONNECT_TIMEOUT_S)
+                else:
+                    if not _run_disconnect_without_loop(disconnect_coro):
+                        raise TimeoutError("late SDK disconnect exceeded its deadline")
+            except Exception:
+                if disconnect_future is not None:
+                    disconnect_future.cancel()
+                if child_process is not None:
+                    _force_kill_sdk_child(pid, process=child_process)
+        if (claimed_loop or claimed_thread) and loop is not None:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+        if claimed_thread and loop_thread is not None:
+            loop_thread.join(timeout=5.0)
+
+    def ensure_started(self) -> Optional[str]:
         """Start the loop thread, build the SDK client, connect. Idempotent —
         returns the session marker (SDK session ids arrive on first result)."""
-        if self._client is not None:
-            return self._session_id or "pending"
-        # Hard default, enforced fail-closed: this provider targets the Claude
-        # SUBSCRIPTION. If a metered ANTHROPIC_API_KEY is present the
-        # underlying CLI would silently prefer it — refuse to start instead.
-        # ANTHROPIC_TOKEN is in the set because it alone authenticates
-        # Hermes' NATIVE Anthropic lane (x-api-key, metered) — but Hermes
-        # also persists subscription setup tokens there, so only an
-        # API-key-shaped value counts as a metered vector.
-        for metered_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN"):
-            value = os.environ.get(metered_var)
-            if not value or self._allow_metered:
-                continue
-            if metered_var == "ANTHROPIC_TOKEN" and _is_subscription_oauth_token(value):
-                continue
-            raise RuntimeError(
-                f"claude-agent-sdk runtime refuses to start: {metered_var} "
-                "is set, which would silently switch billing from the "
-                "Claude subscription to metered API usage. Unset it, or "
-                "set agent.claude_agent_sdk.allow_metered_key: true in "
-                "config.yaml to explicitly allow it."
-            )
-        if self._client_factory is None:
-            ok, msg = check_claude_sdk_available()
-            if not ok:
-                raise RuntimeError(msg)
+        with self._turn_callback_lock:
+            if self._retiring or self._closed:
+                return None
+            if self._client is not None:
+                return self._session_id or "pending"
+            if self._starting:
+                startup_done = self._startup_done
+                starter = False
+            else:
+                self._starting = True
+                self._startup_done.clear()
+                startup_done = self._startup_done
+                starter = True
+        if not starter:
+            startup_done.wait()
+            with self._turn_callback_lock:
+                if self._retiring or self._closed:
+                    return None
+                return self._session_id or "pending"
+        startup_client: Any = None
+        startup_loop: Any = None
+        startup_loop_thread: Any = None
+        startup_reader_task: Any = None
+        try:
+            # Hard default, enforced fail-closed: this provider targets the Claude
+            # SUBSCRIPTION. If a metered ANTHROPIC_API_KEY is present the
+            # underlying CLI would silently prefer it — refuse to start instead.
+            # ANTHROPIC_TOKEN is in the set because it alone authenticates
+            # Hermes' NATIVE Anthropic lane (x-api-key, metered) — but Hermes
+            # also persists subscription setup tokens there, so only an
+            # API-key-shaped value counts as a metered vector.
+            for metered_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN"):
+                value = os.environ.get(metered_var)
+                if not value or self._allow_metered:
+                    continue
+                if metered_var == "ANTHROPIC_TOKEN" and _is_subscription_oauth_token(value):
+                    continue
+                raise RuntimeError(
+                    f"claude-agent-sdk runtime refuses to start: {metered_var} "
+                    "is set, which would silently switch billing from the "
+                    "Claude subscription to metered API usage. Unset it, or "
+                    "set agent.claude_agent_sdk.allow_metered_key: true in "
+                    "config.yaml to explicitly allow it."
+                )
+            if self._client_factory is None:
+                ok, msg = check_claude_sdk_available()
+                if not ok:
+                    raise RuntimeError(msg)
+        except BaseException:
+            with self._turn_callback_lock:
+                self._starting = False
+                self._startup_done.set()
+            raise
 
-        self._start_loop_thread()
-        client = self._build_client()
-        # Assign BEFORE connect: a connect timeout/cancel leaves a
-        # half-connected client whose CLI subprocess close() must still reap
-        # — a None _client would skip disconnect and orphan it.
-        self._client = client
-        self._run_coro(client.connect(), timeout=60.0)
-        # From here on exactly ONE consumer owns the SDK stream
-        # (claude_agent_sdk_session_turn._reader_loop).
-        # Started after connect so the client is live, before any turn so no
-        # message can arrive unowned.
-        self._start_reader()
-        logger.info(
-            "claude-agent-sdk session started: model=%s mode=%s cwd=%s",
-            self._model or "cli-default",
-            self._permission_mode,
-            self._cwd,
-        )
-        if self._permission_mode == "default":
-            # Say the cost out loud once per session: on this lane the guardian is an SDK
-            # one-shot (a full CLI spawn) per Bash call that reaches the callback. (cntrl carry)
-            logger.warning(
-                "claude-agent-sdk permission_mode=default: every Bash call that reaches the "
-                "approval callback spawns a guardian one-shot (a Claude CLI process). Set "
-                "agent.claude_agent_sdk.permission_mode: auto to let the CLI's classifier "
-                "screen first; Hermes then screens only what it will not approve."
+        try:
+            started_resources = self._start_loop_thread()
+            if started_resources is not None:
+                startup_loop, startup_loop_thread = started_resources
+            else:
+                # Keep compatibility with narrow test seams that implement
+                # the starter without returning its snapshot.
+                with self._turn_callback_lock:
+                    startup_loop = self._loop
+                    startup_loop_thread = self._loop_thread
+            with self._turn_callback_lock:
+                retired = self._retiring or self._closed
+            if retired:
+                self._cleanup_startup_resources(
+                    loop=startup_loop, loop_thread=startup_loop_thread
+                )
+                return None
+            startup_client = self._build_client()
+            # Assign BEFORE connect: a connect timeout/cancel leaves a
+            # half-connected client whose CLI subprocess close() must still reap
+            # — a None _client would skip disconnect and orphan it.
+            with self._turn_callback_lock:
+                retired = self._retiring or self._closed
+                if not retired:
+                    self._client = startup_client
+            if retired:
+                self._cleanup_startup_resources(
+                    client=startup_client,
+                    loop=startup_loop,
+                    loop_thread=startup_loop_thread,
+                )
+                return None
+            self._run_coro(startup_client.connect(), timeout=60.0)
+            with self._turn_callback_lock:
+                retired = self._retiring or self._closed
+            if retired:
+                self._cleanup_startup_resources(
+                    client=startup_client,
+                    loop=startup_loop,
+                    loop_thread=startup_loop_thread,
+                )
+                return None
+            # From here on exactly ONE consumer owns the SDK stream
+            # (claude_agent_sdk_session_turn._reader_loop).
+            # Started after connect so the client is live, before any turn so no
+            # message can arrive unowned.
+            self._start_reader()
+            with self._turn_callback_lock:
+                startup_reader_task = self._reader_task
+                retired = self._retiring or self._closed
+            if retired:
+                self._cleanup_startup_resources(
+                    client=startup_client,
+                    loop=startup_loop,
+                    loop_thread=startup_loop_thread,
+                    reader_task=startup_reader_task,
+                )
+                return None
+            logger.info(
+                "claude-agent-sdk session started: model=%s mode=%s cwd=%s",
+                self._model or "cli-default",
+                self._permission_mode,
+                self._cwd,
             )
-        return self._session_id or "pending"
+            if self._permission_mode == "default":
+                # Say the cost out loud once per session: on this lane the guardian is an SDK
+                # one-shot (a full CLI spawn) per Bash call that reaches the callback. (cntrl carry)
+                logger.warning(
+                    "claude-agent-sdk permission_mode=default: every Bash call that reaches the "
+                    "approval callback spawns a guardian one-shot (a Claude CLI process). Set "
+                    "agent.claude_agent_sdk.permission_mode: auto to let the CLI's classifier "
+                    "screen first; Hermes then screens only what it will not approve."
+                )
+            with self._turn_callback_lock:
+                retired = self._retiring or self._closed
+                marker = self._session_id or "pending"
+            if retired:
+                self._cleanup_startup_resources(
+                    client=startup_client,
+                    loop=startup_loop,
+                    loop_thread=startup_loop_thread,
+                    reader_task=startup_reader_task,
+                )
+                return None
+            return marker
+        except BaseException:
+            if self._startup_is_retired():
+                self._cleanup_startup_resources(
+                    client=startup_client,
+                    loop=startup_loop,
+                    loop_thread=startup_loop_thread,
+                    reader_task=startup_reader_task,
+                )
+            raise
+        finally:
+            with self._turn_callback_lock:
+                self._starting = False
+                self._startup_done.set()
 
     def rename(self, name: str) -> bool:
         """Rename the spawned CLI session so peers see the new name NOW.
@@ -366,9 +666,65 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         return True
 
     def close(self) -> None:
-        if self._closed:
+        # Tolerate a partially constructed object (tests build one via
+        # __new__; __init__ may also have raised before the lock existed).
+        admission_lock = getattr(self, "_turn_callback_lock", None)
+        with admission_lock if admission_lock is not None else contextlib.nullcontext():
+            if self._closed:
+                startup_done = (
+                    self._startup_done if getattr(self, "_starting", False) else None
+                )
+                admission_done = (
+                    self._admission_done
+                    if getattr(self, "_admission_inflight", 0)
+                    else None
+                )
+                should_cleanup = False
+            else:
+                # Publish the fence before any blocking reader/disconnect work.
+                # Callers can therefore reject stale turns without waiting for
+                # the SDK loop thread to finish shutting down.
+                self._closed = True
+                startup_done = (
+                    self._startup_done if getattr(self, "_starting", False) else None
+                )
+                admission_done = (
+                    self._admission_done
+                    if getattr(self, "_admission_inflight", 0)
+                    else None
+                )
+                should_cleanup = True
+        # These waits intentionally happen outside _turn_callback_lock. They are
+        # bounded: a leaked startup/admission reservation must degrade to a
+        # warning and teardown, never make close() hang before it can stop the
+        # reader and disconnect the client that would unblock the turn.
+        shutdown_deadline = time.monotonic() + _SDK_DISCONNECT_TIMEOUT_S
+        for label, event in (("startup", startup_done), ("admission", admission_done)):
+            if event is None:
+                continue
+            remaining = max(0.0, shutdown_deadline - time.monotonic())
+            if not event.wait(timeout=remaining):
+                logger.warning(
+                    "claude-agent-sdk close: %s reservation did not release "
+                    "within %.1fs; proceeding with teardown",
+                    label,
+                    _SDK_DISCONNECT_TIMEOUT_S,
+                )
+        pending_admission_future = None
+        if admission_lock is not None:
+            with admission_lock:
+                pending_admission_future = getattr(
+                    self, "_pending_turn_admission_future", None
+                )
+                self._pending_turn_admission_future = None
+                self._close_owned_client = getattr(self, "_client", None)
+                self._close_owned_loop = getattr(self, "_loop", None)
+                self._close_owned_loop_thread = getattr(self, "_loop_thread", None)
+                self._close_owned_reader_task = getattr(self, "_reader_task", None)
+        if pending_admission_future is not None:
+            pending_admission_future.cancel()
+        if not should_cleanup:
             return
-        self._closed = True
         interrupt_commit_lock = getattr(self, "_interrupt_commit_lock", None)
         if interrupt_commit_lock is not None:
             with interrupt_commit_lock:
@@ -381,7 +737,25 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 interrupt_event.clear()
         # Cancel the reader BEFORE disconnect so it unwinds on a live stream
         # instead of raising against a torn-down one.
+        reader_task = getattr(self, "_reader_task", None)
+        reader_loop = self._loop
         self._stop_reader()
+        if reader_task is not None and reader_loop is not None:
+            async def _wait_for_reader_stop() -> None:
+                try:
+                    await reader_task
+                except asyncio.CancelledError:
+                    pass
+
+            reader_wait = _wait_for_reader_stop()
+            try:
+                self._run_coro(
+                    reader_wait,
+                    timeout=min(1.0, _SDK_DISCONNECT_TIMEOUT_S),
+                )
+            except Exception:
+                if reader_loop.is_closed() or not reader_loop.is_running():
+                    reader_wait.close()
         if self._client is not None and self._loop is not None:
             # Budget must exceed the SDK transport's own escalation ladder
             # (stdin lock + graceful wait + SIGTERM + SIGKILL); on timeout the
@@ -633,7 +1007,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # honors), so it disables the scrub too — otherwise the documented
         # escape hatch would hand the CLI an environment with the key blanked.
         env_overrides = _sdk_env_overrides(
-            metered_allowed=self._allow_metered
+            metered_allowed=self._allow_metered,
+            task_list_id=self._task_list_id,
         )
 
         fields = {

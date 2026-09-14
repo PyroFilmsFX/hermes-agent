@@ -310,6 +310,43 @@ class TestHybridRegistryDiff:
         ]
         assert legacy == ["read_file"]
 
+    def test_skill_manage_retains_hermes_tools_legacy_identity_in_hybrid_bridge(
+        self, monkeypatch
+    ):
+        from agent.transports import hermes_hybrid_mcp
+        from agent.transports.hermes_tool_exposure import HERMES_TOOLS_LEGACY_NAMES
+
+        recorded = {}
+
+        def _build(agent, tools, *, server_name, **kwargs):
+            recorded[server_name] = kwargs
+            return {"type": "sdk", "name": server_name}
+
+        monkeypatch.setattr(hermes_hybrid_mcp, "build_hybrid_mcp_server", _build)
+        self._patch_registry(monkeypatch, [])
+        session = self._session(
+            agent=object(),
+            tools=[self._spec("read_file"), self._spec("skill_manage")],
+        )
+
+        session.build_option_fields()
+
+        legacy_only = set(recorded["hermes-tools"].get("only_names") or set())
+        assert "skill_manage" in legacy_only
+        assert legacy_only == set(HERMES_TOOLS_LEGACY_NAMES)
+
+        hybrid_exclude = set(recorded["hermes-hybrid"].get("exclude_names") or [])
+        assert "skill_manage" in hybrid_exclude
+
+    def test_sdk_skill_tools_included_in_legacy_names(self):
+        from agent.transports.hermes_tool_exposure import (
+            CLAUDE_AGENT_SDK_SKILL_TOOLS,
+            HERMES_TOOLS_LEGACY_NAMES,
+        )
+
+        for tool in CLAUDE_AGENT_SDK_SKILL_TOOLS:
+            assert tool in HERMES_TOOLS_LEGACY_NAMES
+
     def test_tool_already_in_snapshot_is_not_registered_twice(
         self, monkeypatch, captured
     ):

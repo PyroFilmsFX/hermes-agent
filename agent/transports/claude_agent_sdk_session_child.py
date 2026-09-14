@@ -8,6 +8,7 @@ every method resolves through ``ClaudeAgentSdkSession``'s MRO unchanged.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
@@ -105,9 +106,11 @@ class ClaudeSdkChildProcessMixin:
 
     # ---------- loop-thread plumbing ----------
 
-    def _start_loop_thread(self) -> None:
-        if self._loop_thread is not None:
-            return
+    def _start_loop_thread(self) -> Any:
+        lifecycle_lock = self._turn_callback_lock
+        with lifecycle_lock:
+            if self._loop_thread is not None:
+                return self._loop, self._loop_thread
         loop = asyncio.new_event_loop()
         ready = threading.Event()
 
@@ -121,19 +124,40 @@ class ClaudeSdkChildProcessMixin:
         )
         thread.start()
         ready.wait(timeout=10)
-        self._loop = loop
-        self._loop_thread = thread
+        # Publish and snapshot both halves while holding the lifecycle lock.
+        # If close fenced the session while the thread was being created, the
+        # starter owns the local resources and must reap them itself.
+        with lifecycle_lock:
+            if self._retiring or self._closed or self._loop_thread is not None:
+                publish = False
+            else:
+                self._loop = loop
+                self._loop_thread = thread
+                return loop, thread
+        if not publish:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+            thread.join(timeout=5.0)
+        return None
 
     def _stop_loop_thread(self) -> None:
-        if self._loop is not None:
+        # Snapshot and detach under the same lock used by startup publication;
+        # the blocking stop/join work must remain outside it.
+        lifecycle_lock = getattr(self, "_turn_callback_lock", None)
+        with contextlib.nullcontext() if lifecycle_lock is None else lifecycle_lock:
+            loop = self._loop
+            thread = self._loop_thread
+            self._loop = None
+            self._loop_thread = None
+        if loop is not None:
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                loop.call_soon_threadsafe(loop.stop)
             except Exception:  # pragma: no cover
                 pass
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=5)
-        self._loop = None
-        self._loop_thread = None
+        if thread is not None:
+            thread.join(timeout=5)
 
     def _run_coro(self, coro: Any, *, timeout: float) -> Any:
         import concurrent.futures

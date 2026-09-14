@@ -1268,6 +1268,88 @@ class TestSessionRename:
         finally:
             session.close()
 
+    def test_unsolicited_rename_prefix_without_pending_rename_is_delivered(self):
+        delivered = []
+        session, holder = _make_hold_open_session(
+            script=[], session_name="hermes:old",
+            on_unsolicited_result=lambda texts: delivered.append(list(texts)),
+        )
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.05)
+            client.feed(AssistantMessage(content=[TextBlock("ok")]), ResultMessage(result="ok", uuid="u-1"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("ping", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            thread.join(timeout=5)
+            client = holder["client"]
+            assert session._pending_rename_ack is None
+            # Background task whose text happens to start with "Session renamed to:"
+            # must NOT be swallowed when no rename was pending.
+            legit_text = "Session renamed to: production server"
+            client.feed(
+                AssistantMessage(content=[TextBlock(legit_text)]),
+                ResultMessage(result=legit_text, uuid="uuid-legit"),
+            )
+            deadline = time.monotonic() + 3
+            while not delivered and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert delivered == [[legit_text]]
+        finally:
+            session.close()
+
+    def test_unsolicited_rename_prefix_mismatched_target_is_delivered(self):
+        delivered = []
+        session, holder = _make_hold_open_session(
+            script=[], session_name="hermes:old",
+            on_unsolicited_result=lambda texts: delivered.append(list(texts)),
+        )
+
+        def feeder():
+            client = _wait_for_client(holder)
+            time.sleep(0.05)
+            client.feed(AssistantMessage(content=[TextBlock("ok")]), ResultMessage(result="ok", uuid="u-1"))
+
+        thread = threading.Thread(target=feeder, daemon=True)
+        thread.start()
+        try:
+            session.run_turn("ping", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            thread.join(timeout=5)
+            client = holder["client"]
+            assert session.rename("hermes:target") is True
+            assert session._pending_rename_ack == "hermes:target"
+            # Text starting with "Session renamed to:" but not matching the pending rename target
+            other_text = "Session renamed to: completely_different"
+            client.feed(
+                AssistantMessage(content=[TextBlock(other_text)]),
+                ResultMessage(result=other_text, uuid="uuid-other"),
+            )
+            deadline = time.monotonic() + 3
+            while not delivered and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert delivered == [[other_text]]
+            # The pending rename is still outstanding
+            assert session._pending_rename_ack == "hermes:target"
+        finally:
+            session.close()
+
+    def test_is_rename_ack_requires_pending_name_and_exact_match(self):
+        from agent.transports.claude_agent_sdk_session_watchdog import _is_rename_ack
+
+        # Without pending name, never an ack
+        assert not _is_rename_ack("Session renamed to: foo", [])
+        assert not _is_rename_ack(None, ["Session renamed to: foo"])
+        assert not _is_rename_ack("Session renamed to: foo", [], None)
+
+        # With pending name, only exact match
+        assert _is_rename_ack("Session renamed to: foo", [], "foo")
+        assert _is_rename_ack(None, ["Session renamed to: foo"], "foo")
+        assert not _is_rename_ack("Session renamed to: bar", [], "foo")
+        assert not _is_rename_ack("Session renamed to: foo and more", [], "foo")
+
     def test_rename_before_start_applies_on_first_build(self):
         session, holder = _make_session(script=[ResultMessage(result="ok")], session_name="hermes:old")
         try:

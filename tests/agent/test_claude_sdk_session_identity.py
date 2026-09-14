@@ -5,6 +5,8 @@ stand-ins, fake clients and shared builders live in
 ``tests.agent.claude_sdk_fakes``.
 """
 
+import asyncio
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,7 +29,84 @@ def _isolate_provider_config(monkeypatch):
     yield from isolate_provider_config(monkeypatch)
 
 
+def _close_promptly(session, timeout=1.0):
+    done = threading.Event()
+
+    def close_session():
+        session.close()
+        done.set()
+
+    closer = threading.Thread(target=close_session, daemon=True)
+    closer.start()
+    closer.join(timeout=timeout)
+    assert done.is_set(), "session.close() exceeded its bounded test timeout"
+    assert not closer.is_alive()
+
+
 class TestHermesSessionIdPlumbing:
+    def test_identity_clear_cannot_erase_publication_waiting_on_agent_lock(self):
+        """A replacement published during the identity read remains reachable."""
+        from agent.claude_sdk_runtime_continuity import (
+            _clear_claude_sdk_session_if_current,
+        )
+
+        old = object()
+        replacement = object()
+        assignment_started = threading.Event()
+        allow_assignment = threading.Event()
+        published = threading.Event()
+
+        class Agent:
+            def __init__(self):
+                self._claude_sdk_session = old
+                self._claude_sdk_session_lock = threading.RLock()
+                self._assignment_paused = False
+
+            def __setattr__(self, name, value):
+                if (
+                    name == "_claude_sdk_session"
+                    and value is None
+                    and not object.__getattribute__(self, "_assignment_paused")
+                ):
+                    object.__setattr__(self, "_assignment_paused", True)
+                    assignment_started.set()
+                    assert allow_assignment.wait(timeout=2.0)
+                object.__setattr__(self, name, value)
+
+        agent = Agent()
+
+        def publish_replacement():
+            assert assignment_started.wait(timeout=2.0)
+            with agent._claude_sdk_session_lock:
+                agent._claude_sdk_session = replacement
+                published.set()
+
+        publisher = threading.Thread(target=publish_replacement, daemon=True)
+        clear_holder = {}
+
+        def clear_current():
+            clear_holder["result"] = _clear_claude_sdk_session_if_current(agent, old)
+
+        clearer = threading.Thread(target=clear_current, daemon=True)
+        publisher.start()
+        clearer.start()
+        try:
+            assert assignment_started.wait(timeout=2.0)
+            # The fixed helper holds the same lock across compare-and-clear, so
+            # publication cannot cross the boundary and be erased.
+            published.wait(timeout=0.2)
+            allow_assignment.set()
+            clearer.join(timeout=2.0)
+            assert clear_holder["result"] is True
+            assert published.wait(timeout=2.0)
+            assert agent._claude_sdk_session is replacement, (
+                "identity-checked clear erased a replacement published across its boundary"
+            )
+        finally:
+            allow_assignment.set()
+            publisher.join(timeout=2.0)
+            clearer.join(timeout=2.0)
+
     def test_session_id_rides_mcp_env(self):
         session, holder = _make_session(
             script=[ResultMessage(result="ok")], hermes_session_id="sess-42"
@@ -263,6 +342,69 @@ class TestContinuity:
 
         monkeypatch.setattr(sdk_session_mod, "ClaudeAgentSdkSession", SpySession)
         return instances
+
+    def test_rotation_during_session_slot_read_rebuilds_instead_of_failing(
+        self, monkeypatch
+    ):
+        """A slot cleared during the existence check takes the benign rebuild path."""
+        from agent.claude_sdk_runtime_continuity import _clear_claude_sdk_session_if_current
+
+        backing = _make_agent()
+        old = backing._claude_sdk_session
+        read_paused = threading.Event()
+        allow_read = threading.Event()
+        reads = 0
+
+        class AgentProxy:
+            def __getattribute__(self, name):
+                nonlocal reads
+                if name == "_claude_sdk_session":
+                    reads += 1
+                    value = getattr(backing, name)
+                    # _refresh_turn_visibility consumes the first read. Pause
+                    # after the old implementation's two-read existence check,
+                    # before its separate snapshot in the else branch.
+                    if reads == 3 and threading.current_thread() is threading.main_thread():
+                        read_paused.set()
+                        assert allow_read.wait(timeout=2.0)
+                    return value
+                return getattr(backing, name)
+
+            def __setattr__(self, name, value):
+                setattr(backing, name, value)
+
+        agent = AgentProxy()
+        replacement = _make_turn(final_text="rebuilt answer")
+        instances = self._spy_sessions(monkeypatch, [replacement])
+
+        def clear_slot():
+            if not read_paused.wait(timeout=0.5):
+                # The fixed one-read path may complete before the scheduled
+                # rotation; clear it afterward and still verify no failure.
+                _clear_claude_sdk_session_if_current(agent, old)
+                allow_read.set()
+                return
+            assert _clear_claude_sdk_session_if_current(agent, old) is True
+            allow_read.set()
+
+        clearer = threading.Thread(target=clear_slot, daemon=True)
+        clearer.start()
+        try:
+            result = run_claude_agent_sdk_turn(
+                agent,
+                user_message="rotate during read",
+                original_user_message="rotate during read",
+                messages=[{"role": "user", "content": "rotate during read"}],
+                effective_task_id="t",
+            )
+            clearer.join(timeout=2.0)
+            assert not clearer.is_alive()
+            assert result["final_response"] in {"SDK_ASSISTANT", "rebuilt answer"}
+            assert "NoneType" not in (result.get("error") or "")
+            assert len(instances) <= 1
+        finally:
+            allow_read.set()
+            clearer.join(timeout=2.0)
 
     def test_creation_resumes_from_persisted_id(self, monkeypatch):
         agent, _db = self._db_agent(
@@ -631,6 +773,48 @@ class TestContinuity:
         assert instances[1].inputs[0].startswith("[Continuity digest")
         db.update_claude_sdk_session_id.assert_any_call("sess-1", None)
 
+    def test_retired_before_query_retries_with_rotation_stash(self, monkeypatch):
+        agent, db = self._db_agent()
+        live = MagicMock()
+        live._cwd = "/tmp"
+        live.run_turn.return_value = _make_turn(
+            should_retire=True,
+            retired_before_query=True,
+            stream_ended=True,
+            error="SDK session is rotating; rebuilding CLI",
+            projected_messages=[],
+            final_text="",
+            token_usage_last=None,
+            api_call_made=False,
+        )
+        agent._claude_sdk_session = live
+        agent._claude_sdk_rotated_resume_id = self._bound_id("sdk-rotating-1")
+        instances = self._spy_sessions(
+            monkeypatch,
+            [_make_turn(final_text="fresh answer", thread_id="sdk-fresh-1")],
+        )
+
+        result = run_claude_agent_sdk_turn(
+            agent,
+            user_message="current question",
+            original_user_message="current question",
+            messages=[
+                {"role": "user", "content": "earlier question"},
+                {"role": "assistant", "content": "earlier answer"},
+                {"role": "user", "content": "current question"},
+            ],
+            effective_task_id="t",
+        )
+
+        assert result["final_response"] == "fresh answer"
+        assert live.close.call_count == 1
+        assert len(instances) == 1
+        assert instances[0].kwargs["resume_session_id"] == "sdk-rotating-1"
+        assert all(
+            call.args != ("sess-1", None)
+            for call in db.update_claude_sdk_session_id.call_args_list
+        )
+
     def test_cold_short_circuit_consumes_live_session_event_too(self, monkeypatch):
         # Validator C1: an interrupt racing turn completion sets BOTH the
         # agent flag and the live session's event. The short-circuit consumed
@@ -996,6 +1180,258 @@ class TestSessionResumeField:
         assert "resume" not in holder["client"].options
 
 
+class TestTaskListIdentity:
+    @staticmethod
+    def _enable_task_tools(monkeypatch):
+        import agent.transports.claude_agent_sdk_session_config as config
+
+        monkeypatch.setattr(
+            config, "_provider_flag", lambda name, default=False: name == "task_tools"
+        )
+
+    def test_task_list_id_is_filesystem_safe_and_bounded(self):
+        from agent.claude_sdk_runtime_continuity import _derive_sdk_task_list_id
+
+        task_list_id = _derive_sdk_task_list_id("sess/with spaces:" + "x" * 100)
+
+        assert task_list_id.startswith("hermes-")
+        assert len(task_list_id) <= 64
+        assert all(char.isalnum() or char in "._-" for char in task_list_id)
+
+    def test_task_list_derivation_is_collision_resistant_and_profile_scoped(self, monkeypatch):
+        from agent.claude_sdk_runtime_continuity import _derive_sdk_task_list_id
+
+        monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-profile-a")
+        slash = _derive_sdk_task_list_id("a/b")
+        dash = _derive_sdk_task_list_id("a-b")
+        long_a = _derive_sdk_task_list_id("x" * 100 + "-a")
+        long_b = _derive_sdk_task_list_id("x" * 100 + "-b")
+        monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-profile-b")
+        other_profile = _derive_sdk_task_list_id("a/b")
+
+        assert slash != dash
+        assert long_a != long_b
+        assert slash != other_profile
+        assert len(long_a) <= 64
+        assert all(char.isalnum() or char in "._-" for char in long_a)
+
+    def test_existing_persisted_task_list_binding_is_reused_verbatim(self, monkeypatch):
+        self._enable_task_tools(monkeypatch)
+        from agent.claude_sdk_runtime_continuity import (
+            _encode_sdk_resume_binding,
+            _sdk_task_list_id,
+        )
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        exact = "already-persisted/list-id-without-renaming"
+        agent = _make_agent()
+        agent.session_id = "sess-1"
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {
+            "claude_sdk_session_id": _encode_sdk_resume_binding(
+                "sdk-existing", cwd=str(resolve_agent_cwd()), task_list=exact
+            )
+        }
+
+        assert _sdk_task_list_id(agent) == exact
+
+    def test_same_task_list_id_survives_resume_and_rotation(self, monkeypatch):
+        self._enable_task_tools(monkeypatch)
+        from agent.claude_sdk_runtime_continuity import (
+            _derive_sdk_task_list_id,
+            _persisted_sdk_session_id,
+            _store_sdk_session_id,
+            rotate_claude_sdk_session,
+        )
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        agent, db = TestContinuity._db_agent()
+        cwd = str(resolve_agent_cwd())
+        _store_sdk_session_id(agent, "sdk-stable", cwd=cwd)
+        stored = db.update_claude_sdk_session_id.call_args.args[1]
+        expected_task_list = _derive_sdk_task_list_id("sess-1")
+        assert f'"task_list":"{expected_task_list}"' in stored
+
+        db.get_session.return_value = {
+            "claude_sdk_session_id": stored,
+            "cwd": cwd,
+        }
+        assert _persisted_sdk_session_id(agent) == "sdk-stable"
+        assert agent._claude_sdk_task_list_id == expected_task_list
+
+        live = MagicMock()
+        live._session_id = "sdk-stable"
+        live._cwd = cwd
+        live._turn_inbox = None
+        live._turn_claim_requested = False
+        agent._claude_sdk_session = live
+        assert rotate_claude_sdk_session(agent, "test") is True
+        assert _persisted_sdk_session_id(agent) == "sdk-stable"
+        assert agent._claude_sdk_task_list_id == expected_task_list
+
+    def test_fork_derives_a_fresh_task_list_id(self, monkeypatch):
+        self._enable_task_tools(monkeypatch)
+        from agent.claude_sdk_runtime_continuity import _sdk_task_list_id
+
+        parent = _make_agent()
+        parent.session_id = "fork-session"
+        parent_id = _sdk_task_list_id(parent)
+
+        agent = _make_agent()
+        agent.session_id = parent.session_id
+        agent._persist_disabled = True
+        agent._session_db = None
+
+        fork_id = _sdk_task_list_id(agent)
+        assert fork_id != parent_id
+        assert _sdk_task_list_id(agent) == fork_id
+
+    def test_child_env_is_identical_across_resume_rebuild(self, monkeypatch):
+        self._enable_task_tools(monkeypatch)
+        import agent.claude_sdk_runtime_session as runtime_session
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+        from agent.claude_sdk_runtime_continuity import (
+            _persisted_sdk_session_id, _store_sdk_session_id,
+            rotate_claude_sdk_session,
+        )
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        captured = []
+        real_session = sdk_session_mod.ClaudeAgentSdkSession
+
+        class CapturingSession(real_session):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                captured.append((self, dict(self.build_option_fields()["env"])))
+
+        monkeypatch.setattr(sdk_session_mod, "ClaudeAgentSdkSession", CapturingSession)
+        monkeypatch.setattr(runtime_session, "_build_approval_callback", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "_background_result_sink", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "build_system_prompt_append", lambda **kwargs: "")
+        monkeypatch.setattr(runtime_session, "_hybrid_bridge_enabled", lambda: False)
+        monkeypatch.setattr(runtime_session, "_configured_max_budget_usd", lambda: None)
+
+        parent, parent_db = _make_agent(), MagicMock()
+        parent.session_id = "shared-hermes-session"
+        parent._session_db = parent_db
+        parent_db.get_session.return_value = {}
+        runtime_session._create_session(
+            parent, resume_id=None, on_interim_assistant=None, on_tool_iteration=None
+        )
+        fresh_env = captured[-1][1]
+
+        cwd = str(resolve_agent_cwd())
+        _store_sdk_session_id(
+            parent, "sdk-stable", cwd=cwd,
+            task_list=parent._claude_sdk_task_list_id,
+        )
+        stored = parent_db.update_claude_sdk_session_id.call_args.args[1]
+        resumed, resumed_db = _make_agent(), MagicMock()
+        resumed.session_id = parent.session_id
+        resumed._session_db = resumed_db
+        resumed_db.get_session.return_value = {"claude_sdk_session_id": stored, "cwd": cwd}
+        resume_id = _persisted_sdk_session_id(resumed)
+        runtime_session._create_session(
+            resumed, resume_id=resume_id,
+            on_interim_assistant=None, on_tool_iteration=None,
+        )
+        resume_env = captured[-1][1]
+
+        assert rotate_claude_sdk_session(resumed, "test rotation") is True
+        rotated_resume_id = _persisted_sdk_session_id(resumed)
+        runtime_session._create_session(
+            resumed, resume_id=rotated_resume_id,
+            on_interim_assistant=None, on_tool_iteration=None,
+        )
+        rotation_env = captured[-1][1]
+
+        fork = _make_agent()
+        fork.session_id = parent.session_id
+        fork._persist_disabled = True
+        fork._session_db = None
+        runtime_session._create_session(
+            fork, resume_id=None, on_interim_assistant=None, on_tool_iteration=None
+        )
+        fork_env = captured[-1][1]
+
+        assert fresh_env == resume_env == rotation_env
+        assert fork_env["CLAUDE_CODE_TASK_LIST_ID"] != fresh_env["CLAUDE_CODE_TASK_LIST_ID"]
+
+    @pytest.mark.parametrize(
+        ("source", "task_list_id", "expected_task_list_id"),
+        [
+            ("configured", "yaml-list", "yaml-list"),
+            ("inherited", "env-list", "env-list"),
+            ("configured", "", None),
+        ],
+    )
+    def test_task_list_override_is_shared_by_child_env_and_snapshot_reader(
+        self, monkeypatch, source, task_list_id, expected_task_list_id
+    ):
+        self._enable_task_tools(monkeypatch)
+        import agent.claude_sdk_runtime_session as runtime_session
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+        import agent.transports.claude_agent_sdk_session_config as config
+
+        monkeypatch.setattr(
+            config,
+            "_configured_sdk_env",
+            lambda: {"CLAUDE_CODE_TASK_LIST_ID": task_list_id}
+            if source == "configured"
+            else {},
+        )
+        if source == "inherited":
+            monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", task_list_id)
+
+        captured = {}
+
+        class SpySession:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(sdk_session_mod, "ClaudeAgentSdkSession", SpySession)
+        monkeypatch.setattr(runtime_session, "_build_approval_callback", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "_background_result_sink", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "build_system_prompt_append", lambda **kwargs: "")
+        monkeypatch.setattr(runtime_session, "_hybrid_bridge_enabled", lambda: False)
+        monkeypatch.setattr(runtime_session, "_configured_max_budget_usd", lambda: None)
+
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        runtime_session._create_session(
+            agent, resume_id=None, on_interim_assistant=None, on_tool_iteration=None
+        )
+
+        child_env = config._sdk_env_overrides(
+            task_list_id=captured["task_list_id"]
+        )
+        assert child_env["CLAUDE_CODE_TASK_LIST_ID"] == task_list_id
+        assert captured["task_list_id"] == expected_task_list_id
+        assert agent._claude_sdk_task_list_id == expected_task_list_id
+
+    def test_legacy_envelope_gains_task_list_on_resume(self, monkeypatch):
+        self._enable_task_tools(monkeypatch)
+        from agent.claude_sdk_runtime_continuity import (
+            _encode_sdk_resume_binding,
+            _derive_sdk_task_list_id,
+            _persisted_sdk_session_id,
+        )
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        agent, db = TestContinuity._db_agent()
+        cwd = str(resolve_agent_cwd())
+        legacy = _encode_sdk_resume_binding("sdk-legacy-task", cwd=cwd)
+        db.get_session.return_value = {
+            "claude_sdk_session_id": legacy,
+            "cwd": cwd,
+        }
+
+        assert _persisted_sdk_session_id(agent) == "sdk-legacy-task"
+        upgraded = db.update_claude_sdk_session_id.call_args.args[1]
+        expected_task_list = _derive_sdk_task_list_id("sess-1")
+        assert f'"task_list":"{expected_task_list}"' in upgraded
+
+
 # ---------- agent close() releases the SDK session ----------
 
 
@@ -1059,6 +1495,38 @@ class TestSessionRotation:
         # Idempotent when nothing is live.
         assert rotate_claude_sdk_session(agent, "test") is False
 
+    def test_rotated_resume_id_is_rejected_after_workspace_switch(self, monkeypatch):
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+        from agent.claude_sdk_runtime_continuity import _persisted_sdk_session_id
+
+        import agent.runtime_cwd as runtime_cwd
+
+        cwd = {"value": "/workspace/a"}
+        monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: cwd["value"])
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live._cwd = "/workspace/a"
+        live._session_id = "sdk-live-1"
+        db = MagicMock()
+        from agent.claude_sdk_runtime_continuity import _encode_sdk_resume_binding
+
+        bound_row_id = _encode_sdk_resume_binding("sdk-db-1", cwd="/workspace/a")
+        row = {
+            "claude_sdk_session_id": bound_row_id,
+            "cwd": "/workspace/a",
+        }
+        db.get_session.return_value = row
+        agent._session_db = db
+        agent.session_id = "sess-1"
+
+        assert rotate_claude_sdk_session(agent, "test") is True
+        cwd["value"] = "/workspace/b"
+
+        assert _persisted_sdk_session_id(agent) is None
+        assert _persisted_sdk_session_id(agent) is None  # DB binding mismatches
+        db.update_claude_sdk_session_id.assert_not_called()
+        assert row["claude_sdk_session_id"] == bound_row_id
+
     def test_rename_helper_prefers_instant_rename_when_idle(self):
         from agent.claude_sdk_runtime import rename_claude_sdk_session
 
@@ -1109,3 +1577,176 @@ class TestSessionRotation:
         live._turn_inbox = None
         assert rotate_claude_sdk_session(agent, "tool surface changed") is True
         live.close.assert_called_once()
+
+    def test_rotate_defers_while_turn_claim_is_requested(self):
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        agent = _make_agent()
+        live = agent._claude_sdk_session
+        live._turn_claim_requested = True
+
+        assert rotate_claude_sdk_session(agent, "tool surface changed") is False
+        live.close.assert_not_called()
+        assert agent._claude_sdk_session is live
+        assert agent._claude_sdk_rename_pending is True
+
+    def test_rotate_releases_admission_lock_before_close(self):
+        import asyncio
+        import threading
+
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        session, holder = _make_session(script=[])
+        session.ensure_started()
+        allow_claim = threading.Event()
+        claim_started = threading.Event()
+        claim_acquired = threading.Event()
+        allow_disconnect = threading.Event()
+        close_started = threading.Event()
+        close_returned = threading.Event()
+
+        async def blocked_disconnect():
+            await asyncio.to_thread(allow_disconnect.wait)
+
+        holder["client"].disconnect = blocked_disconnect
+        original_close = session.close
+
+        def observed_close():
+            close_started.set()
+            original_close()
+            close_returned.set()
+
+        session.close = observed_close
+
+        async def publish_claim():
+            claim_started.set()
+            await asyncio.to_thread(allow_claim.wait)
+            with session._turn_callback_lock:
+                claim_acquired.set()
+
+        claim_future = asyncio.run_coroutine_threadsafe(
+            publish_claim(), session._loop
+        )
+        agent = _make_agent()
+        agent._claude_sdk_session = session
+        rotation = None
+        try:
+            assert claim_started.wait(timeout=1.0)
+            rotation = threading.Thread(
+                target=rotate_claude_sdk_session,
+                args=(agent, "test"),
+                daemon=True,
+            )
+            rotation.start()
+            assert close_started.wait(timeout=1.0)
+            assert session._closed is True
+            allow_claim.set()
+            assert claim_acquired.wait(timeout=1.0)
+            allow_disconnect.set()
+            assert close_returned.wait(timeout=1.0)
+            rotation.join(timeout=1.0)
+            assert not rotation.is_alive()
+            claim_future.result(timeout=1.0)
+        finally:
+            allow_claim.set()
+            allow_disconnect.set()
+            _close_promptly(session)
+
+    def test_rotation_does_not_clear_replacement_published_during_close(self):
+        """An old rotation may finish after a losing turn installs a replacement."""
+        from agent.claude_sdk_runtime import rotate_claude_sdk_session
+
+        old, holder = _make_session(script=[])
+        old.ensure_started()
+        disconnect_entered = threading.Event()
+        allow_disconnect = threading.Event()
+
+        async def blocked_disconnect():
+            disconnect_entered.set()
+            await asyncio.to_thread(allow_disconnect.wait)
+            holder["client"].disconnected = True
+
+        holder["client"].disconnect = blocked_disconnect
+        old._session_id = "sdk-old"
+        agent = _make_agent()
+        agent._claude_sdk_session = old
+        rotation = threading.Thread(
+            target=rotate_claude_sdk_session,
+            args=(agent, "test"),
+            daemon=True,
+        )
+        replacement = None
+        try:
+            rotation.start()
+            assert disconnect_entered.wait(timeout=2.0)
+            replacement, _ = _make_session(script=[])
+            agent._claude_sdk_session = replacement
+            allow_disconnect.set()
+            rotation.join(timeout=2.0)
+            assert not rotation.is_alive()
+            assert agent._claude_sdk_session is replacement
+        finally:
+            allow_disconnect.set()
+            rotation.join(timeout=2.0)
+            _close_promptly(old)
+            if replacement is not None:
+                _close_promptly(replacement)
+
+    def test_stop_during_retired_before_query_close_does_not_retry(self, monkeypatch):
+        """A stop admitted while retiring cleanup runs owns the abandoned turn."""
+        from agent.claude_sdk_runtime import run_claude_agent_sdk_turn
+        import agent.runtime_cwd as runtime_cwd
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+
+        monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: "/tmp")
+        agent = _make_agent()
+        agent._claude_sdk_session = None
+        old, _holder = _make_session(script=[])
+        old._retiring = True
+        agent._claude_sdk_session = old
+        close_entered = threading.Event()
+        allow_close = threading.Event()
+        original_close = old.close
+
+        def blocked_close():
+            close_entered.set()
+            allow_close.wait(timeout=2.0)
+            original_close()
+
+        old.close = blocked_close
+        replacement_instances = []
+
+        class ReplacementSession:
+            def __init__(self, **kwargs):
+                replacement_instances.append(self)
+
+            def run_turn(self, user_input):
+                raise AssertionError("stopped retired turn must not be replayed")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            sdk_session_mod, "ClaudeAgentSdkSession", ReplacementSession
+        )
+        stopper = threading.Thread(
+            target=lambda: (close_entered.wait(2.0), setattr(agent, "_interrupt_requested", True), allow_close.set()),
+            daemon=True,
+        )
+        stopper.start()
+        try:
+            result = run_claude_agent_sdk_turn(
+                agent,
+                user_message="hi",
+                original_user_message="hi",
+                messages=[{"role": "user", "content": "hi"}],
+                effective_task_id="t",
+            )
+        finally:
+            allow_close.set()
+            stopper.join(timeout=2.0)
+            _close_promptly(old)
+        assert replacement_instances == []
+        assert result["interrupted"] is True
+        assert result["failed"] is False
+        assert agent._interrupt_requested is False
