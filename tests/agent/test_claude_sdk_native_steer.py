@@ -17,6 +17,7 @@ regress silently:
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import types
 
@@ -115,7 +116,7 @@ def test_empty_steer_rejected_before_any_routing():
 def _transport(turn_inbox, client=True, loop=True):
     from agent.transports import claude_agent_sdk_session as mod
 
-    queried: list[str] = []
+    queried: list[object] = []
     fake_client = types.SimpleNamespace(query=lambda t: queried.append(t))
     stub = types.SimpleNamespace(
         _turn_inbox=turn_inbox,
@@ -160,7 +161,16 @@ def test_transport_schedules_query_on_a_live_turn(monkeypatch):
     )
 
     assert mod.ClaudeAgentSdkSession.steer(stub, "  actually, stop  ") is True
-    assert queried == ["actually, stop"]
+    assert len(queried) == 1
+    async def collect(stream):
+        return [message async for message in stream]
+
+    assert asyncio.run(collect(queried[0])) == [{
+        "type": "user",
+        "message": {"role": "user", "content": "actually, stop"},
+        "parent_tool_use_id": None,
+        "origin": {"kind": "human"},
+    }]
     assert len(scheduled) == 1, "future must carry a done-callback so the "
     "exception is retrieved, not logged at teardown"
 
@@ -196,15 +206,22 @@ def test_mid_turn_steer_result_stays_owned_by_live_turn():
         return message
 
     class SteerClient(_FakeClient):
-        async def query(self, text):
-            self.queried.append(text)
-            if len(self.queried) == 1:
-                self._pending.append(StreamEvent(event={
-                    "type": "content_block_delta",
-                    "delta": {"type": "text_delta", "text": "working"},
-                }))
-                self._pending.append(result("original", "original-result"))
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                if len(self.queried) == 1:
+                    self._pending.append(StreamEvent(event={
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": "working"},
+                    }))
+                    self._pending.append(result("original", "original-result"))
+                else:
+                    self._pending.append(result(
+                        "steered", "steer-result", {"kind": "human"},
+                    ))
             else:
+                payload = [message async for message in prompt]
+                self.queried.append(payload)
                 self._pending.append(result(
                     "steered", "steer-result", {"kind": "human"},
                 ))
@@ -235,11 +252,148 @@ def test_mid_turn_steer_result_stays_owned_by_live_turn():
     finally:
         session.close()
 
-    assert holder["client"].queried == ["initial", "correct course"]
+    assert holder["client"].queried[0] == "initial"
+    assert holder["client"].queried[1] == [{
+        "type": "user",
+        "message": {"role": "user", "content": "correct course"},
+        "parent_tool_use_id": None,
+        "origin": {"kind": "human"},
+    }], "steers must use the SDK message stream with human origin"
     assert turn.final_text == "steered", "steer result must close the live host turn"
     assert turn.turn_id == "steer-result", "live accounting must use the steer result once"
     assert delivered == [], "steer result must not use unsolicited delivery"
     assert session._unsolicited_results == 0
+
+
+def test_two_steers_keep_foreground_ownership_until_both_results():
+    """Every accepted steer result belongs to the same host turn."""
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import ResultMessage, StreamEvent, _FakeClient
+
+    def result(text, uuid, origin=None):
+        message = ResultMessage(result=text, uuid=uuid)
+        message.origin = origin
+        return message
+
+    class TwoSteerClient(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                if len([item for item in self.queried if isinstance(item, str)]) == 1:
+                    self._pending.append(StreamEvent(event={
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": "working"},
+                    }))
+                    self._pending.append(result("original", "original-result"))
+                elif not any(isinstance(item, list) for item in self.queried):
+                    steer_number = len([
+                        item for item in self.queried if isinstance(item, str)
+                    ]) - 1
+                    self._pending.append(result(
+                        f"steer-{steer_number}", f"steer-{steer_number}-result",
+                        {"kind": "human"},
+                    ))
+                else:
+                    self._pending.append(result("next host answer", "next-result"))
+                return
+            payload = [message async for message in prompt]
+            self.queried.append(payload)
+            steer_number = len([item for item in self.queried if isinstance(item, list)])
+            self._pending.append(result(
+                f"steer-{steer_number}", f"steer-{steer_number}-result",
+                {"kind": "human"},
+            ))
+
+    holder = {}
+    sent = 0
+
+    def factory(options=None):
+        holder["client"] = TwoSteerClient(options=options)
+        return holder["client"]
+
+    def on_delta(_text):
+        nonlocal sent
+        if sent == 0:
+            sent = 1
+            assert session.steer("correction-1") is True
+            sent = 2
+            assert session.steer("correction-2") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=factory,
+        on_stream_delta=on_delta,
+    )
+    try:
+        turn = session.run_turn("initial")
+        next_turn = session.run_turn("next host question")
+    finally:
+        session.close()
+
+    assert turn.final_text == "steer-2", (
+        "the foreground turn must remain open until the second steer result"
+    )
+    assert turn.turn_id == "steer-2-result"
+    assert next_turn.final_text == "next host answer", (
+        "the following host turn must receive its own result"
+    )
+
+
+def test_steer_admitted_during_result_projection_remains_foreground_owned(monkeypatch):
+    """A steer admitted in the projection/commit gap stays in this turn."""
+    from agent.transports import claude_agent_sdk_session_turn as turn_module
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import ResultMessage, _FakeClient
+
+    def result(text, uuid, origin=None):
+        message = ResultMessage(result=text, uuid=uuid)
+        message.origin = origin
+        return message
+
+    class BarrierClient(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(result("original", "original-result"))
+            else:
+                self.queried.append([message async for message in prompt])
+                self._pending.append(result(
+                    "barrier steer", "barrier-result", {"kind": "human"},
+                ))
+
+    holder = {}
+
+    def factory(options=None):
+        holder["client"] = BarrierClient(options=options)
+        return holder["client"]
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=factory,
+    )
+    original_project = turn_module.ClaudeSdkTurnMixin._project_message_step
+    admitted = False
+
+    def project(projector, watch, message, out):
+        nonlocal admitted
+        projection = original_project(projector, watch, message, out)
+        if type(message).__name__ == "ResultMessage" and not admitted:
+            admitted = True
+            assert session.steer("during projection") is True
+        return projection
+
+    monkeypatch.setattr(
+        turn_module.ClaudeSdkTurnMixin,
+        "_project_message_step",
+        staticmethod(project),
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+
+    assert turn.final_text == "barrier steer", (
+        "a steer admitted during projection must stay owned by the live turn"
+    )
+    assert turn.turn_id == "barrier-result"
 
 
 def test_steer_after_terminal_result_is_not_claimed_by_next_turn():
