@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import Any, Callable, Optional
 
 from tools.process_registry import process_registry
@@ -49,6 +50,49 @@ def _tool_use_id(message: Any) -> str:
     return str(_value(message, "tool_use_id", "") or "")
 
 
+def _task_metadata(value: Any) -> tuple[str, str]:
+    """Find task identity/status in the SDK's versioned result envelopes."""
+    if isinstance(value, Mapping):
+        task_id = str(value.get("task_id") or value.get("taskId") or "")
+        status = str(value.get("status") or value.get("subtype") or "")
+        if task_id or status:
+            return task_id, status
+        for nested in value.values():
+            task_id, status = _task_metadata(nested)
+            if task_id or status:
+                return task_id, status
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            task_id, status = _task_metadata(nested)
+            if task_id or status:
+                return task_id, status
+    else:
+        task_id = str(_value(value, "task_id", "") or _value(value, "taskId", "") or "")
+        status = str(_value(value, "status", "") or _value(value, "subtype", "") or "")
+        if task_id or status:
+            return task_id, status
+    return "", ""
+
+
+def _result_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return str(value.get("output") or value.get("content") or value.get("message") or "")
+    return str(value or "")
+
+
+def _result_status(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value in {"complete", "completed", "success", "succeeded", "done"}:
+        return "completed"
+    if value in {"fail", "failed", "error"}:
+        return "failed"
+    if value in {"stop", "stopped", "killed", "cancelled", "canceled", "interrupted"}:
+        return "stopped"
+    return "running"
+
+
 def _observe_tool_use(message: Any, session_key: str, stop_task) -> None:
     if type(message).__name__ != "AssistantMessage":
         return
@@ -67,6 +111,33 @@ def _observe_tool_use(message: Any, session_key: str, stop_task) -> None:
             output_file=str(args.get("output_file") or ""),
             stop_task=stop_task,
         )
+
+
+def _observe_tool_result(message: Any, session_key: str) -> None:
+    if type(message).__name__ != "UserMessage":
+        return
+    envelope = _value(message, "tool_use_result", None)
+    for block in getattr(message, "content", None) or []:
+        if type(block).__name__ != "ToolResultBlock":
+            continue
+        tool_use_id = str(_value(block, "tool_use_id", "") or "")
+        if not tool_use_id:
+            continue
+        block_result = _value(block, "tool_use_result", None) or _value(block, "metadata", None)
+        metadata = block_result or envelope or _value(block, "content", None)
+        task_id, status = _task_metadata(metadata)
+        output = _result_text(_value(block, "content", ""))
+        if bool(_value(block, "is_error", False)):
+            process_registry.update_sdk_task(
+                session_key=session_key, tool_use_id=tool_use_id,
+                status="failed", output=output, exit_code=1,
+            )
+            continue
+        if task_id:
+            process_registry.update_sdk_task(
+                session_key=session_key, task_id=task_id, tool_use_id=tool_use_id,
+                status=_result_status(status), output=output,
+            )
 
 
 def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
@@ -143,7 +214,9 @@ def observe_sdk_message(message: Any, *, session_key: str, stop_task=None) -> No
         return
     callback = stop_task or _stop_task_callback(key)
     _observe_tool_use(message, key, callback)
+    _observe_tool_result(message, key)
     _observe_task_message(message, key, callback)
+    process_registry.prune_sdk_tasks()
 
 
 __all__ = ["observe_sdk_message", "register_sdk_session_control"]

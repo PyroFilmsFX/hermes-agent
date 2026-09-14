@@ -6,6 +6,7 @@ through ``ClaudeAgentSdkSession``'s MRO unchanged.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Callable, Optional
 
@@ -51,6 +52,9 @@ class ClaudeSdkNotifyMixin:
         if parent_tool_use_id:
             task_id = self._sdk_task_for_parent(parent_tool_use_id)
             if task_id:
+                record = self._sdk_subagent_tasks().get(task_id)
+                if record is not None:
+                    record["streamed_text"] = str(record.get("streamed_text") or "") + str(text)
                 self._emit_sdk_subagent(
                     "subagent.text", task_id, "Agent", str(text), None,
                     parent_tool_id=parent_tool_use_id,
@@ -109,7 +113,6 @@ class ClaudeSdkNotifyMixin:
     def _notify_tool_started(self, message: Any) -> None:
         """Bridge ToolUseBlocks to Hermes tool-progress (gateway breadcrumbs),
         mirroring codex_runtime._codex_note_to_tool_progress (#38835)."""
-        self._notify_task_message(message)
         self._notify_child_text(message)
         if type(message).__name__ != "AssistantMessage":
             return
@@ -140,16 +143,6 @@ class ClaudeSdkNotifyMixin:
     def _notify_tool_use(self, message: Any) -> None:
         """Open a stable-id tool card per top-level ToolUseBlock. Subagent
         streams (parent_tool_use_id set) stay quiet, like the deltas."""
-        from agent.transports.claude_sdk_background_tasks import observe_sdk_message
-
-        observe_sdk_message(
-            message,
-            session_key=(
-                getattr(self, "_sdk_registry_session_key", "")
-                or getattr(self, "_hermes_session_id", "")
-                or ""
-            ),
-        )
         if type(message).__name__ != "AssistantMessage":
             return
         if getattr(message, "parent_tool_use_id", None):
@@ -395,6 +388,48 @@ class ClaudeSdkNotifyMixin:
         )
         tasks.pop(task_id, None)
 
+    def _observe_sdk_lifecycle(self, message: Any) -> None:
+        """Observe every SDK message before turn-specific interrupt gates."""
+        from agent.transports.claude_sdk_background_tasks import observe_sdk_message
+
+        observe_sdk_message(
+            message,
+            session_key=(
+                getattr(self, "_sdk_registry_session_key", "")
+                or getattr(self, "_hermes_session_id", "")
+                or ""
+            ),
+            stop_task=getattr(self, "stop_task", None),
+        )
+        self._notify_task_message(message)
+
+    def _finalize_sdk_tasks(self, status: str = "interrupted") -> None:
+        """Finish each locally live SDK task exactly once at stream teardown."""
+        tasks = self._sdk_subagent_tasks()
+        from tools import delegate_tool_registry
+        from tools.process_registry import process_registry
+
+        session_key = (
+            getattr(self, "_sdk_registry_session_key", "")
+            or getattr(self, "_hermes_session_id", "")
+            or ""
+        )
+        for task_id, record in list(tasks.items()):
+            tasks.pop(task_id, None)
+            self._emit_sdk_subagent(
+                "subagent.complete", task_id, "Agent",
+                str(record.get("goal") or ""), None,
+                parent_tool_id=record.get("parent_tool_id"),
+                status=status,
+            )
+            with contextlib.suppress(Exception):
+                delegate_tool_registry.update_sdk_subagent(
+                    "subagent.complete", task_id=task_id, status=status,
+                )
+        if session_key:
+            with contextlib.suppress(Exception):
+                process_registry.finalize_sdk_tasks(session_key, status="stopped")
+
     @staticmethod
     def _sdk_terminal_status(status: Any) -> bool:
         return str(status or "").strip().lower() in {
@@ -421,11 +456,22 @@ class ClaudeSdkNotifyMixin:
         task_id = self._sdk_task_for_parent(parent_tool_id)
         if not task_id:
             return
+        record = self._sdk_subagent_tasks().get(task_id)
+        if record is None:
+            return
         for block in getattr(message, "content", None) or []:
             if type(block).__name__ != "TextBlock":
                 continue
             text = str(getattr(block, "text", "") or "")
             if text:
+                streamed = str(record.get("streamed_text") or "")
+                record.pop("streamed_text", None)
+                if streamed == text:
+                    continue
+                if streamed and text.startswith(streamed):
+                    text = text[len(streamed):]
+                if not text:
+                    continue
                 self._emit_sdk_subagent(
                     "subagent.text", task_id, "Agent", text, None,
                     parent_tool_id=parent_tool_id,
