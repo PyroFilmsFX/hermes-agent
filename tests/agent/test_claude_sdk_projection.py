@@ -105,6 +105,7 @@ class TestProjector:
             )
         )
         assert out.messages[0]["content"] == "[error] boom"
+        assert out.messages[0]["is_error"] is True
 
     def test_tool_result_truncation(self):
         p = ClaudeSdkEventProjector()
@@ -113,7 +114,15 @@ class TestProjector:
                 content=[ToolResultBlock(tool_use_id="t3", content="x" * 9000)]
             )
         )
-        assert len(out.messages[0]["content"]) == 4000
+        assert out.messages[0]["content"] == (
+            "x" * 4000 + "… [truncated: 5000 more chars]"
+        )
+
+    def test_plain_text_result_is_preserved_verbatim(self):
+        p = ClaudeSdkEventProjector()
+        text = "not json, and punctuation stays: {ok}"
+        out = p.project(UserMessage(content=[ToolResultBlock(tool_use_id="t4", content=text)]))
+        assert out.messages[0]["content"] == text
 
     def test_result_message_sets_final_text(self):
         p = ClaudeSdkEventProjector()

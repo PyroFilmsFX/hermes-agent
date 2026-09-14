@@ -488,3 +488,144 @@ describe('buildToolView memory status', () => {
     expect(view.subtitle).toContain('Memory is full')
   })
 })
+
+describe('buildToolView fidelity contract (U3.4)', () => {
+  it('renders plain-text result preserved under output', () => {
+    const stdout = 'total 4\n-rw-r--r-- 1 user staff 12 Sep 13 21:00 hello.txt'
+    const view = buildToolView(part({ result: { output: stdout }, toolName: 'terminal' }), '')
+
+    expect(view.detail).toContain(stdout)
+    expect(view.status).toBe('success')
+  })
+
+  it('renders array result preserved under output', () => {
+    const items = ['first element', 'second element']
+    const view = buildToolView(part({ result: { output: items }, toolName: 'list_items' }), '')
+
+    expect(view.detail).toContain('- first element')
+    expect(view.detail).toContain('- second element')
+    expect(view.status).toBe('success')
+  })
+
+  it('shows result text as error text when isError is true without error field', () => {
+    const errorMsg = 'command failed: permission denied'
+
+    const view = buildToolView(
+      part({
+        isError: true,
+        result: { output: errorMsg },
+        toolName: 'terminal'
+      }),
+      ''
+    )
+
+    expect(view.status).toBe('error')
+    expect(view.subtitle).toBe(errorMsg)
+    expect(view.detail).toContain(errorMsg)
+  })
+
+  it('computes truncated label correctly when truncated payload is present', () => {
+    const view = buildToolView(
+      part({
+        result: {
+          output: 'truncated bash output',
+          truncated: { shown: 50, total: 120 }
+        },
+        toolName: 'terminal'
+      }),
+      ''
+    )
+
+    expect(view.truncatedLabel).toBe('… 70 more chars')
+  })
+
+  it('leaves JSON object result unchanged as regression guard', () => {
+    const view = buildToolView(
+      part({
+        result: {
+          exit_code: 0,
+          output: 'finished ok',
+          success: true
+        },
+        toolName: 'terminal'
+      }),
+      ''
+    )
+
+    expect(view.status).toBe('success')
+    expect(view.detail).toBe('finished ok')
+    expect(view.truncatedLabel).toBeUndefined()
+  })
+})
+describe('buildToolView Agent / Task tool card labels', () => {
+  it('uses args.description for Agent tool card label', () => {
+    const view = buildToolView(
+      part({
+        args: { description: 'Search codebase for login bug', prompt: 'look for login' },
+        result: undefined,
+        toolName: 'Agent'
+      }),
+      ''
+    )
+
+    expect(view.title).toBe('Search codebase for login bug')
+  })
+
+  it('falls back to args.subagent_type when description is missing', () => {
+    const view = buildToolView(
+      part({
+        args: { prompt: 'look for login', subagent_type: 'researcher' },
+        result: undefined,
+        toolName: 'Agent'
+      }),
+      ''
+    )
+
+    expect(view.title).toBe('researcher')
+  })
+
+  it('falls back to generic label when both description and subagent_type are missing', () => {
+    const running = buildToolView(part({ args: {}, result: undefined, toolName: 'Agent' }), '')
+
+    expect(running.title).toBe('Running agent')
+
+    const settled = buildToolView(part({ args: {}, result: { ok: true }, toolName: 'Agent' }), '')
+
+    expect(settled.title).toBe('Agent')
+  })
+
+  it('handles normalized and mcp__hermes-*__ prefixed names for Agent and Task', () => {
+    const prefixedAgent = buildToolView(
+      part({
+        args: { description: 'Prefixed agent task' },
+        result: undefined,
+        toolName: 'mcp__hermes-agent__Agent'
+      }),
+      ''
+    )
+
+    expect(prefixedAgent.title).toBe('Prefixed agent task')
+
+    const taskWithDesc = buildToolView(
+      part({
+        args: { description: 'Legacy CLI task' },
+        result: undefined,
+        toolName: 'Task'
+      }),
+      ''
+    )
+
+    expect(taskWithDesc.title).toBe('Legacy CLI task')
+
+    const prefixedTask = buildToolView(
+      part({
+        args: { subagent_type: 'worker' },
+        result: undefined,
+        toolName: 'mcp__hermes-tools__Task'
+      }),
+      ''
+    )
+
+    expect(prefixedTask.title).toBe('worker')
+  })
+})

@@ -302,7 +302,7 @@ const COUNT_FIELD_KEYS = [
 
 const COUNT_ARRAY_KEYS = ['results', 'items', 'matches', 'files', 'documents', 'sources', 'rows'] as const
 
-const COUNT_EXCLUDED_KEYS = new Set(['duration_s', 'exit_code', 'status_code'])
+const COUNT_EXCLUDED_KEYS = new Set(['duration_s', 'exit_code', 'status_code', 'tool_use_result', 'truncated'])
 
 const COUNT_NOUN_BY_FIELD: Partial<Record<(typeof COUNT_FIELD_KEYS)[number], string>> = {
   count: '',
@@ -657,7 +657,14 @@ function toolErrorText(part: ToolPart, result: Record<string, unknown>): string 
   const extractedError = extractToolErrorMessage(part.result)
 
   if (part.isError) {
-    return extractedError || (typeof part.result === 'string' && part.result.trim()) || 'Tool returned an error.'
+    return (
+      extractedError ||
+      (typeof result.error === 'string' && result.error.trim()) ||
+      (typeof result.output === 'string' && result.output.trim()) ||
+      (typeof part.result === 'string' && part.result.trim()) ||
+      firstStringField(result, ['message', 'reason', 'detail']) ||
+      'Tool returned an error.'
+    )
   }
 
   if (typeof result.error === 'string' && result.error.trim()) {
@@ -724,6 +731,22 @@ function durationLabel(resultRecord: Record<string, unknown>): string | undefine
   }
 
   return formatDurationSeconds(seconds)
+}
+
+function truncatedLabel(resultRecord: Record<string, unknown>): string | undefined {
+  const truncated = resultRecord.truncated
+
+  if (truncated && typeof truncated === 'object' && !Array.isArray(truncated)) {
+    const t = truncated as { shown?: unknown; total?: unknown }
+    const total = numberValue(t.total)
+    const shown = numberValue(t.shown)
+
+    if (total !== null && shown !== null && total > shown) {
+      return `… ${total - shown} more chars`
+    }
+  }
+
+  return undefined
 }
 
 function toolPreviewTarget(toolName: string, args: Record<string, unknown>, result: Record<string, unknown>): string {
@@ -1406,6 +1429,29 @@ function dynamicTitle(
     }
   }
 
+  const normalizedToolName = part.toolName.replace(/^mcp__hermes.*?__/, '')
+
+  if (
+    normalizedToolName === 'Agent' ||
+    normalizedToolName === 'Task' ||
+    normalizedToolName.toLowerCase() === 'agent' ||
+    normalizedToolName.toLowerCase() === 'task'
+  ) {
+    const description = typeof args.description === 'string' ? args.description.trim() : ''
+
+    if (description) {
+      return { title: description }
+    }
+
+    const subagentType = typeof args.subagent_type === 'string' ? args.subagent_type.trim() : ''
+
+    if (subagentType) {
+      return { title: subagentType }
+    }
+
+    return fallback
+  }
+
   return fallback
 }
 
@@ -1497,6 +1543,7 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     subtitle,
     title,
     titleAction: titleParts.action,
-    tone: meta.tone
+    tone: meta.tone,
+    truncatedLabel: truncatedLabel(resultRecord)
   }
 }

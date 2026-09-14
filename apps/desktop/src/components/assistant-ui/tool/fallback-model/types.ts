@@ -61,6 +61,7 @@ export interface ToolView {
   title: string
   titleAction?: ToolTitleAction
   tone: ToolTone
+  truncatedLabel?: string
 }
 
 export interface ToolMeta {

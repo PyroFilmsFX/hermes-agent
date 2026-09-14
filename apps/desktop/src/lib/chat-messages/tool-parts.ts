@@ -46,6 +46,42 @@ function parseMaybeJsonObject(value: unknown): Record<string, unknown> {
   }
 }
 
+interface ToolPayloadContract extends GatewayEventPayload {
+  is_error?: boolean
+  truncated?: { shown: number; total: number }
+  tool_use_result?: Record<string, unknown>
+}
+
+function parseToolResultPayload(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object') {
+    if (Array.isArray(value)) {
+      return { output: value }
+    }
+
+    return value as Record<string, unknown>
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(value)
+
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>
+        }
+      } catch {
+        // Fall through to non-JSON string
+      }
+    }
+
+    return { output: value }
+  }
+
+  return {}
+}
+
 function firstNonEmptyObject(...values: unknown[]): Record<string, unknown> {
   for (const value of values) {
     const parsed = parseMaybeJsonObject(value)
@@ -264,12 +300,26 @@ function toolArgs(payload: GatewayEventPayload | undefined, prevArgs?: unknown):
   }
 }
 
-function toolResult(
+export function toolResult(
   payload: GatewayEventPayload | undefined,
   prevResult?: unknown,
   prevArgs?: unknown
 ): Record<string, unknown> {
-  const parsedResult = parseMaybeJsonObject(payload?.result)
+  const parsedResult = parseToolResultPayload(payload?.result)
+  const payloadExtended = payload as ToolPayloadContract | undefined
+  const isError = Boolean(payload?.error) || payloadExtended?.is_error === true
+  const rawError = typeof payload?.error === 'string' ? payload.error.trim() : ''
+
+  const errorFallback =
+    isError && !rawError
+      ? typeof payload?.result === 'string' && payload.result.trim()
+        ? payload.result.trim()
+        : typeof parsedResult.output === 'string' && parsedResult.output.trim()
+          ? parsedResult.output.trim()
+          : typeof parsedResult.message === 'string' && parsedResult.message.trim()
+            ? parsedResult.message.trim()
+            : undefined
+      : undefined
 
   return {
     ...parsedResult,
@@ -279,7 +329,10 @@ function toolResult(
     ...(payload?.preview ? { preview: payload.preview } : {}),
     ...(payload?.duration_s !== undefined ? { duration_s: payload.duration_s } : {}),
     ...carryTodos(payload, prevResult, prevArgs),
-    ...(payload?.error ? { error: payload.error } : {})
+    ...(payload?.error ? { error: payload.error } : {}),
+    ...(errorFallback ? { error: errorFallback } : {}),
+    ...(payloadExtended?.truncated ? { truncated: payloadExtended.truncated } : {}),
+    ...(payloadExtended?.tool_use_result !== undefined ? { tool_use_result: payloadExtended.tool_use_result } : {})
   }
 }
 
@@ -331,7 +384,7 @@ export function upsertToolPart(
     ...(phase === 'complete' && {
       completedAt: occurredAt,
       result: toolResult(payload, prevResult, prevArgs),
-      isError: Boolean(payload?.error)
+      isError: Boolean(payload?.error) || (payload as ToolPayloadContract | undefined)?.is_error === true
     })
   } satisfies ChatMessagePart
 
