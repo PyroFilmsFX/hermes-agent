@@ -43,7 +43,7 @@ def _flatten_tool_result_content(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return content[:_TOOL_RESULT_MAX_CHARS]
+        return content
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -57,8 +57,18 @@ def _flatten_tool_result_content(content: Any) -> str:
                         parts.append(repr(item))
             elif item is not None:
                 parts.append(str(item))
-        return "\n".join(parts)[:_TOOL_RESULT_MAX_CHARS]
-    return str(content)[:_TOOL_RESULT_MAX_CHARS]
+        return "\n".join(parts)
+    return str(content)
+
+
+def _transcript_tool_result_text(text: str) -> str:
+    """Keep the transcript bounded while naming exactly what was omitted."""
+    if len(text) <= _TOOL_RESULT_MAX_CHARS:
+        return text
+    return (
+        text[:_TOOL_RESULT_MAX_CHARS]
+        + f"… [truncated: {len(text) - _TOOL_RESULT_MAX_CHARS} more chars]"
+    )
 
 
 def _format_tool_args(d: Any) -> str:
@@ -180,16 +190,20 @@ class ClaudeSdkEventProjector:
         for block in content or []:
             if _sdk_type_name(block) != "ToolResultBlock":
                 continue
-            text = _flatten_tool_result_content(getattr(block, "content", None))
-            if getattr(block, "is_error", False):
-                text = f"[error] {text}" if text else "[error]"
-            out.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": getattr(block, "tool_use_id", "") or "",
-                    "content": text,
-                }
+            is_error = bool(getattr(block, "is_error", False))
+            text = _transcript_tool_result_text(
+                _flatten_tool_result_content(getattr(block, "content", None))
             )
+            if is_error:
+                text = f"[error] {text}" if text else "[error]"
+            row = {
+                "role": "tool",
+                "tool_call_id": getattr(block, "tool_use_id", "") or "",
+                "content": text,
+            }
+            if is_error:
+                row["is_error"] = True
+            out.append(row)
             tool_iteration = True
         return ProjectionResult(messages=out, is_tool_iteration=tool_iteration)
 

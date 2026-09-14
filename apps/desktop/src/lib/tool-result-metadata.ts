@@ -8,6 +8,10 @@ export interface ToolResultMetadata {
   preview?: string
   summary?: string
   todos?: unknown
+  /** SDK lane: the live result was capped; the card labels the omitted count. */
+  truncated?: { shown: number; total: number }
+  /** SDK lane: ToolResultBlock / tool_use_result metadata passthrough. */
+  tool_use_result?: unknown
 }
 
 export interface ToolResultSource {

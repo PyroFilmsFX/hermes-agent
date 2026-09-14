@@ -51,6 +51,12 @@ from agent.transports.claude_agent_sdk_session_watchdog import (
 logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 
 
+def _is_human_origin(message: Any) -> bool:
+    """Return whether the SDK attributed a result to an application query."""
+    origin = getattr(message, "origin", None)
+    return isinstance(origin, dict) and origin.get("kind") == "human"
+
+
 def _clear_unsolicited_projection(session: Any) -> None:
     """Discard the current unsolicited burst's text and structured projections."""
     session._unsolicited_text.clear()
@@ -836,10 +842,28 @@ class ClaudeSdkTurnMixin:
                     if not interrupted and not billing_guarded:
                         self._forward_stream_delta(message)
                     continue
+                if type(message).__name__ == "ResultMessage":
+                    # A steer is a second query on the same SDK stream. Its
+                    # human-origin terminal result owns the live Hermes turn;
+                    # the prior query's un-attributed terminal result must not
+                    # close that turn first.
+                    with self._interrupt_commit_lock:
+                        pending_steer = getattr(self, "_pending_steer_results", 0)
+                        is_steer_result = pending_steer > 0 and _is_human_origin(message)
+                        if is_steer_result:
+                            self._pending_steer_results = pending_steer - 1
+                    if pending_steer > 0 and not is_steer_result:
+                        continue
                 self._note_mcp_tool_use(message, out)
-                if not interrupted and not billing_guarded:
-                    self._notify_tool_started(message)
-                    self._notify_interim_assistant(message)
+                if not billing_guarded:
+                    if not interrupted:
+                        self._notify_tool_started(message)
+                        self._notify_tool_use(message)
+                    # Results must still close cards while the interrupted turn
+                    # drains to its terminal ResultMessage.
+                    self._notify_tool_results(message)
+                    if not interrupted:
+                        self._notify_interim_assistant(message)
                 projection, _result_is_error, _result_is_contradictory_success = (
                     self._project_message_step(projector, watch, message, out)
                 )
@@ -1236,6 +1260,25 @@ class ClaudeSdkTurnMixin:
         if sid:
             self._session_id = sid
         name = type(message).__name__
+        if name == "ResultMessage" and _is_human_origin(message):
+            # Human-origin results answer a query submitted by this host (most
+            # commonly a steer). If ownership was released before the result
+            # arrived, it is late, not a background task result. Clear any
+            # preceding projection so it cannot be joined to the next burst.
+            _clear_unsolicited_projection(self)
+            logger.debug(
+                "claude-agent-sdk: ignored late human-origin ResultMessage %s",
+                getattr(message, "uuid", None),
+            )
+            return
+        self._notify_task_message(message)
+        if name == "StreamEvent":
+            self._forward_stream_delta(message)
+        if name == "AssistantMessage":
+            # CLI-initiated Agent work has no foreground turn, but its child
+            # tool/text activity still belongs on the existing subagent feed.
+            self._notify_tool_started(message)
+            self._notify_tool_use(message)
         if name == "ResultMessage":
             self._unsolicited_results += 1
         if getattr(message, "parent_tool_use_id", None):

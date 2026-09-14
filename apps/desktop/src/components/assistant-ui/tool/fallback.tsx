@@ -470,6 +470,7 @@ function ToolEntry({ part }: ToolEntryProps) {
     view.stderr ||
     view.terminalCommand ||
     view.terminalExitCode !== undefined ||
+    view.truncatedLabel ||
     toolViewMode === 'technical'
   )
 
@@ -714,6 +715,9 @@ function ToolEntry({ part }: ToolEntryProps) {
                 )}
               </div>
             ))}
+          {view.truncatedLabel && (
+            <p className="text-[0.7rem] text-(--ui-text-tertiary)">{view.truncatedLabel}</p>
+          )}
           {toolViewMode === 'technical' && <ToolPayloadDisclosure args={part.args} result={part.result} />}
         </div>
       )}
