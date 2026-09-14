@@ -743,6 +743,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             interrupt_event = getattr(self, "_interrupt_event", None)
             if interrupt_event is not None:
                 interrupt_event.clear()
+        self._finalize_sdk_tasks()
         # Cancel the reader BEFORE disconnect so it unwinds on a live stream
         # instead of raising against a torn-down one.
         reader_task = getattr(self, "_reader_task", None)
@@ -945,22 +946,6 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             "claude-agent-sdk: steered live turn via streaming input (%d chars)",
             len(cleaned),
         )
-        return True
-
-    def stop_task(self, task_id: str) -> bool:
-        """Ask the SDK to stop one Agent task on its owning loop thread."""
-        task_id = str(task_id or "").strip()
-        client, loop = self._client, self._loop
-        if not task_id or client is None or loop is None:
-            return False
-        stop = getattr(client, "stop_task", None)
-        if not callable(stop):
-            return False
-        try:
-            self._run_coro(stop(task_id), timeout=10.0)
-        except Exception:
-            logger.debug("SDK stop_task(%s) failed", task_id, exc_info=True)
-            return False
         return True
 
     def build_option_fields(self) -> dict[str, Any]:

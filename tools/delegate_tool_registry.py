@@ -32,6 +32,7 @@ def _register_sdk_subagent(
     goal: str,
     sdk_session: Any,
     owner_session_id: Optional[str],
+    owner_agent_session_id: Optional[str],
     owner_agent: Any,
     parent_tool_id: Optional[str] = None,
     child_session_id: Optional[str] = None,
@@ -56,7 +57,7 @@ def _register_sdk_subagent(
         "agent": None,
         "sdk_session": sdk_session,
         "owner_agent": owner_agent,
-        "owner_agent_session_id": owner_session_id,
+        "owner_agent_session_id": owner_agent_session_id or owner_session_id,
         "owner_session_id": owner_session_id,
         "owner_transport": owner_transport,
         "owner_session_record": owner_session_record,
@@ -72,6 +73,7 @@ def update_sdk_subagent(
     goal: str = "",
     sdk_session: Any = None,
     owner_session_id: Optional[str] = None,
+    owner_agent_session_id: Optional[str] = None,
     owner_agent: Any = None,
     parent_tool_id: Optional[str] = None,
     child_session_id: Optional[str] = None,
@@ -126,6 +128,7 @@ def update_sdk_subagent(
             goal=goal,
             sdk_session=sdk_session,
             owner_session_id=owner_session_id,
+            owner_agent_session_id=owner_agent_session_id,
             owner_agent=owner_agent,
             parent_tool_id=parent_tool_id,
             child_session_id=child_session_id,
@@ -158,6 +161,12 @@ def _register_subagent(record: Dict[str, Any]) -> None:
     if not sid:
         return
     record.setdefault("accepting_steer", True)
+    # Progress relays historically imported this mapping by reference. Keep
+    # that reference aligned when a test or host rebinds the registry object.
+    import sys
+    progress_module = sys.modules.get("tools.delegate_tool_progress")
+    if progress_module is not None:
+        progress_module._active_subagents = _active_subagents
     with _active_subagents_lock:
         _active_subagents[sid] = record
 

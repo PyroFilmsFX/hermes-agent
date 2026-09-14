@@ -244,12 +244,23 @@ def _on_sdk_subagent_event(agent, event_type: str, tool_name: str = "", preview:
     from tools.delegate_tool_registry import update_sdk_subagent
 
     session = getattr(agent, "_claude_sdk_session", None)
+    live_session_id = str(getattr(agent, "_tui_gateway_runtime_sid", None) or "")
+    if not live_session_id:
+        try:
+            from gateway.session_context import get_session_env
+            live_session_id = str(get_session_env("HERMES_UI_SESSION_ID", "") or "")
+        except Exception:
+            live_session_id = ""
+    if live_session_id:
+        agent._tui_gateway_runtime_sid = live_session_id
+    owner_agent_session_id = getattr(agent, "session_id", None)
     update_sdk_subagent(
         event_type,
         task_id=str(kwargs.get("subagent_id") or ""),
         goal=str(kwargs.get("goal") or ""),
         sdk_session=session,
-        owner_session_id=getattr(agent, "session_id", None),
+        owner_session_id=live_session_id or owner_agent_session_id,
+        owner_agent_session_id=owner_agent_session_id,
         owner_agent=agent,
         parent_tool_id=kwargs.get("parent_tool_id"),
         child_session_id=kwargs.get("child_session_id"),
@@ -550,6 +561,13 @@ def _create_session(
     effective_child_env = dict(os.environ)
     effective_child_env.update(_sdk_env_overrides(task_list_id=task_list_id))
     task_store_root = _resolve_sdk_task_store_root(cwd, effective_child_env)
+    try:
+        from gateway.session_context import get_session_env
+        runtime_sid = str(get_session_env("HERMES_UI_SESSION_ID", "") or "")
+    except Exception:
+        runtime_sid = ""
+    if runtime_sid:
+        agent._tui_gateway_runtime_sid = runtime_sid
     agent._claude_sdk_task_list_id = task_list_id
     agent._claude_sdk_task_config_dir = task_config_dir
     agent._claude_sdk_task_store_root = str(task_store_root)

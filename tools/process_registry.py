@@ -75,6 +75,9 @@ WATCH_LIFETIME_MAX_HITS = 8
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
 WATCH_GLOBAL_WINDOW_SECONDS = 10
 WATCH_GLOBAL_COOLDOWN_SECONDS = 30
+# A Bash ``run_in_background`` record is provisional until the SDK supplies its
+# TaskStarted identity.  Do not retain an unkillable empty-id record forever.
+SDK_PROVISIONAL_GRACE_SECONDS = 30
 
 
 # --- systemd cgroup isolation for gateway-spawned local executors ------------------
@@ -1629,6 +1632,37 @@ class ProcessRegistry(ProcessCheckpointMixin):
             self._move_to_finished(session)
         return session
 
+    def prune_sdk_tasks(self, *, now: Optional[float] = None) -> int:
+        """Drop provisional SDK records that never received a TaskStarted id."""
+        current = time.time() if now is None else now
+        with self._lock:
+            expired = [
+                sid for sid, session in self._running.items()
+                if session.sdk_owned and not session.sdk_task_id
+                and current - session.started_at > SDK_PROVISIONAL_GRACE_SECONDS
+            ]
+            for sid in expired:
+                self._running.pop(sid, None)
+        return len(expired)
+
+    def finalize_sdk_tasks(self, session_key: str, *, status: str = "stopped") -> int:
+        """Finish all SDK process records for a session, including provisional ones."""
+        with self._lock:
+            sessions = [
+                session for session in self._running.values()
+                if session.sdk_owned and session.session_key == str(session_key or "")
+            ]
+        finished = 0
+        for session in sessions:
+            if self.update_sdk_task(
+                session_key=session_key,
+                task_id=session.sdk_task_id,
+                tool_use_id=session.sdk_tool_use_id,
+                status=status,
+            ) is not None:
+                finished += 1
+        return finished
+
     def _resolve_prefix(self, session_id: str) -> Optional[ProcessSession]:
         """Resolve a unique session-ID prefix (a bare hex tail is normalized to
         ``proc_<tail>``); :meth:`get` tries exact first."""
@@ -2025,6 +2059,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         surfaced too, even if they belong to a different task — so the agent can discover a forgotten
         preview server that is blocking session reset (#29177).
         """
+        self.prune_sdk_tasks()
         # Only an explicit tool query reads historical receipts. Status bars and
         # gateway liveness scans call this frequently and need the live registry.
         sessions = load_completed_results() if include_retained else {}
