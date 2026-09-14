@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
+import { apiErrorFromEnvelope, isApiErrorEnvelope } from './api-error-envelope'
+
 // Which translucency the OS can back. Asked synchronously because the renderer
 // needs it before its first paint, and answered by main because deciding it
 // needs `os.release()` — a sandboxed preload may only require electron, events,
@@ -258,7 +260,17 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     remember: name => ipcRenderer.invoke('hermes:profile:remember', name),
     set: name => ipcRenderer.invoke('hermes:profile:set', name)
   },
-  api: request => ipcRenderer.invoke('hermes:api', request),
+  // Expected failures (404 for a session the renderer still polls) arrive as a
+  // resolved envelope so the main process stops logging a stack for each one;
+  // rebuild the identical rejection here. See electron/api-error-envelope.ts.
+  api: async request => {
+    const result = await ipcRenderer.invoke('hermes:api', request)
+    if (isApiErrorEnvelope(result)) {
+      throw apiErrorFromEnvelope(result)
+    }
+
+    return result
+  },
   notify: payload => ipcRenderer.invoke('hermes:notify', payload),
   requestMicrophoneAccess: () => ipcRenderer.invoke('hermes:requestMicrophoneAccess'),
   readWindowBelow: () => ipcRenderer.invoke('hermes:window:readBelow'),

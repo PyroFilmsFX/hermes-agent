@@ -1750,3 +1750,151 @@ class TestSessionRotation:
         assert result["interrupted"] is True
         assert result["failed"] is False
         assert agent._interrupt_requested is False
+
+
+class TestModelSwitchRotation:
+    """A model switch must reach the CLI.
+
+    The CLI binds ``--model`` at process start. Before this, switching a live
+    session's model changed only ``agent.model``: the running CLI kept serving
+    the OLD model, so every later turn — Retry included — stayed on it and kept
+    hitting that model's rate limit. Observed 2026-09-14: a session switched to
+    Opus answered "You've reached your Fable limit" indefinitely.
+    """
+
+    @staticmethod
+    def _live(model):
+        live = MagicMock()
+        live._model = model
+        live._session_id = "sdk-live"
+        live._turn_inbox = None
+        live._turn_claim_requested = False
+        return live
+
+    def _agent_with(self, bound_model, current_model):
+        agent = _make_agent()
+        agent.model = current_model
+        agent._claude_sdk_session = self._live(bound_model)
+        return agent
+
+    def test_switching_the_model_rotates_the_live_session(self):
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        agent = self._agent_with("claude-fable-5-1", "claude-opus-5")
+        assert rotate_claude_sdk_session_on_model_change(agent) is True
+        # Rotation clears the slot so the next turn rebuilds with --model opus.
+        assert getattr(agent, "_claude_sdk_session", None) is None
+
+    def test_same_model_does_not_rotate(self):
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        agent = self._agent_with("claude-opus-5", "claude-opus-5")
+        assert rotate_claude_sdk_session_on_model_change(agent) is False
+        assert agent._claude_sdk_session is not None
+
+    def test_unset_agent_model_is_not_drift(self):
+        """An empty model means "follow the CLI default"; a momentarily unset
+        value must never churn the process."""
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        for empty in (None, "", "   "):
+            agent = self._agent_with("claude-fable-5-1", empty)
+            assert rotate_claude_sdk_session_on_model_change(agent) is False
+            assert agent._claude_sdk_session is not None
+
+    def test_an_unreadable_model_value_is_never_drift(self):
+        """A stand-in (MagicMock, sentinel) stringifies uniquely per object, so
+        coercing with str() read two doubles as a switch and rotated the CLI on
+        every turn — it broke three reuse tests before the isinstance guard."""
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        # Unreadable on the agent side.
+        agent = self._agent_with("claude-fable-5-1", MagicMock())
+        assert rotate_claude_sdk_session_on_model_change(agent) is False
+        assert agent._claude_sdk_session is not None
+
+        # Unreadable on the live-session side.
+        agent = self._agent_with(MagicMock(), "claude-opus-5")
+        assert rotate_claude_sdk_session_on_model_change(agent) is False
+        assert agent._claude_sdk_session is not None
+
+        # A session pinned to no model at all still rotates to an explicit one.
+        agent = self._agent_with(None, "claude-opus-5")
+        assert rotate_claude_sdk_session_on_model_change(agent) is True
+
+    def test_no_live_session_is_a_noop(self):
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        agent = _make_agent()
+        agent.model = "claude-opus-5"
+        agent._claude_sdk_session = None
+        assert rotate_claude_sdk_session_on_model_change(agent) is False
+
+    def test_a_busy_session_defers_instead_of_killing_the_turn(self):
+        """Same safety as the rename rotation: a turn owning the stream is never
+        closed under; the rebuild happens at the next turn boundary."""
+        from agent.claude_sdk_runtime_continuity import (
+            rotate_claude_sdk_session_on_model_change,
+        )
+
+        agent = self._agent_with("claude-fable-5-1", "claude-opus-5")
+        agent._claude_sdk_session._turn_inbox = object()
+        assert rotate_claude_sdk_session_on_model_change(agent) is False
+        assert agent._claude_sdk_session is not None
+        assert agent._claude_sdk_rename_pending is True
+
+    def test_turn_after_a_switch_rebuilds_the_cli_with_the_new_model(self, monkeypatch):
+        """End-to-end through run_claude_agent_sdk_turn: the rebuilt session is
+        constructed with the model the operator switched to."""
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+
+        built = []
+
+        class _CapturingSession:
+            def __init__(self, **kwargs):
+                built.append(kwargs.get("model"))
+                self._model = kwargs.get("model")
+                self._turn_inbox = None
+                self._turn_claim_requested = False
+                self._cwd = kwargs.get("cwd")
+
+            def run_turn(self, user_input):
+                return _make_turn(projected_messages=[], final_text="ok")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(sdk_session_mod, "ClaudeAgentSdkSession", _CapturingSession)
+
+        agent = _make_agent()
+        agent.model = "claude-fable-5-1"
+        agent._claude_sdk_session = None
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="first",
+            original_user_message="first",
+            messages=[{"role": "user", "content": "first"}],
+            effective_task_id="task-1",
+        )
+        assert built == ["claude-fable-5-1"]
+
+        # Operator switches models mid-session; the live CLI is still Fable.
+        agent.model = "claude-opus-5"
+        run_claude_agent_sdk_turn(
+            agent,
+            user_message="second",
+            original_user_message="second",
+            messages=[{"role": "user", "content": "second"}],
+            effective_task_id="task-2",
+        )
+        assert built == ["claude-fable-5-1", "claude-opus-5"]
