@@ -169,3 +169,24 @@ class TestCompletionEntries:
         monkeypatch.setattr(M, "configured_plugin_roots", lambda: [str(root)])
         assert M.sdk_slash_names("anthropic") == set()
         assert M.sdk_slash_names("claude-agent-sdk") == {"tb-ship", "conductor:tb-ship"}
+
+    def test_merged_adds_live_sdk_names_and_preserves_precedence(self, monkeypatch, isolated):
+        """Live SDK commands appear on SDK lane; built-ins win on collision; off-lane unchanged."""
+        base = {"/help": {"name": "help", "description": "hermes help"}}
+        live = ["live-only-cmd", "help", "plan"]
+
+        # On SDK lane: live-only-cmd added, help preserved from base, plan skipped (registry owns plan)
+        merged = M.merged_skill_commands(base, provider="claude-agent-sdk", live_names=live)
+        assert "/live-only-cmd" in merged
+        assert merged["/live-only-cmd"]["source"] == "claude-agent-sdk"
+        assert merged["/help"]["description"] == "hermes help"
+        assert "/plan" not in merged
+
+        # Off SDK lane: unchanged
+        off_lane = M.merged_skill_commands(base, provider="openai", live_names=live)
+        assert off_lane == base
+
+    def test_sdk_slash_names_includes_live_names_on_lane(self, isolated):
+        assert M.sdk_slash_names("openai", live_names=["live-cmd"]) == set()
+        assert "live-cmd" in M.sdk_slash_names("claude-agent-sdk", live_names=["live-cmd"])
+

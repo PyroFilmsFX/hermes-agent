@@ -442,6 +442,24 @@ class TestSession:
         # approval posture. The empty list is the SDK's isolation mode.
         assert options["setting_sources"] == []
 
+    def test_configured_max_turns_is_an_immutable_sdk_option(self, monkeypatch):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"max_turns": 7}},
+        )
+        session, _holder = _make_session(script=[ResultMessage(result="ok")])
+        assert session.build_option_fields()["max_turns"] == 7
+
+        monkeypatch.setattr(
+            cfg,
+            "load_config_readonly",
+            lambda *a, **k: {"agent": {"max_turns": 3}},
+        )
+        assert session.build_option_fields()["max_turns"] == 7
+
     def test_native_read_is_disallowed_in_favor_of_bounded_mcp_read(self):
         # Native Read must remain behind Hermes's protected-path-aware bounded
         # MCP read surface under every supported SDK permission mode.

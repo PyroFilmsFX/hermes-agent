@@ -262,10 +262,32 @@ def _maybe_spawn_background_review(
 
 def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
     turn = state.turn
+    raw_iteration_count = getattr(
+        turn, "num_turns", getattr(turn, "iteration_count", None)
+    )
+    if isinstance(raw_iteration_count, bool):
+        raw_iteration_count = None
+    try:
+        iteration_count = int(raw_iteration_count)
+    except (TypeError, ValueError, OverflowError):
+        iteration_count = 1 if getattr(turn, "api_call_made", True) else 0
+    if iteration_count < 0:
+        iteration_count = 0
+    last_reasoning = next(
+        (
+            message.get("reasoning")
+            for message in reversed(getattr(turn, "projected_messages", None) or [])
+            if isinstance(message, dict)
+            and isinstance(message.get("reasoning"), str)
+            and message["reasoning"].strip()
+        ),
+        None,
+    )
     result = {
         "final_response": turn.final_text,
         "messages": state.messages,
         "api_calls": int(getattr(turn, "api_call_made", True)),
+        "iteration_count": iteration_count,
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,
         "failed": bool(turn.error) and not state.effects.interrupted,
@@ -282,6 +304,7 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
         # user turn (append_message has no dedup).
         "agent_persisted": True,
         "claude_sdk_session_id": turn.thread_id,
+        "last_reasoning": last_reasoning,
         **state.usage_result,
     }
     # Fatal startup/auth/billing refusals surface the same machine-readable

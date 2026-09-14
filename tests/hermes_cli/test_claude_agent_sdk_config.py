@@ -33,8 +33,10 @@ class TestClaudeAgentSdkDefaults:
         # cntrl enables the native Claude task feed; the upstream PR candidate
         # intentionally flips this to false before landing upstream.
         assert block["task_tools"] is True
-        # No partial-message deltas unless the operator opts in.
-        assert block["streaming"] is False
+        # cntrl fork enables partial-message deltas by default so SDK turns
+        # prove liveness; the upstream PR candidate should flip this to false
+        # before landing upstream.
+        assert block["streaming"] is True
         # Refuse to start over a metered key unless explicitly allowed.
         assert block["allow_metered_key"] is False
         # No persona file appended by default.
@@ -81,6 +83,9 @@ class TestClaudeAgentSdkDefaults:
             "permission_mode": "auto",
             "session_name": "hermes:{title}",
             "task_tools": True,
+            # cntrl fork: SDK partial deltas are on by default for live
+            # progress; document this as an upstream flip-to-false candidate.
+            "streaming": True,
             # session_spawn: a running SDK session may create a sibling Hermes session
             # with a seeded task (inventory item 2). Service-gated (the tool only exists
             # when the owner gateway bridge is reachable at construction) and bounded by
@@ -136,7 +141,7 @@ class TestUserConfigMerge:
         cfg = self._load(tmp_path, monkeypatch, {"agent": {"max_turns": 5}})
         # Per-key pins (not whole-dict equality) — see test_canonical_defaults.
         block = cfg["agent"]["claude_agent_sdk"]
-        assert block["streaming"] is False
+        assert block["streaming"] is True
         assert block["allow_metered_key"] is False
         assert block["append_file"] == ""
         assert block["env"] == {}

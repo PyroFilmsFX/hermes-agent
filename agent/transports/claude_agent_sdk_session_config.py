@@ -269,6 +269,25 @@ def _configured_max_buffer_size() -> int:
     return value
 
 
+def _configured_max_turns() -> Optional[int]:
+    """Resolve the canonical ``agent.max_turns`` cap for the SDK option.
+
+    The SDK client is session-scoped, so this is called only while constructing
+    a session. Unlimited Hermes values omit the option and preserve the SDK's
+    own unlimited behavior; finite values become ``ClaudeAgentOptions.max_turns``.
+    """
+    try:
+        from hermes_cli.config import TURN_LIMIT_UNLIMITED, load_config_readonly, resolve_turn_limit
+
+        config = load_config_readonly() or {}
+        raw = (config.get("agent") or {}).get("max_turns")
+        value = resolve_turn_limit(raw)
+        return None if value == TURN_LIMIT_UNLIMITED else value
+    except Exception:
+        logger.debug("claude-agent-sdk max_turns resolution failed", exc_info=True)
+        return None
+
+
 def _configured_cli_path() -> str:
     """agent.claude_agent_sdk.cli_path from config.yaml, validated.
 

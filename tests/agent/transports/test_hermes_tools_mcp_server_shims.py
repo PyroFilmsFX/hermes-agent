@@ -189,6 +189,56 @@ class TestSessionSearchShim:
         dispatch_session_search({"query": "auth"})
         assert captured.get("current_session_id") == "sess-current-9"
 
+    def test_detail_forwarded_when_given(self, tmp_hermes_home, monkeypatch):
+        db_path = tmp_hermes_home / "state.db"
+        self._seed_db(db_path)
+        monkeypatch.setenv("HERMES_MCP_STATE_DB", str(db_path))
+
+        captured = {}
+        import tools.session_search_tool as sst
+
+        real = sst.session_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return real(**kwargs)
+
+        monkeypatch.setattr(sst, "session_search", spy)
+        out = json.loads(dispatch_session_search({"query": "auth", "detail": "full"}))
+
+        assert captured.get("detail") == "full"
+        assert out.get("detail") == "full"
+
+    def test_detail_defaults_to_adaptive_when_omitted(self, tmp_hermes_home, monkeypatch):
+        db_path = tmp_hermes_home / "state.db"
+        self._seed_db(db_path)
+        monkeypatch.setenv("HERMES_MCP_STATE_DB", str(db_path))
+
+        captured = {}
+        import tools.session_search_tool as sst
+
+        real = sst.session_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return real(**kwargs)
+
+        monkeypatch.setattr(sst, "session_search", spy)
+        out = json.loads(dispatch_session_search({"query": "auth"}))
+
+        assert captured.get("detail") == "adaptive"
+        assert out.get("detail") == "adaptive"
+
+    def test_invalid_detail_returns_error_without_exception(
+        self, tmp_hermes_home, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_MCP_STATE_DB", str(tmp_hermes_home / "state.db"))
+
+        out = json.loads(dispatch_session_search({"query": "auth", "detail": "compact"}))
+
+        assert out.get("success") is False
+        assert "invalid detail" in out.get("error", "")
+
     def test_calling_session_excluded_via_production_producer(
         self, tmp_hermes_home, monkeypatch
     ):
@@ -354,6 +404,12 @@ class TestShimRegistration:
         assert "target" in mem_sig.parameters
         ss_sig, _ = _signature_from_schema(shim_schemas["session_search"])
         assert "query" in ss_sig.parameters
+        from tools.session_search_tool import SESSION_SEARCH_SCHEMA
+
+        assert (
+            shim_schemas["session_search"]["properties"]["detail"]
+            == SESSION_SEARCH_SCHEMA["parameters"]["properties"]["detail"]
+        )
 
     def test_agent_loop_refusal_stays_intact_for_other_callers(self):
         # The shims must NOT weaken the generic dispatcher: a stateless
