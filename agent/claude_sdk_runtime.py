@@ -26,6 +26,7 @@ from agent.claude_sdk_runtime_continuity import (
     _persist_turn,
     rename_claude_sdk_session,
     rotate_claude_sdk_session,
+    rotate_claude_sdk_session_on_model_change,
 )
 from agent.claude_sdk_runtime_fallback import (
     _consume_agent_interrupt,
@@ -320,4 +321,9 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
     return result
 
 
-__all__ = ["run_claude_agent_sdk_turn", "rename_claude_sdk_session", "rotate_claude_sdk_session"]
+__all__ = [
+    "run_claude_agent_sdk_turn",
+    "rename_claude_sdk_session",
+    "rotate_claude_sdk_session",
+    "rotate_claude_sdk_session_on_model_change",
+]

@@ -298,6 +298,46 @@ def rename_claude_sdk_session(agent, *, busy: bool = False) -> str:
     return name
 
 
+def _normalized_sdk_model(value: Any) -> Optional[str]:
+    """"" for "no model pinned", the trimmed id for a real one, None for
+    UNKNOWABLE. Only a genuine string is a model id: a MagicMock or any other
+    stand-in stringifies to something unique per object, so coercing with
+    str() would read two doubles as a model change and rotate the CLI on every
+    turn (it did — three reuse tests died)."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return None
+
+
+def rotate_claude_sdk_session_on_model_change(agent) -> bool:
+    """Rotate when the operator switched models under a live CLI.
+
+    The CLI binds ``--model`` at process start, so a mid-session switch never
+    reaches it: every later turn — Retry included — keeps running, billing and
+    RATE-LIMITING against the old model. Observed 2026-09-14: a session switched
+    to Opus kept answering "You've reached your Fable limit" because the live
+    CLI was still the Fable one. Rotation keeps the persisted resume id, so the
+    conversation continues in a CLI rebuilt with the new model.
+
+    Only an explicit new id rotates. An empty ``agent.model`` means "follow the
+    CLI default" and is never treated as drift, so a momentarily unset model
+    cannot churn the process. (cntrl carry)
+    """
+    live = getattr(agent, "_claude_sdk_session", None)
+    if live is None:
+        return False
+    current = _normalized_sdk_model(getattr(agent, "model", None))
+    # "" = follow the CLI default, None = not a readable id. Neither is drift.
+    if not current:
+        return False
+    bound = _normalized_sdk_model(getattr(live, "_model", None))
+    if bound is None or bound == current:
+        return False
+    return rotate_claude_sdk_session(agent, "model switched")
+
+
 def rotate_claude_sdk_session(agent, reason: str = "tool surface changed") -> bool:
     """Close the live SDK session so the NEXT turn rebuilds the CLI with fresh
     ``mcp_servers`` / ``plugins`` / ``cli_path`` — the live-reload the SDK

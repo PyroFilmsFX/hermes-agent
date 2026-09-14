@@ -30,6 +30,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { withQuietApiFailures } from './api-error-envelope'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
@@ -16837,7 +16838,12 @@ async function handleHermesApiRequest(request) {
   return response
 }
 
-ipcMain.handle('hermes:api', async (_event, request) => {
+ipcMain.handle('hermes:api', async (_event, request) =>
+  // Expected client failures (404s for sessions the renderer is still
+  // polling) resolve as envelopes so Electron stops printing a stack for
+  // each one; the preload rebuilds the identical rejection. See
+  // electron/api-error-envelope.ts.
+  withQuietApiFailures(async () => {
   // Hold the deletion gate for BOTH profile deletes and renames: a concurrent
   // renderer reconnect entering ensureBackend() mid-mutation would otherwise
   // respawn the old-name backend and recreate its HERMES_HOME (#45474).
@@ -16865,7 +16871,8 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   const releaseProfileDeletion = profileDeletionGate.acquire(mutatingProfile)
 
   return handleHermesApiRequest(request).finally(releaseProfileDeletion)
-})
+  })
+)
 
 // Main serializes cross-window ambient claims (see event-dedupe.ts for why a
 // spoken reply holds its claim far longer than a beep).
