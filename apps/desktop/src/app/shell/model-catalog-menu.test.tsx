@@ -14,7 +14,12 @@ import {
 } from '@/store/model-visibility'
 import type { LocalRuntimeJob } from '@/types/hermes'
 
-import { ModelCatalogMenu, type ModelMenuController } from './model-catalog-menu'
+import {
+  catalogProviderSortRank,
+  compareCatalogProviders,
+  ModelCatalogMenu,
+  type ModelMenuController
+} from './model-catalog-menu'
 
 // Radix calls these on open; jsdom doesn't implement them.
 beforeAll(() => {
@@ -56,6 +61,25 @@ afterEach(() => {
   // disappears so an in-flight app-level poll cannot schedule another tick.
   $localRuntimeJobs.set([])
   vi.clearAllMocks()
+})
+
+describe('catalog provider ordering', () => {
+  it('ranks Claude Agent SDK first and Anthropic second for its catalog', () => {
+    expect(catalogProviderSortRank('claude-agent-sdk', 'claude-agent-sdk')).toBeLessThan(
+      catalogProviderSortRank('anthropic', 'claude-agent-sdk')
+    )
+    expect(catalogProviderSortRank('anthropic', 'claude-agent-sdk')).toBeLessThan(
+      catalogProviderSortRank('openai', 'claude-agent-sdk')
+    )
+  })
+
+  it('falls through to alphabetical order for other providers and current providers', () => {
+    const google = { name: 'Google', slug: 'google' }
+    const openai = { name: 'OpenAI', slug: 'openai' }
+
+    expect(compareCatalogProviders(google, openai, 'claude-agent-sdk')).toBeLessThan(0)
+    expect(compareCatalogProviders(google, openai, 'anthropic')).toBeLessThan(0)
+  })
 })
 
 // A minimal controller — these tests are about the CATALOG's own behaviour

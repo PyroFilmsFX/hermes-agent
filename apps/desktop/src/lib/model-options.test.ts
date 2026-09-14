@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getGlobalModelOptions } from '@/hermes'
 
-import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from './model-options'
+import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions, resolveProviderForModel } from './model-options'
 
 const globalOptions = { model: 'hermes-4', provider: 'nous', providers: [] }
 
@@ -221,5 +221,33 @@ describe('catalogProviderMatches', () => {
     expect(catalogProviderMatches(cloudflare, 'Cloudflare')).toBe(true)
     expect(catalogProviderMatches(cloudflare, 'custom:cloudflare')).toBe(true)
     expect(catalogProviderMatches(cloudflare, 'openrouter')).toBe(false)
+  })
+})
+
+describe('resolveProviderForModel', () => {
+  const providers = [
+    { slug: 'anthropic', name: 'Anthropic', models: ['claude-opus-4-6', 'claude-sonnet-4-6'] },
+    { slug: 'claude-agent-sdk', name: 'Claude Agent SDK', models: ['claude-fable-5-1', 'claude-opus-4-6'] },
+    { slug: 'openai', name: 'OpenAI', models: ['gpt-5'] }
+  ]
+
+  it('returns empty string when providers or model is empty', () => {
+    expect(resolveProviderForModel(undefined, 'claude-opus-4-6')).toBe('')
+    expect(resolveProviderForModel([], 'claude-opus-4-6')).toBe('')
+    expect(resolveProviderForModel(providers, '')).toBe('')
+  })
+
+  it('prefers the preferredProvider if it offers the model', () => {
+    expect(resolveProviderForModel(providers, 'claude-opus-4-6', 'claude-agent-sdk')).toBe('claude-agent-sdk')
+    expect(resolveProviderForModel(providers, 'claude-opus-4-6', 'anthropic')).toBe('anthropic')
+  })
+
+  it('falls back to any provider offering the model if preferredProvider does not have it', () => {
+    expect(resolveProviderForModel(providers, 'gpt-5', 'claude-agent-sdk')).toBe('openai')
+    expect(resolveProviderForModel(providers, 'claude-fable-5-1', 'anthropic')).toBe('claude-agent-sdk')
+  })
+
+  it('returns empty string if no provider offers the model', () => {
+    expect(resolveProviderForModel(providers, 'nonexistent-model', 'claude-agent-sdk')).toBe('')
   })
 })

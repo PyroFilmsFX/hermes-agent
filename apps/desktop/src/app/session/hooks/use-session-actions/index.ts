@@ -24,6 +24,7 @@ import {
 } from '@/lib/chat-messages'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
+import { requestModelOptions, resolveProviderForModel } from '@/lib/model-options'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
@@ -31,6 +32,7 @@ import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue
 import { $connectionRequests } from '@/store/connection-request'
 import {
   $gateway,
+  activeGateway,
   openGatewayForAgent,
   openGatewayForProfile,
   requestGatewayForAgent,
@@ -290,7 +292,7 @@ function reconcileAuthoritativeMessages(
 // profile to None). Effort/fast still ride as per-session overrides. Model and
 // provider only ride when the composer source is 'manual' — a default-sourced
 // value is a mirror of Settings → Model and must not pin the new chat.
-async function desktopSessionCreateParams(
+export async function desktopSessionCreateParams(
   cwd: string,
   capturedRoute = resolveNewChatOwnerRoute()
 ): Promise<Record<string, unknown>> {
@@ -304,11 +306,14 @@ async function desktopSessionCreateParams(
   // model. Omit model/provider unless the source is 'manual'.
   const isManualSelection = getCurrentModelSource() === 'manual'
 
+  const manualModel = isManualSelection ? $currentModel.get().trim() : ''
+  const manualProvider = isManualSelection ? $currentProvider.get().trim() : ''
+
   const selection = {
     effort: $currentReasoningEffort.get().trim(),
     fast: $currentFastMode.get(),
-    model: isManualSelection ? $currentModel.get().trim() : '',
-    provider: isManualSelection ? $currentProvider.get().trim() : ''
+    model: manualModel,
+    provider: manualProvider
   }
 
   const profile = capturedRoute?.profile || $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
@@ -319,13 +324,40 @@ async function desktopSessionCreateParams(
     await ensureGatewayProfile(profile)
   }
 
+  if (selection.model && !selection.provider) {
+    try {
+      const options = await requestModelOptions({
+        gateway: activeGateway() || undefined,
+        profile: capturedRoute?.targetProfile || profile,
+        ...(capturedRoute
+          ? {
+              request: <T>(method: string, params?: Record<string, unknown>) =>
+                requestGatewayForAgent<T>(capturedRoute.connectionId, capturedRoute.profile, method, params)
+            }
+          : {})
+      })
+
+      const resolved = resolveProviderForModel(options?.providers, selection.model, options?.provider)
+
+      if (resolved) {
+        selection.provider = resolved
+      } else {
+        selection.model = ''
+        selection.provider = ''
+      }
+    } catch {
+      selection.model = ''
+      selection.provider = ''
+    }
+  }
+
   return {
     cols: 96,
     source: 'desktop',
     ...(cwd && { cwd }),
     ...(profile ? { profile: capturedRoute?.targetProfile || profile } : {}),
-    ...(selection.model
-      ? { model: selection.model, ...(selection.provider ? { provider: selection.provider } : {}) }
+    ...(selection.model && selection.provider
+      ? { model: selection.model, provider: selection.provider }
       : {}),
     ...(selection.effort ? { reasoning_effort: selection.effort } : {}),
     fast: selection.fast

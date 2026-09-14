@@ -18,6 +18,39 @@ export function catalogProviderMatches(provider: CatalogProviderIdentity, curren
   )
 }
 
+/**
+ * Resolve the provider slug for a model from catalog providers, preferring
+ * the preferred (current/configured) provider if it lists the model.
+ * Returns empty string if not found.
+ */
+export function resolveProviderForModel(
+  providers: ModelOptionProvider[] | undefined,
+  model: string,
+  preferredProvider?: string
+): string {
+  if (!providers?.length || !model) {
+    return ''
+  }
+
+  const targetModel = model.trim().toLowerCase()
+
+  if (!targetModel) {
+    return ''
+  }
+
+  if (preferredProvider) {
+    const prefRow = providers.find(row => catalogProviderMatches(row, preferredProvider))
+
+    if (prefRow?.models?.some(m => m.toLowerCase() === targetModel)) {
+      return prefRow.slug
+    }
+  }
+
+  const matchingRow = providers.find(row => row.models?.some(m => m.toLowerCase() === targetModel))
+
+  return matchingRow ? matchingRow.slug : ''
+}
+
 /** The catalog's option support for the current pick, or undefined while the
  *  catalog is loading / doesn't say. Callers treat undefined as "assume
  *  reasoning" so controls never flicker away during the fetch. */

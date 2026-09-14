@@ -301,13 +301,22 @@ def _seed_row(record: dict) -> None:
         logger.debug("seeded-session title write failed for %s; pending_title stays queued", key, exc_info=True)
 
 
-def _create_overrides(params: dict) -> tuple:
+def _create_overrides(params: dict, profile_home=None) -> tuple:
     """PER-SESSION (model, reasoning, service_tier) overrides from the composer — never a global config
     write. ``fast`` presence is the contract: omitted inherits, true pins priority, false pins normal ("")."""
     create_model = _str_param(params, "model")
     model_override = None
     if create_model:
-        model_override = {"model": create_model, "provider": _str_param(params, "provider") or None}
+        provider = _str_param(params, "provider") or None
+        if not provider:
+            from tui_gateway.server import _resolve_provider
+            with _profile_build_scope(profile_home):
+                configured = _resolve_provider()
+            if configured:
+                from hermes_cli.models import _model_in_provider_catalog, _provider_keys
+                if _model_in_provider_catalog(create_model.lower(), _provider_keys(configured)):
+                    provider = configured
+        model_override = {"model": create_model, "provider": provider}
     reasoning_override = None
     if effort := _str_param(params, "reasoning_effort"):
         with contextlib.suppress(Exception):
@@ -333,7 +342,7 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
-    session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
+    session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params, profile_home=profile_home)
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -383,11 +392,14 @@ def _(rid, params: dict) -> dict:
     cwd = _sessions[sid]["cwd"]
     override = session_model_override or {}
     messages = _history_to_messages(history)  # hidden seed rows are not on the wire; count what is (as resume does)
+    with _profile_build_scope(profile_home):
+        resolved_model = override.get("model") if override and override.get("model") else _resolve_model()
+        resolved_provider = override.get("provider") or _resolve_provider()
     return _ok(rid, {
         "session_id": sid, "stored_session_id": key, "message_count": len(messages), "messages": messages,
         # Reflect the override now so the client doesn't clobber its sticky pick.
-        "info": {"model": override.get("model") if override else _resolve_model(),
-                 **({"provider": override["provider"]} if override.get("provider") else {}),
+        "info": {"model": resolved_model,
+                 "provider": resolved_provider,
                  "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
