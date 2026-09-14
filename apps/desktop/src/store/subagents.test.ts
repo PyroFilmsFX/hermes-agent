@@ -334,4 +334,31 @@ describe('subagent store', () => {
 
     expect(listFor('s1')[0]?.status).toBe('failed')
   })
+
+  it('prefers goal for an SDK-shaped subagent payload and falls back to description/subagent_type', () => {
+    upsertSubagent('s1', {
+      goal: 'Explore auth module',
+      status: 'running',
+      subagent_id: 'sdk-1',
+      tool_name: 'Agent'
+    })
+    upsertSubagent('s1', {
+      description: 'Find memory leaks',
+      status: 'running',
+      subagent_id: 'sdk-2',
+      tool_name: 'Agent'
+    })
+    upsertSubagent('s1', {
+      status: 'running',
+      subagent_id: 'sdk-3',
+      subagent_type: 'code_reviewer',
+      tool_name: 'Agent'
+    })
+
+    const items = listFor('s1')
+
+    expect(items.find(i => i.id === 'sdk-1')?.goal).toBe('Explore auth module')
+    expect(items.find(i => i.id === 'sdk-2')?.goal).toBe('Find memory leaks')
+    expect(items.find(i => i.id === 'sdk-3')?.goal).toBe('code_reviewer')
+  })
 })
