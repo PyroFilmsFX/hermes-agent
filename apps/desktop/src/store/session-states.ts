@@ -459,6 +459,48 @@ function handleTransition(previous: ClientSessionState | null, next: ClientSessi
   }
 }
 
+export const $activeBackgroundSessions = atom<Set<string>>(new Set())
+
+export function setBackgroundDeliveryActive(sessionId: string, active: boolean): void {
+  const current = $activeBackgroundSessions.get()
+  const next = new Set(current)
+
+  if (active) {
+    next.add(sessionId)
+  } else {
+    next.delete(sessionId)
+  }
+
+  $activeBackgroundSessions.set(next)
+}
+
+export function isBackgroundDeliveryActive(sessionId: string): boolean {
+  return $activeBackgroundSessions.get().has(sessionId)
+}
+
+/**
+ * A background completion (e.g. peer_message or sdk_background_result)
+ * finishes without flipping busy. If the session is not focused, mark it
+ * unread-finished so the unread dot appears.
+ */
+export function markBackgroundSessionFinished(sessionIdOrStoredId: string): void {
+  const storedId = storedSessionIdForRuntimeId(sessionIdOrStoredId) ?? sessionIdOrStoredId
+
+  if (!storedId) {
+    return
+  }
+
+  markSettled(storedId)
+
+  if (storedId !== $focusedStoredSessionId.get()) {
+    const lastReadAt = $lastReadAtBySessionId.get()[storedId] ?? -1
+
+    if (Date.now() > lastReadAt) {
+      markSessionUnreadFinished(storedId)
+    }
+  }
+}
+
 /** Is any surface on THIS window still holding the runtime — the primary view
  *  or an open tile? (A tile mid-resume references by stored id only; its
  *  runtime binding is patched in after `resumeTile` returns.) */

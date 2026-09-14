@@ -569,6 +569,24 @@ export type TimelineDisplayMetadata =
     }
   | { display_text: string }
   | { reactions: MessageReaction[] }
+  | {
+      direction?: 'in' | 'out'
+      peer?: string
+      peer_session?: string
+      msg_id?: string
+      completed_at?: number | string
+    }
+  | {
+      event: 'woken' | 'child_exited' | 'resumed'
+      source?: string
+      by?: string
+      uuid?: string
+      exit_code?: number | null
+      reason?: string
+      digest_messages?: number
+      resume_id_present?: boolean
+      completed_at?: number | string
+    }
 
 /** One emoji reaction on a message. One per author, iOS-Tapback style. */
 export interface MessageReaction {
@@ -602,8 +620,11 @@ export interface SessionMessage {
     | 'auto_continue'
     | 'hidden'
     | 'model_switch'
+    | 'peer_message'
     | 'personality_switch'
     | 'process_complete'
+    | 'session_lifecycle'
+    | 'sdk_background_result'
     | 'steer'
     | string
   /**

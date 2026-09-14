@@ -62,7 +62,7 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
 
 export const SystemMessage: FC = () => {
   const text = useAuiState(s => messageContentText(s.message.content))
-  const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult)
+  const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult ?? s.message.metadata.custom?.peerMessage)
   const processResult = useAuiState(s => s.message.metadata.custom?.asyncResultKind === 'process')
 
   if (!text) {

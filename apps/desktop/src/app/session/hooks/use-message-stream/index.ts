@@ -27,6 +27,7 @@ import { isTodoToolName, nextTodosFromToolEvent, parseTodoRevision } from '@/lib
 import type { ScopedServerRequest } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
+import { isBackgroundDeliveryActive } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { upsertSubagent } from '@/store/subagents'
 import { $todosBySession, setSessionTodos } from '@/store/todos'
@@ -101,8 +102,9 @@ export function useMessageStream({
           // After a stop, drop any late deltas / tool events for the
           // cancelled turn so they don't keep growing the (now finalized)
           // assistant bubble or, worse, seed a brand-new bubble that
-          // appears to belong to the next user message.
-          if (state.interrupted) {
+          // appears to belong to the next user message. Background deliveries
+          // belong to a peer or agent, not the cancelled user turn.
+          if (state.interrupted && !isBackgroundDeliveryActive(sessionId)) {
             return state
           }
 
@@ -457,7 +459,7 @@ export function useMessageStream({
       // a tool part can't jump ahead of the text that preceded it.
       flushQueuedDeltas(sessionId)
 
-      if (sessionInterrupted(sessionId)) {
+      if (sessionInterrupted(sessionId) && !isBackgroundDeliveryActive(sessionId)) {
         return
       }
 

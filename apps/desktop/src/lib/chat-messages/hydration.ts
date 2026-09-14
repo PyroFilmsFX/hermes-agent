@@ -127,7 +127,9 @@ function transcriptContent(displayKind: SessionMessage['display_kind'], content:
 
 // A remote backend older than this app serves display_metadata as raw JSON text,
 // and `in` throws on a primitive — which used to fail the whole session resume.
-function parseDisplayMetadata(metadata: SessionMessage['display_metadata']): null | Record<string, unknown> {
+function parseDisplayMetadata(
+  metadata: SessionMessage['display_metadata'] | Record<string, unknown>
+): null | Record<string, unknown> {
   let parsed: unknown = metadata
 
   if (typeof parsed === 'string') {
@@ -139,6 +141,77 @@ function parseDisplayMetadata(metadata: SessionMessage['display_metadata']): nul
   }
 
   return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+}
+
+function lifecycleSourceLabel(source: unknown): string {
+  const value = typeof source === 'string' ? source : ''
+
+  if (value.endsWith('/scheduled-trigger')) {
+    return 'scheduled trigger'
+  }
+
+  if (value.endsWith('/peer-send-message') || value === 'peer') {
+    return 'peer message'
+  }
+
+  if (value.startsWith('task-notification')) {
+    return 'task notification'
+  }
+
+  if (value === 'channel' || value.startsWith('channel/')) {
+    return 'channel'
+  }
+
+  return value || 'unknown'
+}
+
+export function sessionLifecycleLabel(metadata: SessionMessage['display_metadata'] | Record<string, unknown>): string {
+  const parsed: Record<string, unknown> = parseDisplayMetadata(metadata) ?? {}
+  const event = parsed.event
+
+  if (event === 'child_exited') {
+    return typeof parsed.exit_code === 'number' ? `CLI child exited (code ${parsed.exit_code})` : 'CLI child exited'
+  }
+
+  if (event === 'resumed') {
+    return typeof parsed.digest_messages === 'number' && parsed.digest_messages > 0
+      ? `session resumed · ${parsed.digest_messages} messages`
+      : 'session resumed'
+  }
+
+  if (event === 'woken') {
+    return `woken by ${lifecycleSourceLabel(parsed.source)}: ${String(parsed.by || 'unknown')}`
+  }
+
+  return 'session lifecycle'
+}
+
+function lifecycleValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+
+  if (value === null) {
+    return 'null'
+  }
+
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+export function sessionLifecycleBody(
+  metadata: SessionMessage['display_metadata'] | Record<string, unknown>
+): string | undefined {
+  const parsed = parseDisplayMetadata(metadata)
+
+  return parsed
+    ? Object.entries(parsed)
+        .map(([key, value]) => `${key}: ${lifecycleValue(value)}`)
+        .join('\n') || undefined
+    : undefined
 }
 
 function timelineTaskCount(metadata: SessionMessage['display_metadata']): number | undefined {
@@ -199,7 +272,66 @@ function asyncResultBody(content: string): string | undefined {
   )
 }
 
+export function formatShortTime(timestamp?: number): string {
+  if (typeof timestamp !== 'number' || Number.isNaN(timestamp)) {
+    return ''
+  }
+
+  const date = new Date(timestamp < 1e11 ? timestamp * 1000 : timestamp)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(date)
+}
+
+export function ellipsizeFirstLine(text: string, maxLength = 80): string {
+  const trimmed = text.trim()
+
+  if (!trimmed) {
+    return ''
+  }
+
+  const firstLine = trimmed.split(/\r?\n/)[0].trim()
+  const isTruncated = trimmed.length > firstLine.length || firstLine.length > maxLength
+
+  if (firstLine.length > maxLength) {
+    return `${firstLine.slice(0, maxLength).trimEnd()}…`
+  }
+
+  if (isTruncated && !firstLine.endsWith('…') && !firstLine.endsWith('...')) {
+    return `${firstLine}…`
+  }
+
+  return firstLine
+}
+
+export function peerMessageLabel(direction: 'in' | 'out', peer: string, text: string, timestamp?: number): string {
+  const peerName = peer.trim() || 'peer'
+
+  if (direction === 'out') {
+    return `↗ to ${peerName}: ${ellipsizeFirstLine(text)}`
+  }
+
+  const shortTime = formatShortTime(timestamp)
+
+  return shortTime ? `↘ from ${peerName} · ${shortTime}` : `↘ from ${peerName}`
+}
+
 function timelineDisplayContent(message: SessionMessage, content: string): string {
+  if (message.display_kind === 'session_lifecycle') {
+    return sessionLifecycleLabel(message.display_metadata)
+  }
+
+  if (message.display_kind === 'peer_message') {
+    const meta = parseDisplayMetadata(message.display_metadata)
+    const direction = meta?.direction === 'out' || (!meta?.direction && message.role === 'assistant') ? 'out' : 'in'
+    const peer = typeof meta?.peer === 'string' && meta.peer.trim() ? meta.peer.trim() : 'peer'
+
+    return peerMessageLabel(direction, peer, content, message.timestamp)
+  }
+
   if (message.display_kind === 'model_switch') {
     return 'model changed'
   }
@@ -319,9 +451,13 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       message.display_kind === 'async_delegation_complete' ||
       message.display_kind === 'process_complete' ||
       message.display_kind === 'auto_continue' ||
-      message.display_kind === 'personality_switch'
+      message.display_kind === 'personality_switch' ||
+      message.display_kind === 'peer_message' ||
+      message.display_kind === 'session_lifecycle'
         ? 'system'
         : message.role
+
+    const isDisplayAssistant = displayRole === 'assistant'
 
     // Persisted user turns carry `@image:<path>` directive lines inline in
     // the text (see tui_gateway/server.py's persist-time rewrite). The
@@ -370,7 +506,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     if (!parts.length && !extractedAttachmentRefs?.length) {
-      if (message.role !== 'assistant') {
+      if (!isDisplayAssistant) {
         flushPendingTools(index)
         activeAssistantIndex = null
       }
@@ -378,8 +514,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
-    const isToolOnlyAssistant =
-      message.role === 'assistant' && parts.length > 0 && parts.every(part => part.type === 'tool-call')
+    const isToolOnlyAssistant = isDisplayAssistant && parts.length > 0 && parts.every(part => part.type === 'tool-call')
 
     if (isToolOnlyAssistant) {
       pendingToolParts = [...pendingToolParts, ...parts]
@@ -388,7 +523,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
-    if (message.role === 'assistant') {
+    if (isDisplayAssistant) {
       if (pendingToolParts.length) {
         if (!appendPartsToActiveAssistant(pendingToolParts, message.timestamp ?? pendingToolTimestamp)) {
           parts.unshift(...pendingToolParts)
@@ -433,13 +568,19 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: asyncResultBody(displayContentForMessage(message.role, message.content || content)) }
         : {}),
       ...(message.display_kind === 'process_complete' ? { asyncResultKind: 'process' as const } : {}),
+      ...(message.display_kind === 'peer_message'
+        ? { asyncResult: displayContentForMessage(message.role, message.content || content) }
+        : {}),
+      ...(message.display_kind === 'session_lifecycle'
+        ? { asyncResult: sessionLifecycleBody(message.display_metadata) }
+        : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(reactions.length ? { reactions } : {}),
       ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
     })
 
-    activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
+    activeAssistantIndex = isDisplayAssistant ? result.length - 1 : null
   })
   flushPendingTools(messages.length)
 

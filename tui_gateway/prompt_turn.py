@@ -286,6 +286,77 @@ def _commit_turn_history(
             "but was not saved to session history.")
 
 
+def _restore_sdk_display_rows(history: list, model_messages: list) -> list:
+    """Put UI-only SDK rows back into the in-memory transcript after a turn.
+
+    The agent receives a filtered copy so display projections cannot enter the
+    model context; the TUI still needs those durable rows in session.history.
+    """
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+    import hashlib
+    import json
+
+    def _row_id(row):
+        for field in ("_row_id", "row_id", "id"):
+            if row.get(field) is not None:
+                return str(row[field])
+        return None
+
+    def _stable_key(row):
+        content = json.dumps(row.get("content"), sort_keys=True, ensure_ascii=False, default=str)
+        return (
+            row.get("role"), row.get("timestamp"),
+            hashlib.sha256(content.encode()).hexdigest(),
+        )
+
+    backbone = [row for row in model_messages if not _is_sdk_display_only_row(row)]
+    by_id = {_row_id(row): index for index, row in enumerate(backbone) if _row_id(row) is not None}
+    by_stable = {_stable_key(row): index for index, row in enumerate(backbone)}
+    after = {}
+    before = {}
+    # Display rows with no surviving predecessor (their anchor was summarised
+    # away) attach BEFORE the next surviving row so they stay beside the summary
+    # instead of being dumped after the tail.
+    unanchored = []
+    seen_ids = set()
+    anchor = None
+    for row in history:
+        if _is_sdk_display_only_row(row):
+            row_id = _row_id(row)
+            if row_id is not None and row_id in seen_ids:
+                continue
+            if row_id is not None:
+                seen_ids.add(row_id)
+            if anchor is None:
+                unanchored.append(row)
+            else:
+                after.setdefault(anchor, []).append(row)
+        else:
+            row_id = _row_id(row)
+            survivor = by_id.get(row_id) if row_id is not None else None
+            if survivor is None:
+                survivor = by_stable.get(_stable_key(row))
+            if survivor is None:
+                # A removed ordinary row breaks the previous display anchor.
+                anchor = None
+                continue
+            anchor = survivor
+            if unanchored:
+                before.setdefault(anchor, []).extend(unanchored)
+                unanchored = []
+    restored = []
+    for index, row in enumerate(backbone):
+        restored.extend(before.pop(index, []))
+        restored.append(row)
+        restored.extend(after.pop(index, []))
+    for rows in before.values():
+        restored.extend(rows)
+    for rows in after.values():
+        restored.extend(rows)
+    restored.extend(unanchored)
+    return restored
+
+
 def _result_status(result: dict) -> str:
     return (
         "interrupted" if result.get("interrupted")
@@ -581,8 +652,12 @@ def _invoke_agent(
         _interim_assistant_cb if _load_interim_assistant_messages() else None)
     # A synthesized turn is typed at turn START so a crash persist writes a timeline event,
     # not a raw user bubble; the post-turn stamp is the fallback for an older agent.
+    from agent.claude_sdk_runtime_continuity import _is_sdk_display_only_row
+    model_history = [row for row in st.history if not _is_sdk_display_only_row(row)]
     st.run_kwargs = run_kwargs = {
-        "conversation_history": list(st.history),
+        # Display projections share session.history for the UI, but must not
+        # enter a later model run or churn its prompt-cache prefix.
+        "conversation_history": model_history,
         "stream_callback": _stream,
         "persist_user_message": (
             _build_persist_user_message(prompt, images, run_message) if images else prompt)}
@@ -664,6 +739,7 @@ def _absorb_turn_result(
     status_note = None
     if isinstance(result, dict):
         if isinstance(result.get("messages"), list):
+            result["messages"] = _restore_sdk_display_rows(st.history, result["messages"])
             status_note = _commit_turn_history(session, result, st.history, st.history_version)
         # Auto-compression may have rotated agent.session_id: sync session_key before
         # title/goal/finalize use it, keep pending_title (user intent), restart the slash
