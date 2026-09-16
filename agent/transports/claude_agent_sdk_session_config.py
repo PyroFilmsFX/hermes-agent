@@ -84,7 +84,10 @@ def _configured_sdk_env() -> dict:
 
 
 def _sdk_env_overrides(
-    *, metered_allowed: Optional[bool] = None, task_list_id: Optional[str] = None
+    *,
+    metered_allowed: Optional[bool] = None,
+    task_list_id: Optional[str] = None,
+    task_env: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
@@ -108,7 +111,12 @@ def _sdk_env_overrides(
     # before the operator env so a deliberate ``env: {PYTHONPATH: ...}`` in
     # config.yaml still wins — that is a knob, not a billing vector.
     overrides.update(_scrubbed_interpreter_env())
-    overrides.update(_effective_sdk_task_env(task_list_id=task_list_id))
+    # A caller that already resolved the task env for this conversation passes
+    # it in, so a rebuilt child gets byte-identical task variables.
+    overrides.update(
+        dict(task_env) if task_env is not None
+        else _effective_sdk_task_env(task_list_id=task_list_id)
+    )
     for key, value in _configured_sdk_env().items():
         if not metered_allowed and _is_metered_sdk_env_value(key, value):
             logger.warning(

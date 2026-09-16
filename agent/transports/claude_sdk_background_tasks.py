@@ -50,6 +50,42 @@ def _tool_use_id(message: Any) -> str:
     return str(_value(message, "tool_use_id", "") or "")
 
 
+# task_type values the Claude CLI stamps on Task* lifecycle messages.
+SHELL_TASK_TYPES = frozenset({"local_bash"})
+AGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent", "in_process_teammate", "local_workflow"})
+
+
+def sdk_task_type(message: Any) -> str:
+    """The CLI's task_type for a Task* message ('' when absent)."""
+    found = _value(message, "task_type", None)
+    if not found:
+        data = _value(message, "data", None)
+        if isinstance(data, Mapping):
+            found = data.get("task_type") or data.get("taskType")
+    return str(found or "").strip()
+
+
+def classify_sdk_task(message: Any, *, agent_tool_ids: Any = ()) -> str:
+    """Route one SDK task to exactly one feed: 'shell', 'agent' or 'other'.
+
+    Background shell commands belong in the process view, Agent tasks in the
+    subagent feed — never both. The CLI's task_type decides; without it, an
+    Agent tool invocation with the same tool_use_id marks an agent, and a
+    provisional background Bash record marks a shell task.
+    """
+    task_type = sdk_task_type(message)
+    if task_type in SHELL_TASK_TYPES:
+        return "shell"
+    if task_type in AGENT_TASK_TYPES:
+        return "agent"
+    if task_type:
+        return "other"
+    tool_use_id = _tool_use_id(message)
+    if tool_use_id and tool_use_id in agent_tool_ids:
+        return "agent"
+    return "unknown"
+
+
 def _task_metadata(value: Any) -> tuple[str, str]:
     """Find task identity/status in the SDK's versioned result envelopes."""
     if isinstance(value, Mapping):
@@ -146,7 +182,17 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
         return
     task_id = _task_id(message)
     tool_use_id = _tool_use_id(message)
+    kind = classify_sdk_task(message)
     if name == "TaskStartedMessage":
+        provisional = (
+            process_registry.find_sdk_task(session_key, tool_use_id=tool_use_id)
+            if tool_use_id else None
+        )
+        # Only shell work belongs in the process view; Agent tasks are shown
+        # by the subagent feed. An untyped task counts only when it resolves a
+        # provisional record from a run_in_background Bash call.
+        if kind != "shell" and not (kind == "unknown" and provisional is not None):
+            return
         process_registry.register_sdk_task(
             session_key=session_key,
             command=str(_value(message, "description", "") or "SDK task"),
@@ -167,7 +213,10 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
     if name == "TaskNotificationMessage":
         # A notification can be the first observable event when the SDK emits
         # the task lifecycle faster than the reader sees TaskStartedMessage.
-        if process_registry.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id) is None:
+        if (
+            kind == "shell"
+            and process_registry.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id) is None
+        ):
             process_registry.register_sdk_task(
                 session_key=session_key,
                 command=str(_value(message, "summary", "SDK task") or "SDK task"),

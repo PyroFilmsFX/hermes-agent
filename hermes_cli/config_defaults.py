@@ -251,8 +251,6 @@ DEFAULT_CONFIG = {
             # Sessions spawning sessions: lets an SDK-lane session create a sibling Hermes
             # session in a project cwd with a seeded first task, through the service-gated
             # hermes-tools MCP tool (only present when the owner gateway bridge is reachable).
-            # cntrl defaults this on with bounded limits; the upstream PR candidate flips
-            # enabled to false before landing upstream.
             # Shipped DISABLED: the 2026-09-14 security review left open findings (child does not
             # inherit caller restrictions at SDK construction, lineage not consulted by the quota,
             # concurrent-retry reservation race). Operators opt in explicitly until those close.

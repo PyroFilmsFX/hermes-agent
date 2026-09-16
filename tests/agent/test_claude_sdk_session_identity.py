@@ -1287,6 +1287,57 @@ class TestTaskListIdentity:
         assert fork_id != parent_id
         assert _sdk_task_list_id(agent) == fork_id
 
+    def test_rebuilt_transport_reuses_the_conversation_prompt_and_task_env(self, monkeypatch):
+        """H-1 (holistic review): a transport rebuild must not recompose the cached
+        prompt or re-resolve task env; only a model switch recomposes the prompt."""
+        self._enable_task_tools(monkeypatch)
+        import agent.claude_sdk_runtime_session as runtime_session
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+        import agent.transports.claude_agent_sdk_session_config as config_mod
+
+        captured = []
+        real_session = sdk_session_mod.ClaudeAgentSdkSession
+
+        class CapturingSession(real_session):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                captured.append((kwargs.get("system_prompt_append"), dict(self.build_option_fields()["env"])))
+
+        builds = []
+
+        def fake_append(**kwargs):
+            builds.append(kwargs.get("model"))
+            return f"append #{len(builds)} for {kwargs.get('model')}"
+
+        monkeypatch.setattr(sdk_session_mod, "ClaudeAgentSdkSession", CapturingSession)
+        monkeypatch.setattr(runtime_session, "_build_approval_callback", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "_background_result_sink", lambda _agent: None)
+        monkeypatch.setattr(runtime_session, "build_system_prompt_append", fake_append)
+        monkeypatch.setattr(runtime_session, "_hybrid_bridge_enabled", lambda: False)
+        monkeypatch.setattr(runtime_session, "_configured_max_budget_usd", lambda: None)
+
+        agent = _make_agent()
+        agent.session_id = "frozen-session"
+        agent.model = "claude-fable-5-1"
+        agent._session_db = MagicMock()
+        agent._session_db.get_session.return_value = {}
+        runtime_session._create_session(agent, resume_id=None, on_interim_assistant=None, on_tool_iteration=None)
+        first_append, first_env = captured[-1]
+
+        # Config edit between rebuilds: task tools switched off in config.yaml.
+        monkeypatch.setattr(config_mod, "_provider_flag", lambda name, default=False: False)
+        runtime_session._create_session(agent, resume_id="sdk-1", on_interim_assistant=None, on_tool_iteration=None)
+        second_append, second_env = captured[-1]
+        assert second_append == first_append
+        assert {k: second_env.get(k) for k in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID")} == {
+            k: first_env.get(k) for k in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID")
+        }
+        assert builds == ["claude-fable-5-1"]
+
+        agent.model = "claude-opus-5"
+        runtime_session._create_session(agent, resume_id="sdk-1", on_interim_assistant=None, on_tool_iteration=None)
+        assert captured[-1][0] == "append #2 for claude-opus-5"
+
     def test_child_env_is_identical_across_resume_rebuild(self, monkeypatch):
         self._enable_task_tools(monkeypatch)
         import agent.claude_sdk_runtime_session as runtime_session

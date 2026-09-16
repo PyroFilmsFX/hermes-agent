@@ -57,6 +57,33 @@ def _is_human_origin(message: Any) -> bool:
     return isinstance(origin, dict) and origin.get("kind") == "human"
 
 
+def _is_injected_origin(origin: Any) -> bool:
+    """True for CLI-injected provenance (peer, task-notification, channel, ...)."""
+    return isinstance(origin, dict) and origin.get("kind") not in (None, "human")
+
+
+def _starts_injected_turn(message: Any) -> bool:
+    """An injected user message, or assistant output with no turn in flight."""
+    name = type(message).__name__
+    if name == "UserMessage":
+        return _is_injected_origin(getattr(message, "origin", None))
+    return name == "AssistantMessage"
+
+
+def _is_own_prompt_echo(message: Any) -> bool:
+    """A replayed Hermes prompt: the CLI has moved on to the host's own turn."""
+    if type(message).__name__ != "UserMessage":
+        return False
+    if _is_injected_origin(getattr(message, "origin", None)):
+        return False
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return bool(content)
+    return bool(content) and isinstance(content, list) and not any(
+        type(block).__name__ == "ToolResultBlock" for block in content
+    )
+
+
 def _clear_unsolicited_projection(session: Any) -> None:
     """Discard the current unsolicited burst's text and structured projections."""
     session._unsolicited_text.clear()
@@ -187,7 +214,7 @@ class ClaudeSdkTurnMixin:
         # texts parked DURING the turn re-buffer via the residue drain and
         # are unaffected). Never a silent drop: WARN what is discarded.
         stale = list(self._unsolicited_text)
-        stale_projection = bool(
+        stale_projection = not getattr(self, "_unsolicited_burst_open", False) and bool(
             stale
             or self._unsolicited_items
             or self._unsolicited_tool_items
@@ -816,6 +843,14 @@ class ClaudeSdkTurnMixin:
                 early_sid = getattr(message, "session_id", None)
                 if early_sid:
                     self._session_id = early_sid
+                if type(message).__name__ == "ResultMessage" and _is_injected_origin(
+                    getattr(message, "origin", None)
+                ):
+                    # ResultMessage.origin names the message that triggered its
+                    # turn: a peer/task-notification result can never answer
+                    # this host turn. Hand it to the background path instead.
+                    self._handle_unsolicited(message)
+                    continue
                 self._handle_compact_boundary(message)
                 # Task lifecycle and provisional Bash records are stream
                 # concerns, not foreground-turn visibility. Observe before
@@ -1188,10 +1223,39 @@ class ClaudeSdkTurnMixin:
                         break
                     self._observe_billing_evidence(message)
                     inbox = self._turn_inbox
-                    if inbox is not None:
+                    if inbox is not None and self._unsolicited_burst_open:
+                        # An injected turn (peer message, task notification)
+                        # started before this claim and has not ended: the CLI
+                        # runs turns sequentially, so everything up to its
+                        # ResultMessage still belongs to it, not to the host's
+                        # turn. Only an echo of the host's own prompt proves
+                        # the CLI moved on.
+                        if _is_own_prompt_echo(message):
+                            # The injected turn ended without its terminal
+                            # result (e.g. a cut-off burst): its partial text
+                            # must never attach to a later unrelated result.
+                            self._unsolicited_burst_open = False
+                            if self._unsolicited_text or self._unsolicited_items:
+                                logger.warning(
+                                    "claude-agent-sdk: discarding %d stale unsolicited text(s) "
+                                    "buffered before this turn — their terminal "
+                                    "ResultMessage never arrived",
+                                    len(self._unsolicited_text),
+                                )
+                            _clear_unsolicited_projection(self)
+                            inbox.put_nowait(message)
+                        else:
+                            self._handle_unsolicited(message)
+                            if type(message).__name__ == "ResultMessage":
+                                self._unsolicited_burst_open = False
+                    elif inbox is not None:
                         inbox.put_nowait(message)
                     else:
+                        if _starts_injected_turn(message):
+                            self._unsolicited_burst_open = True
                         self._handle_unsolicited(message)
+                        if type(message).__name__ == "ResultMessage":
+                            self._unsolicited_burst_open = False
                     # Message wins ties with a claim. Re-arm first, then loop:
                     # every immediately available pre-claim FIFO entry is
                     # classified unsolicited before the claim is acknowledged.
