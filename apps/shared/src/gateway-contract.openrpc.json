@@ -3085,6 +3085,24 @@
       }
     },
     {
+      "name": "session.task_create",
+      "summary": "Create and start a peer session for an SDK session's task (session_spawn; off by default).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionTaskCreateParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionTaskCreateResult"
+        }
+      }
+    },
+    {
       "name": "session.title",
       "summary": "Read or set a live session's title; a title set before the row exists is queued.",
       "params": [
@@ -26814,6 +26832,151 @@
           "output"
         ],
         "title": "SessionStatusResult",
+        "type": "object"
+      },
+      "SessionTaskCreateParams": {
+        "additionalProperties": false,
+        "description": "Owner-scoped spawn from an SDK session; the socket injects the capability token.",
+        "properties": {
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cwd"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Task"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Id"
+          },
+          "_session_spawn_capability": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Spawn Capability"
+          }
+        },
+        "title": "SessionTaskCreateParams",
+        "type": "object"
+      },
+      "SessionTaskCreateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cwd"
+          },
+          "peer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Peer Name"
+          },
+          "task_status": {
+            "title": "Task Status",
+            "type": "string"
+          },
+          "peer_status": {
+            "title": "Peer Status",
+            "type": "string"
+          },
+          "resumable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resumable"
+          }
+        },
+        "required": [
+          "stored_session_id",
+          "session_id",
+          "task_status",
+          "peer_status"
+        ],
+        "title": "SessionTaskCreateResult",
         "type": "object"
       },
       "SessionTitleParams": {

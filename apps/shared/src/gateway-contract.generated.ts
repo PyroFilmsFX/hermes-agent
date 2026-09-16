@@ -2637,6 +2637,24 @@ export interface SessionActiveItem {
   title: string
 }
 export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working' | 'streaming' | 'resuming'
+/** Owner-scoped spawn from an SDK session; the socket injects the capability token. */
+export interface SessionTaskCreateParams {
+  cwd?: string | null
+  task?: string | null
+  title?: string | null
+  request_id?: string | null
+  _session_spawn_capability?: string | null
+}
+export interface SessionTaskCreateResult {
+  stored_session_id: string
+  session_id: string
+  profile?: string | null
+  cwd?: string | null
+  peer_name?: string | null
+  task_status: string
+  peer_status: string
+  resumable?: boolean | null
+}
 /** ``session_id`` is the STORED id. */
 export interface SessionDeleteParams {
   session_id: string
@@ -4518,6 +4536,8 @@ export interface RpcMethods {
   'session.status': { params: SessionStatusParams; result: SessionStatusResult }
   /** Inject text into the next tool result without interrupting the turn. */
   'session.steer': { params: SessionCorrectionParams; result: SessionCorrectionResult }
+  /** Create and start a peer session for an SDK session's task (session_spawn; off by default). */
+  'session.task_create': { params: SessionTaskCreateParams; result: SessionTaskCreateResult }
   /** Read or set a live session's title; a title set before the row exists is queued. */
   'session.title': { params: SessionTitleParams; result: SessionTitleResult }
   /** Drop the last user turn (and everything after it) from an idle session. */
@@ -4784,6 +4804,7 @@ export const RPC_METHODS = [
   'session.set_hidden',
   'session.status',
   'session.steer',
+  'session.task_create',
   'session.title',
   'session.undo',
   'session.usage',
