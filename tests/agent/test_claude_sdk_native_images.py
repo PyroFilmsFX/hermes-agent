@@ -1,0 +1,130 @@
+"""Native image input on the Claude Agent SDK lane: payload budget, envelope, replayed-echo ownership."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+
+from agent.transports.claude_agent_sdk_session_input import (
+    SDK_IMAGE_BASE64_LIMIT,
+    _sdk_user_message_stream,
+    fit_images_to_sdk_budget,
+)
+from agent.transports.claude_agent_sdk_session_turn import _is_own_prompt_echo
+
+MiB = 1024 * 1024
+
+
+def _image(size):
+    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * size}}
+
+
+def test_budget_keeps_images_in_order_until_the_echo_would_overflow_stdout():
+    text = {"type": "text", "text": "compare"}
+    parts = [text, _image(4 * MiB), _image(4 * MiB), _image(4 * MiB)]
+
+    kept, dropped = fit_images_to_sdk_budget(parts, max_buffer_size=10 * MiB)
+
+    assert kept == parts[:3]
+    assert dropped == [2]
+
+
+def test_budget_drops_one_oversized_image_and_keeps_later_ones_that_fit():
+    parts = [_image(SDK_IMAGE_BASE64_LIMIT + 1), _image(1024)]
+
+    kept, dropped = fit_images_to_sdk_budget(parts, max_buffer_size=64 * MiB)
+
+    assert kept == parts[1:]
+    assert dropped == [0]
+
+
+def test_budget_counts_the_text_the_echo_repeats():
+    long_text = {"type": "text", "text": "x" * (2 * MiB)}
+    images = [_image(4 * MiB), _image(4 * MiB)]
+
+    assert fit_images_to_sdk_budget(images, max_buffer_size=10 * MiB)[1] == []
+    assert fit_images_to_sdk_budget([long_text, *images], max_buffer_size=10 * MiB)[1] == [1]
+
+
+def _sent(content, **kwargs):
+    async def collect():
+        return [message async for message in _sdk_user_message_stream(content, **kwargs)]
+
+    return asyncio.run(collect())
+
+
+def test_turns_stay_unattributed_and_steers_carry_human_origin():
+    blocks = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}]
+
+    (turn,) = _sent(blocks)
+    (steer,) = _sent("stop", origin={"kind": "human"})
+
+    assert "origin" not in turn
+    assert turn["message"] == {"role": "user", "content": blocks}
+    assert steer["origin"] == {"kind": "human"}
+    assert steer["message"] == {"role": "user", "content": "stop"}
+
+
+def test_installed_parser_image_echo_is_recognized_as_the_host_prompt():
+    from claude_agent_sdk._internal.message_parser import parse_message
+
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+    (image_only,) = _sent([image])
+    (captioned,) = _sent([{"type": "text", "text": "look"}, image])
+    peer = {**image_only, "origin": {"kind": "peer", "from": "uds:/tmp/x.sock"}}
+    tool_result = {**image_only, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "done"}]}}
+    subagent = {**image_only, "parent_tool_use_id": "task-1"}
+
+    def parsed(raw):
+        return parse_message({**raw, "uuid": "u", "session_id": "s"})
+
+    assert _is_own_prompt_echo(parsed(image_only))
+    assert _is_own_prompt_echo(parsed(captioned))
+    assert not _is_own_prompt_echo(parsed(peer))
+    assert not _is_own_prompt_echo(parsed(tool_result))
+    assert not _is_own_prompt_echo(parsed(subagent))
+
+
+def test_image_only_host_turn_reclaims_the_stream_from_an_open_peer_burst():
+    """The CLI replays an image-only prompt as an empty user message; that echo must still close an
+    open peer burst, or the host's own answer is delivered as background output."""
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
+    )
+
+    delivered = []
+    host_script = [AssistantMessage(content=[TextBlock("a red square")]),
+                   ResultMessage(result="a red square", uuid="host-1")]
+    session, holder = _make_session(
+        script=[],
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other", "body": "ping"}
+    try:
+        session.ensure_started()
+        client = holder["client"]
+        peer_in = UserMessage(content="ping")
+        peer_in.origin = peer_origin
+        client.feed(peer_in, AssistantMessage(content=[TextBlock("partial peer text")]))
+        deadline = time.time() + 2
+        while not session._unsolicited_burst_open and time.time() < deadline:
+            time.sleep(0.01)
+        assert session._unsolicited_burst_open
+
+        async def query_with_parsed_echo(prompt):
+            client.queried.append([message async for message in prompt])
+            client.feed(UserMessage(content=[]), *host_script)
+
+        client.query = query_with_parsed_echo
+        turn = session.run_turn(
+            [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}],
+            turn_timeout=5.0,
+        )
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert turn.final_text == "a red square"
+    assert session._unsolicited_burst_open is False
+    assert all("a red square" not in " ".join(texts) for texts, _items in delivered)

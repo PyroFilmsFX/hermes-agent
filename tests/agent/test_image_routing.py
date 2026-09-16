@@ -665,3 +665,42 @@ class TestProbeApiKeyForwarding:
         ) as detect:
             _lookup_supports_vision("custom", "llava", {"model": {"api_key": key}})
         assert detect.call_args.kwargs.get("api_key") == key
+
+
+# ─── claude-agent-sdk resolves vision through the Anthropic catalog ──────────
+
+
+class TestClaudeAgentSdkVisionRouting:
+    _CATALOG = {"anthropic": {"claude-fable-5-1": {"modalities": {"input": ["text", "image"]}, "tool_call": True}}}
+
+    def _registry(self, mdev_id, *, allow_network):
+        return self._CATALOG.get(mdev_id)
+
+    def test_sdk_and_anthropic_identities_of_one_model_route_alike(self):
+        with patch("agent.models_dev._registry_models", side_effect=self._registry):
+            decisions = {
+                (provider, model): decide_image_input_mode(provider, model, {})
+                for provider, model in (
+                    ("anthropic", "claude-fable-5-1"),
+                    ("claude-agent-sdk", "claude-fable-5-1"),
+                    ("claude-agent-sdk", "claude-fable-5.1"),
+                )
+            }
+        assert set(decisions.values()) == {"native"}
+
+    def test_sdk_keeps_explicit_text_and_aux_backend_precedence(self):
+        with patch("agent.models_dev._registry_models", side_effect=self._registry):
+            explicit = decide_image_input_mode(
+                "claude-agent-sdk", "claude-fable-5-1", {"agent": {"image_input_mode": "text"}}
+            )
+            aux = decide_image_input_mode(
+                "claude-agent-sdk", "claude-fable-5-1",
+                {"auxiliary": {"vision": {"provider": "claude-agent-sdk", "model": "claude-sonnet-5"}}},
+            )
+            unknown = decide_image_input_mode("claude-agent-sdk", "claude-unlisted-9", {})
+        assert (explicit, aux, unknown) == ("text", "text", "text")
+
+    def test_sdk_alias_does_not_leak_into_the_provider_map(self):
+        from agent.models_dev import PROVIDER_TO_MODELS_DEV
+
+        assert "claude-agent-sdk" not in PROVIDER_TO_MODELS_DEV

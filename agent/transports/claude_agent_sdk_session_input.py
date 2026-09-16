@@ -150,10 +150,78 @@ def _coerce_turn_input(user_input: Any) -> Any:
     return "" if user_input is None else str(user_input)
 
 
-async def _sdk_user_message_stream(content: list[dict[str, Any]]):
-    """One-message async stream accepted by ``ClaudeSDKClient.query``."""
-    yield {
+# Per-image ceiling: the bundled CLI's conservative default image budget (5 MiB of base64). The whole
+# message has a second ceiling: with replay-user-messages the CLI echoes the user message back on
+# stdout, and a stdout line over max_buffer_size kills the SDK reader (and the session) mid-turn.
+SDK_IMAGE_BASE64_LIMIT = 5 * 1024 * 1024
+_SDK_ECHO_ENVELOPE_RESERVE = 64 * 1024
+_SDK_IMAGE_BLOCK_OVERHEAD = 256
+
+
+def _image_part_payload_size(part: dict[str, Any]) -> Optional[int]:
+    """Bytes of base64 an image part will put on the wire (a URL costs its length), or None if not an image."""
+    if not isinstance(part, dict) or part.get("type") not in {"image_url", "input_image", "image"}:
+        return None
+    source = part.get("source")
+    if isinstance(source, dict):
+        return len(str(source.get("data") or source.get("url") or ""))
+    raw_url = part.get("image_url")
+    if isinstance(raw_url, dict):
+        raw_url = raw_url.get("url")
+    raw_url = raw_url if isinstance(raw_url, str) else str(part.get("url") or "")
+    _head, sep, data = raw_url.partition(";base64,")
+    return len(data) if sep else len(raw_url)
+
+
+def fit_images_to_sdk_budget(
+    parts: list[dict[str, Any]], *, max_buffer_size: Optional[int] = None
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Drop image parts the SDK lane cannot carry, in order: one over the per-image ceiling, or one that
+    would push the echoed message past the stdout buffer. Returns ``(kept_parts, dropped)`` where
+    ``dropped`` indexes the image parts (0-based among images) that were removed."""
+    import json as _json
+
+    if max_buffer_size is None:
+        from agent.transports.claude_agent_sdk_session_config import _configured_max_buffer_size
+
+        max_buffer_size = _configured_max_buffer_size()
+    budget = max(0, int(max_buffer_size) - _SDK_ECHO_ENVELOPE_RESERVE)
+    used = sum(
+        len(_json.dumps(part, ensure_ascii=False)) for part in parts if _image_part_payload_size(part) is None
+    )
+    kept: list[dict[str, Any]] = []
+    dropped: list[int] = []
+    image_index = 0
+    for part in parts:
+        size = _image_part_payload_size(part)
+        if size is None:
+            kept.append(part)
+            continue
+        cost = size + _SDK_IMAGE_BLOCK_OVERHEAD
+        if size > SDK_IMAGE_BASE64_LIMIT or used + cost > budget:
+            dropped.append(image_index)
+        else:
+            used += cost
+            kept.append(part)
+        image_index += 1
+    return kept, dropped
+
+
+def _sdk_user_message(content: Any, *, origin: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """The one streaming-input user envelope for host turns and steers.
+
+    Host turns stay unattributed: steer accounting identifies a steer's result by its human origin, so a
+    turn stamped human would be counted as a steer."""
+    message = {
         "type": "user",
         "message": {"role": "user", "content": content},
         "parent_tool_use_id": None,
     }
+    if origin is not None:
+        message["origin"] = origin
+    return message
+
+
+async def _sdk_user_message_stream(content: Any, *, origin: Optional[dict[str, Any]] = None):
+    """One-message async stream accepted by ``ClaudeSDKClient.query``."""
+    yield _sdk_user_message(content, origin=origin)
