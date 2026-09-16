@@ -128,3 +128,36 @@ def test_image_only_host_turn_reclaims_the_stream_from_an_open_peer_burst():
     assert turn.final_text == "a red square"
     assert session._unsolicited_burst_open is False
     assert all("a red square" not in " ".join(texts) for texts, _items in delivered)
+
+
+def test_session_boundary_omits_images_past_the_reader_it_started_with():
+    """Every surface (CLI, messaging, delegation) reaches run_turn; the session budgets against the
+    max_buffer_size its CLI was started with, not whatever the config says now."""
+    from unittest.mock import patch
+
+    from tests.agent.claude_sdk_fakes import ResultMessage, _make_session
+
+    with patch(
+        "agent.transports.claude_agent_sdk_session._configured_max_buffer_size", return_value=1 * MiB
+    ):
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+    small = "data:image/png;base64," + "A" * 1024
+    large = "data:image/png;base64," + "A" * (2 * MiB)
+    try:
+        with patch(
+            "agent.transports.claude_agent_sdk_session._configured_max_buffer_size", return_value=64 * MiB
+        ):
+            turn = session.run_turn([
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": small}},
+                {"type": "image_url", "image_url": {"url": large}},
+            ])
+        assert holder["client"].options["max_buffer_size"] == 1 * MiB
+    finally:
+        session.close()
+
+    assert turn.error is None
+    ((sent,),) = holder["client"].queried
+    content = sent["message"]["content"]
+    assert [block["type"] for block in content] == ["text", "image", "text"]
+    assert "1 attached image(s) were too large" in content[-1]["text"]

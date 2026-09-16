@@ -704,3 +704,15 @@ class TestClaudeAgentSdkVisionRouting:
         from agent.models_dev import PROVIDER_TO_MODELS_DEV
 
         assert "claude-agent-sdk" not in PROVIDER_TO_MODELS_DEV
+
+    def test_anthropic_model_override_applies_to_the_sdk_identity(self):
+        import agent.models_dev as md
+
+        overrides = {"anthropic": {"claude-fable-5-1": {"supports_vision": False}}}
+        sdk_own = {**overrides, "claude-agent-sdk": {"claude-fable-5-1": {"supports_vision": True}}}
+        with patch("agent.models_dev._registry_models", side_effect=self._registry):
+            with patch.object(md, "_load_model_overrides", return_value=overrides):
+                inherited = decide_image_input_mode("claude-agent-sdk", "claude-fable-5-1", {})
+            with patch.object(md, "_load_model_overrides", return_value=sdk_own):
+                own = decide_image_input_mode("claude-agent-sdk", "claude-fable-5-1", {})
+        assert (inherited, own) == ("text", "native")
