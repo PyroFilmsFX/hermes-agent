@@ -3462,7 +3462,10 @@ def _run_summary_phase(
         # Durable adoption reloads the parent with its UI-only SDK projections. Split
         # them at this boundary, before checkpointing or dispatching any compressor;
         # the caller still owns the sidecar for post-turn display restoration.
-        messages, _display_rows = _split_sdk_display_rows(messages)
+        # Rebind only when rows were split: callers compare the list by identity for rollback.
+        working, _display_rows = _split_sdk_display_rows(messages)
+        if _display_rows:
+            messages = working
         memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
         compress_fn, compress_kwargs = _resolve_compress_call(
             agent, approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,
