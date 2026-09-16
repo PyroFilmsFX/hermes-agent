@@ -5,6 +5,8 @@ import pytest
 
 class _Agent:
     ephemeral_system_prompt = ""
+    # build_api_messages reads the turn's frozen admission clock (upstream replay canonicalization).
+    _current_turn_timestamp = 0.0
 
     def _copy_reasoning_content_for_api(self, source, target):
         if source.get("reasoning_content"):
