@@ -22,6 +22,7 @@ import {
   sessionMatchesStoredId,
   setCurrentCwd
 } from '@/store/session'
+import { isSessionGoneForBackgroundPolling } from '@/store/session-gone-latch'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 import {
   $sessionStates,
@@ -186,7 +187,9 @@ export async function reconcileTileTranscripts({
     // Bot tiles are pinned to an exact owner (connection + target profile);
     // read from that backend, not whichever profile is foreground. Tiles
     // without a route keep the legacy local read.
-    const profileScope = profileScopeForTranscriptSession(tile)
+    // A plain tile has no owner route; without the sidebar row's profile the read lands on
+    // the primary backend, 404s, and retried every tick (the hermes:api 404 storm, cntrl carry).
+    const profileScope = profileScopeForTranscriptSession(tile) ?? storedRowProfileScope(storedSessionId)
 
     const signatureKey = tileTranscriptSignatureKey(tile)
 

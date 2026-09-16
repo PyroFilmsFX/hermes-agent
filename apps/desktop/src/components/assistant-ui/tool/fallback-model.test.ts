@@ -570,7 +570,8 @@ describe('buildToolView fidelity contract (U3.4)', () => {
     const view = buildToolView(
       part({
         isError: true,
-        result: { output: errorMsg },
+        // Upstream keeps a plain-text tool result verbatim on the part.
+        result: errorMsg,
         toolName: 'terminal'
       }),
       ''
