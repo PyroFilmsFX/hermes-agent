@@ -12,6 +12,7 @@ try:
 except ModuleNotFoundError:
     pass  # partial `hermes update` — only skips the Windows UTF-8 stdio setup
 
+import atexit
 import json
 import logging
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ def _join_background_review_threads() -> None:
 
 def _register_background_review_thread(t: "threading.Thread") -> None:
     global _BG_REVIEW_ATEXIT_REGISTERED
+    if not callable(getattr(t, "is_alive", None)):
+        return  # test doubles stand in for Thread; nothing to join
     _BG_REVIEW_THREADS[:] = [x for x in _BG_REVIEW_THREADS if x.is_alive()]
     _BG_REVIEW_THREADS.append(t)
     if not _BG_REVIEW_ATEXIT_REGISTERED:
