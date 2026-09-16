@@ -152,3 +152,22 @@ class TestProjector:
         assert p.project(SystemMessage()).messages == []
         # A plain-text user echo must not duplicate the real user turn.
         assert p.project(UserMessage(content="hi")).messages == []
+
+
+
+def test_replayed_prompt_echoes_add_nothing_to_the_transcript():
+    """With --replay-user-messages the CLI echoes Hermes' own prompts; they must not project."""
+    from claude_agent_sdk.types import TextBlock as RealTextBlock
+    from claude_agent_sdk.types import UserMessage as RealUserMessage
+
+    from agent.transports.claude_sdk_event_projector import ClaudeSdkEventProjector
+
+    projector = ClaudeSdkEventProjector()
+    for echo in (
+        RealUserMessage(content="hello", origin={"kind": "human"}),
+        RealUserMessage(content=[RealTextBlock(text="steer this")], origin={"kind": "human"}),
+        RealUserMessage(content="ping", origin={"kind": "peer", "from": "x", "body": "ping"}),
+    ):
+        result = projector.project(echo)
+        assert result.messages == []
+        assert result.is_tool_iteration is False

@@ -10,15 +10,6 @@ import pytest
 import tui_gateway.server as server
 
 
-@pytest.fixture(autouse=True)
-def _isolate_claude_child_env(monkeypatch):
-    """Tests must not inherit the task vars of the Claude session running them."""
-    for key in (
-        "CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID",
-        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
 
 def _task_root(tmp_path, list_id="hermes-session"):
     root = tmp_path / "claude" / "tasks" / list_id

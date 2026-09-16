@@ -20,15 +20,6 @@ import pytest
 from agent.transports import claude_agent_sdk_session_config as M
 
 
-@pytest.fixture(autouse=True)
-def _isolate_claude_child_env(monkeypatch):
-    """Tests must not inherit the task vars of the Claude session running them."""
-    for key in (
-        "CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID",
-        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
 
 @pytest.fixture
 def env_config(monkeypatch):
