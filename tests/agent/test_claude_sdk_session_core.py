@@ -795,7 +795,13 @@ class TestSession:
 
     def test_session_name_absent_when_unnamed(self):
         session, _ = _make_session(script=[ResultMessage(result="ok")])
-        assert "extra_args" not in session.build_option_fields()
+        assert "name" not in session.build_option_fields().get("extra_args", {})
+
+    def test_cli_replays_user_messages_so_injected_turns_are_visible(self):
+        """Peer messages / task notifications only reach the stream with replay on."""
+        session, _ = _make_session(script=[ResultMessage(result="ok")])
+        extra = session.build_option_fields()["extra_args"]
+        assert "replay-user-messages" in extra and extra["replay-user-messages"] is None
 
     # --- fork default permission_mode=auto (cntrl carry) ---
 
