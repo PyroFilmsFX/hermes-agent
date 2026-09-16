@@ -20,6 +20,16 @@ import pytest
 from agent.transports import claude_agent_sdk_session_config as M
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_child_env(monkeypatch):
+    """Tests must not inherit the task vars of the Claude session running them."""
+    for key in (
+        "CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID",
+        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture
 def env_config(monkeypatch):
     """Drive _configured_sdk_env / the metered flag / the scrub from the test."""
@@ -215,3 +225,18 @@ def test_interpreter_scrub_is_independent_of_the_metered_opt_in(env_config, monk
     monkeypatch.setenv("PYTHONPATH", "/repo/.venv/lib/python3.11/site-packages")
 
     assert M._sdk_env_overrides()["PYTHONPATH"] == ""
+
+
+def test_nested_in_claude_child_masks_the_parent_task_list(env_config, monkeypatch):
+    """Inside a Claude Code child the inherited list id is the PARENT's: never reuse it."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "parent-session-list")
+    monkeypatch.setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+    env_config(task_tools=True)
+    enabled = M._sdk_env_overrides(task_list_id="derived-list")
+    assert enabled["CLAUDE_CODE_TASK_LIST_ID"] == "derived-list"
+
+    env_config(task_tools=False)
+    disabled = M._sdk_env_overrides(task_list_id="derived-list")
+    assert disabled["CLAUDE_CODE_TASK_LIST_ID"] == ""
+    assert disabled["CLAUDE_CODE_ENABLE_TODO_TOOLS"] == ""
