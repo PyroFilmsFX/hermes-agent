@@ -16,6 +16,14 @@ Upstream moves ~180 commits a day. We merge upstream often. So:
 1. **New code goes out-of-tree.** `cntrl-plugins/<name>/` (symlinked into
    `$HERMES_HOME/plugins/`), `$HERMES_HOME/plugins/`, or a pip entry point.
    Never a new feature inside Hermes core files.
+   **Use Hermes' plugin systems first.** Hermes has plugin seams for most
+   layers: backend plugins and hooks (`plugins/`, the hermes_cli plugin
+   loader), MCP servers, skills, desktop UI contributions
+   (`apps/desktop/src/app/contrib/` — surfaces, panes, controller, wiring),
+   and the composer status stack. New UI above the composer, new panels,
+   new backend behaviour: build it as a plugin against those seams. There is
+   NO plugin seam for the agent engine/transport itself (e.g. the Claude
+   Agent SDK runtime); engine changes are core edits under rule 2.
 2. **Core edits only when there is no seam.** Keep them tiny, keep them in one
    commit, and list them in `docs/cntrl/fork-inventory.md` with the reason.
 3. **The Claude Agent SDK runtime is upstream PR #65982, not ours.** Do not
