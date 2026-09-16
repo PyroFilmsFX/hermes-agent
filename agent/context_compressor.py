@@ -4648,7 +4648,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         # compressor's working copy: the gateway keeps the original display rows and restores them after
         # the model-facing transcript is compacted. This must happen before pruning, window selection,
         # memory-checkpoint inputs, or summary serialization can turn a display answer into model context.
-        messages = [message for message in messages if not _is_sdk_display_only_row(message)]
+        if any(_is_sdk_display_only_row(message) for message in messages):
+            messages = [message for message in messages if not _is_sdk_display_only_row(message)]
         telemetry = self._begin_compress_attempt(current_tokens, force)
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
