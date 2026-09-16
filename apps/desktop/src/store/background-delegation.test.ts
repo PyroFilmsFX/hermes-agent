@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { $backgroundResume } from './background-delegation'
+import { $backgroundResume, backgroundResumeFor } from './background-delegation'
 import { $activeSessionId, $busy } from './session'
 import { $subagentsBySession, type SubagentProgress, type SubagentStreamEntry } from './subagents'
 
@@ -61,5 +61,16 @@ describe('$backgroundResume', () => {
     $subagentsBySession.set({ s1: [sub({ id: 'a' })] })
     $activeSessionId.set(null)
     expect($backgroundResume.get()).toBeNull()
+  })
+})
+
+describe('backgroundResumeFor', () => {
+  it('reports only the given session children, never the active session', () => {
+    $activeSessionId.set('other')
+    $subagentsBySession.set({ other: [sub({ id: 'astra', stream: [stream('Astra: debt census')] })], mine: [] })
+    const bySession = $subagentsBySession.get()
+    expect(backgroundResumeFor(bySession.mine, false)).toBeNull()
+    expect(backgroundResumeFor(bySession.other, false)?.activity).toBe('Astra: debt census')
+    expect(backgroundResumeFor(bySession.other, true)).toBeNull()
   })
 })

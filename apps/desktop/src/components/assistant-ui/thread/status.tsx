@@ -13,13 +13,15 @@ import { Loader } from '@/components/ui/loader'
 import { StatusPulse } from '@/components/ui/status-pulse'
 import { getLocalModelsStatus } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { useSessionSlice } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { $backgroundResume } from '@/store/background-delegation'
+import { backgroundResumeFor } from '@/store/background-delegation'
 import { sessionCompacting } from '@/store/compaction'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { sessionAwaitingInput } from '@/store/prompts'
 import { parseModelLoadWait, sessionProviderWait } from '@/store/provider-wait'
 import { $currentModel } from '@/store/session'
+import { $subagentsBySession } from '@/store/subagents'
 import { type DraftingTool, sessionDraftingTool } from '@/store/tool-drafting'
 import type { LocalModelLoadProgress } from '@/types/hermes'
 
@@ -276,7 +278,13 @@ export const ResponseLoadingIndicator: FC = () => {
 // nothing is parked.
 export const BackgroundResumeNotice: FC = () => {
   const { t } = useI18n()
-  const resume = useStore($backgroundResume)
+  // Scoped to the transcript that mounted it, like every other indicator here:
+  // another session's parked agents must never show in this thread.
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const busy = useStore(view.$busy)
+  const children = useSessionSlice($subagentsBySession, sessionId ?? null)
+  const resume = backgroundResumeFor(children, busy)
 
   if (!resume) {
     return null

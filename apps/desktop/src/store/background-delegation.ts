@@ -28,21 +28,29 @@ const RUNNING = (s: SubagentProgress) => s.status === 'running' || s.status === 
  * spawned inside a running turn (synchronous orchestrator children) are part of
  * that turn, not parked background work the user is waiting on.
  */
+export function backgroundResumeFor(
+  children: readonly SubagentProgress[] | undefined,
+  busy: boolean
+): BackgroundResume | null {
+  if (busy) {
+    return null
+  }
+
+  const running = (children ?? []).filter(RUNNING)
+
+  if (running.length === 0) {
+    return null
+  }
+
+  const activity = (running[0]!.stream.at(-1)?.text ?? '').trim() || null
+
+  return { activity, count: running.length }
+}
+
+/** App-wide variant for the active session. Transcripts must NOT use it: a
+ *  thread renders its own session's parked work (see BackgroundResumeNotice),
+ *  otherwise a split view or background tab shows another session's agents. */
 export const $backgroundResume = computed(
   [$subagentsBySession, $activeSessionId, $busy],
-  (bySession, sid, busy): BackgroundResume | null => {
-    if (busy || !sid) {
-      return null
-    }
-
-    const running = (bySession[sid] ?? []).filter(RUNNING)
-
-    if (running.length === 0) {
-      return null
-    }
-
-    const activity = (running[0]!.stream.at(-1)?.text ?? '').trim() || null
-
-    return { activity, count: running.length }
-  }
+  (bySession, sid, busy): BackgroundResume | null => (sid ? backgroundResumeFor(bySession[sid], busy) : null)
 )
