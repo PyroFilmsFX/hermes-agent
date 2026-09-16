@@ -22,7 +22,7 @@ def test_session_create_preserves_configured_provider_when_catalog_serves_model(
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
 
     db = SessionDB(db_path=tmp_path / "state.db")
     _quiet_create(monkeypatch, db)
@@ -55,17 +55,17 @@ def test_resolve_model_reads_model_and_falls_back_to_provider_default(monkeypatc
 
     # Case A: provider only (no model.model) -> resolves provider default (claude-fable-5-1)
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == "claude-fable-5-1"
 
     # Case B: model key specified
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "model": "claude-3-5-haiku-20241022"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == "claude-3-5-haiku-20241022"
 
     # Case C: legacy default key fallback
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-legacy-default"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == "claude-legacy-default"
 
 
@@ -78,7 +78,7 @@ def test_session_create_info_always_includes_provider(monkeypatch, tmp_path):
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
 
     db = SessionDB(db_path=tmp_path / "state.db")
     _quiet_create(monkeypatch, db)
@@ -125,14 +125,15 @@ def test_config_model_target_sdk_default_only_keeps_default(monkeypatch, tmp_pat
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
 
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._config_model_target() == ("claude-opus-5", "claude-agent-sdk")
 
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5", "model": "claude-fable-5-1"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
-    assert server._config_model_target() == ("claude-fable-5-1", "claude-agent-sdk")
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
+    # Upstream canonicalization: default > model (hermes_cli/config.py _normalize_root_model_keys).
+    assert server._config_model_target() == ("claude-opus-5", "claude-agent-sdk")
 
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "anthropic", "default": "claude-opus-4-6", "model": "ignored-for-non-sdk"}}))
-    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+    server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._config_model_target() == ("claude-opus-4-6", "anthropic")
 

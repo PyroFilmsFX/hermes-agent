@@ -85,7 +85,6 @@ def _(rid, params: dict) -> dict:
     return create_task_session(rid, params)
 
 
-@contextlib.contextmanager
 def _profile_build_scope(profile_home):
     """Bind HERMES_HOME + secret + terminal scope for an agent build: the same composition a turn
     binds (``_session_profile_runtime_scope``). Home alone leaves ``get_secret()`` on the LAUNCH

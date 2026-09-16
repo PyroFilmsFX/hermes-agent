@@ -25018,6 +25018,44 @@
             "default": false,
             "title": "Follow Profile Config",
             "type": "boolean"
+          },
+          "_cwd_identity": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cwd Identity"
+          },
+          "_delegated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delegated By"
+          },
+          "_delegated_restrictions": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delegated Restrictions"
           }
         },
         "title": "SessionCreateParams",

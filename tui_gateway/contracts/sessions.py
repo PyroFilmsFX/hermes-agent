@@ -128,6 +128,11 @@ class SessionCreateParams(ProfileParams):
     hidden: bool = False
     room_plumbing: bool = False
     follow_profile_config: bool = False
+    # Internal sibling-session handoff (tui_gateway/session_task_handoff.py, shipped disabled):
+    # a validated cwd identity, the spawning root, and the caller restrictions the child inherits.
+    cwd_identity: dict[str, JsonValue] | None = Field(default=None, alias="_cwd_identity")
+    delegated_by: str | None = Field(default=None, alias="_delegated_by")
+    delegated_restrictions: dict[str, JsonValue] | None = Field(default=None, alias="_delegated_restrictions")
 
 
 class SessionCreateResult(Result):

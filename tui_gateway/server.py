@@ -1606,7 +1606,7 @@ def _resolve_model() -> str:
     if isinstance(m, dict):
         provider = _resolve_provider(cfg)
         if provider.lower() == "claude-agent-sdk":
-            model = str(m.get("model") or m.get("default", "") or "").strip()
+            model = str(m.get("default") or m.get("model", "") or "").strip()
             if model:
                 return model
             with contextlib.suppress(Exception):
@@ -1649,10 +1649,10 @@ def _config_model_target() -> tuple[str, str]:
     if isinstance(cfg_model, dict):
         provider = str(cfg_model.get("provider") or "").strip()
         if provider.lower() == "claude-agent-sdk":
-            # SDK block: prefer the explicit model key but keep honouring the
-            # default key that model persistence still writes (A4: config sync
-            # must not see an empty model for a default-only SDK config).
-            model = str(cfg_model.get("model") or cfg_model.get("default", "") or "").strip()
+            # SDK block: upstream canonicalizes the model id to ``default`` (default > model >
+            # name, hermes_cli/config.py _normalize_root_model_keys); read the same precedence and
+            # keep the ``model`` key only as a fallback for a not-yet-migrated block.
+            model = str(cfg_model.get("default") or cfg_model.get("model", "") or "").strip()
         else:
             model = str(cfg_model.get("default", "") or "").strip()
         return model, "" if provider.lower() == "auto" else provider
