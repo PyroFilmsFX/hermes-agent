@@ -1126,10 +1126,18 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             fields["plugins"] = plugins
         # Name the spawned session so peers can find and message it
         # (ListAgents/SendMessage) — the host-router seam.
+        extra = dict(fields.get("extra_args") or {})
         if self._session_name:
-            extra = dict(fields.get("extra_args") or {})
             extra.setdefault("name", self._session_name)
-            fields["extra_args"] = extra
+        # Injected turns (peer SendMessage deliveries, task notifications,
+        # scheduled prompts) only appear on the stream as origin-tagged
+        # UserMessages when the CLI replays user messages. Without this the
+        # unsolicited path never sees the inbound peer message or what woke the
+        # session, so neither renders in the transcript. Replayed echoes of
+        # Hermes' own prompts are harmless: the projector keeps only tool
+        # results from UserMessages. Constant per session (cache-safe).
+        extra.setdefault("replay-user-messages", None)
+        fields["extra_args"] = extra
         # Default OFF (upstream-conservative): partial messages only when the
         # operator opts in via agent.claude_agent_sdk.streaming in config.yaml.
         # Reads the __init__ snapshot so option and quiet-watchdog semantics

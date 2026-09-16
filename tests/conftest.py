@@ -156,6 +156,16 @@ _CREDENTIAL_SUFFIXES = (
 )
 
 # Explicit names (for ones that don't fit the suffix pattern)
+_CLAUDE_CHILD_VARS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENABLE_TODO_TOOLS",
+    "CLAUDE_CODE_TASK_LIST_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+)
+
 _CREDENTIAL_NAMES = frozenset({
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -467,6 +477,12 @@ def _hermetic_environment(tmp_path, monkeypatch):
 
     # 2. Blank behavioral HERMES_* vars that could change test semantics.
     for name in _HERMES_BEHAVIORAL_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    # 2b. The suite is often run from inside a Claude Code session (a Hermes SDK
+    #     child). That session's own markers and task-list vars would change SDK
+    #     child-env resolution, so tests start from a non-Claude process.
+    for name in _CLAUDE_CHILD_VARS:
         monkeypatch.delenv(name, raising=False)
 
     # Honcho's fallback host/config resolution legitimately reads the user's
