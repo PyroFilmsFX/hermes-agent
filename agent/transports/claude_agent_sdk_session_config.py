@@ -121,15 +121,40 @@ def _sdk_env_overrides(
     return overrides
 
 
+_TASK_ENV_KEYS = ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID")
+# Set by the Claude Code CLI in its own child processes. When Hermes itself runs
+# inside a Claude session (a Hermes SDK child running tests, a nested backend,
+# `hermes` typed in a Claude-driven terminal), the inherited task vars belong to
+# THAT parent session, not to an operator: honouring them would make every
+# session this process starts read and write the parent's task list.
+_CLAUDE_CHILD_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")
+
+
+def _inside_claude_code_child() -> bool:
+    return any(os.environ.get(marker) for marker in _CLAUDE_CHILD_MARKERS)
+
+
 def _effective_sdk_task_env(*, task_list_id: Optional[str] = None) -> dict[str, str]:
-    """Resolve task-tool env with YAML > inherited process env > injected defaults."""
+    """Resolve task-tool env with YAML > inherited process env > injected defaults.
+
+    Inherited values count as operator intent only outside a Claude Code child;
+    inside one they are the parent session's and are masked instead.
+    """
     values: dict[str, str] = {}
+    nested = _inside_claude_code_child()
     if _provider_flag("task_tools"):
         values["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1"
         if task_list_id:
             values["CLAUDE_CODE_TASK_LIST_ID"] = str(task_list_id)
-    for key in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID"):
-        if key in os.environ:
+    for key in _TASK_ENV_KEYS:
+        if key not in os.environ:
+            continue
+        if nested:
+            # Never let the parent's list leak into this session's child; the
+            # SDK merges options.env after the inherited env, so an explicit
+            # blank is what masks it when no per-session value was set above.
+            values.setdefault(key, "")
+        else:
             values[key] = str(os.environ[key])
     configured = _configured_sdk_env()
     for key in ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID"):
