@@ -255,6 +255,34 @@ method("session.active_list", params=SessionActiveListParams, result=SessionActi
        doc="Live sessions in this process, insertion order (not a DB browser).")
 
 
+# ── session.task_create ───────────────────────────────────────────────────────────────────────
+
+
+class SessionTaskCreateParams(Params):
+    """Owner-scoped spawn from an SDK session; the socket injects the capability token."""
+
+    cwd: str | None = None
+    task: str | None = None
+    title: str | None = None
+    request_id: str | None = None
+    session_spawn_capability: str | None = Field(default=None, alias="_session_spawn_capability")
+
+
+class SessionTaskCreateResult(Result):
+    stored_session_id: str
+    session_id: str
+    profile: str | None = None
+    cwd: str | None = None
+    peer_name: str | None = None
+    task_status: str
+    peer_status: str
+    resumable: bool | None = None
+
+
+method("session.task_create", params=SessionTaskCreateParams, result=SessionTaskCreateResult,
+       doc="Create and start a peer session for an SDK session's task (session_spawn; off by default).")
+
+
 # ── stored-row mutation ───────────────────────────────────────────────────────────────────────
 
 

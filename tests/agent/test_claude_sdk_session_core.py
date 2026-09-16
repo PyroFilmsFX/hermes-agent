@@ -460,6 +460,13 @@ class TestSession:
         )
         assert session.build_option_fields()["max_turns"] == 7
 
+    def test_catalog_dotted_model_id_reaches_the_cli_as_the_api_id(self):
+        dotted, _ = _make_session(script=[ResultMessage(result="ok")])
+        api, _ = _make_session(script=[ResultMessage(result="ok")])
+        dotted._model, api._model = "anthropic/claude-fable-5.1", "claude-fable-5-1"
+        assert dotted.build_option_fields()["model"] == api.build_option_fields()["model"]
+        assert dotted._model == "anthropic/claude-fable-5.1"
+
     def test_native_read_is_disallowed_in_favor_of_bounded_mcp_read(self):
         # Native Read must remain behind Hermes's protected-path-aware bounded
         # MCP read surface under every supported SDK permission mode.

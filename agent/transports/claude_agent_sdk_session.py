@@ -150,6 +150,15 @@ __all__ = [
 ]
 
 
+def _cli_model_id(model):
+    """The Claude Code CLI takes API ids; catalogs spell some versions with dots (``claude-fable-5.1``)."""
+    if not model:
+        return model
+    from agent.anthropic_message_convert import normalize_model_name
+
+    return normalize_model_name(str(model))
+
+
 class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, ClaudeSdkNotifyMixin, ClaudeSdkCompactionMixin, ClaudeSdkBillingMixin, ClaudeSdkChildProcessMixin):
     """One SDK client per Hermes session, lifetime owned by AIAgent.
 
@@ -1084,7 +1093,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         )
 
         fields = {
-            "model": self._model,
+            "model": _cli_model_id(self._model),
             "cwd": self._cwd,
             "permission_mode": self._permission_mode,
             "system_prompt": system_prompt,
