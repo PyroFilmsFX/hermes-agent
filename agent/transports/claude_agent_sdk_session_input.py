@@ -207,6 +207,29 @@ def fit_images_to_sdk_budget(
     return kept, dropped
 
 
+def fit_sdk_turn_blocks(prompt: Any, *, max_buffer_size: int) -> Any:
+    """Session-boundary backstop for every caller (desktop, CLI, messaging, delegation): images the CLI
+    cannot carry are replaced by one note, so a turn never kills the reader. Path-aware notes are the
+    desktop gateway's job; here only counts are known."""
+    if not isinstance(prompt, list):
+        return prompt
+    kept, dropped = fit_images_to_sdk_budget(prompt, max_buffer_size=max_buffer_size)
+    if not dropped:
+        return prompt
+    logger.warning("claude-agent-sdk: %d attached image(s) exceed the payload budget; omitted", len(dropped))
+    note = (
+        f"[{len(dropped)} attached image(s) were too large to send inline and were omitted; "
+        "ask the user to resend a smaller version if they matter]"
+    )
+    has_image = any(_image_part_payload_size(block) is not None for block in kept)
+    if not has_image:
+        text = "\n\n".join(
+            str(block.get("text") or "") for block in kept if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        return f"{text}\n\n{note}" if text else note
+    return [*kept, {"type": "text", "text": note}]
+
+
 def _sdk_user_message(content: Any, *, origin: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """The one streaming-input user envelope for host turns and steers.
 

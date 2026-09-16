@@ -32,6 +32,7 @@ from agent.transports.claude_agent_sdk_session_availability import (
 from agent.transports.claude_agent_sdk_session_input import (
     _coerce_turn_input,
     _sdk_user_message_stream,
+    fit_sdk_turn_blocks,
 )
 from agent.transports.claude_agent_sdk_session_config import (
     _configured_post_tool_quiet_timeout,
@@ -163,6 +164,9 @@ class ClaudeSdkTurnMixin:
         only a grace expiry hard-cancels and retires."""
         result = TurnResult()
         prompt = _coerce_turn_input(user_input)
+        max_buffer_size = getattr(self, "_max_buffer_size", None)
+        if max_buffer_size:
+            prompt = fit_sdk_turn_blocks(prompt, max_buffer_size=max_buffer_size)
         if isinstance(prompt, str) and not prompt.strip():
             self.consume_interrupt()
             result.final_text = (

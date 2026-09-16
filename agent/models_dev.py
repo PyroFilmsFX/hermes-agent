@@ -764,9 +764,11 @@ def get_model_capabilities(provider: str, model: str, *, allow_network: bool = F
     catalog_provider, catalog_model = _capability_catalog_identity(provider, model)
     models = _get_provider_models(catalog_provider, allow_network=allow_network)
     entry = _find_model_entry(models, catalog_model, catalog_provider) if models is not None else None
-    raw = _apply_overrides(provider, model, entry)
-    if raw is None and catalog_provider != provider:
+    if catalog_provider != provider and _explicit_model_override(provider, model) is None:
+        # No SDK-keyed override: the catalog identity's overrides (``model_overrides.anthropic``) apply.
         raw = _apply_overrides(catalog_provider, catalog_model, entry)
+    else:
+        raw = _apply_overrides(provider, model, entry)
     if raw is None:
         return None
     return ModelCapabilities(

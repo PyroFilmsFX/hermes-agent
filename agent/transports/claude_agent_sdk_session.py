@@ -241,6 +241,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Snapshot the canonical Hermes iteration cap once. The SDK options
         # are session-scoped and must remain byte-identical across resumes.
         self._max_turns = _configured_max_turns()
+        # Frozen with the client: turn payloads are budgeted against the reader this CLI actually has.
+        self._max_buffer_size = _configured_max_buffer_size()
         self._client_factory = client_factory  # test seam
         self._include_hermes_tools = include_hermes_tools
         # Hermes-side session id, exported to the hermes-tools MCP subprocess
@@ -1111,7 +1113,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             # Explicit, because the SDK's 1 MiB default is below what this
             # lane's own tool results routinely produce and overflowing it
             # kills the turn outright — see _configured_max_buffer_size.
-            "max_buffer_size": _configured_max_buffer_size(),
+            "max_buffer_size": getattr(self, "_max_buffer_size", None) or _configured_max_buffer_size(),
             # AskUserQuestion has no native answer bridge. Native Read stays
             # behind the protected-path-aware, bounded Hermes MCP surface in
             # every supported SDK permission mode.
