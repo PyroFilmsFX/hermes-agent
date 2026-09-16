@@ -188,8 +188,13 @@ def _sdk_task_snapshot(
     try:
         canonical_tasks_dir = tasks_dir.resolve(strict=False)
         root = (tasks_dir / list_id_path).resolve(strict=False)
-        if not root.is_relative_to(canonical_tasks_dir) or not root.is_dir():
+        if not root.is_relative_to(canonical_tasks_dir):
             logger.warning("invalid Claude task list path %r; refusing snapshot read", raw_list_id)
+            return None
+        if not root.is_dir():
+            # The CLI creates the list lazily on the first Task* call; a session
+            # that never used the task tools simply has nothing to show yet.
+            logger.debug("Claude task list %r not created yet", raw_list_id)
             return None
         tasks_stat = canonical_tasks_dir.stat()
         root_stat = root.stat()

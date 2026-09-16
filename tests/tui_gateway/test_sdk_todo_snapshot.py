@@ -10,6 +10,16 @@ import pytest
 import tui_gateway.server as server
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_child_env(monkeypatch):
+    """Tests must not inherit the task vars of the Claude session running them."""
+    for key in (
+        "CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_TASK_LIST_ID",
+        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 def _task_root(tmp_path, list_id="hermes-session"):
     root = tmp_path / "claude" / "tasks" / list_id
     root.mkdir(parents=True)
@@ -480,3 +490,18 @@ def test_task_store_root_uses_child_env_and_cwd(tmp_path):
     assert resolve_root(
         str(child_cwd), {"HOME": str(child_home), "CLAUDE_CONFIG_DIR": "relative-config"}
     ) == (child_cwd / "relative-config").resolve()
+
+
+def test_missing_task_list_is_quiet_not_an_invalid_path(tmp_path, caplog):
+    """A list the CLI has not created yet is normal: no event and no warning."""
+    import logging
+
+    from tui_gateway import tool_progress
+
+    (tmp_path / "tasks").mkdir()
+    with caplog.at_level(logging.WARNING, logger=tool_progress.logger.name):
+        result = tool_progress._sdk_task_snapshot(
+            task_list_id="hermes-not-created-yet", task_store_root=str(tmp_path)
+        )
+    assert result is None
+    assert not [r for r in caplog.records if "invalid Claude task list" in r.getMessage()]
