@@ -46,11 +46,30 @@ def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str
     return f"{text}\n{refs}" if text else refs
 
 
-def _build_persist_user_message(user_text: str, image_paths: list[str], run_message: Any) -> Any:
+def _image_fallback_note(too_large: list[str], unreadable: list[str]) -> str:
+    """Per-attachment notes for images a native turn could not carry. A readable file too large to send
+    inline keeps the ``vision_analyze`` hint; an unreadable or blocked one says so and names no tool."""
+    notes = [
+        f"[The user attached an image too large to send inline: {Path(p).name}]\n"
+        f"[Examine it with the vision_analyze tool using image_url: {p}]"
+        for p in too_large
+    ]
+    notes += [f"[The user attached an image that could not be read: {Path(p).name}]" for p in unreadable]
+    return "\n\n".join(notes)
+
+
+def _build_persist_user_message(
+    user_text: str, image_paths: list[str], run_message: Any, *, runtime_owns_media: bool = False
+) -> Any:
     """Shape the persisted user turn like the model payload: ``_flush_messages_to_session_db`` ignores a
     plain-string override for a list (native-vision) payload, so swap only the text part for the
-    ``@image:`` form, keep image parts, drop API-only text parts (barge-in note)."""
+    ``@image:`` form, keep image parts, drop API-only text parts (barge-in note). When the runtime owns the
+    media (the Claude Agent SDK CLI transcript), the durable row is the text form alone."""
     persist_text = _build_persist_message_with_image_refs(user_text, image_paths)
+    if runtime_owns_media and isinstance(run_message, list):
+        from agent.session_persistence import RuntimeOwnedMediaText
+
+        return RuntimeOwnedMediaText(persist_text)
     if not isinstance(run_message, list):
         return persist_text
     image_parts = [p for p in run_message if not (isinstance(p, dict) and p.get("type") == "text")]

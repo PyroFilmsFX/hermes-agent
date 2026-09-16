@@ -64,14 +64,23 @@ def _safe_session_filename_component(session_id: str) -> str:
     return f"{sanitized}_{hashlib.sha256(raw.encode('utf-8', errors='surrogatepass')).hexdigest()[:12]}"
 
 
+class RuntimeOwnedMediaText(str):
+    """A text persist override that MAY replace native media blocks: the runtime (the Claude Agent SDK CLI)
+    keeps the image bytes in its own transcript, so the durable row stays caption + ``@image:`` directives."""
+
+
+def _plain_override(override: Any) -> Any:
+    return str(override) if isinstance(override, RuntimeOwnedMediaText) else override
+
+
 def _override_replaces_content(msg: Dict, content: Any, override: Any) -> bool:
     """May the persist override replace ``content``? A plain-text override must not replace native image/audio
-    blocks (a list override is the clean multimodal payload and does), nor a message MERGED with a compaction
-    summary (overwriting would drop the summary)."""
+    blocks (a list override is the clean multimodal payload and does; so does ``RuntimeOwnedMediaText``), nor a
+    message MERGED with a compaction summary (overwriting would drop the summary)."""
     return (
         override is not None
         and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
-        and (not isinstance(content, list) or isinstance(override, list))
+        and (not isinstance(content, list) or isinstance(override, (list, RuntimeOwnedMediaText)))
     )
 
 
@@ -84,7 +93,7 @@ def durable_user_row_content(agent, msg: Dict, content: Any, api_content: Any) -
     if _override_replaces_content(msg, content, override):
         if api_content is None and isinstance(content, str) and content != override:
             api_content = content
-        content = override
+        content = _plain_override(override)
     return content, api_content
 
 
@@ -289,7 +298,7 @@ class SessionPersistenceMixin:
         if not (isinstance(msg, dict) and msg.get("role") == "user"):
             return
         if _override_replaces_content(msg, msg.get("content"), override):
-            msg["content"] = override
+            msg["content"] = _plain_override(override)
         if timestamp is not None:
             msg["timestamp"] = timestamp
         if platform_id is not None:  # load-bearing for restart drain-window recovery dedup (has_platform_message_id)

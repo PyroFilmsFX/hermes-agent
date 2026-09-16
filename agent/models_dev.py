@@ -736,6 +736,21 @@ def _entry_supports_vision(entry: Dict[str, Any]) -> bool:
     return "image" in input_mods if isinstance(input_mods, list) else bool(entry.get("attachment", False))
 
 
+# Runtimes that serve another provider's models under their own provider id. Capability lookups only:
+# the forward map above is also inverted by the model switcher, where this alias must not leak.
+_CAPABILITY_CATALOG_ALIASES: Dict[str, str] = {"claude-agent-sdk": "anthropic"}
+
+
+def _capability_catalog_identity(provider: str, model: str) -> tuple[str, str]:
+    """(provider, model) to read capabilities under; SDK ids resolve as the Anthropic API ids they are."""
+    aliased = _CAPABILITY_CATALOG_ALIASES.get((provider or "").strip())
+    if aliased is None:
+        return provider, model
+    from agent.anthropic_message_convert import normalize_model_name
+
+    return aliased, normalize_model_name((model or "").strip())
+
+
 def get_model_capabilities(provider: str, model: str, *, allow_network: bool = False) -> Optional[ModelCapabilities]:
     """Capability metadata from the models.dev cache, or None if unresolvable. EXPLICIT ``model_overrides``
     patch catalog fields; ``_default`` fills the gap only for models the catalog does not know. Unspecified
@@ -746,9 +761,12 @@ def get_model_capabilities(provider: str, model: str, *, allow_network: bool = F
     self-unblock path for custom/local models (#8731) and for models with wrong metadata in models.dev
     (#84482).
     """
-    models = _get_provider_models(provider, allow_network=allow_network)
-    entry = _find_model_entry(models, model, provider) if models is not None else None
+    catalog_provider, catalog_model = _capability_catalog_identity(provider, model)
+    models = _get_provider_models(catalog_provider, allow_network=allow_network)
+    entry = _find_model_entry(models, catalog_model, catalog_provider) if models is not None else None
     raw = _apply_overrides(provider, model, entry)
+    if raw is None and catalog_provider != provider:
+        raw = _apply_overrides(catalog_provider, catalog_model, entry)
     if raw is None:
         return None
     return ModelCapabilities(

@@ -213,12 +213,52 @@ def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
             print(
                 f"[tui_gateway] native image attachment skipped {len(skipped)} unreadable path(s)",
                 file=sys.stderr)
+        too_large: list[str] = []
+        if getattr(agent, "api_mode", "") == "claude_agent_sdk":
+            parts, too_large = _fit_sdk_turn_images(parts, images, skipped)
         if any(p.get("type") == "image_url" for p in parts):
-            return parts
+            return _with_image_fallback_note(parts, too_large, skipped)
+        if too_large or skipped:
+            note = _image_fallback_note(too_large, skipped)
+            return f"{note}\n\n{prompt}" if prompt else note
     except Exception as _img_exc:
         print(f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
               file=sys.stderr)
     return _build_image_ref_message(prompt, images)
+
+
+def _fit_sdk_turn_images(parts: list, images: list[str], skipped: list[str]) -> tuple[list, list[str]]:
+    """Budget native parts for the SDK lane; ``(parts, too_large_paths)`` with dropped hints removed.
+    Image parts follow the attached (non-skipped) paths in order, as ``build_native_content_parts`` builds them."""
+    from agent.transports.claude_agent_sdk_session_input import fit_images_to_sdk_budget
+
+    unread = list(skipped)
+    attached = []
+    for path in images:
+        if str(path) in unread:
+            unread.remove(str(path))
+        else:
+            attached.append(path)
+    kept, dropped = fit_images_to_sdk_budget(parts)
+    too_large = [attached[i] for i in dropped if i < len(attached)]
+    if too_large and kept and kept[0].get("type") == "text":
+        hints = {f"[Image attached at: {p}]" for p in too_large}
+        text = "\n".join(line for line in str(kept[0].get("text") or "").split("\n") if line not in hints)
+        kept = [{**kept[0], "text": text.rstrip()}, *kept[1:]]
+    if too_large:
+        print(f"[tui_gateway] {len(too_large)} image(s) exceed the SDK payload budget; sent as fallback text",
+              file=sys.stderr)
+    return kept, too_large
+
+
+def _with_image_fallback_note(parts: list, too_large: list[str], unreadable: list[str]) -> list:
+    """Append the per-attachment fallback note to the turn's text part (native images kept as-is)."""
+    note = _image_fallback_note(too_large, unreadable)
+    if not note:
+        return parts
+    if parts and parts[0].get("type") == "text":
+        return [{**parts[0], "text": f"{parts[0].get('text') or ''}\n\n{note}"}, *parts[1:]]
+    return [{"type": "text", "text": note}, *parts]
 
 
 def _start_turn_voice() -> tuple[Any, bool]:
@@ -660,7 +700,10 @@ def _invoke_agent(
         "conversation_history": model_history,
         "stream_callback": _stream,
         "persist_user_message": (
-            _build_persist_user_message(prompt, images, run_message) if images else prompt)}
+            _build_persist_user_message(
+                prompt, images, run_message,
+                runtime_owns_media=getattr(agent, "api_mode", "") == "claude_agent_sdk",
+            ) if images else prompt)}
     try:
         run_params = inspect.signature(agent.run_conversation).parameters
     except (TypeError, ValueError):

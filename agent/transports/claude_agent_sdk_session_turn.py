@@ -79,9 +79,14 @@ def _is_own_prompt_echo(message: Any) -> bool:
     content = getattr(message, "content", None)
     if isinstance(content, str):
         return bool(content)
-    return bool(content) and isinstance(content, list) and not any(
-        type(block).__name__ == "ToolResultBlock" for block in content
-    )
+    if not isinstance(content, list):
+        return False
+    if not content:
+        # The installed parser drops image blocks, so an image-only prompt replays as an empty list.
+        # Only a top-level, unattributed message can be that echo (tool results and subagent turns
+        # carry blocks or a parent tool id).
+        return getattr(message, "parent_tool_use_id", None) is None
+    return not any(type(block).__name__ == "ToolResultBlock" for block in content)
 
 
 def _clear_unsolicited_projection(session: Any) -> None:
