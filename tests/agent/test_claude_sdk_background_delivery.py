@@ -390,3 +390,90 @@ def test_stale_projection_discard_clears_seen_ids():
     assert session._unsolicited_items == []
     assert session._unsolicited_tool_items == {}
     assert session._unsolicited_seen == set()
+
+
+def test_peer_burst_that_straddles_admission_never_answers_the_host_turn():
+    """H-2 (holistic review): peer turn starts idle, host prompt claims the stream,
+    peer turn finishes, then the host's own turn runs. The host must get its own
+    answer and the peer answer must go to the background (display) path."""
+    import time as _time
+
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
+    )
+
+    delivered = []
+    session, holder = _make_session(
+        script=[AssistantMessage(content=[TextBlock("host answer")]),
+                ResultMessage(result="host answer", uuid="host-1")],
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other", "body": "ping"}
+    try:
+        session.ensure_started()
+        client = holder["client"]
+        peer_in = UserMessage(content="ping")
+        peer_in.origin = peer_origin
+        peer_in.uuid = "peer-in-1"
+        client.feed(peer_in)
+        deadline = _time.time() + 2
+        while not session._unsolicited_burst_open and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session._unsolicited_burst_open
+
+        real_query = client.query
+
+        async def query_after_peer_finishes(text):
+            # The CLI finishes the injected turn before it starts the host's.
+            peer_result = ResultMessage(result="peer answer", uuid="peer-res-1")
+            peer_result.origin = peer_origin
+            client.feed(AssistantMessage(content=[TextBlock("peer answer")]), peer_result)
+            await real_query(text)
+
+        client.query = query_after_peer_finishes
+        turn = session.run_turn("host question", turn_timeout=10.0)
+    finally:
+        session.close()
+
+    assert turn.final_text == "host answer"
+    assert all("peer answer" not in str(m.get("content")) for m in turn.projected_messages)
+    assert delivered, "the peer burst must be delivered on the background path"
+    texts, items = delivered[-1]
+    assert "peer answer" in " ".join(texts)
+    assert any(item.get("kind") == "peer_in" for item in (items or []))
+    assert session._unsolicited_burst_open is False
+
+
+def test_bash_background_task_is_not_a_subagent_and_agent_task_is_not_a_process():
+    """Owner screenshot 09-16: Agent tasks showed under both Subagents and Background."""
+    from agent.transports.claude_sdk_background_tasks import classify_sdk_task
+
+    class Started:
+        def __init__(self, task_type, tool_use_id="t1"):
+            self.task_type = task_type
+            self.tool_use_id = tool_use_id
+
+    assert classify_sdk_task(Started("local_bash")) == "shell"
+    assert classify_sdk_task(Started("local_agent")) == "agent"
+    assert classify_sdk_task(Started("remote_agent")) == "agent"
+    assert classify_sdk_task(Started("dream")) == "other"
+    assert classify_sdk_task(Started(None), agent_tool_ids={"t1"}) == "agent"
+    assert classify_sdk_task(Started(None)) == "unknown"
+
+
+def test_injected_origin_result_in_the_host_inbox_is_never_the_answer():
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, _make_session
+
+    stray = ResultMessage(result="peer answer", uuid="peer-res-2")
+    stray.origin = {"kind": "peer", "from": "uds:/tmp/y.sock", "body": "hi"}
+    delivered = []
+    session, _holder = _make_session(
+        script=[stray, AssistantMessage(content=[TextBlock("host answer")]),
+                ResultMessage(result="host answer", uuid="host-2")],
+        on_unsolicited_result=lambda texts, items=None: delivered.append(texts),
+    )
+    try:
+        turn = session.run_turn("host question", turn_timeout=10.0)
+    finally:
+        session.close()
+    assert turn.final_text == "host answer"

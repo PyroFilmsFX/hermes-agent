@@ -527,15 +527,34 @@ def _create_session(
     context_cwd = resolve_context_cwd()
     approval_callback = _build_approval_callback(agent)
 
-    append = build_system_prompt_append(
-        platform=getattr(agent, "platform", None),
-        session_id=getattr(agent, "session_id", None),
-        model=getattr(agent, "model", None),
-        cwd=str(context_cwd) if context_cwd is not None else None,
-        include_project_context=not bool(
-            getattr(agent, "skip_context_files", False)
-        ),
+    # The appended system prompt is part of the cached prefix. Build it once
+    # per logical conversation and reuse it when the transport is rebuilt
+    # (rotation, rename, retire/retry): re-reading memory, project context and
+    # the date there would silently break the cache. Only a deliberate input
+    # change (model switch, working directory, project-context setting) —
+    # each of which starts a new cache anyway — recomposes it.
+    append_inputs = (
+        getattr(agent, "model", None),
+        str(context_cwd) if context_cwd is not None else None,
+        not bool(getattr(agent, "skip_context_files", False)),
     )
+    frozen_append = getattr(agent, "_claude_sdk_frozen_append", None)
+    if (
+        isinstance(frozen_append, tuple)
+        and len(frozen_append) == 2
+        and frozen_append[0] == append_inputs
+        and isinstance(frozen_append[1], str)
+    ):
+        append = frozen_append[1]
+    else:
+        append = build_system_prompt_append(
+            platform=getattr(agent, "platform", None),
+            session_id=getattr(agent, "session_id", None),
+            model=append_inputs[0],
+            cwd=append_inputs[1],
+            include_project_context=append_inputs[2],
+        )
+        agent._claude_sdk_frozen_append = (append_inputs, append)
 
     on_unsolicited_result = _background_result_sink(agent)
     task_list_id = _sdk_task_list_id(agent) if _task_tools_enabled() else None
@@ -546,7 +565,14 @@ def _create_session(
     )
 
     configured_sdk_env = _configured_sdk_env()
-    task_env = _effective_sdk_task_env(task_list_id=task_list_id)
+    # Same rule for the child's task environment: resolve once per
+    # conversation so a config edit cannot change a resumed child's env.
+    frozen_task_env = getattr(agent, "_claude_sdk_frozen_task_env", None)
+    if isinstance(frozen_task_env, dict):
+        task_env = dict(frozen_task_env)
+    else:
+        task_env = _effective_sdk_task_env(task_list_id=task_list_id)
+        agent._claude_sdk_frozen_task_env = dict(task_env)
     task_enabled = str(task_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS", "")).strip().lower() not in {
         "",
         "0",
@@ -560,7 +586,7 @@ def _create_session(
         task_list_id = None
     task_config_dir = configured_sdk_env.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
     effective_child_env = dict(os.environ)
-    effective_child_env.update(_sdk_env_overrides(task_list_id=task_list_id))
+    effective_child_env.update(_sdk_env_overrides(task_list_id=task_list_id, task_env=task_env))
     task_store_root = _resolve_sdk_task_store_root(cwd, effective_child_env)
     try:
         from gateway.session_context import get_session_env
@@ -584,6 +610,7 @@ def _create_session(
         system_prompt_append=append,
         hermes_session_id=getattr(agent, "session_id", None),
         task_list_id=task_list_id,
+        task_env=task_env,
         # Peer-addressable CLI session name (ListAgents/SendMessage).
         session_name=_sdk_session_name(agent),
         resume_session_id=resume_id,

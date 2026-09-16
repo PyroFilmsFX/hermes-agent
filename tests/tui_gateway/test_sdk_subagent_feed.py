@@ -173,6 +173,7 @@ def test_foreground_task_update_after_interrupt_still_finalizes_once():
         task_id = "task-interrupted"
         description = "background work"
         tool_use_id = "parent-tool"
+        task_type = "local_agent"
 
     class TaskUpdatedMessage:
         task_id = "task-interrupted"

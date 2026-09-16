@@ -189,8 +189,14 @@ class _FakeClient:
     async def query(self, text):
         if isinstance(text, str):
             self.queried.append(text)
+            echo = UserMessage(content=text)
         else:
-            self.queried.append([message async for message in text])
+            sent = [message async for message in text]
+            self.queried.append(sent)
+            echo = UserMessage(content=str(sent))
+        # The real CLI runs with --replay-user-messages: it echoes each prompt
+        # before answering it (Hermes relies on that echo for stream ownership).
+        self._pending.append(echo)
         self._pending.extend(self._script)
         if not any(type(m).__name__ == "ResultMessage" for m in self._script):
             self._pending.append(_EOS)

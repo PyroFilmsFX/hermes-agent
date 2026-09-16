@@ -199,6 +199,11 @@ class TestInterruptRoutesToSdkSession:
                 self.queried.append(text)
 
             async def receive_messages(self):
+                # Like the real CLI: nothing is emitted until the prompt is
+                # sent, and the prompt is echoed first (--replay-user-messages).
+                while not self.queried:
+                    await asyncio.sleep(0.005)
+                yield UserMessage(content=self.queried[0])
                 yield AssistantMessage(content=[
                     ToolUseBlock(id="top", name="Bash", input={})
                 ])

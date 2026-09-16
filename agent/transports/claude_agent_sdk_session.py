@@ -173,6 +173,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
         task_list_id: Optional[str] = None,
+        task_env: Optional[dict[str, str]] = None,
         session_name: str = "",
         resume_session_id: Optional[str] = None,
         on_stream_delta: Optional[Callable[[str], None]] = None,
@@ -237,6 +238,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # so the stateless session_search shim can exclude its own lineage.
         self._hermes_session_id = hermes_session_id
         self._task_list_id = task_list_id
+        self._task_env = dict(task_env) if task_env is not None else None
         # Peer-addressable name for the spawned CLI session (see
         # _configured_session_name_template). "" keeps the CLI's own naming.
         self._session_name = (session_name or "").strip()
@@ -333,6 +335,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # operator poked). No callback wired = the historical drop semantics.
         self._on_unsolicited_result = on_unsolicited_result
         self._unsolicited_text: list[str] = []
+        # True while a CLI-injected turn (peer message, task notification) is
+        # in flight; the reader keeps routing it to the background path even
+        # after a host turn claims the stream (see _reader_loop).
+        self._unsolicited_burst_open = False
         self._unsolicited_items: list[dict] = []
         self._unsolicited_tool_items: dict[str, dict] = {}
         self._unsolicited_seen: set[str] = set()
@@ -871,10 +877,11 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
 
         Verified 2026-08-15 against SDK 0.2.120: a query() issued while a tool
         call was in flight did not raise and was honored at the next turn
-        boundary ~3s later. Note it also produces a SECOND ResultMessage once
-        the superseded work unwinds; that arrives unclaimed and is handled by
-        the existing unsolicited-result path (``_on_unsolicited_result``), so
-        ``deliver_background_results`` is load-bearing here.
+        boundary ~3s later. It also produces a SECOND ResultMessage once the
+        superseded work unwinds. The steer is submitted with a human origin, so
+        the live turn keeps ownership until every accepted steer has settled and
+        attributes that result itself; only a steer result arriving after the
+        turn released is treated as late (see _handle_unsolicited).
 
         Returns True only when the steer was actually scheduled onto a live
         turn. False means "not applicable" — the caller must fall back to the
@@ -1073,6 +1080,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         env_overrides = _sdk_env_overrides(
             metered_allowed=self._allow_metered,
             task_list_id=self._task_list_id,
+            task_env=getattr(self, "_task_env", None),
         )
 
         fields = {
@@ -1138,8 +1146,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # results from UserMessages. Constant per session (cache-safe).
         extra.setdefault("replay-user-messages", None)
         fields["extra_args"] = extra
-        # Default OFF (upstream-conservative): partial messages only when the
-        # operator opts in via agent.claude_agent_sdk.streaming in config.yaml.
+        # Partial messages follow agent.claude_agent_sdk.streaming (the cntrl
+        # fork defaults it on; upstream ships it off).
         # Reads the __init__ snapshot so option and quiet-watchdog semantics
         # can never diverge across a mid-session config edit.
         if self._streaming:
