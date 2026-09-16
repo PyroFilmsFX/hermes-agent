@@ -334,6 +334,11 @@ class ClaudeSdkNotifyMixin:
             return
         tasks = self._sdk_subagent_tasks()
         if name == "TaskStartedMessage":
+            from agent.transports.claude_sdk_background_tasks import classify_sdk_task
+
+            # Background shell tasks are process-view rows, not subagents.
+            if classify_sdk_task(message, agent_tool_ids=self._sdk_agent_tools()) != "agent":
+                return
             parent_tool_id = value("tool_use_id", data.get("tool_use_id"))
             agent_tool = self._sdk_agent_tools().get(str(parent_tool_id or ""), {})
             goal = str(
@@ -359,7 +364,10 @@ class ClaudeSdkNotifyMixin:
             return
         if name == "TaskProgressMessage":
             usage = self._sdk_usage_dict(value("usage", data.get("usage")))
-            description = str(value("description", data.get("description")) or record.get("goal") or "")
+            description = str(value("description", data.get("description")) or "")
+            if description == record.get("goal"):
+                # Same text as the row title: do not repeat it as the preview.
+                description = ""
             self._emit_sdk_subagent(
                 "subagent.progress", task_id, "Agent", description, None,
                 usage=usage, parent_tool_id=record.get("parent_tool_id"),

@@ -68,3 +68,18 @@ def test_sdk_subagent_rpc_uses_live_gateway_owner_not_stored_agent_id(monkeypatc
     assert [row["subagent_id"] for row in listed["result"]["subagents"]] == ["sdk-task"]
     assert tailed["result"]["text"] == "child output"
     assert interrupted["result"] == {"found": True, "subagent_id": "sdk-task"}
+
+
+
+def test_agent_task_started_never_registers_a_background_process():
+    from agent.transports.claude_sdk_background_tasks import observe_sdk_message
+    from tools.process_registry import process_registry
+
+    class TaskStartedMessage:
+        task_id = "agent-task-1"
+        description = "Astra: bug + logging triage"
+        tool_use_id = "agent-tool-1"
+        task_type = "local_agent"
+
+    observe_sdk_message(TaskStartedMessage(), session_key="sess-agent-only")
+    assert process_registry.find_sdk_task("sess-agent-only", task_id="agent-task-1") is None
