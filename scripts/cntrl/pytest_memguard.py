@@ -53,7 +53,7 @@ def _footprint_darwin():
 
 def _footprint_linux():
     def read() -> int:
-        with open("/proc/self/statm") as f:
+        with open("/proc/self/statm", encoding="utf-8") as f:
             return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 
     return read
@@ -89,7 +89,7 @@ def _trip(config, used: int, limit: int) -> None:
     text = "\n".join(lines) + "\n"
     report = os.path.join(tempfile.gettempdir(), f"hermes-pytest-memguard-{os.getpid()}.txt")
     try:
-        with open(report, "w") as f:
+        with open(report, "w", encoding="utf-8") as f:
             f.write(text)
     except OSError:
         pass
@@ -122,7 +122,7 @@ def pytest_configure(config) -> None:
     except ValueError:
         limit_gb = _DEFAULT_LIMIT_GB
     trace_path = os.environ.get("HERMES_TEST_MEM_TRACE")
-    _trace = open(trace_path, "a", buffering=1) if trace_path and _read else None
+    _trace = open(trace_path, "a", buffering=1, encoding="utf-8") if trace_path and _read else None
     if _read is None or limit_gb <= 0:
         return
     threading.Thread(

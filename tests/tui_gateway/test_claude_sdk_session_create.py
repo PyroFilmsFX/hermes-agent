@@ -53,10 +53,12 @@ def test_resolve_model_reads_model_and_falls_back_to_provider_default(monkeypatc
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
 
-    # Case A: provider only (no model.model) -> resolves provider default (claude-fable-5-1)
+    # Case A: provider only (no model.model) -> resolves the provider's catalog default
+    from hermes_cli.models import get_default_model_for_provider
+
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
-    assert server._resolve_model() == "claude-fable-5-1"
+    assert server._resolve_model() == get_default_model_for_provider("claude-agent-sdk")
 
     # Case B: model key specified
     cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "model": "claude-3-5-haiku-20241022"}}))
@@ -93,7 +95,9 @@ def test_session_create_info_always_includes_provider(monkeypatch, tmp_path):
     info = resp["result"]["info"]
     assert "provider" in info
     assert info["provider"] == "claude-agent-sdk"
-    assert info["model"] == "claude-fable-5-1"
+    from hermes_cli.models import get_default_model_for_provider
+
+    assert info["model"] == get_default_model_for_provider("claude-agent-sdk")
 
 
 def test_non_sdk_model_resolution_keeps_legacy_precedence(monkeypatch):

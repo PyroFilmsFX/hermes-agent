@@ -80,7 +80,7 @@ def listed_core_files() -> set[str]:
     """Backtick-quoted paths in §3 of the hand-written inventory."""
     if not HANDWRITTEN.exists():
         return set()
-    text = HANDWRITTEN.read_text()
+    text = HANDWRITTEN.read_text(encoding="utf-8")
     m = re.search(r"## 3\..*?(?=\n## 4\.)", text, re.S)
     section = m.group(0) if m else ""
     return set(re.findall(r"`([^`\s]+\.[a-z]+)`", section))
@@ -146,15 +146,16 @@ def main() -> int:
     for f in sorted(core_files):
         lines.append(f"| `{f}` | {', '.join(core_files[f])} | {'yes' if f in listed else '**NO**'} |")
     lines.append("")
-    GENERATED.write_text("\n".join(lines))
+    GENERATED.write_text("\n".join(lines), encoding="utf-8")
 
     if not LOG.exists():
         LOG.write_text(
             "# Fork inventory — run log (append-only)\n\n"
             "| date | branch | head | ahead/behind main | carried | core files | unlisted |\n"
-            "|---|---|---|---|---|---|---|\n"
+            "|---|---|---|---|---|---|---|\n",
+            encoding="utf-8",
         )
-    with LOG.open("a") as fh:
+    with LOG.open("a", encoding="utf-8") as fh:
         fh.write(
             f"| {today} | `{branch}` | {head} | {ahead_main}/{behind_main} | {len(rows)} | {len(core_files)} | {len(unlisted)} |\n"
         )

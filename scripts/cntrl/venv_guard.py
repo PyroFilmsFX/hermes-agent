@@ -42,7 +42,7 @@ def expected_python() -> str | None:
     """The Python the project pins, from .python-version (authoritative here)."""
     pin = REPO / ".python-version"
     if pin.is_file():
-        return pin.read_text().strip() or None
+        return pin.read_text(encoding="utf-8").strip() or None
     return None
 
 
@@ -52,7 +52,7 @@ def venv_python() -> str | None:
         return None
     parser = configparser.ConfigParser()
     # pyvenv.cfg has no section header; synthesize one.
-    parser.read_string("[v]\n" + cfg.read_text())
+    parser.read_string("[v]\n" + cfg.read_text(encoding="utf-8"))
     return parser["v"].get("version_info") or parser["v"].get("version")
 
 

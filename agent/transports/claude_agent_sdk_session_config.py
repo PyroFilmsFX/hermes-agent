@@ -908,14 +908,16 @@ def _publish_session_spawn_capability(path: Path, value: str) -> None:
     """Publish one capability with private directory/file permissions and no symlink follow."""
     path.parent.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.mkdir(exist_ok=True, mode=0o700)
+    getuid = getattr(os, "getuid", None)  # absent on Windows, where st_uid carries no ownership
+    owner = getuid() if getuid is not None else None
     for directory in (path.parent.parent, path.parent):
         parent_st = os.lstat(directory)
-        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_uid != os.getuid():
+        if not stat.S_ISDIR(parent_st.st_mode) or (owner is not None and parent_st.st_uid != owner):
             raise PermissionError("session-spawn capability directory is not owner-controlled")
         os.chmod(directory, 0o700, follow_symlinks=False)
     with contextlib.suppress(FileNotFoundError):
         path_st = os.lstat(path)
-        if not stat.S_ISREG(path_st.st_mode) or path_st.st_uid != os.getuid():
+        if not stat.S_ISREG(path_st.st_mode) or (owner is not None and path_st.st_uid != owner):
             raise PermissionError("session-spawn capability path is not owner-controlled")
     with contextlib.suppress(FileNotFoundError):
         path.unlink()
