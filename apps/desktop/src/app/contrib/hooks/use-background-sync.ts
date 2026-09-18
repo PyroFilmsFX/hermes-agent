@@ -10,9 +10,8 @@ import { $sidebarShowArchived } from '@/store/layout'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
 import { refreshActiveProfile } from '@/store/profile'
-import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
-import { isSessionGoneForBackgroundPolling } from '@/store/session-gone-latch'
 import { refreshProjectTree } from '@/store/projects'
+import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
 import {
   $activeSessionId,
   $busy,
@@ -151,6 +150,7 @@ export async function reconcileTileTranscripts({
       goneTileSignatures.delete(signatureKey)
     }
   }
+
   for (const signatureKey of signatureRef.current.keys()) {
     if (!openSignatureKeys.has(signatureKey)) {
       signatureRef.current.delete(signatureKey)
@@ -192,6 +192,7 @@ export async function reconcileTileTranscripts({
     const profileScope = profileScopeForTranscriptSession(tile) ?? storedRowProfileScope(storedSessionId)
 
     const signatureKey = tileTranscriptSignatureKey(tile)
+
     if (goneTileSignatures.has(signatureKey)) {
       // Answered "Session not found" from the backend it was routed to; a
       // retry every tick cannot change that. Re-armed when the tile rebinds
@@ -240,6 +241,7 @@ export async function reconcileTileTranscripts({
     } catch (error) {
       if (isSessionGoneForBackgroundPolling(error)) {
         goneTileSignatures.add(signatureKey)
+
         continue
       }
       // Non-fatal (transient): the next change event retries.
@@ -258,10 +260,12 @@ export function storedRowProfileScope(storedSessionId: string): ProfileScope {
   for (const rows of [$sessions.get(), $cronSessions.get(), $messagingSessions.get()]) {
     const row = rows.find(session => session.id === storedSessionId)
     const profile = row?.profile?.trim()
+
     if (profile) {
       return row?.connection_id?.trim() ? { connectionId: row.connection_id.trim(), profile } : { profile }
     }
   }
+
   return undefined
 }
 

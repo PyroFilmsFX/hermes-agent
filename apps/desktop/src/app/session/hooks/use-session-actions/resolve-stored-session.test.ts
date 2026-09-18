@@ -5,9 +5,9 @@ import { getSession } from '@/hermes'
 import { $activeGatewayProfile, $profiles } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { $cronSessions, $messagingSessions, $sessions } from '@/store/session'
+import { isSessionGone, resetBackgroundPollingGuard } from '@/store/session-gone-latch'
 import type { SessionInfo } from '@/types/hermes'
 
-import { isSessionGone, resetBackgroundPollingGuard } from '@/store/session-gone-latch'
 import { cachedSessionRow, resolveSessionProfile, resolveStoredSession } from './utils'
 
 vi.mock('@/hermes', async importActual => ({

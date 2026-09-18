@@ -8,7 +8,6 @@ import { parseErrorSurface } from '@/lib/error-surface'
 import { isMessagingSource, normalizeSessionSource } from '@/lib/session-source'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
-import { latchSessionGone } from '@/store/session-gone-latch'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import {
@@ -39,6 +38,7 @@ import {
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
+import { latchSessionGone } from '@/store/session-gone-latch'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { sessionTileOwnerRoute } from '@/store/session-states'
 
@@ -1594,6 +1594,7 @@ export async function resolveStoredSession(
       // Not on this profile; try the next.
     }
   }
+
   if (attempts > 0 && goneEverywhere) {
     // Latched, not deleted: the latch is cleared at the real rebind seams
     // (gateway reconnect / runtime re-mint), so a race during a profile swap
