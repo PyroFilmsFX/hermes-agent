@@ -175,6 +175,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         approval_callback: Optional[Callable[..., str]] = None,
         approval_bypass_provider: Optional[Callable[[], bool]] = None,
         on_tool_started: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_use: Optional[Callable[[str, str, dict], None]] = None,
+        on_tool_result: Optional[Callable[[str, str, dict, str], None]] = None,
         max_budget_usd: Optional[float] = None,
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
@@ -224,6 +226,15 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._approval_callback = approval_callback
         self._approval_bypass_provider = approval_bypass_provider
         self._on_tool_started = on_tool_started
+        # Stable-id tool CARD hooks (desktop/TUI tool rows), the codex-runtime
+        # pattern: ``on_tool_use(tool_use_id, name, args)`` when a ToolUseBlock
+        # issues, ``on_tool_result(tool_use_id, name, args, result)`` when its
+        # ToolResultBlock echoes back. ``on_tool_started`` is only the progress
+        # breadcrumb, which the gateway drops when a name is present — so
+        # without these the desktop showed NO tool activity on this lane.
+        self._on_tool_use = on_tool_use
+        self._on_tool_result = on_tool_result
+        self._open_tool_cards: dict[str, tuple[str, dict]] = {}
         self._on_compaction = on_compaction
         self._on_compact_boundary = on_compact_boundary
         self._max_budget_usd = max_budget_usd
