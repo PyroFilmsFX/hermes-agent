@@ -22,6 +22,8 @@ import { markBackgroundSessionFinished, setBackgroundDeliveryActive } from '@/st
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
+import { settleableInterimIndex } from '../utils'
+
 import type { GatewayEventContext } from './types'
 
 let backgroundStreamMessageSeq = 0
@@ -426,8 +428,23 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
         let nextMessages: ChatMessage[]
 
+        // Sealing an interim clears `streamId`, so a background turn that already relayed its prose
+        // (the SDK lane relays EVERY assistant message) has no stream bubble left to seal. Settle onto
+        // that interim row instead of appending a second copy of the same answer. Assistant rows only:
+        // peer/lifecycle rows are system rows and never continue an assistant bubble.
+        const interimIndex =
+          existing && streamId
+            ? -1
+            : sealedMessage.role === 'assistant'
+              ? settleableInterimIndex(state.messages, finalText)
+              : -1
+
         if (existing && streamId) {
           nextMessages = state.messages.map(m => (m.id === streamId ? sealedMessage : m))
+        } else if (interimIndex >= 0) {
+          nextMessages = state.messages.map((message, index) =>
+            index === interimIndex ? { ...sealedMessage, id: message.id, timestamp: message.timestamp } : message
+          )
         } else {
           nextMessages = [...state.messages, sealedMessage]
         }

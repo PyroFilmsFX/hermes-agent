@@ -345,3 +345,79 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(false)
   })
 })
+
+describe('background completions and sealed interim prose', () => {
+  const backgroundComplete = (text: string, extra: Record<string, unknown> = {}) =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true, text, ...extra },
+        session_id: SID,
+        type: 'message.complete'
+      } as unknown as GatewayEvent)
+    )
+
+  beforeEach(() => {
+    clearSessionTodos(SID)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSessionTodos(SID)
+    vi.restoreAllMocks()
+  })
+
+  it('settles a woken turn onto its own sealed interim instead of printing it twice', async () => {
+    // A peer/monitor wake relays its prose as interim (the SDK lane relays every assistant
+    // message), which seals the stream bubble; the background completion then carried the same
+    // answer and appended a second copy of it.
+    mountStream()
+    await start()
+
+    await delta('The override worked in production.')
+    await interim('The override worked in production.')
+
+    await backgroundComplete('The override worked in production.')
+
+    expect(assistantMessages()).toEqual(['The override worked in production.'])
+  })
+
+  it('keeps a background answer that continues the interim as one bubble', async () => {
+    mountStream()
+    await start()
+
+    await delta('Both things are moving.')
+    await interim('Both things are moving.')
+
+    await backgroundComplete('Both things are moving. PR 96 has the override label.')
+
+    expect(assistantMessages()).toEqual(['Both things are moving. PR 96 has the override label.'])
+  })
+
+  it('still appends a background answer that is unrelated to the interim', async () => {
+    mountStream()
+    await start()
+
+    await delta('Watching the run.')
+    await interim('Watching the run.')
+
+    await backgroundComplete('The deploy failed on staging.')
+
+    expect(assistantMessages()).toEqual(['Watching the run.', 'The deploy failed on staging.'])
+  })
+
+  it('leaves peer rows alone — they are system rows, not a continuation', async () => {
+    mountStream()
+    await start()
+
+    await delta('Checking the peer claim.')
+    await interim('Checking the peer claim.')
+
+    await backgroundComplete('Checking the peer claim.', {
+      display_kind: 'peer_message',
+      display_metadata: { direction: 'in', peer: 'hermes:audit' }
+    })
+
+    expect(assistantMessages()).toEqual(['Checking the peer claim.'])
+    expect(getState().messages.some(m => m.role === 'system')).toBe(true)
+  })
+})

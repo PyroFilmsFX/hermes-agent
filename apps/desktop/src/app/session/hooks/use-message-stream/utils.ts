@@ -1,4 +1,4 @@
-import type { GatewayEventPayload } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, type GatewayEventPayload } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { isTodoToolName } from '@/lib/todos'
 
@@ -125,6 +125,36 @@ export function completionErrorText(finalText: string): string | null {
   const text = finalText.trim()
 
   return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
+}
+
+/** Index of a trailing sealed-interim assistant row this completion continues, else -1.
+
+The SDK lane relays EVERY assistant message as interim prose, so a turn's own final answer is
+usually already on screen in a sealed bubble (sealing clears `streamId`). Settling onto it keeps
+the live UI at the one row the DB stores. Continuity, not equality: streaming can drop characters
+and the final may add a trailing delta, so prefix-either-way counts as the same message. */
+export function settleableInterimIndex(messages: ChatMessage[], finalText: string): number {
+  const text = finalText.trim()
+
+  if (!text) {
+    return -1
+  }
+
+  const lastAssistant = [...messages].reverse().findIndex(message => message.role === 'assistant' && !message.hidden)
+
+  if (lastAssistant < 0) {
+    return -1
+  }
+
+  const index = messages.length - 1 - lastAssistant
+  const existing = messages[index]
+  const existingText = chatMessageText(existing).trim()
+
+  if (!existing.interim || !existingText) {
+    return -1
+  }
+
+  return text === existingText || text.startsWith(existingText) || existingText.startsWith(text) ? index : -1
 }
 
 export const SUBAGENT_EVENT_TYPES = new Set([
