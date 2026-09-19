@@ -255,8 +255,11 @@ def _sync_session_key_after_compress(
     old_key = session.get("session_key", "") or ""
     if not new_session_id or new_session_id == old_key:
         return
-    # Spawn reservations are keyed by the durable child identity, not the SDK continuation id.
-    session.setdefault("spawn_child_stored_session_id", old_key)
+    # Spawn quotas are keyed by the durable identity, not the SDK continuation id. setdefault is not
+    # enough: a session that never came from a spawn stores None here, and leaving it None let a ROOT
+    # caller shed its depth/concurrency/rate history by compressing first (W8 review A8-23).
+    if not session.get("spawn_child_stored_session_id"):
+        session["spawn_child_stored_session_id"] = old_key
     if not _transfer_active_session_slot(sid, session, new_session_id=new_session_id):
         logger.warning(
             "Compression session lease did not re-anchor: sid=%s old_session_id=%s new_session_id=%s",

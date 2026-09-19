@@ -276,3 +276,112 @@ def test_resume_record_carries_stable_child_identity_after_compression(monkeypat
     assert record["spawn_child_stored_session_id"] == "child-stored", (
         "compression/resume must retain the durable child identity used for reservation release"
     )
+
+
+def _spawn_harness(monkeypatch, tmp_path, caller, receipts):
+    """Wire create_task_session against an in-memory receipt store. Returns the dispatch call log."""
+    import tui_gateway.server as server
+
+    root = tmp_path / "project"
+    root.mkdir(exist_ok=True)
+    calls = []
+
+    monkeypatch.setattr(handoff, "_find_caller", lambda _: ("owner-runtime", caller))
+    monkeypatch.setattr(handoff, "_policy", lambda *_: {
+        "enabled": True, "max_children_per_root": 2, "max_depth": 1, "rate_per_minute": 5})
+    monkeypatch.setattr(handoff, "_validate_cwd", lambda raw, caller: str(root))
+    monkeypatch.setattr(handoff, "_load_receipts", lambda _: receipts)
+    monkeypatch.setattr(handoff, "_save_receipts", lambda profile_home, saved: receipts.update(saved))
+    monkeypatch.setattr(bridge, "authorize_scoped_capability",
+                        lambda token: bridge.ScopedSessionCapability(token, "owner-runtime", 0))
+    monkeypatch.setattr(handoff, "_dispatch_existing", lambda method, params, request_id: calls.append(method) or (
+        {"session_id": "child-runtime", "stored_session_id": "child-stored"} if method == "session.create" else
+        {"pending": False, "title": "child"} if method == "session.title" else {}))
+    monkeypatch.setattr(server, "_sessions", {"child-runtime": {"session_key": "child-stored", "running": False, "agent": None}})
+    monkeypatch.setattr(server, "_ok", lambda rid, result: {"result": result})
+    monkeypatch.setattr(server, "_err", lambda rid, code, message, data=None: {"error": {"code": code, "message": message}})
+    return str(root), calls
+
+
+def test_compression_does_not_reset_the_spawn_quota_lineage(monkeypatch, tmp_path):
+    """W8 A8-23: a compressed caller kept its depth/concurrency/rate history, instead of looking
+    like a brand-new root at depth 0."""
+    # The caller already spawned its own children at depth 1 and filled the per-root allowance.
+    receipts = {
+        "a": {"root_session_id": "origin", "child_stored_session_id": "owner-origin",
+              "depth": 1, "active_reservation": True, "created_at": 0},
+        "b": {"root_session_id": "origin", "child_stored_session_id": "sibling",
+              "depth": 1, "active_reservation": True, "created_at": 0},
+    }
+    caller = {
+        # Compression moved the live key to a continuation id; the durable spawn id is recorded.
+        "session_key": "owner-continuation-after-compression",
+        "spawn_child_stored_session_id": "owner-origin",
+        "cwd": str(tmp_path / "project"),
+        "profile_home": None,
+        "agent": SimpleNamespace(api_mode="claude_agent_sdk", model="m", provider="p"),
+    }
+    root, calls = _spawn_harness(monkeypatch, tmp_path, caller, receipts)
+
+    result = handoff.create_task_session(1, {
+        "cwd": root, "task": "x", "title": "child", "request_id": "r-depth",
+        "_session_spawn_capability": "cap"})
+
+    assert "error" in result, "a compressed caller must not spawn past the depth limit"
+    assert result["error"]["code"] == 4293
+    assert "session.create" not in calls
+
+
+def test_a_second_request_cannot_steal_an_in_progress_reservation(monkeypatch, tmp_path):
+    """W8 A8-26: the retry saw a reservation with no child id yet, deleted it, and created a second
+    child behind the same quota entry."""
+    import time as _time
+
+    receipts = {}
+    caller = {"session_key": "owner-stored", "cwd": str(tmp_path / "project"), "profile_home": None,
+              "agent": SimpleNamespace(api_mode="claude_agent_sdk", model="m", provider="p")}
+    root, calls = _spawn_harness(monkeypatch, tmp_path, caller, receipts)
+
+    reserved = {}
+
+    def create_then_reenter(method, params, request_id):
+        calls.append(method)
+        if method == "session.create" and not reserved:
+            # Same request_id arrives while this creation is still in flight.
+            reserved["second"] = handoff.create_task_session(2, {
+                "cwd": root, "task": "x", "title": "child", "request_id": "r-race",
+                "_session_spawn_capability": "cap"})
+            return {"session_id": "child-runtime", "stored_session_id": "child-stored"}
+        if method == "session.title":
+            return {"pending": False, "title": "child"}
+        return {}
+
+    monkeypatch.setattr(handoff, "_dispatch_existing", create_then_reenter)
+
+    first = handoff.create_task_session(1, {
+        "cwd": root, "task": "x", "title": "child", "request_id": "r-race",
+        "_session_spawn_capability": "cap"})
+
+    assert first["result"]["stored_session_id"] == "child-stored"
+    assert "error" in reserved["second"], "the concurrent retry must be refused, not served a second child"
+    assert reserved["second"]["error"]["code"] == 4292
+    assert calls.count("session.create") == 1
+    # A stale claim is still reclaimable, so a crashed spawn never strands the request_id.
+    stranded = {"claim_started_at": _time.time() - handoff._CLAIM_TTL_SECONDS - 1}
+    assert handoff._claim_is_live(stranded) is False
+    assert handoff._claim_is_live({"claim_started_at": _time.time()}) is True
+
+
+def test_compression_anchors_the_lineage_id_even_for_a_root_session():
+    """A root session stores None here at create; setdefault would leave it None and the quota would
+    key off the continuation id (W8 review A8-23)."""
+    from types import SimpleNamespace as NS
+
+    from tui_gateway import server  # the split module's bodies are rebound onto server's globals
+
+    session = {"session_key": "root-original", "spawn_child_stored_session_id": None,
+               "agent": NS(session_id="root-continuation")}
+    server._sync_session_key_after_compress("sid", session)
+
+    assert session["session_key"] == "root-continuation"
+    assert session["spawn_child_stored_session_id"] == "root-original"

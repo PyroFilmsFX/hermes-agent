@@ -196,6 +196,40 @@ def _caller_model_provider(caller: dict) -> tuple[str, str]:
     return model, provider
 
 
+# A reservation is exclusive between reserve and child identity. A crashed or wedged creation must
+# not strand the request_id forever, so the claim expires — generously, since session.create waits on
+# a real backend build.
+_CLAIM_TTL_SECONDS = 180.0
+
+
+def _claim_is_live(receipt: dict) -> bool:
+    """True while another in-flight request owns this receipt's reservation."""
+    if receipt.get("child_session_id"):
+        return False
+    started = receipt.get("claim_started_at")
+    if not isinstance(started, (int, float)):
+        return False  # pre-claim receipt (older build): reclaimable, as before
+    return (time.time() - float(started)) < _CLAIM_TTL_SECONDS
+
+
+def _caller_lineage_id(caller: dict, capability: Any, profile_home: str | None) -> str:
+    """The caller's DURABLE spawn identity.
+
+    Compression gives a session a continuation ``session_key``; keying the quota off that made every
+    compressed child look like a fresh root at depth 0 with no siblings and no rate history, so a
+    caller could pass any depth/concurrency/rate limit by compressing first (W8 review A8-23). The
+    session record carries the original id (``spawn_child_stored_session_id``), and the receipts
+    themselves are the fallback map.
+    """
+    recorded = str(caller.get("spawn_child_stored_session_id") or "")
+    if recorded:
+        return recorded
+    key = str(caller.get("session_key") or capability.owner_session_id)
+    with contextlib.suppress(Exception):
+        return child_lineage_identity(key, profile_home) or key
+    return key
+
+
 def _root_depth(receipts: dict[str, dict], stored_id: str) -> tuple[str, int]:
     current = stored_id
     depth = 0
@@ -290,7 +324,7 @@ def create_task_session(rid: Any, params: dict) -> dict:
     task = task[:_MAX_TASK_CHARS]
 
     profile = profile_name_for_home(profile_home) or server._current_profile_name()
-    root_session_id = str(caller.get("session_key") or capability.owner_session_id)
+    root_session_id = _caller_lineage_id(caller, capability, profile_home)
     model, provider = _caller_model_provider(caller)
     caller_generation = str(caller.get("session_generation") or capability.session_generation)
     receipt_key = json.dumps([str(profile_home or ""), capability.owner_session_id,
@@ -314,6 +348,10 @@ def create_task_session(rid: Any, params: dict) -> dict:
             if existing.get("child_session_id"):
                 retry_existing = existing
                 receipt = existing
+            elif _claim_is_live(existing):
+                # Another request with this request_id is between reserve and child identity. Dropping
+                # its receipt here let both create a child behind one quota entry (W8 review A8-26).
+                return _error(rid, 4292, "a spawn for this request_id is already in progress")
             else:
                 receipts.pop(receipt_key, None)
                 _save_receipts(profile_home, receipts)
@@ -335,6 +373,8 @@ def create_task_session(rid: Any, params: dict) -> dict:
                 "depth": caller_depth + 1, "cwd": cwd, "task": task, "title": title,
                 "profile_home": receipt_profile, "created_at": now, "task_status": "created",
                 "active_reservation": True, "caller_generation": caller_generation,
+                # Held until child identity lands (or the claim goes stale); see _claim_is_live.
+                "claim_started_at": now,
             }
             receipts[receipt_key] = receipt
             _save_receipts(profile_home, receipts)
@@ -407,7 +447,9 @@ def create_task_session(rid: Any, params: dict) -> dict:
             receipts = _load_receipts(profile_home)
             receipt = receipts.get(receipt_key)
             if receipt is not None:
-                receipt.update({"task_status": "failed", "error": str(exc)})
+                # Release the exclusive claim with the failure: a retry of this request_id must be
+                # able to reserve again without waiting out the TTL (W8 review A8-26).
+                receipt.update({"task_status": "failed", "error": str(exc), "claim_started_at": None})
                 if receipt.get("child_stored_session_id") and receipt.get("child_session_id"):
                     failed_result = {
                         "stored_session_id": receipt["child_stored_session_id"],
