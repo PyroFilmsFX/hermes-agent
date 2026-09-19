@@ -1,4 +1,4 @@
-import type { GatewayEventPayload } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, type GatewayEventPayload } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { isTodoToolName } from '@/lib/todos'
 
@@ -125,6 +125,41 @@ export function completionErrorText(finalText: string): string | null {
   const text = finalText.trim()
 
   return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
+}
+
+/** Index of the interim row THIS turn sealed when the completion continues it, else -1.
+
+The SDK lane relays EVERY assistant message as interim prose, so a turn's own final answer is
+usually already on screen in a sealed bubble (sealing clears `streamId`). Settling onto it keeps the
+live UI at the one row the DB stores. Two guards, both required: the row must be the bubble this
+turn sealed (`sealedInterimId` — a leftover interim from an earlier turn is never a settle target),
+and the texts must be continuous (streaming can drop characters and the final may add a trailing
+delta, so prefix-either-way counts as the same message; unrelated prose keeps its own bubble). */
+export function settleableInterimIndex(
+  messages: ChatMessage[],
+  finalText: string,
+  sealedInterimId: string | null
+): number {
+  const text = finalText.trim()
+
+  if (!text || !sealedInterimId) {
+    return -1
+  }
+
+  const index = messages.findIndex(message => message.id === sealedInterimId)
+
+  if (index < 0) {
+    return -1
+  }
+
+  const existing = messages[index]
+  const existingText = chatMessageText(existing).trim()
+
+  if (existing.role !== 'assistant' || existing.hidden || !existing.interim || !existingText) {
+    return -1
+  }
+
+  return text === existingText || text.startsWith(existingText) || existingText.startsWith(text) ? index : -1
 }
 
 export const SUBAGENT_EVENT_TYPES = new Set([

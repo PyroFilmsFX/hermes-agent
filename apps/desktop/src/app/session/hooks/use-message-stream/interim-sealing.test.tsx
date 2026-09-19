@@ -345,3 +345,140 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(false)
   })
 })
+
+describe('background completions and sealed interim prose', () => {
+  const backgroundComplete = (text: string, extra: Record<string, unknown> = {}) =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true, text, ...extra },
+        session_id: SID,
+        type: 'message.complete'
+      } as unknown as GatewayEvent)
+    )
+
+  beforeEach(() => {
+    clearSessionTodos(SID)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSessionTodos(SID)
+    vi.restoreAllMocks()
+  })
+
+  it('settles a woken turn onto its own sealed interim instead of printing it twice', async () => {
+    // A peer/monitor wake relays its prose as interim (the SDK lane relays every assistant
+    // message), which seals the stream bubble; the background completion then carried the same
+    // answer and appended a second copy of it.
+    mountStream()
+    await start()
+
+    await delta('The override worked in production.')
+    await interim('The override worked in production.')
+
+    await backgroundComplete('The override worked in production.')
+
+    expect(assistantMessages()).toEqual(['The override worked in production.'])
+  })
+
+  it('keeps a background answer that continues the interim as one bubble', async () => {
+    mountStream()
+    await start()
+
+    await delta('Both things are moving.')
+    await interim('Both things are moving.')
+
+    await backgroundComplete('Both things are moving. PR 96 has the override label.')
+
+    expect(assistantMessages()).toEqual(['Both things are moving. PR 96 has the override label.'])
+  })
+
+  it('still appends a background answer that is unrelated to the interim', async () => {
+    mountStream()
+    await start()
+
+    await delta('Watching the run.')
+    await interim('Watching the run.')
+
+    await backgroundComplete('The deploy failed on staging.')
+
+    expect(assistantMessages()).toEqual(['Watching the run.', 'The deploy failed on staging.'])
+  })
+
+  it('leaves peer rows alone — they are system rows, not a continuation', async () => {
+    mountStream()
+    await start()
+
+    await delta('Checking the peer claim.')
+    await interim('Checking the peer claim.')
+
+    await backgroundComplete('Checking the peer claim.', {
+      display_kind: 'peer_message',
+      display_metadata: { direction: 'in', peer: 'hermes:audit' }
+    })
+
+    expect(assistantMessages()).toEqual(['Checking the peer claim.'])
+    expect(getState().messages.some(m => m.role === 'system')).toBe(true)
+  })
+})
+
+describe('a completion never settles onto another turn\'s interim', () => {
+  const backgroundStart = () =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true },
+        session_id: SID,
+        type: 'message.start'
+      } as unknown as GatewayEvent)
+    )
+
+  const backgroundComplete = (text: string) =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true, text },
+        session_id: SID,
+        type: 'message.complete'
+      } as unknown as GatewayEvent)
+    )
+
+  beforeEach(() => {
+    clearSessionTodos(SID)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSessionTodos(SID)
+    vi.restoreAllMocks()
+  })
+
+  it('keeps an unsettled interim from an earlier turn when a later background answer looks similar', async () => {
+    mountStream()
+    await start()
+    await delta('Checking the files, then I will report back.')
+    await interim('Checking the files, then I will report back.')
+    await complete('Found three problems.')
+
+    // A later, unrelated wake whose answer is a prefix of that older interim.
+    await backgroundStart()
+    await backgroundComplete('Checking the files')
+
+    expect(assistantMessages()).toEqual([
+      'Checking the files, then I will report back.',
+      'Found three problems.',
+      'Checking the files'
+    ])
+  })
+
+  it('does not let a background answer overwrite the live turn\'s interim', async () => {
+    mountStream()
+    await start()
+    await delta('Working on the migration.')
+    await interim('Working on the migration.')
+
+    // A background delivery for the same session lands mid-turn.
+    await backgroundStart()
+    await backgroundComplete('Working on the migration. Done.')
+
+    expect(assistantMessages()).toEqual(['Working on the migration.', 'Working on the migration. Done.'])
+  })
+})

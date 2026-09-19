@@ -554,6 +554,8 @@ export function useMessageStream({
           messages: nextMessages,
           streamId: null,
           interimBoundaryPending: true,
+          // The row a later completion of THIS turn may settle onto (see settleableInterimIndex).
+          sealedInterimId: nextMessages[nextMessages.length - 1]?.id ?? null,
           sawAssistantPayload: state.sawAssistantPayload || Boolean(authoritativeText)
         }
       })
@@ -583,6 +585,7 @@ export function useMessageStream({
             busy: false,
             needsInput: false,
             pendingBranchGroup: null,
+            sealedInterimId: null,
             streamId: null,
             turnStartedAt: null,
             turnLive: false
@@ -768,6 +771,7 @@ export function useMessageStream({
           busy: false,
           needsInput: false,
           interimBoundaryPending: false,
+          sealedInterimId: null,
           turnStartedAt: null,
           turnLive: false
         }
