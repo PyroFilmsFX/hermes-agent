@@ -173,6 +173,70 @@ def _image_part_payload_size(part: dict[str, Any]) -> Optional[int]:
     return len(data) if sep else len(raw_url)
 
 
+def _image_part_data_url(part: dict[str, Any]) -> Optional[str]:
+    """The data URL an image part carries, in either the Hermes or the SDK block shape."""
+    source = part.get("source")
+    if isinstance(source, dict) and source.get("type") == "base64":
+        media_type, data = source.get("media_type"), source.get("data")
+        if isinstance(media_type, str) and isinstance(data, str):
+            return f"data:{media_type};base64,{data}"
+        return None
+    raw_url = part.get("image_url")
+    if isinstance(raw_url, dict):
+        raw_url = raw_url.get("url")
+    if not isinstance(raw_url, str):
+        raw_url = part.get("url")
+    return raw_url if isinstance(raw_url, str) and raw_url.startswith("data:") else None
+
+
+def _with_image_data_url(part: dict[str, Any], url: str) -> dict[str, Any]:
+    """``part`` carrying ``url``, keeping whichever shape it already had."""
+    source = part.get("source")
+    if isinstance(source, dict) and source.get("type") == "base64":
+        header, _, data = url.partition(",")
+        media_type = header[len("data:"):].split(";", 1)[0] or source.get("media_type")
+        return {**part, "source": {**source, "data": data, "media_type": media_type}}
+    if isinstance(part.get("image_url"), dict):
+        return {**part, "image_url": {**part["image_url"], "url": url}}
+    return {**part, "image_url": {"url": url}} if "image_url" in part else {**part, "url": url}
+
+
+def _shrink_image_part(part: dict[str, Any], budget: int) -> Optional[dict[str, Any]]:
+    """Downscale an over-budget image so it fits, or None when it cannot.
+
+    Retina screenshots routinely encode to 6+ MiB of base64 — well over the per-image ceiling — and
+    dropping them lost the attachment the user actually sent. The CLI downscales its own inputs
+    anyway (2000px default), so this loses nothing the model would have seen.
+    """
+    url = _image_part_data_url(part)
+    if not url:
+        return None
+    try:
+        from agent.conversation_compression import _shrink_data_url
+        from tools.vision_tools import _resize_image_for_vision
+    except Exception:  # noqa: BLE001 - Pillow/vision stack missing: fall back to the note
+        logger.debug("claude-agent-sdk: image shrink unavailable", exc_info=True)
+        return None
+    for max_dimension in (2000, 1400, 1000):
+        try:
+            resized, _unshrinkable = _shrink_data_url(
+                url, max_dimension=max_dimension, resize_fn=_resize_image_for_vision
+            )
+        except Exception:  # noqa: BLE001 - never fail a turn over a resize
+            logger.debug("claude-agent-sdk: image shrink raised", exc_info=True)
+            return None
+        if not resized:
+            continue
+        candidate = _with_image_data_url(part, resized)
+        size = _image_part_payload_size(candidate)
+        if size is not None and size <= budget:
+            logger.info(
+                "claude-agent-sdk: attached image downscaled to %dpx to fit the payload budget", max_dimension
+            )
+            return candidate
+    return None
+
+
 def fit_images_to_sdk_budget(
     parts: list[dict[str, Any]], *, max_buffer_size: Optional[int] = None
 ) -> tuple[list[dict[str, Any]], list[int]]:
@@ -199,7 +263,15 @@ def fit_images_to_sdk_budget(
             continue
         cost = size + _SDK_IMAGE_BLOCK_OVERHEAD
         if size > SDK_IMAGE_BASE64_LIMIT or used + cost > budget:
-            dropped.append(image_index)
+            # Shrink before giving up: the attachment is what the user actually sent.
+            headroom = min(SDK_IMAGE_BASE64_LIMIT, max(0, budget - used - _SDK_IMAGE_BLOCK_OVERHEAD))
+            smaller = _shrink_image_part(part, headroom) if headroom else None
+            smaller_size = _image_part_payload_size(smaller) if smaller is not None else None
+            if smaller is not None and smaller_size is not None:
+                used += smaller_size + _SDK_IMAGE_BLOCK_OVERHEAD
+                kept.append(smaller)
+            else:
+                dropped.append(image_index)
         else:
             used += cost
             kept.append(part)
