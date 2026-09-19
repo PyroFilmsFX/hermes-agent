@@ -385,3 +385,89 @@ def test_compression_anchors_the_lineage_id_even_for_a_root_session():
 
     assert session["session_key"] == "root-continuation"
     assert session["spawn_child_stored_session_id"] == "root-original"
+
+
+def test_lineage_survives_restart_and_repeated_compression(tmp_path, monkeypatch):
+    """W8 A8-23 follow-up: the in-memory lineage field dies with the process. A resumed session that
+    compressed twice must still resolve to the id its receipts were written under."""
+    monkeypatch.setattr(handoff, "_receipt_home", lambda _: tmp_path / "home")
+
+    handoff.record_compression_continuation("child-original", "continuation-1", None)
+    handoff.record_compression_continuation("continuation-1", "continuation-2", None)
+
+    # Nothing in memory — exactly the state after a restart.
+    assert handoff.child_lineage_identity("continuation-2", None) == "child-original"
+    assert handoff.child_lineage_identity("continuation-1", None) == "child-original"
+    assert handoff.child_lineage_identity("never-compressed", None) == "never-compressed"
+
+
+def test_lineage_map_is_kept_when_receipts_are_written(tmp_path, monkeypatch):
+    monkeypatch.setattr(handoff, "_receipt_home", lambda _: tmp_path / "home")
+
+    handoff.record_compression_continuation("orig", "cont", None)
+    handoff._save_receipts(None, {"k": {"root_session_id": "orig", "created_at": 0}})
+
+    assert handoff._load_lineage(None) == {"cont": "orig"}
+    assert handoff.child_lineage_identity("cont", None) == "orig"
+
+
+def test_a_compressed_child_releases_its_concurrency_slot(tmp_path, monkeypatch):
+    """W8 review (medium): teardown released by the live session_key, so a compressed child held its
+    slot forever and the root's concurrency quota leaked one child per compression."""
+    monkeypatch.setattr(handoff, "_receipt_home", lambda _: tmp_path / "home")
+    handoff._save_receipts(None, {
+        "k": {"root_session_id": "root", "child_stored_session_id": "child-original",
+              "child_session_id": "child-runtime", "active_reservation": True, "created_at": 0}})
+    handoff.record_compression_continuation("child-original", "child-continuation", None)
+
+    handoff.release_child_reservation("child-continuation", None)
+
+    assert handoff._load_receipts(None)["k"]["active_reservation"] is False
+
+
+def test_a_claim_owned_by_a_dead_process_is_reclaimable_immediately():
+    """A restart mid-spawn must not strand the request_id for the whole TTL."""
+    import time as _time
+
+    fresh = _time.time()
+    dead_owner = {"claim_started_at": fresh, "claim_owner": "999999:deadbeef"}
+    live_unknown = {"claim_started_at": fresh, "claim_owner": "not-a-pid"}
+
+    assert handoff._claim_is_live(dead_owner, "key") is False
+    assert handoff._claim_is_live(live_unknown, "key") is True
+
+
+def test_this_process_holds_its_claim_however_long_creation_takes():
+    """Ownership, not the wall clock, decides: a slow session.create must not let a retry in."""
+    import time as _time
+
+    key = "receipt-key"
+    slow = {"claim_started_at": _time.time() - (handoff._CLAIM_TTL_SECONDS * 3),
+            "claim_owner": handoff._PROCESS_TOKEN}
+    with handoff._inflight_lock:
+        handoff._inflight_claims.add(key)
+    try:
+        assert handoff._claim_is_live(slow, key) is True
+    finally:
+        with handoff._inflight_lock:
+            handoff._inflight_claims.discard(key)
+    # Not in flight here any more (e.g. the turn crashed): reclaimable.
+    assert handoff._claim_is_live(slow, key) is False
+
+
+def test_a_finished_spawn_still_replays_idempotently(monkeypatch, tmp_path):
+    """The exclusivity must not break the retry contract: same request_id after success replays."""
+    receipts = {}
+    caller = {"session_key": "owner-stored", "cwd": str(tmp_path / "project"), "profile_home": None,
+              "agent": SimpleNamespace(api_mode="claude_agent_sdk", model="m", provider="p")}
+    root, calls = _spawn_harness(monkeypatch, tmp_path, caller, receipts)
+
+    first = handoff.create_task_session(1, {
+        "cwd": root, "task": "x", "title": "child", "request_id": "r-idem", "_session_spawn_capability": "cap"})
+    second = handoff.create_task_session(2, {
+        "cwd": root, "task": "x", "title": "child", "request_id": "r-idem", "_session_spawn_capability": "cap"})
+
+    assert first["result"]["stored_session_id"] == "child-stored"
+    assert second["result"] == first["result"]
+    assert calls.count("session.create") == 1
+    assert calls.count("prompt.submit") == 1, "a replay must not re-submit the task to the child"

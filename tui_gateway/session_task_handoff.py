@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from utils import atomic_json_write
 logger = logging.getLogger(__name__)
 
 _RECEIPT_FILENAME = "session_spawn_receipts.json"
+_MAX_LINEAGE_ENTRIES = 512
 _MAX_RECEIPTS_PER_ROOT = 256
 _MAX_TASK_CHARS = 8192
 _receipt_lock = threading.RLock()
@@ -89,16 +91,66 @@ def _receipt_path(profile_home: str | None) -> Path:
     return _receipt_home(profile_home) / "runtime" / _RECEIPT_FILENAME
 
 
-def _load_receipts(profile_home: str | None) -> dict[str, dict]:
+def _load_document(profile_home: str | None) -> dict:
     try:
         raw = json.loads(_receipt_path(profile_home).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    receipts = raw.get("receipts") if isinstance(raw, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _load_receipts(profile_home: str | None) -> dict[str, dict]:
+    receipts = _load_document(profile_home).get("receipts")
     return receipts if isinstance(receipts, dict) else {}
 
 
+def _load_lineage(profile_home: str | None) -> dict[str, str]:
+    """``continuation session id -> the durable id it continues``.
+
+    Receipts key off the id a child was created with, but compression mints a new one, and a cold
+    resume rebuilds the session record without the in-memory lineage field. Without this map the
+    quota treats a resumed, compressed session as a brand-new root (W8 review A8-23).
+    """
+    lineage = _load_document(profile_home).get("lineage")
+    return {str(k): str(v) for k, v in lineage.items()} if isinstance(lineage, dict) else {}
+
+
+def _resolve_lineage(session_id: str, lineage: dict[str, str]) -> str:
+    """Walk continuation -> durable to the oldest id (cycle-safe)."""
+    current = str(session_id or "")
+    seen: set[str] = set()
+    while current in lineage and current not in seen:
+        seen.add(current)
+        nxt = str(lineage[current] or "")
+        if not nxt or nxt == current:
+            break
+        current = nxt
+    return current
+
+
+def record_compression_continuation(old_session_id: str | None, new_session_id: str | None,
+                                    profile_home: str | None = None) -> None:
+    """Remember that ``new_session_id`` continues ``old_session_id`` (called when compression rotates
+    a session id). Durable, so the spawn quota survives a restart of a compressed session."""
+    old_id, new_id = str(old_session_id or ""), str(new_session_id or "")
+    if not old_id or not new_id or old_id == new_id:
+        return
+    with _receipt_guard(profile_home):
+        document = _load_document(profile_home)
+        lineage = document.get("lineage")
+        lineage = {str(k): str(v) for k, v in lineage.items()} if isinstance(lineage, dict) else {}
+        lineage[new_id] = _resolve_lineage(old_id, lineage)
+        if len(lineage) > _MAX_LINEAGE_ENTRIES:  # bounded: drop the oldest insertions
+            lineage = dict(list(lineage.items())[-_MAX_LINEAGE_ENTRIES:])
+        receipts = document.get("receipts")
+        _write_document(profile_home, receipts if isinstance(receipts, dict) else {}, lineage)
+
+
 def _save_receipts(profile_home: str | None, receipts: dict[str, dict]) -> None:
+    _write_document(profile_home, receipts, _load_lineage(profile_home))
+
+
+def _write_document(profile_home: str | None, receipts: dict[str, dict], lineage: dict[str, str]) -> None:
     path = _receipt_path(profile_home)
     path.parent.mkdir(parents=True, exist_ok=True)
     for root in {str(row.get("root_session_id") or "") for row in receipts.values()}:
@@ -108,7 +160,7 @@ def _save_receipts(profile_home: str | None, receipts: dict[str, dict]) -> None:
             terminal.sort(key=lambda item: float(item[1].get("created_at") or 0))
             for key, _row in terminal[:-_MAX_RECEIPTS_PER_ROOT]:
                 receipts.pop(key, None)
-    atomic_json_write(path, {"receipts": receipts}, indent=2, mode=0o600)
+    atomic_json_write(path, {"receipts": receipts, "lineage": lineage}, indent=2, mode=0o600)
 
 
 def _find_caller(owner_session_id: str) -> tuple[str, dict] | None:
@@ -196,19 +248,47 @@ def _caller_model_provider(caller: dict) -> tuple[str, str]:
     return model, provider
 
 
-# A reservation is exclusive between reserve and child identity. A crashed or wedged creation must
-# not strand the request_id forever, so the claim expires — generously, since session.create waits on
-# a real backend build.
+# A reservation is exclusive for the WHOLE spawn (create -> title -> submit), not just until the
+# child id lands: a retry that slipped in after the id was written re-submitted the task to the same
+# child. Liveness is ownership-based, not a bare clock — a claim this process is still executing is
+# live no matter how long session.create takes, and a claim owned by a process that is gone is dead
+# immediately (no waiting out a TTL after a restart). The TTL is only the backstop for a claim whose
+# owner we cannot interrogate.
 _CLAIM_TTL_SECONDS = 180.0
+_PROCESS_TOKEN = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+_inflight_claims: set[str] = set()
+_inflight_lock = threading.Lock()
 
 
-def _claim_is_live(receipt: dict) -> bool:
-    """True while another in-flight request owns this receipt's reservation."""
-    if receipt.get("child_session_id"):
+def _owner_process_alive(owner: str) -> bool:
+    """Is the process that took this claim still running? Unknown owners count as alive."""
+    pid_text = str(owner or "").split(":", 1)[0]
+    if not pid_text.isdigit():
+        return True
+    try:
+        os.kill(int(pid_text), 0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    except Exception:  # noqa: BLE001 - unknowable owner: fall back to the clock
+        return True
+    return True
+
+
+def _claim_is_live(receipt: dict, receipt_key: str | None = None) -> bool:
+    """True while another in-flight request owns this receipt's spawn."""
+    if receipt.get("result") and not receipt.get("claim_started_at"):
+        return False  # finished spawn: idempotent replay is the contract
     started = receipt.get("claim_started_at")
     if not isinstance(started, (int, float)):
         return False  # pre-claim receipt (older build): reclaimable, as before
+    owner = str(receipt.get("claim_owner") or "")
+    if owner == _PROCESS_TOKEN:
+        with _inflight_lock:
+            return receipt_key is None or receipt_key in _inflight_claims
+    if not _owner_process_alive(owner):
+        return False  # the owner died mid-spawn; reclaiming cannot duplicate anything
     return (time.time() - float(started)) < _CLAIM_TTL_SECONDS
 
 
@@ -293,6 +373,17 @@ def _dispatch_owned(method: str, params: dict, request_id: str, transport=None) 
 
 def create_task_session(rid: Any, params: dict) -> dict:
     """Authorize, reserve, then create/title/submit exactly one child turn."""
+    claimed: list[str] = []
+    try:
+        return _create_task_session(rid, params, claimed)
+    finally:
+        # The claim is exclusive for the whole spawn; this process must never leave it marked
+        # in-flight after returning, or a legitimate retry would be refused until the TTL.
+        with _inflight_lock:
+            _inflight_claims.difference_update(claimed)
+
+
+def _create_task_session(rid: Any, params: dict, claimed: list[str]) -> dict:
     from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
     from tui_gateway import server
 
@@ -345,13 +436,14 @@ def create_task_session(rid: Any, params: dict) -> dict:
             result = existing.get("result")
             if isinstance(result, dict) and not (result.get("resumable") and existing.get("child_session_id")):
                 return server._ok(rid, result)
+            if _claim_is_live(existing, receipt_key):
+                # Another request with this request_id is mid-spawn. Dropping its receipt let both
+                # create a child behind one quota entry; proceeding past a written child id let both
+                # submit the task to that child (W8 review A8-26).
+                return _error(rid, 4292, "a spawn for this request_id is already in progress")
             if existing.get("child_session_id"):
                 retry_existing = existing
                 receipt = existing
-            elif _claim_is_live(existing):
-                # Another request with this request_id is between reserve and child identity. Dropping
-                # its receipt here let both create a child behind one quota entry (W8 review A8-26).
-                return _error(rid, 4292, "a spawn for this request_id is already in progress")
             else:
                 receipts.pop(receipt_key, None)
                 _save_receipts(profile_home, receipts)
@@ -373,11 +465,14 @@ def create_task_session(rid: Any, params: dict) -> dict:
                 "depth": caller_depth + 1, "cwd": cwd, "task": task, "title": title,
                 "profile_home": receipt_profile, "created_at": now, "task_status": "created",
                 "active_reservation": True, "caller_generation": caller_generation,
-                # Held until child identity lands (or the claim goes stale); see _claim_is_live.
-                "claim_started_at": now,
+                # Held for the whole spawn (or until the claim goes stale); see _claim_is_live.
+                "claim_started_at": now, "claim_owner": _PROCESS_TOKEN,
             }
             receipts[receipt_key] = receipt
             _save_receipts(profile_home, receipts)
+            with _inflight_lock:
+                _inflight_claims.add(receipt_key)
+            claimed.append(receipt_key)
 
     create_params = {"cwd": cwd, "title": title, "source": "claude-agent-sdk-session-spawn",
                      "_cwd_identity": cwd_identity, "_delegated_by": root_session_id,
@@ -416,7 +511,7 @@ def create_task_session(rid: Any, params: dict) -> dict:
             with _receipt_guard(profile_home):
                 receipts = _load_receipts(profile_home)
                 receipt = receipts.get(receipt_key, receipt)
-                receipt.update({"task_status": "accepted", "result": result})
+                receipt.update({"task_status": "accepted", "result": result, "claim_started_at": None})
                 receipts[receipt_key] = receipt
                 _save_receipts(profile_home, receipts)
             return server._ok(rid, result)
@@ -438,7 +533,8 @@ def create_task_session(rid: Any, params: dict) -> dict:
             receipts = _load_receipts(profile_home)
             receipt = receipts.get(receipt_key, receipt)
             receipt.update({"child_stored_session_id": stored_id, "child_session_id": runtime_id,
-                            "task_status": result["task_status"], "result": result})
+                            "task_status": result["task_status"], "result": result,
+                            "claim_started_at": None})
             receipts[receipt_key] = receipt
             _save_receipts(profile_home, receipts)
         return server._ok(rid, result)
@@ -477,13 +573,17 @@ def release_child_reservation(stored_session_id: str | None, profile_home: str |
     wanted = str(stored_session_id or "")
     if not wanted:
         return
+    # Teardown hands us the session's CURRENT key; compression rewrote it, and receipts keep the id
+    # the child was created with — so a compressed child never released its slot (W8 review, A8-26
+    # follow-up) and the root's concurrency quota leaked one child per compression.
+    durable = _resolve_lineage(wanted, _load_lineage(profile_home))
     with _receipt_guard(profile_home):
         receipts = _load_receipts(profile_home)
         changed = False
         for receipt in receipts.values():
             if (receipt.get("active_reservation") and
-                    wanted in {str(receipt.get("child_stored_session_id") or ""),
-                               str(receipt.get("child_session_id") or "")}):
+                    {wanted, durable} & {str(receipt.get("child_stored_session_id") or ""),
+                                         str(receipt.get("child_session_id") or "")}):
                 receipt["active_reservation"] = False
                 changed = True
         if changed:
@@ -518,6 +618,7 @@ def child_lineage_identity(stored_session_id: str, profile_home: str | None = No
     wanted = str(stored_session_id or "")
     if not wanted:
         return ""
+    wanted = _resolve_lineage(wanted, _load_lineage(profile_home))
     receipts = _load_receipts(profile_home)
     for receipt in receipts.values():
         if wanted in {str(receipt.get("child_stored_session_id") or ""),
