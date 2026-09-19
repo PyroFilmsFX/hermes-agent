@@ -230,7 +230,11 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         revoke_scoped_capabilities_for_session(session)
     with contextlib.suppress(Exception):
         from tui_gateway.session_task_handoff import release_child_reservation
-        release_child_reservation(session.get("session_key"), session.get("profile_home"))
+        # The durable id first: compression rewrites session_key, and receipts keep the id the child
+        # was created with, so releasing by the live key leaked a concurrency slot per compression.
+        release_child_reservation(
+            session.get("spawn_child_stored_session_id") or session.get("session_key"),
+            session.get("profile_home"))
     _lock_vault_managers(session)
     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"

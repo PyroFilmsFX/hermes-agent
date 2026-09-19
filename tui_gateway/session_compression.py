@@ -260,6 +260,13 @@ def _sync_session_key_after_compress(
     # caller shed its depth/concurrency/rate history by compressing first (W8 review A8-23).
     if not session.get("spawn_child_stored_session_id"):
         session["spawn_child_stored_session_id"] = old_key
+    # Durable half of the same fix: the in-memory field is lost when the session is rebuilt after a
+    # restart, so persist continuation -> durable next to the receipts.
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_task_handoff import record_compression_continuation
+        record_compression_continuation(
+            session.get("spawn_child_stored_session_id") or old_key, new_session_id,
+            session.get("profile_home"))
     if not _transfer_active_session_slot(sid, session, new_session_id=new_session_id):
         logger.warning(
             "Compression session lease did not re-anchor: sid=%s old_session_id=%s new_session_id=%s",
