@@ -161,3 +161,49 @@ def test_session_boundary_omits_images_past_the_reader_it_started_with():
     content = sent["message"]["content"]
     assert [block["type"] for block in content] == ["text", "image", "text"]
     assert "1 attached image(s) were too large" in content[-1]["text"]
+
+
+def _real_png(path, width=2400, height=1600):
+    from PIL import Image
+
+    # Noise, not flat colour: a flat image compresses to nothing and never trips the budget.
+    import random
+
+    rng = random.Random(7)
+    image = Image.new("RGB", (width, height))
+    image.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(width * height)])
+    image.save(path)
+    return str(path)
+
+
+def test_an_oversized_screenshot_is_downscaled_instead_of_dropped(tmp_path):
+    """A retina screenshot encodes past the per-image ceiling; dropping it loses the attachment."""
+    from agent.image_routing import build_native_content_parts
+    from agent.transports.claude_agent_sdk_session_input import _image_part_payload_size
+
+    parts, skipped = build_native_content_parts("what is this", [_real_png(tmp_path / "shot.png")])
+    assert not skipped
+    original = next(_image_part_payload_size(p) for p in parts if _image_part_payload_size(p) is not None)
+    assert original > SDK_IMAGE_BASE64_LIMIT, "fixture must exceed the per-image ceiling"
+
+    kept, dropped = fit_images_to_sdk_budget(parts, max_buffer_size=10 * MiB)
+
+    assert dropped == []
+    sent = [p for p in kept if _image_part_payload_size(p) is not None]
+    assert len(sent) == 1
+    assert _image_part_payload_size(sent[0]) <= SDK_IMAGE_BASE64_LIMIT
+    # Still a usable image, not a truncated blob.
+    from PIL import Image
+    import base64, io
+
+    data = sent[0]["image_url"]["url"].split(",", 1)[1]
+    Image.open(io.BytesIO(base64.b64decode(data))).verify()
+
+
+def test_an_image_that_cannot_be_shrunk_still_becomes_a_note():
+    parts = [{"type": "text", "text": "look"}, _image(SDK_IMAGE_BASE64_LIMIT + 1)]
+
+    kept, dropped = fit_images_to_sdk_budget(parts, max_buffer_size=10 * MiB)
+
+    assert dropped == [0]
+    assert kept == parts[:1]
