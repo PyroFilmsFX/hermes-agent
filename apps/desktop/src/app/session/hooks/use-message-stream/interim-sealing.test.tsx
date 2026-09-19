@@ -421,3 +421,64 @@ describe('background completions and sealed interim prose', () => {
     expect(getState().messages.some(m => m.role === 'system')).toBe(true)
   })
 })
+
+describe('a completion never settles onto another turn\'s interim', () => {
+  const backgroundStart = () =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true },
+        session_id: SID,
+        type: 'message.start'
+      } as unknown as GatewayEvent)
+    )
+
+  const backgroundComplete = (text: string) =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true, text },
+        session_id: SID,
+        type: 'message.complete'
+      } as unknown as GatewayEvent)
+    )
+
+  beforeEach(() => {
+    clearSessionTodos(SID)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSessionTodos(SID)
+    vi.restoreAllMocks()
+  })
+
+  it('keeps an unsettled interim from an earlier turn when a later background answer looks similar', async () => {
+    mountStream()
+    await start()
+    await delta('Checking the files, then I will report back.')
+    await interim('Checking the files, then I will report back.')
+    await complete('Found three problems.')
+
+    // A later, unrelated wake whose answer is a prefix of that older interim.
+    await backgroundStart()
+    await backgroundComplete('Checking the files')
+
+    expect(assistantMessages()).toEqual([
+      'Checking the files, then I will report back.',
+      'Found three problems.',
+      'Checking the files'
+    ])
+  })
+
+  it('does not let a background answer overwrite the live turn\'s interim', async () => {
+    mountStream()
+    await start()
+    await delta('Working on the migration.')
+    await interim('Working on the migration.')
+
+    // A background delivery for the same session lands mid-turn.
+    await backgroundStart()
+    await backgroundComplete('Working on the migration. Done.')
+
+    expect(assistantMessages()).toEqual(['Working on the migration.', 'Working on the migration. Done.'])
+  })
+})

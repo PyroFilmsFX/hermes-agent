@@ -119,6 +119,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       setBackgroundDeliveryActive(sessionId, true)
       updateSessionState(sessionId, state => ({
         ...state,
+        // A new turn starts: the previous turn's sealed interim is no longer a settle target.
+        sealedInterimId: null,
         streamId: nextBackgroundMessageId('background-stream')
       }))
 
@@ -166,6 +168,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         sawAssistantPayload: false,
         interrupted: false,
         interimBoundaryPending: false,
+        sealedInterimId: null,
         // Backend accepted the turn — the no-payload settle gate below may
         // now treat a running=false heartbeat as a real turn end.
         turnLive: true,
@@ -436,7 +439,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           existing && streamId
             ? -1
             : sealedMessage.role === 'assistant'
-              ? settleableInterimIndex(state.messages, finalText)
+              ? settleableInterimIndex(state.messages, finalText, state.sealedInterimId)
               : -1
 
         if (existing && streamId) {
@@ -452,6 +455,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         return {
           ...state,
           messages: nextMessages,
+          sealedInterimId: null,
           streamId: null
         }
       })

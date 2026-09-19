@@ -1699,6 +1699,7 @@ describe('resumeSession failure recovery', () => {
             cwd: '',
             fast: false,
             interimBoundaryPending: false,
+            sealedInterimId: null,
             interrupted: false,
             messages: [],
             adoptedRunningTurn: false,

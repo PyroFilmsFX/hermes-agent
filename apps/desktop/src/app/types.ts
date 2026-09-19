@@ -172,6 +172,9 @@ export interface ClientSessionState {
   interrupted: boolean
   /** True after message.interim finalized a bubble in the still-running turn. */
   interimBoundaryPending: boolean
+  /** Id of the bubble the CURRENT turn's message.interim sealed, or null. A completion may only
+   *  settle onto that exact row — never a leftover interim from an earlier turn. */
+  sealedInterimId: string | null
   /** A blocking clarify prompt is waiting on the user for this session. Drives
    *  the sidebar "needs input" indicator; cleared when the turn resumes/ends. */
   needsInput: boolean

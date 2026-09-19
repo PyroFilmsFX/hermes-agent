@@ -127,30 +127,35 @@ export function completionErrorText(finalText: string): string | null {
   return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
 }
 
-/** Index of a trailing sealed-interim assistant row this completion continues, else -1.
+/** Index of the interim row THIS turn sealed when the completion continues it, else -1.
 
 The SDK lane relays EVERY assistant message as interim prose, so a turn's own final answer is
-usually already on screen in a sealed bubble (sealing clears `streamId`). Settling onto it keeps
-the live UI at the one row the DB stores. Continuity, not equality: streaming can drop characters
-and the final may add a trailing delta, so prefix-either-way counts as the same message. */
-export function settleableInterimIndex(messages: ChatMessage[], finalText: string): number {
+usually already on screen in a sealed bubble (sealing clears `streamId`). Settling onto it keeps the
+live UI at the one row the DB stores. Two guards, both required: the row must be the bubble this
+turn sealed (`sealedInterimId` — a leftover interim from an earlier turn is never a settle target),
+and the texts must be continuous (streaming can drop characters and the final may add a trailing
+delta, so prefix-either-way counts as the same message; unrelated prose keeps its own bubble). */
+export function settleableInterimIndex(
+  messages: ChatMessage[],
+  finalText: string,
+  sealedInterimId: string | null
+): number {
   const text = finalText.trim()
 
-  if (!text) {
+  if (!text || !sealedInterimId) {
     return -1
   }
 
-  const lastAssistant = [...messages].reverse().findIndex(message => message.role === 'assistant' && !message.hidden)
+  const index = messages.findIndex(message => message.id === sealedInterimId)
 
-  if (lastAssistant < 0) {
+  if (index < 0) {
     return -1
   }
 
-  const index = messages.length - 1 - lastAssistant
   const existing = messages[index]
   const existingText = chatMessageText(existing).trim()
 
-  if (!existing.interim || !existingText) {
+  if (existing.role !== 'assistant' || existing.hidden || !existing.interim || !existingText) {
     return -1
   }
 
