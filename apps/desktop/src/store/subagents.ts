@@ -38,6 +38,26 @@ export interface SubagentProgress {
   summary?: string
   /** Active tool while running — cleared on terminal status. */
   currentTool?: string
+  /** What this child IS, from the SDK plus whatever plugin owns it (see the `subagent_metadata`
+   *  hook): declared type, display name, the real worker/model/effort behind a relay wrapper, and
+   *  the ids that join the row to its on-disk transcript. */
+  meta?: SubagentMeta
+}
+
+export interface SubagentMeta {
+  display_name?: string
+  subagent_type?: string
+  /** The model the Task asked for — a relay wrapper may drive a different one. */
+  requested_model?: string
+  /** The model that actually ran, when the owning plugin can say so. */
+  model?: string
+  effort?: string
+  worker?: string
+  job_id?: string
+  sdk_agent_id?: string
+  sdk_parent_session_id?: string
+  source?: string
+  [key: string]: unknown
 }
 
 export interface SubagentNode extends SubagentProgress {
@@ -113,10 +133,51 @@ const compact = (text: string, max = PREVIEW_MAX) => {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
+/** "Codex worker · gpt-6-astra · xhigh" — what this child is, as far as anyone can say.
+ *
+ * Nothing is invented: a relay wrapper's real worker/model/effort only appear once the plugin that
+ * owns it reports them, and the model the Task merely ASKED for is shown as such (it is often
+ * `sonnet` for a wrapper that drives something else entirely). */
+export function subagentIdentity(item: Pick<SubagentProgress, 'meta' | 'model'>): string {
+  const meta = item.meta ?? {}
+  const name = String(meta.display_name || meta.worker || meta.subagent_type || '').trim()
+  const model = String(meta.model || item.model || '').trim()
+  const effort = String(meta.effort || '').trim()
+  const parts = [name, model, effort].filter(Boolean)
+
+  if (parts.length) {
+    return parts.join(' · ')
+  }
+
+  const requested = String(meta.requested_model || '').trim()
+
+  return requested ? `requested ${requested}` : ''
+}
+
+const mergeMeta = (prev: SubagentMeta | undefined, next: unknown): SubagentMeta | undefined => {
+  const incoming = next && typeof next === 'object' && !Array.isArray(next) ? (next as SubagentMeta) : undefined
+
+  if (!incoming) {
+    return prev
+  }
+
+  // Enrichment arrives after the row exists (a relay's job record lands once the worker reports), so
+  // later metadata merges onto earlier rather than replacing it.
+  return { ...prev, ...incoming }
+}
+
 const toolLabel = (name: string) => name.split('_').filter(Boolean).map(capitalize).join(' ') || name
+
+// SDK subagent lifecycle events all carry the tool name "Agent"; wrapping their text as
+// `Agent("…")` dressed the child's own prose up as a tool call it never made.
+const SYNTHETIC_TOOL_NAMES = new Set(['agent', 'task'])
 
 const formatTool = (name: string, preview = '') => {
   const snippet = compact(preview, TOOL_PREVIEW_MAX)
+
+  if (SYNTHETIC_TOOL_NAMES.has(name.trim().toLowerCase())) {
+    return snippet
+  }
 
   return snippet ? `${toolLabel(name)}("${snippet}")` : toolLabel(name)
 }
@@ -180,7 +241,16 @@ function streamFromPayload(
   }
 
   if (tool) {
-    out.push({ at, isError: !!payload.error, kind: 'tool', text: formatTool(tool, preview) })
+    const line = formatTool(tool, preview)
+
+    if (line) {
+      out.push({
+        at,
+        isError: !!payload.error,
+        kind: SYNTHETIC_TOOL_NAMES.has(tool.trim().toLowerCase()) ? 'progress' : 'tool',
+        text: line
+      })
+    }
   }
 
   if (eventType === 'subagent.progress' && text) {
@@ -215,6 +285,7 @@ function toProgress(payload: SubagentPayload, prev: SubagentProgress | undefined
     sessionId: str(payload.child_session_id) || prev?.sessionId,
     delegationId: str(payload.delegation_id) || prev?.delegationId,
     model: str(payload.model) || prev?.model,
+    meta: mergeMeta(prev?.meta, payload.subagent_meta ?? payload.meta),
     status,
     taskCount: num(payload.task_count) ?? prev?.taskCount ?? 1,
     taskIndex: num(payload.task_index) ?? prev?.taskIndex ?? 0,
@@ -261,7 +332,11 @@ export function reconcileSubagentSnapshot(sid: string, children: SubagentPayload
     // A roster records the last tool, not a currently executing call. Seed cold
     // activity only; a repeated snapshot must not append over newer live text.
     if (!projected.stream.length && str(payload.last_tool)) {
-      projected.stream = [{ at: projected.updatedAt, kind: 'tool', text: formatTool(str(payload.last_tool)) }]
+      const lastToolLine = formatTool(str(payload.last_tool))
+
+      projected.stream = lastToolLine
+        ? [{ at: projected.updatedAt, kind: 'tool', text: lastToolLine }]
+        : []
     }
 
     if (index < 0) {

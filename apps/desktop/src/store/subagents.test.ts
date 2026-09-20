@@ -10,6 +10,7 @@ import {
   pruneDelegateFallbackSubagents,
   pruneFinishedSessionSubagents,
   reconcileSubagentSnapshot,
+  subagentIdentity,
   upsertSubagent
 } from './subagents'
 
@@ -394,5 +395,72 @@ describe('subagent store', () => {
     expect(items.find(i => i.id === 'sdk-1')?.goal).toBe('Explore auth module')
     expect(items.find(i => i.id === 'sdk-2')?.goal).toBe('Find memory leaks')
     expect(items.find(i => i.id === 'sdk-3')?.goal).toBe('code_reviewer')
+  })
+})
+
+describe('subagent identity', () => {
+  beforeEach(() => $subagentsBySession.set({}))
+
+  it('keeps metadata across events so late enrichment sticks', () => {
+    upsertSubagent('s1', {
+      goal: 'review the diff',
+      status: 'running',
+      subagent_id: 'a1',
+      subagent_meta: { sdk_agent_id: 'a1', subagent_type: 'conductor:codex-worker', requested_model: 'sonnet' }
+    })
+    // The owning plugin only learns the real worker once its job record lands.
+    upsertSubagent('s1', {
+      status: 'running',
+      subagent_id: 'a1',
+      subagent_meta: { display_name: 'Codex worker', model: 'gpt-6-astra', effort: 'xhigh' }
+    })
+
+    const [item] = listFor('s1')
+    expect(item.meta?.subagent_type).toBe('conductor:codex-worker')
+    expect(item.meta?.model).toBe('gpt-6-astra')
+    expect(subagentIdentity(item)).toBe('Codex worker · gpt-6-astra · xhigh')
+  })
+
+  it('says what was requested when nobody can say what actually ran', () => {
+    upsertSubagent('s1', {
+      goal: 'x', status: 'running', subagent_id: 'a2',
+      subagent_meta: { requested_model: 'sonnet' }
+    })
+
+    expect(subagentIdentity(listFor('s1')[0])).toBe('requested sonnet')
+  })
+
+  it('shows nothing rather than guessing for a child with no metadata', () => {
+    upsertSubagent('s1', { goal: 'x', status: 'running', subagent_id: 'a3' })
+
+    expect(subagentIdentity(listFor('s1')[0])).toBe('')
+  })
+
+  it("does not dress the child's own prose up as an Agent(...) tool call", () => {
+    upsertSubagent('s1', {
+      goal: 'x', status: 'running', subagent_id: 'a4',
+      tool_name: 'Agent', text: 'Reading the config file'
+    })
+
+    const [item] = listFor('s1')
+    expect(item.stream.at(-1)?.text).toBe('Reading the config file')
+    expect(item.stream.at(-1)?.kind).toBe('progress')
+  })
+
+  it('still formats a real tool call as a tool call', () => {
+    upsertSubagent('s1', {
+      goal: 'x', status: 'running', subagent_id: 'a5',
+      tool_name: 'Bash', tool_preview: 'ls -la'
+    })
+
+    expect(listFor('s1')[0].stream.at(-1)?.text).toBe('Bash("ls -la")')
+  })
+
+  it('carries metadata from the roster snapshot too', () => {
+    reconcileSubagentSnapshot('s1', [
+      { subagent_id: 'a6', goal: 'x', status: 'running', meta: { display_name: 'Codex worker' } }
+    ])
+
+    expect(subagentIdentity(listFor('s1')[0])).toBe('Codex worker')
   })
 })

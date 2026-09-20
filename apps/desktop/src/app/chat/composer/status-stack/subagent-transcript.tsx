@@ -9,6 +9,9 @@ interface Tail {
   available: boolean
   text: string
   truncated: boolean
+  /** `waiting` = the child has not written anything yet; `error` = the read failed. The panel used
+   *  to show "Live transcript unavailable" for both, which read as broken when it was just early. */
+  state?: 'error' | 'ready' | 'waiting'
 }
 
 export function SubagentTranscript({ sessionId, subagentId }: { sessionId: string; subagentId: string }) {
@@ -35,13 +38,14 @@ export function SubagentTranscript({ sessionId, subagentId }: { sessionId: strin
         if (!cancelled && owner === JSON.stringify(knownOwnerForSession(sessionId))) {
           setTail({
             available: result.available,
+            state: result.state,
             text: typeof result.text === 'string' ? result.text.slice(-16384) : '',
             truncated: result.truncated
           })
         }
       } catch {
         if (!cancelled) {
-          setTail({ available: false, text: '', truncated: false })
+          setTail({ available: false, state: 'error', text: '', truncated: false })
         }
       } finally {
         pending = false
@@ -66,7 +70,9 @@ export function SubagentTranscript({ sessionId, subagentId }: { sessionId: strin
           {tail.text}
         </pre>
       ) : (
-        <p className="text-(--ui-text-tertiary)">{tail ? t.agents.transcriptUnavailable : t.agents.waitingActivity}</p>
+        <p className="text-(--ui-text-tertiary)">
+          {!tail || tail.state === 'waiting' ? t.agents.waitingActivity : t.agents.transcriptUnavailable}
+        </p>
       )}
     </section>
   )

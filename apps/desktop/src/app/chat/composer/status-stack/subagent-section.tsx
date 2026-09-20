@@ -9,7 +9,7 @@ import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useViewedInterval } from '@/hooks/use-viewed-interval'
 import { useI18n } from '@/i18n'
 import { useSessionSlice } from '@/lib/use-session-slice'
-import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
+import { $subagentsBySession, subagentIdentity, type SubagentProgress } from '@/store/subagents'
 
 import { SubagentControls } from './subagent-controls'
 import { SubagentTranscript } from './subagent-transcript'
@@ -56,6 +56,9 @@ export function SubagentSection({ sessionId }: SubagentSectionProps) {
     >
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs text-(--ui-text-primary)">{item.goal}</span>
+        {subagentIdentity(item) && (
+          <span className="block truncate text-[0.68rem] text-(--ui-text-secondary)">{subagentIdentity(item)}</span>
+        )}
         <span className="block truncate text-[0.68rem] text-(--ui-text-tertiary)">
           {item.stream.at(-1)?.text || (item.status === 'queued' ? t.agents.queued : t.agents.waitingActivity)}
         </span>
