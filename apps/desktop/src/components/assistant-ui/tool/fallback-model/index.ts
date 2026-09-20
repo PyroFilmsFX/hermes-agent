@@ -1498,8 +1498,14 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     titlePartsFromAction(baseTitle, part.result === undefined ? meta.pendingAction : undefined)
   )
 
+  // A card sealed without a result: the turn ended before its completion arrived (the settle sweep
+  // closes rows so none spin forever). The notice keeps the row from rendering as a live special
+  // card, but on its own it erased WHICH tool this was — the first thing anyone asks when they see
+  // one. Name the tool beside it.
   const unavailable = part.result === undefined && part.completedAt !== undefined
-  const title = unavailable ? translateNow('assistant.tool.resultUnavailable') : titleParts.title
+  const title = unavailable
+    ? `${translateNow('assistant.tool.resultUnavailable')} · ${titleParts.title}`
+    : titleParts.title
   const titleEnriched = title !== baseTitle
   const baseSubtitle = error || toolSubtitle(part, argsRecord, resultRecord)
 

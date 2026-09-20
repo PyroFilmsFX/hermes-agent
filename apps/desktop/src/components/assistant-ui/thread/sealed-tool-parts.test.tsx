@@ -58,7 +58,7 @@ describe('tool parts sealed without a result', () => {
     $activeSessionId.set('sess-1')
     const { container } = render(<Harness message={sealedMessage('delegate_task', { tasks: [{ goal: 'inspect' }] })} />)
 
-    expect(await screen.findByText('Result unavailable')).toBeTruthy()
+    expect(await screen.findByText(/Result unavailable/)).toBeTruthy()
     expect(container.querySelector('[data-delegate-card]')).toBeNull()
     expect(screen.queryByLabelText('Running')).toBeNull()
   })
@@ -66,7 +66,7 @@ describe('tool parts sealed without a result', () => {
   it('renders a sealed image_generate as the generic row, not a rendering placeholder', async () => {
     const { container } = render(<Harness message={sealedMessage('image_generate', { prompt: 'a cat' })} />)
 
-    expect(await screen.findByText('Result unavailable')).toBeTruthy()
+    expect(await screen.findByText(/Result unavailable/)).toBeTruthy()
     expect(container.querySelector('[data-slot="aui_generated-image"]')).toBeNull()
     expect(screen.queryByRole('status')).toBeNull()
   })
@@ -75,7 +75,7 @@ describe('tool parts sealed without a result', () => {
     const command = 'hermes -p turqoise chat --in ~ -c "Bot Chat" -Q -q "Message from 🤖 Hermes (@hermes): hi"'
     const { container } = render(<Harness message={sealedMessage('terminal', { command })} />)
 
-    expect(await screen.findByText('Result unavailable')).toBeTruthy()
+    expect(await screen.findByText(/Result unavailable/)).toBeTruthy()
     expect(container.querySelector('[data-slot="aui_agent-delivery-notice"]')).toBeNull()
   })
 })

@@ -687,3 +687,24 @@ describe('buildToolView Agent / Task tool card labels', () => {
     expect(prefixedTask.title).toBe('worker')
   })
 })
+
+describe('a tool card sealed without its result', () => {
+  it('still says which tool it was', () => {
+    // The turn ended before the completion arrived and the settle sweep closed the row. Replacing
+    // the title with the notice hid the tool name — the first thing anyone asks when they see it.
+    const view = buildToolView(
+      part({ completedAt: 5, result: undefined, toolName: 'terminal', args: { command: 'ls -la' } }),
+      ''
+    )
+
+    expect(view.title.toLowerCase()).toContain('result unavailable')
+    // ...and still says which tool it was.
+    expect(`${view.title} ${view.subtitle}`).toContain('ls -la')
+  })
+
+  it('leaves a completed tool card alone', () => {
+    const view = buildToolView(part({ completedAt: 5, result: 'total 0\n', toolName: 'terminal' }), '')
+
+    expect(`${view.title} ${view.subtitle}`.toLowerCase()).not.toContain('result unavailable')
+  })
+})

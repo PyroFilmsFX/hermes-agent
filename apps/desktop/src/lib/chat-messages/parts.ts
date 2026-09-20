@@ -228,11 +228,20 @@ export function mergeFinalAssistantText(
 
 /** Seal every still-open visible activity when the assistant turn stops. */
 export function completeOpenTimelineParts(parts: ChatMessagePart[], completedAt: number): ChatMessagePart[] {
-  return parts.map(part =>
-    part.timestamp !== undefined && part.completedAt === undefined
-      ? ({ ...part, completedAt } as ChatMessagePart)
-      : part
-  )
+  return parts.map(part => {
+    if (part.timestamp === undefined || part.completedAt !== undefined) {
+      return part
+    }
+
+    // A tool row sealed here never received its completion event, and renders as "Result
+    // unavailable" even though the tool itself usually RAN. Name it in dev so the producer can be
+    // found, instead of every report being "it happens on random tools".
+    if (import.meta.env.DEV && part.type === 'tool-call' && part.result === undefined) {
+      console.debug('[tool-card] sealed without a result at turn end:', part.toolName, part.toolCallId)
+    }
+
+    return { ...part, completedAt } as ChatMessagePart
+  })
 }
 
 // Coalesce only adjacent deltas of the same channel. Switching between text
