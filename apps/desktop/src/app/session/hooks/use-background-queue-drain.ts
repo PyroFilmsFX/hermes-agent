@@ -155,7 +155,10 @@ export function useBackgroundQueueDrain({
     // Preserve the retry budget while session discovery runs at boot, on a
     // gateway/profile switch, or during a refresh over an empty list.
     // Once discovery settles, submitText can resume by stored id.
-    if (!enabled || sessionsLoading) {
+    // Bounded by what the flag is FOR (skeletons over an empty list): a discovery
+    // pass that never publishes its false would otherwise strand every queued
+    // turn in the app, with no other visible symptom.
+    if (!enabled || (sessionsLoading && $sessions.get().length === 0)) {
       return
     }
 

@@ -248,6 +248,25 @@ describe('useBackgroundQueueDrain', () => {
     expect(getQueuedPrompts('stored-session-a')).toHaveLength(1)
   })
 
+  it('drains once sessions are known, even if the loading flag never cleared', async () => {
+    // The flag only exists to drive skeletons over an EMPTY list. A discovery pass
+    // that never publishes its false (a switch superseded mid-flight, a refresh
+    // that started empty and finished after a newer one) used to strand every
+    // queued turn in the app, with no other visible symptom.
+    setSessionsLoading(true)
+    setSessions([lineageSession({ id: 'stored-session-a' })])
+
+    const runtimeMap = { current: new Map([['stored-session-a', 'rt-session-a']]) }
+    const submitText = vi.fn(async () => true)
+
+    enqueueQueuedPrompt('stored-session-a', { text: 'not stranded', attachments: [] })
+
+    render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
+
+    await waitFor(() => expect(submitText).toHaveBeenCalledTimes(1))
+    expect(getQueuedPrompts('stored-session-a')).toHaveLength(0)
+  })
+
   it('drains a restored background queue once the session list finishes loading', async () => {
     setSessionsLoading(true)
 

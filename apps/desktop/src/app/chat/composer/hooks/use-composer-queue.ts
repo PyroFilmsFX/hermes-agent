@@ -22,7 +22,7 @@ import {
   updateQueuedPrompt
 } from '@/store/composer-queue'
 import { notify } from '@/store/notifications'
-import { $sessionsLoading } from '@/store/session'
+import { $sessions, $sessionsLoading } from '@/store/session'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { useComposerScope } from '../scope'
@@ -82,6 +82,7 @@ export function useComposerQueue({
   const parkedSessions = useStore($parkedQueueSessions)
   const queueParked = Boolean(activeQueueSessionKey && parkedSessions[activeQueueSessionKey])
   const sessionsLoading = useStore($sessionsLoading)
+  const hasKnownSessions = useStore($sessions).length > 0
 
   const [queueEdit, setQueueEdit] = useState<QueueEditState | null>(null)
   queueEditRef.current = queueEdit
@@ -407,7 +408,11 @@ export function useComposerQueue({
   useEffect(() => {
     // Match the background drainer: preserve the retry budget while session
     // discovery runs at boot, on a gateway/profile switch, or over an empty list.
-    if (sessionsLoading) {
+    // Bounded by what the flag is FOR (skeletons over an empty list): a discovery
+    // pass that never publishes its false — a switch superseded mid-flight, a
+    // refresh that started empty and finished after a newer one — would otherwise
+    // strand every queued turn in the app with no other visible symptom.
+    if (sessionsLoading && !hasKnownSessions) {
       return
     }
 
