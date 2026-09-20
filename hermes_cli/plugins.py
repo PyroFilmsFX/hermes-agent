@@ -127,6 +127,14 @@ VALID_HOOKS: Set[str] = {
     "on_session_finalize", "on_session_reset",
     # on_skill_lifecycle: successful skill lifecycle facts (local skill name visible to plugins).
     "on_skill_lifecycle", "subagent_start", "subagent_stop",
+    # Subagent surface hooks (observer + enrichment; a plugin that OWNS a child knows things core
+    # cannot infer). subagent_metadata kwargs: subagent_id, kind, session_id, meta (immutable base:
+    # ids, declared type, requested model), record (goal/status/tool_count). Return a dict of
+    # additions to merge, or None. Never trust it to rename core identity fields.
+    # subagent_tail kwargs: subagent_id, kind, session_id, meta, limit. Return
+    # {"available": bool, "text": str, "truncated": bool, "state": "ready"|"waiting"|"error"} to
+    # serve that row's transcript, or None to defer to the built-in readers.
+    "subagent_metadata", "subagent_tail",
     # pre_gateway_dispatch: once per incoming MessageEvent, after the internal-event guard, BEFORE
     # auth/pairing and dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip",
     # "reason"} -> drop; {"action": "rewrite", "text"} -> replace event.text; "allow"/None -> normal.

@@ -249,6 +249,33 @@ class ClaudeSdkNotifyMixin:
             or ""
         ).strip()
 
+    @staticmethod
+    def _base_subagent_meta(args: dict, task_id: str, parent_session_id: str) -> dict[str, Any]:
+        """What the SDK itself tells us about a subagent: its type, the name the caller gave it, the
+        model it was asked for, and the ids that join this row to the on-disk child transcript.
+
+        Deliberately shallow: a relay wrapper (conductor's codex-worker runs as ``sonnet`` but drives
+        an external model) is NOT inferred here — its real identity arrives through the
+        ``subagent_metadata`` hook, which the owning plugin fills from its own job records.
+        """
+        subagent_type = str(args.get("subagent_type") or "").strip()
+        meta: dict[str, Any] = {
+            "sdk_agent_id": str(task_id or ""),
+            # The child transcript records the PARENT session uuid; keep it under a name that says so
+            # instead of passing it off as a Hermes child session the desktop could open.
+            "sdk_parent_session_id": str(parent_session_id or ""),
+            "source": "claude-agent-sdk",
+        }
+        if subagent_type:
+            meta["subagent_type"] = subagent_type
+            meta["display_name"] = subagent_type
+        if description := str(args.get("description") or "").strip():
+            meta["description"] = description
+        if requested_model := str(args.get("model") or "").strip():
+            # What the Task call ASKED for; a wrapper may run something else entirely.
+            meta["requested_model"] = requested_model
+        return meta
+
     def _sdk_task_for_parent(self, parent_tool_id: str) -> Optional[str]:
         for task_id, record in self._sdk_subagent_tasks().items():
             if record.get("parent_tool_id") == parent_tool_id:
@@ -266,6 +293,7 @@ class ClaudeSdkNotifyMixin:
         parent_tool_id: Optional[str] = None,
         goal: str = "",
         child_session_id: Optional[str] = None,
+        meta: Optional[dict] = None,
         usage: Optional[dict] = None,
         status: Optional[str] = None,
         summary: str = "",
@@ -285,6 +313,9 @@ class ClaudeSdkNotifyMixin:
         child_sid = child_session_id or record.get("child_session_id")
         if child_sid:
             kwargs["child_session_id"] = str(child_sid)
+        resolved_meta = meta if meta is not None else record.get("meta")
+        if resolved_meta:
+            kwargs["subagent_meta"] = dict(resolved_meta)
         if usage is not None:
             kwargs["usage"] = usage
             for key in ("input_tokens", "output_tokens", "reasoning_tokens", "api_calls"):
@@ -346,17 +377,25 @@ class ClaudeSdkNotifyMixin:
                 or agent_tool.get("goal")
                 or ""
             ).strip()
-            child_session_id = value("session_id", data.get("session_id"))
+            # TaskStarted.session_id is the PARENT session uuid (verified against a real child
+            # transcript), so it is not a child session anyone can open. It belongs in the metadata
+            # as what it is, and `child_session_id` stays reserved for a genuine Hermes child.
+            parent_session_id = value("session_id", data.get("session_id"))
+            meta = self._base_subagent_meta(
+                agent_tool.get("args") or {}, task_id, str(parent_session_id or ""))
+            if goal and "description" not in meta:
+                meta["description"] = goal
             record = {
                 "goal": goal,
                 "parent_tool_id": str(parent_tool_id) if parent_tool_id else None,
-                "child_session_id": str(child_session_id) if child_session_id else None,
+                "child_session_id": None,
+                "meta": meta,
             }
             tasks[task_id] = record
             self._emit_sdk_subagent(
                 "subagent.start", task_id, "Agent", goal, None,
                 parent_tool_id=record["parent_tool_id"],
-                child_session_id=record["child_session_id"],
+                meta=meta,
             )
             return
         record = tasks.get(task_id)

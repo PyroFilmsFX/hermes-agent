@@ -14,6 +14,60 @@ _SUBAGENT_SNAPSHOT_FIELDS = (
     "started_at", "status", "tool_count", "last_tool", "accepting_steer",
 )
 _SUBAGENT_TAIL_BYTES = 16384
+# Identity fields a plugin may not overwrite: enrichment adds what core cannot know (the real worker
+# behind a relay wrapper), it does not get to rename the row core is tracking.
+_PROTECTED_META_KEYS = frozenset({"sdk_agent_id", "sdk_parent_session_id", "source", "subagent_type"})
+
+
+def _enriched_meta(record: dict, session_id: str) -> dict:
+    """Base SDK metadata plus whatever a plugin that owns this child contributes."""
+    from hermes_cli.plugins import invoke_hook
+
+    meta = dict(record.get("subagent_meta") or {})
+    try:
+        contributions = invoke_hook(
+            "subagent_metadata",
+            subagent_id=str(record.get("subagent_id") or ""),
+            kind=str(record.get("kind") or ""),
+            session_id=session_id,
+            meta=dict(meta),
+            record={key: record.get(key) for key in ("goal", "status", "tool_count", "last_tool", "started_at")},
+        )
+    except Exception:  # noqa: BLE001 - a plugin must never break the roster
+        return meta
+    for contribution in contributions or ():
+        if not isinstance(contribution, dict):
+            continue
+        meta.update({str(k): v for k, v in contribution.items() if str(k) not in _PROTECTED_META_KEYS})
+    return meta
+
+
+def _plugin_tail(record: dict, session_id: str, meta: dict, limit: int) -> dict | None:
+    """A tail served by the plugin that owns this child, or None to use the built-in readers."""
+    from hermes_cli.plugins import invoke_hook
+
+    try:
+        results = invoke_hook(
+            "subagent_tail",
+            subagent_id=str(record.get("subagent_id") or ""),
+            kind=str(record.get("kind") or ""),
+            session_id=session_id,
+            meta=dict(meta),
+            limit=limit,
+        )
+    except Exception:  # noqa: BLE001 - fall back to the built-in readers
+        return None
+    for result in results or ():
+        if isinstance(result, dict) and result.get("text"):
+            text = str(result.get("text") or "")
+            return {
+                "available": True,
+                "text": text[-limit:],
+                "truncated": bool(result.get("truncated")) or len(text) > limit,
+                "state": str(result.get("state") or "ready"),
+                "source": str(result.get("source") or "plugin"),
+            }
+    return None
 
 
 def _owned_subagent_records(session_id, transport, owner):
@@ -38,6 +92,8 @@ def _(rid, params):
         snapshot = {key: record.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS if key != "kind"}
         if record.get("kind"):
             snapshot["kind"] = record["kind"]
+        if meta := _enriched_meta(record, session_id):
+            snapshot["meta"] = meta
         snapshots.append(snapshot)
     return _ok(rid, {"subagents": snapshots, "delegations": []})
 
@@ -83,17 +139,36 @@ def _(rid, params):
     transport, owner = _current_session_steer_authority(session_id)
     if transport is None or owner is None:
         return _err(rid, 4001, "session not found or not owned by this transport")
-    result = {"subagent_id": subagent_id, "available": False, "text": "", "truncated": False}
+    # `state` distinguishes "no transcript yet" from "the read failed"; the UI showed one
+    # "unavailable" for both.
+    result = {"subagent_id": subagent_id, "available": False, "text": "", "truncated": False,
+              "state": "waiting", "source": ""}
     record = next((r for r in _owned_subagent_records(session_id, transport, owner)
                    if r.get("subagent_id") == subagent_id), None)
-    path = getattr(record.get("agent"), "_live_transcript_path", None) if record else None
-    if record and record.get("kind") == "sdk":
+    if record is None:
+        return _ok(rid, result)
+    meta = _enriched_meta(record, session_id)
+    if served := _plugin_tail(record, session_id, meta, _SUBAGENT_TAIL_BYTES):
+        return _ok(rid, {**result, **served})
+    path = getattr(record.get("agent"), "_live_transcript_path", None)
+    if record.get("kind") == "sdk":
+        # The CLI's own child transcript is the real history; the in-memory buffer only ever holds
+        # forwarded text (off by default), so it is the fallback, not the source.
+        from tui_gateway.sdk_subagent_transcript import read_tail
+
+        owner_session = owner if isinstance(owner, dict) else {}
+        on_disk = read_tail(meta, owner_session.get("cwd"), limit=_SUBAGENT_TAIL_BYTES)
+        if on_disk.get("available"):
+            return _ok(rid, {**result, **on_disk})
         text = str(record.get("transcript") or "")
+        dropped = int(record.get("transcript_dropped") or 0)
         return _ok(rid, {
             **result,
             "available": bool(text),
             "text": text[-_SUBAGENT_TAIL_BYTES:],
-            "truncated": len(text) > _SUBAGENT_TAIL_BYTES,
+            "truncated": bool(dropped) or len(text) > _SUBAGENT_TAIL_BYTES,
+            "state": "ready" if text else on_disk.get("state", "waiting"),
+            "source": "sdk-buffer" if text else str(on_disk.get("source") or ""),
         })
     if not path:
         return _ok(rid, result)
@@ -104,8 +179,9 @@ def _(rid, params):
             text = stream.read(_SUBAGENT_TAIL_BYTES).decode("utf-8", errors="ignore")
     except OSError:
         # Creation/cleanup races are normal while a child starts or ends.
-        return _ok(rid, result)
-    return _ok(rid, {**result, "available": True, "text": text, "truncated": size > _SUBAGENT_TAIL_BYTES})
+        return _ok(rid, {**result, "state": "error", "source": "child-transcript"})
+    return _ok(rid, {**result, "available": True, "text": text, "state": "ready",
+                     "source": "child-transcript", "truncated": size > _SUBAGENT_TAIL_BYTES})
 
 
 def register(server):

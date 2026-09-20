@@ -221,3 +221,45 @@ def test_scoped_tool_started_breadcrumb_is_not_dropped(monkeypatch):
         subagent_id="task-1", goal="inspect files", parent_tool_id="parent-tool",
     )
     assert emitted == [("subagent.tool", "parent", {"subagent_id": "task-1", "goal": "inspect files", "parent_tool_id": "parent-tool"})]
+
+
+def test_a_started_subagent_carries_its_real_identity_not_the_parent_session():
+    """The panel showed a raw Agent("…") and claimed the PARENT session uuid was the child's."""
+    events = []
+    session = _session(events)
+    session._sdk_agent_tool_uses = {"parent-tool": {
+        "goal": "review the diff",
+        "args": {"subagent_type": "conductor:codex-worker", "description": "review the diff",
+                 "model": "sonnet", "prompt": "..."},
+    }}
+    session._notify_task_message(TaskStartedMessage(
+        "task-9", "review the diff", tool_use_id="parent-tool", session_id="parent-session-uuid"))
+
+    (event, _name, _preview, _args, kwargs), = events
+    assert event == "subagent.start"
+    meta = kwargs["subagent_meta"]
+    assert meta["subagent_type"] == "conductor:codex-worker"
+    assert meta["display_name"] == "conductor:codex-worker"
+    # The Task call ASKED for sonnet; a relay wrapper may drive something else entirely, so this is
+    # recorded as the request, never as the model that ran.
+    assert meta["requested_model"] == "sonnet"
+    assert "model" not in meta
+    # The ids that join this row to the on-disk child transcript.
+    assert meta["sdk_agent_id"] == "task-9"
+    assert meta["sdk_parent_session_id"] == "parent-session-uuid"
+    # ...and that parent uuid is NOT passed off as an openable child session.
+    assert kwargs.get("child_session_id") is None
+
+
+def test_a_subagent_without_declared_type_still_reports_its_join_ids():
+    events = []
+    session = _session(events)
+    session._sdk_agent_tool_uses = {"parent-tool": {"goal": "do the thing", "args": {}}}
+    session._notify_task_message(TaskStartedMessage(
+        "task-3", "do the thing", tool_use_id="parent-tool", session_id="parent-uuid"))
+
+    (_event, _name, _preview, _args, kwargs), = events
+    meta = kwargs["subagent_meta"]
+    assert meta["sdk_agent_id"] == "task-3"
+    assert meta["description"] == "do the thing"
+    assert "subagent_type" not in meta

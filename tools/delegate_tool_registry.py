@@ -23,6 +23,8 @@ _active_subagents: Dict[str, Dict[str, Any]] = {}
 # after the summary was delivered); their completion notifications reach the parent via the shared completion_queue
 # and need delegation attribution even though the live registry entry is gone.
 _RECENT_SUBAGENTS_CAP = 200
+# In-memory tail buffer for SDK child text; the full history lives in the CLI's own transcript.
+_SDK_TRANSCRIPT_BUFFER_CHARS = 16384
 _recent_subagents: Dict[str, Dict[str, Any]] = {}
 
 
@@ -36,6 +38,7 @@ def _register_sdk_subagent(
     owner_agent: Any,
     parent_tool_id: Optional[str] = None,
     child_session_id: Optional[str] = None,
+    subagent_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Register one Claude SDK task without changing native child records."""
     owner_transport, owner_session_record = _capture_gateway_steer_authority(
@@ -62,7 +65,14 @@ def _register_sdk_subagent(
         "owner_transport": owner_transport,
         "owner_session_record": owner_session_record,
         "child_session_id": child_session_id,
+        # What the SDK told us about this child (ids that join it to its on-disk transcript, its
+        # declared type, the model the Task asked for). A plugin that owns the child — a relay
+        # wrapper knows its real worker and model — enriches this through `subagent_metadata`.
+        "subagent_meta": dict(subagent_meta or {}),
         "transcript": "",
+        # Bytes the in-memory buffer dropped, so a tail can say it is partial instead of guessing
+        # from a length that was already capped.
+        "transcript_dropped": 0,
     })
 
 
@@ -77,6 +87,7 @@ def update_sdk_subagent(
     owner_agent: Any = None,
     parent_tool_id: Optional[str] = None,
     child_session_id: Optional[str] = None,
+    subagent_meta: Optional[Dict[str, Any]] = None,
     tool_name: str = "",
     text: str = "",
     status: str = "running",
@@ -100,6 +111,8 @@ def update_sdk_subagent(
                     "parent_tool_id": parent_tool_id or record.get("parent_tool_id"),
                     "child_session_id": child_session_id or record.get("child_session_id"),
                 })
+                if subagent_meta:
+                    record["subagent_meta"] = {**(record.get("subagent_meta") or {}), **subagent_meta}
                 return
         elif record is None or record.get("kind") != "sdk":
             return
@@ -112,7 +125,11 @@ def update_sdk_subagent(
         elif event_type == "subagent.text":
             value = str(text or "")
             if value:
-                record["transcript"] = ((record.get("transcript") or "") + value)[-16384:]
+                joined = (record.get("transcript") or "") + value
+                record["transcript"] = joined[-_SDK_TRANSCRIPT_BUFFER_CHARS:]
+                record["transcript_dropped"] = (
+                    int(record.get("transcript_dropped") or 0)
+                    + max(0, len(joined) - _SDK_TRANSCRIPT_BUFFER_CHARS))
         elif event_type == "subagent.complete":
             _active_subagents.pop(sid, None)
             return
@@ -131,6 +148,7 @@ def update_sdk_subagent(
             owner_agent_session_id=owner_agent_session_id,
             owner_agent=owner_agent,
             parent_tool_id=parent_tool_id,
+            subagent_meta=subagent_meta,
             child_session_id=child_session_id,
         )
 

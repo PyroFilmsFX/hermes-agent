@@ -1765,6 +1765,7 @@ export interface SubagentSnapshot {
   tool_count?: number | null
   last_tool?: string | null
   accepting_steer?: boolean | null
+  meta?: Record<string, unknown> | null
 }
 /** Lifecycle of one delegated child (``tools/delegate_tool_child_run.py``); ``failed`` / ``error`` / ``timeout`` / ``interrupted`` / ``completed`` are terminal. */
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'error' | 'timeout' | 'interrupted'
@@ -1777,13 +1778,17 @@ export interface SubagentInterruptResult {
   found: boolean
   subagent_id: string
 }
-/** ``available`` is false while the child has no live transcript yet (or it was cleaned up). */
+/** ``available`` is false while the child has no live transcript yet (or it was cleaned up); ``state`` says which of those it is, and ``source`` names the reader that served it. */
 export interface SubagentTailResult {
   subagent_id: string
   available?: boolean
   text?: string
   truncated?: boolean
+  state?: SubagentTailState | null
+  source?: string
 }
+/** ``waiting`` = no transcript yet (a child that just started); ``error`` = the read failed. */
+export type SubagentTailState = 'ready' | 'waiting' | 'error'
 /** ``methods_projects._projects_payload``: every project (archived included) + the active id. */
 export interface ProjectsPayload {
   projects: ProjectInfo[]
@@ -4570,7 +4575,7 @@ export interface RpcMethods {
   'subagent.list': { params: SessionParams; result: SubagentListResult }
   /** Queue steering text into a live delegated child owned by this session. */
   'subagent.steer': { params: SubagentSteerParams; result: SubagentSteerResult }
-  /** Last 16KB of an owned child's live transcript. */
+  /** Last 16KB of an owned child's transcript (plugin-served, the SDK's on-disk child transcript, or the native child's file). */
   'subagent.tail': { params: SubagentIdParams; result: SubagentTailResult }
   /** Schedule a downgrade / same-price change or a period-end cancellation. */
   'subscription.change': { params: SubscriptionChangeParams; result: BillingPendingChangeResult }

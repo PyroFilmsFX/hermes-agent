@@ -265,6 +265,7 @@ def _on_sdk_subagent_event(agent, event_type: str, tool_name: str = "", preview:
         owner_agent=agent,
         parent_tool_id=kwargs.get("parent_tool_id"),
         child_session_id=kwargs.get("child_session_id"),
+        subagent_meta=kwargs.get("subagent_meta"),
         tool_name=tool_name,
         text=preview,
         status=str(kwargs.get("status") or "running"),

@@ -580,6 +580,10 @@ class SubagentSnapshot(Result):
     tool_count: int | None = None
     last_tool: str | None = None
     accepting_steer: bool | None = None
+    # What this child actually IS: the SDK's own identity (agent id + parent session, declared type,
+    # the model the Task asked for) plus whatever the plugin owning the child added through the
+    # ``subagent_metadata`` hook — e.g. a relay wrapper's real worker, model and job id.
+    meta: dict[str, JsonValue] | None = None
 
 
 class SubagentListResult(Result):
@@ -606,14 +610,26 @@ method("subagent.interrupt", params=SubagentIdParams, result=SubagentInterruptRe
        doc="Hard-interrupt one owned child; ``found`` is false when it already finished.")
 
 
+class SubagentTailState(WireEnum):
+    """``waiting`` = no transcript yet (a child that just started); ``error`` = the read failed."""
+
+    ready = "ready"
+    waiting = "waiting"
+    error = "error"
+
+
 class SubagentTailResult(Result):
-    """``available`` is false while the child has no live transcript yet (or it was cleaned up)."""
+    """``available`` is false while the child has no live transcript yet (or it was cleaned up);
+    ``state`` says which of those it is, and ``source`` names the reader that served it."""
 
     subagent_id: str
     available: bool = False
     text: str = ""
     truncated: bool = False
+    state: SubagentTailState | None = None
+    source: str = ""
 
 
 method("subagent.tail", params=SubagentIdParams, result=SubagentTailResult,
-       doc="Last 16KB of an owned child's live transcript.")
+       doc="Last 16KB of an owned child's transcript (plugin-served, the SDK's on-disk child "
+           "transcript, or the native child's file).")
