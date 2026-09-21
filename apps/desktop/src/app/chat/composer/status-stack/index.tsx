@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 
+import { COMPOSER_AREAS } from '@/app/chat/composer/contrib'
 import { blurComposerInput } from '@/app/chat/composer/focus'
 import { useComposerSurfaceId } from '@/app/chat/composer/scope'
 import { AGENTS_ROUTE } from '@/app/routes'
@@ -15,6 +16,9 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+import { Slot as ContribSlot } from '@/contrib/react/slot'
+import { ContribSurfaceProvider } from '@/contrib/react/surface'
+import { useContributions } from '@/contrib/react/use-contributions'
 import { type Translations, useI18n } from '@/i18n'
 import { useSessionSlice, useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -31,6 +35,7 @@ import {
 import { $freeTierRoute, $freeTierStatus, freeTierStripPending } from '@/store/free-tier'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $sessionControlBySession, refreshSessionControl } from '@/store/session-control'
+import { knownOwnerForSession } from '@/store/session-states'
 import { $threadScrolledUpBySession } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -287,7 +292,12 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   // status card, above the billing wall, above everything. They're the only
   // rows up here you press instead of read, so nothing may ever stack on top
   // of them. Rendered outside the card (below) so the pills float.
-  const visible = sections.length > 0
+  // A contribution may be the only thing in the stack (a build-state row with no subagents or
+  // tasks running), so it counts towards visibility like any core section.
+  const statusContributions = useContributions(COMPOSER_AREAS.status)
+  const owner = knownOwnerForSession(sessionId)
+  const profile = typeof owner === 'string' ? owner : (owner?.profile ?? null)
+  const visible = sections.length > 0 || statusContributions.length > 0
 
   // No height to publish: the stack is an in-flow child of the composer dock,
   // so the dock's own measurement (--composer-measured-height) already covers
@@ -312,7 +322,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
           Rounded top, square bottom; the bottom border is TRANSPARENT — the
           composer surface's visible top border (which sits at a higher z) is the
           single shared seam, so the two read as one fused capsule. */}
-      {sections.length > 0 && (
+      {visible && (
         <div
           className={cn(
             composerDockCard('top'),
@@ -334,6 +344,12 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
                   {section.node}
                 </div>
               ))}
+              {/* Plugin-owned session status (conductor's build state, and anything like it). Last
+                  so core's own rows always lead, and inside the surface provider so a contribution
+                  knows WHICH session it is reporting on. */}
+              <ContribSurfaceProvider profile={profile} sessionId={sessionId}>
+                <ContribSlot area={COMPOSER_AREAS.status} />
+              </ContribSurfaceProvider>
             </div>
           </div>
         </div>

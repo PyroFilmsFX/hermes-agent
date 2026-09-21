@@ -4,6 +4,9 @@
  * panes, layouts):
  *
  *   render areas (`render`):  composer.top       — banner strip above the input
+ *                             composer.status    — session-scoped row in the
+ *                                                  status stack (subagents /
+ *                                                  tasks / queue live there)
  *                             composer.bottom    — row below the input grid
  *                             composer.underside — floating strip BELOW the
  *                                                  whole composer (no chrome)
@@ -30,6 +33,10 @@ import type { ComposerAction } from '@/store/composer-actions'
 
 export const COMPOSER_AREAS = {
   top: 'composer.top',
+  /** Session-scoped strip inside the status stack (with subagents / tasks / queue), for a panel
+   *  that reports on THIS session — e.g. which build wave it is in. Contributions here can read
+   *  their session and profile with `useContribSurface()`. */
+  status: 'composer.status',
   bottom: 'composer.bottom',
   underside: 'composer.underside',
   leading: 'composer.leading',

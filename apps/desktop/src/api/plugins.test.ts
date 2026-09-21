@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { setApiRequestConnection, setApiRequestProfile } from '@/hermes'
 
-import { activeConnection } from './plugins'
+import { activeConnection, pluginRest } from './plugins'
 
 // desktop.getConnection/getConnectionFor are IPC round-trips into the main
 // process with no timeout of their own (#93454). A wedged main-process
@@ -45,5 +45,46 @@ describe('activeConnection connection timeout (#93454)', () => {
 
     await vi.advanceTimersByTimeAsync(20_000)
     await pending
+  })
+})
+
+describe('pluginRest profile routing', () => {
+  afterEach(() => {
+    setApiRequestProfile(null)
+    Reflect.deleteProperty(window, 'hermesDesktop')
+  })
+
+  function captureApi() {
+    const calls: Array<Record<string, unknown>> = []
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: {
+        api: vi.fn(async (request: Record<string, unknown>) => {
+          calls.push(request)
+
+          return {}
+        })
+      }
+    })
+
+    return calls
+  }
+
+  it("targets the surface's profile when a panel names one, not the active profile", async () => {
+    setApiRequestProfile('primary-active')
+    const calls = captureApi()
+
+    await pluginRest('conductor', '/state', { profile: 'research' })
+
+    expect(calls.at(-1)).toMatchObject({ path: '/api/plugins/conductor/state', profile: 'research' })
+  })
+
+  it('keeps following the active profile when no profile is given', async () => {
+    setApiRequestProfile('coder')
+    const calls = captureApi()
+
+    await pluginRest('conductor', '/state')
+
+    expect(calls.at(-1)).toMatchObject({ profile: 'coder' })
   })
 })

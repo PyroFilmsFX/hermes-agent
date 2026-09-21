@@ -17,6 +17,7 @@ import { createPluginI18n, type PluginI18n } from '@/i18n'
 import { readKey, writeKey } from '@/lib/storage'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 
+import { type ContribSurface, useContribSurface } from './react/surface'
 import { registry } from './registry'
 import type { Contribution } from './types'
 
@@ -102,6 +103,10 @@ export interface PluginContext {
   /** Plugin-scoped i18n: ship + register locale bundles under this plugin,
    *  resolved against the app's active locale — no core `en.ts` edit. */
   i18n: PluginI18n
+  /** React hook: the session and profile the calling render is for (nulls outside a session
+   *  surface such as `composer.status`). Call it inside a contribution's `render`, then pass
+   *  `profile` to `rest(…, { profile })` so the panel asks THAT session's backend. */
+  useSurface: () => ContribSurface
 }
 
 export interface HermesPlugin {
@@ -212,6 +217,7 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     registerMany: cs => track(registry.registerMany(cs.map(scope))),
     onDispose: fn => void track(fn),
     rest: <T>(path: string, opts?: PluginRestOptions) => pluginRest<T>(pluginId, path, opts),
+    useSurface: useContribSurface,
     socket: (path, onMessage) => track(pluginSocket(pluginId, path, onMessage)),
     os: createPluginOs(pluginId),
     storage: createPluginStorage(pluginId),

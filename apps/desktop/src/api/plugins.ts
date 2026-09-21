@@ -47,6 +47,11 @@ export interface PluginRestOptions {
   /** Single-file multipart upload (see HermesApiRequest.upload). */
   upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
   timeoutMs?: number
+  /** Backend to ask, when it is not the app's active one. A panel rendered for a session surface
+   *  (see `useContribSurface`) must address THAT session's profile — a tile can hold a session from
+   *  another profile, and asking the active backend about it answers for the wrong machine. `null`
+   *  targets the primary explicitly; omitted keeps following the active profile. */
+  profile?: null | string
 }
 
 // Normalize `path` to a leading-slash suffix relative to `/api/plugins/<id>`.
@@ -82,7 +87,7 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    ...profileScoped()
+    ...profileScoped(opts.profile)
   })
 }
 
