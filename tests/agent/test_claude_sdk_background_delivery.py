@@ -477,3 +477,46 @@ def test_injected_origin_result_in_the_host_inbox_is_never_the_answer():
     finally:
         session.close()
     assert turn.final_text == "host answer"
+
+
+def test_a_woken_turn_closes_the_tool_cards_it_opens():
+    """Owner screenshots 09-20/21: after a peer-woken turn, every tool it ran (bash, sendmessage,
+    plan_contract_write) showed 'Result unavailable'. The unsolicited path opened a card per tool
+    call but only the foreground loop ever closed one, so they were all sealed at settle."""
+    import time as _time
+
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage,
+        _make_session,
+    )
+
+    opened, closed = [], []
+    session, holder = _make_session(
+        script=[],
+        on_unsolicited_result=lambda texts, items=None: None,
+        on_tool_use=lambda tool_id, name, args: opened.append((tool_id, name)),
+        on_tool_result=lambda tool_id, name, args, result, **kwargs: closed.append((tool_id, name)),
+    )
+    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:audit", "body": "ping"}
+    try:
+        session.ensure_started()
+        client = holder["client"]
+        woke = UserMessage(content="ping")
+        woke.origin = peer_origin
+        client.feed(
+            woke,
+            AssistantMessage(content=[ToolUseBlock(id="tool-bash", name="Bash", input={"command": "ls"})]),
+            UserMessage(content=[ToolResultBlock(tool_use_id="tool-bash", content="total 0")]),
+            AssistantMessage(content=[ToolUseBlock(id="tool-msg", name="SendMessage", input={"to": "x"})]),
+            UserMessage(content=[ToolResultBlock(tool_use_id="tool-msg", content="sent")]),
+            AssistantMessage(content=[TextBlock("replied")]),
+            ResultMessage(result="replied", uuid="woken-1"),
+        )
+        deadline = _time.time() + 3
+        while len(closed) < 2 and _time.time() < deadline:
+            _time.sleep(0.01)
+    finally:
+        session.close()
+
+    assert [name for _id, name in opened] == ["Bash", "SendMessage"]
+    assert sorted(closed) == sorted(opened), "every card a woken turn opens must be closed with its result"

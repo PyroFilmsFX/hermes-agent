@@ -1383,6 +1383,12 @@ class ClaudeSdkTurnMixin:
             # tool/text activity still belongs on the existing subagent feed.
             self._notify_tool_started(message)
             self._notify_tool_use(message)
+        if name == "UserMessage":
+            # Close what the line above opened. A woken turn (peer message, task
+            # notification) opened a card per tool call but never closed one — the
+            # foreground loop is the only other caller — so every tool it ran was
+            # sealed at settle as "Result unavailable" although it had succeeded.
+            self._notify_tool_results(message)
         if name == "ResultMessage":
             self._unsolicited_results += 1
         if getattr(message, "parent_tool_use_id", None):
