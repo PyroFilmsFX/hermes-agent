@@ -33,6 +33,7 @@ def test_anthropic_native_list_keeps_aggregator_flagships():
         assert f"anthropic/{slug}" in or_ids
         assert slug in native
     assert native.index("claude-fable-5-1") < native.index("claude-fable-5")
+    assert native.index("claude-opus-5-5") < native.index("claude-opus-5")
     assert native.index("claude-opus-5") < native.index("claude-opus-4-8")
 
 
