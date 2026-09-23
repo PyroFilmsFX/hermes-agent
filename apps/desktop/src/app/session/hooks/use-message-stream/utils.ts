@@ -162,6 +162,46 @@ export function settleableInterimIndex(
   return text === existingText || text.startsWith(existingText) || existingText.startsWith(text) ? index : -1
 }
 
+const normalizedProse = (text: string) => text.split(/\s+/).filter(Boolean).join(' ')
+
+/** Index of an assistant row in the transcript's trailing assistant run whose text IS `finalText`, else -1.
+
+A CLI-injected turn (a `<task-notification>` or peer wake the Claude CLI answers on its own) can
+interleave with a live host turn. Its AssistantMessage rides the host turn's reader, so the SDK lane
+relays it as `message.interim`; its ResultMessage carries the injected origin, so the same text is
+then delivered again as a background result (`sdk_background_result` → message.start/complete with
+`background: true`). That background `message.start` has already cleared `sealedInterimId`, and the
+host turn's completion clears it too, so `settleableInterimIndex` cannot catch this pair.
+
+Only the trailing run of visible assistant rows (the one visual response) is searched, and only an
+identical text (whitespace-normalized) counts: that pair is the same message printed twice, while a
+prefix-related or earlier-turn row may be a different reply and keeps its own bubble. */
+export function duplicateTailAssistantIndex(messages: ChatMessage[], finalText: string): number {
+  const text = normalizedProse(finalText)
+
+  if (!text) {
+    return -1
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+
+    if (message.hidden) {
+      continue
+    }
+
+    if (message.role !== 'assistant') {
+      return -1
+    }
+
+    if (normalizedProse(chatMessageText(message)) === text) {
+      return index
+    }
+  }
+
+  return -1
+}
+
 export const SUBAGENT_EVENT_TYPES = new Set([
   'subagent.spawn_requested',
   'subagent.start',
