@@ -59,7 +59,7 @@ def test_real_gateway_attach_route_and_bridge_client(monkeypatch, tmp_path):
         # final session handlers are isolated so this test remains model-free.
         result = client.create_task_session(cwd=str(tmp_path), task="work", title="child", request_id="r1")
         assert result["stored_session_id"] == "child-stored"
-        with pytest.raises(bridge.SessionSpawnBridgeError, match="permits session.task_create only"):
+        with pytest.raises(bridge.SessionSpawnBridgeError, match="permits session.task_create and session.send only"):
             client._rpc("session.list", {})
     finally:
         running.should_exit = True
@@ -130,7 +130,7 @@ def test_spawn_websocket_scope_rejects_session_list_even_with_valid_ticket(monke
     monkeypatch.setattr(ws.server, "_ensure_skin_watcher", lambda: None)
     fake = FakeWebSocket()
     asyncio.run(ws.handle_ws(fake, required_spawn_scope=True))
-    assert any("session-spawn connection permits session.task_create only" in json.loads(raw).get("error", {}).get("message", "")
+    assert any("session-spawn connection permits session.task_create and session.send only" in json.loads(raw).get("error", {}).get("message", "")
                for raw in fake.sent), "a valid scoped ticket must not unlock session.list"
 
 

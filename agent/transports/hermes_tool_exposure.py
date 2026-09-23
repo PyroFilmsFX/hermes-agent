@@ -110,15 +110,26 @@ CLAUDE_AGENT_SDK_INSPECTION_TOOLS: Tuple[str, ...] = (
 CLAUDE_AGENT_SDK_SKILL_TOOLS: Tuple[str, ...] = ("skill_manage",)
 
 SESSION_CREATE_TOOL = "session_create"
+SESSION_SEND_TOOL = "session_send"  # cntrl carry: durable cross-session messaging (#11)
 
 
 def session_spawn_available() -> bool:
-    """Return the construction-time verdict for the scoped SDK capability."""
+    """Return the construction-time verdict for the scoped SDK capability (any bridge tool usable)."""
     try:
-        from tools.session_tools import check_session_spawn_requirements
-        return check_session_spawn_requirements()
+        from tools.session_tools import check_session_send_requirements, check_session_spawn_requirements
+        return check_session_spawn_requirements() or check_session_send_requirements()
     except Exception:
         return False
+
+
+def _bridge_tools() -> Tuple[str, ...]:
+    """Bridge tools the owner config enables; reachability is the caller's ``include_session_spawn``."""
+    try:
+        from tools.session_tools import session_send_enabled, session_spawn_enabled
+    except Exception:
+        return (SESSION_CREATE_TOOL,)
+    return tuple(name for name, enabled in ((SESSION_CREATE_TOOL, session_spawn_enabled()),
+                                            (SESSION_SEND_TOOL, session_send_enabled())) if enabled)
 
 
 def exposed_tools_for_profile(
@@ -134,7 +145,7 @@ def exposed_tools_for_profile(
         if include_session_spawn is None:
             include_session_spawn = session_spawn_available()
         if include_session_spawn:
-            tools += (SESSION_CREATE_TOOL,)
+            tools += _bridge_tools()
         return tools
     return CURATED_STATELESS_TOOLS
 
@@ -151,6 +162,7 @@ HERMES_TOOLS_LEGACY_NAMES = frozenset((
     *CLAUDE_AGENT_SDK_INSPECTION_TOOLS,
     *CLAUDE_AGENT_SDK_SKILL_TOOLS,
     SESSION_CREATE_TOOL,
+    SESSION_SEND_TOOL,
 ))
 
 

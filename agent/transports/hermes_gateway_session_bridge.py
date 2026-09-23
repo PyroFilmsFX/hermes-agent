@@ -320,6 +320,14 @@ class HermesGatewaySessionBridge:
             {"cwd": cwd, "task": task, "title": title, "request_id": request_id},
         )
 
+    def send_to_session(self, *, target: str, body: str, request_id: str = "") -> dict[str, Any]:
+        """Durable peer message (cntrl carry): the gateway reports delivered-live / resumed-and-delivered /
+        queued / failed. The sender identity is the capability's owner, never a parameter."""
+        params: dict[str, Any] = {"target": target, "body": body}
+        if request_id:
+            params["request_id"] = request_id
+        return self._rpc("session.send", params)
+
 
 def bridge_available_from_environment() -> bool:
     """Availability predicate used by the service-gated MCP registration."""

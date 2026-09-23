@@ -188,10 +188,10 @@ def _build_server(profile: Optional[str] = None) -> Any:
     exposed_count = 0
     for name in profile_tools:
         spec = all_defs.get(name)
-        if spec is None and name == "session_create" and _session_spawn_exposure_decision(session_id):
-            from tools.session_tools import SESSION_CREATE_SCHEMA
+        if spec is None and name in ("session_create", "session_send") and _session_spawn_exposure_decision(session_id):
+            from tools.session_tools import SESSION_CREATE_SCHEMA, SESSION_SEND_SCHEMA
 
-            spec = SESSION_CREATE_SCHEMA
+            spec = SESSION_CREATE_SCHEMA if name == "session_create" else SESSION_SEND_SCHEMA
         if spec is None:
             logger.debug("skipping %s — not registered in this Hermes process", name)
             continue
@@ -199,6 +199,10 @@ def _build_server(profile: Optional[str] = None) -> Any:
             from tools.session_tools import session_create
 
             dispatch = lambda kwargs: session_create(**kwargs)
+        elif name == "session_send":
+            from tools.session_tools import session_send
+
+            dispatch = lambda kwargs: session_send(**kwargs)
         else:
             dispatch = lambda kwargs, tool_name=name: handle_function_call(tool_name, kwargs)
         _register_tool(

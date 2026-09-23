@@ -97,6 +97,9 @@ class TestClaudeAgentSdkDefaults:
                 "max_depth": 2,
                 "rate_per_minute": 5,
             },
+            # session_send: durable cross-session messaging (inventory item 11, owner-approved
+            # 2026-09-23). Rides the same scoped bridge; delivery is bounded by peer_mailbox.
+            "session_send": {"enabled": True},
         }
         for key, expected in fork_truthy.items():
             assert block[key] == expected, f"fork default for {key!r} drifted"

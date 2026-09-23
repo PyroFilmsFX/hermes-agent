@@ -27,16 +27,64 @@ SESSION_CREATE_SCHEMA = {
 }
 
 
+SESSION_SEND_SCHEMA = {
+    "name": "session_send",
+    "description": (
+        "Send a message to another Hermes session by stored session id (or its title as a hint). "
+        "The message is stored durably and delivered as that session's next turn even when it is not "
+        "running: it is resumed on demand, or delivered when it next starts. Returns an honest status: "
+        "delivered-live, resumed-and-delivered, queued, or failed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string", "description": "Stored Hermes session id (preferred) or session title."},
+            "body": {"type": "string", "description": "The message; it arrives labelled with this session as sender."},
+            "request_id": {"type": "string", "description": "Optional stable retry key; a retry never sends twice."},
+        },
+        "required": ["target", "body"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _bridge_tool_enabled(policy_key: str) -> bool:
+    """Owner config gate for one bridge tool (``agent.claude_agent_sdk.<policy_key>.enabled``)."""
+    from agent.transports.claude_agent_sdk_session_config import _provider_config
+
+    policy = _provider_config().get(policy_key)
+    return not (isinstance(policy, dict) and not bool(policy.get("enabled", True)))
+
+
+def session_spawn_enabled() -> bool:
+    try:
+        return _bridge_tool_enabled("session_spawn")
+    except Exception:
+        return False
+
+
+def session_send_enabled() -> bool:
+    try:
+        return _bridge_tool_enabled("session_send")
+    except Exception:
+        return False
+
+
 def check_session_spawn_requirements() -> bool:
     """Construction-time reachability gate; invocation rechecks authorization."""
     try:
-        from agent.transports.claude_agent_sdk_session_config import _provider_config
         from agent.transports.hermes_gateway_session_bridge import bridge_available_from_environment
 
-        policy = _provider_config().get("session_spawn")
-        if isinstance(policy, dict) and not bool(policy.get("enabled", True)):
-            return False
-        return bridge_available_from_environment()
+        return session_spawn_enabled() and bridge_available_from_environment()
+    except Exception:
+        return False
+
+
+def check_session_send_requirements() -> bool:
+    try:
+        from agent.transports.hermes_gateway_session_bridge import bridge_available_from_environment
+
+        return session_send_enabled() and bridge_available_from_environment()
     except Exception:
         return False
 
@@ -60,6 +108,26 @@ def session_create(**kwargs: Any) -> str:
         return json.dumps({"error": f"session_create failed: {exc}"})
 
 
+def session_send(**kwargs: Any) -> str:
+    """Durable peer message through the scoped owner bridge; the sender is never an argument."""
+    from agent.transports.hermes_gateway_session_bridge import (
+        HermesGatewaySessionBridge,
+        SessionSpawnBridgeError,
+    )
+
+    target, body, request_id = kwargs.get("target"), kwargs.get("body"), kwargs.get("request_id")
+    if not isinstance(target, str) or not target.strip() or not isinstance(body, str) or not body.strip():
+        return json.dumps({"status": "failed", "error": "target and body are required"})
+    try:
+        result = HermesGatewaySessionBridge.from_environment().send_to_session(
+            target=target.strip(), body=body, request_id=request_id.strip() if isinstance(request_id, str) else "")
+        return json.dumps(result, ensure_ascii=False)
+    except SessionSpawnBridgeError as exc:
+        return json.dumps({"status": "failed", "error": str(exc)})
+    except Exception as exc:  # noqa: BLE001 - MCP tool boundary
+        return json.dumps({"status": "failed", "error": f"session_send failed: {exc}"})
+
+
 registry.register(
     name="session_create",
     toolset="session_spawn",
@@ -68,5 +136,17 @@ registry.register(
     check_fn=check_session_spawn_requirements,
 )
 
+registry.register(
+    name="session_send",
+    toolset="session_spawn",
+    schema=SESSION_SEND_SCHEMA,
+    handler=lambda args, **_: session_send(**args),
+    check_fn=check_session_send_requirements,
+)
 
-__all__ = ["SESSION_CREATE_SCHEMA", "check_session_spawn_requirements", "session_create"]
+
+__all__ = [
+    "SESSION_CREATE_SCHEMA", "SESSION_SEND_SCHEMA", "check_session_send_requirements",
+    "check_session_spawn_requirements", "session_create", "session_send", "session_send_enabled",
+    "session_spawn_enabled",
+]

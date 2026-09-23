@@ -154,6 +154,10 @@ def _session_is_lru_evictable(sid: str, session: dict) -> bool:
     make them immortal."""
     if session.get("running") or _session_pending_kind(sid) or _session_has_active_delegations(sid, session):
         return False
+    if session.get("pinned_resident"):  # cntrl carry: pinned sessions stay resident (session_mailbox.py)
+        from tui_gateway.session_mailbox import session_is_resident
+        if session_is_resident(session):
+            return False
     ready = session.get("agent_ready")
     if ready is not None and not ready.is_set() and not session.get("lazy"):
         return False

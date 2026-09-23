@@ -236,6 +236,12 @@ def _write_or_exit(payload: dict, reason: str) -> None:
         sys.exit(0)
 
 
+def _schedule_peer_mailbox_startup() -> None:
+    from tui_gateway.session_mailbox import schedule_startup_delivery
+
+    schedule_startup_delivery()
+
+
 def main():
     _install_sidecar_publisher()
 
@@ -243,7 +249,8 @@ def main():
     # so it must start BEFORE the sweep.
     for start, what in (
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
-            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling")):
+            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+            (_schedule_peer_mailbox_startup, "peer mailbox startup scheduling")):
         try:
             start()
         except Exception:

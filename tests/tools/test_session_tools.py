@@ -46,3 +46,35 @@ def test_session_create_rejects_identity_and_permission_overrides(monkeypatch):
         permission_mode="bypassPermissions", denied_tools=[]))
     assert result == {"ok": True}
     assert set(seen) == {"cwd", "task", "title", "request_id"}
+
+
+def test_session_send_is_registered_and_never_takes_a_sender(monkeypatch):
+    entry = registry.get_entry("session_send")
+    assert entry is not None and entry.toolset == "session_spawn"
+    assert entry.check_fn is session_tools.check_session_send_requirements
+    seen = {}
+
+    class _Bridge:
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        def send_to_session(self, **kwargs):
+            seen.update(kwargs)
+            return {"status": "queued", "message_id": 7}
+
+    monkeypatch.setattr(bridge, "HermesGatewaySessionBridge", _Bridge)
+    result = json.loads(session_tools.session_send(target="manager", body="hi", from_session_id="forged"))
+    assert result == {"status": "queued", "message_id": 7}
+    assert seen == {"target": "manager", "body": "hi", "request_id": ""}
+
+
+def test_session_send_reports_bridge_failure_as_failed_status(monkeypatch):
+    class _Bridge:
+        @classmethod
+        def from_environment(cls):
+            raise bridge.SessionSpawnBridgeError("owner gateway is unavailable")
+
+    monkeypatch.setattr(bridge, "HermesGatewaySessionBridge", _Bridge)
+    result = json.loads(session_tools.session_send(target="t", body="b"))
+    assert result == {"status": "failed", "error": "owner gateway is unavailable"}

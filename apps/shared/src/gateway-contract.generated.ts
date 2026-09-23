@@ -2660,6 +2660,22 @@ export interface SessionTaskCreateResult {
   peer_status: string
   resumable?: boolean | null
 }
+/** Scoped SDK sessions send as themselves (the socket injects the capability); an unscoped client sends as ``operator``. ``target`` is a stored session id (a title is only a hint). */
+export interface SessionSendParams {
+  target?: string | null
+  body?: string | null
+  request_id?: string | null
+  _session_spawn_capability?: string | null
+}
+export interface SessionSendResult {
+  status: string
+  message_id?: number | null
+  target_session_id?: string | null
+  target_title?: string | null
+  detail?: string | null
+  error?: string | null
+  duplicate?: boolean | null
+}
 /** ``session_id`` is the STORED id. */
 export interface SessionDeleteParams {
   session_id: string
@@ -4535,6 +4551,8 @@ export interface RpcMethods {
   'session.resume': { params: SessionResumeParams; result: SessionResumeResult }
   /** Export the transcript to ~/.hermes/sessions/saved (classic /save). */
   'session.save': { params: SessionSaveParams; result: SessionSaveResult }
+  /** Queue a peer message durably and deliver it as the target's next turn (resuming it if needed). */
+  'session.send': { params: SessionSendParams; result: SessionSendResult }
   /** Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage. */
   'session.set_hidden': { params: SessionSetHiddenParams; result: SessionSetHiddenResult }
   /** Rendered /status text for the session. */
@@ -4806,6 +4824,7 @@ export const RPC_METHODS = [
   'session.redirect',
   'session.resume',
   'session.save',
+  'session.send',
   'session.set_hidden',
   'session.status',
   'session.steer',
