@@ -22,7 +22,7 @@ import { markBackgroundSessionFinished, setBackgroundDeliveryActive } from '@/st
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
-import { settleableInterimIndex } from '../utils'
+import { duplicateTailAssistantIndex, settleableInterimIndex } from '../utils'
 
 import type { GatewayEventContext } from './types'
 
@@ -442,11 +442,26 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
               ? settleableInterimIndex(state.messages, finalText, state.sealedInterimId)
               : -1
 
+        // A CLI-injected turn that interleaved with a host turn was already relayed as interim prose
+        // on that host turn, then arrives here as its background result: same text, and the
+        // turn-scoped settle target is gone by now. Keep the row already on screen instead of
+        // printing the answer twice (see duplicateTailAssistantIndex).
+        const duplicateIndex =
+          (existing && streamId) || interimIndex >= 0 || sealedMessage.role !== 'assistant'
+            ? -1
+            : duplicateTailAssistantIndex(state.messages, finalText)
+
         if (existing && streamId) {
           nextMessages = state.messages.map(m => (m.id === streamId ? sealedMessage : m))
         } else if (interimIndex >= 0) {
           nextMessages = state.messages.map((message, index) =>
             index === interimIndex ? { ...sealedMessage, id: message.id, timestamp: message.timestamp } : message
+          )
+        } else if (duplicateIndex >= 0) {
+          nextMessages = state.messages.map((message, index) =>
+            index === duplicateIndex
+              ? { ...message, completedAt: message.completedAt ?? occurredAt, interim: false, pending: false }
+              : message
           )
         } else {
           nextMessages = [...state.messages, sealedMessage]

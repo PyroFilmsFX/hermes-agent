@@ -482,3 +482,85 @@ describe('a completion never settles onto another turn\'s interim', () => {
     expect(assistantMessages()).toEqual(['Working on the migration.', 'Working on the migration. Done.'])
   })
 })
+
+describe('a CLI-injected turn relayed as interim, then delivered as its background result', () => {
+  // A <task-notification> / peer wake the Claude CLI answers by itself can interleave with a live
+  // host turn: its prose rides the host turn's reader (relayed as message.interim), and its
+  // injected-origin ResultMessage is then delivered again as sdk_background_result. By then the
+  // background message.start (and any host completion) has cleared sealedInterimId.
+  const backgroundStart = () =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true },
+        session_id: SID,
+        type: 'message.start'
+      } as unknown as GatewayEvent)
+    )
+
+  const backgroundComplete = (text: string) =>
+    act(() =>
+      stream.handleEvent({
+        payload: { background: true, text, display_kind: 'sdk_background_result' },
+        session_id: SID,
+        type: 'message.complete'
+      } as unknown as GatewayEvent)
+    )
+
+  const REPLY = 'The MCP design agent has finished; its results are in my last message. Two agents are still running.'
+
+  beforeEach(() => {
+    clearSessionTodos(SID)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSessionTodos(SID)
+    vi.restoreAllMocks()
+  })
+
+  it('prints the injected reply once when its background result lands mid host turn', async () => {
+    mountStream()
+    await start()
+    await delta(REPLY)
+    await interim(REPLY)
+
+    await backgroundStart()
+    await backgroundComplete(REPLY)
+
+    expect(assistantMessages()).toEqual([REPLY])
+    expect(getState().messages.at(-1)?.interim).toBe(false)
+  })
+
+  it('prints the injected reply once when its background result lands after the host turn settled', async () => {
+    mountStream()
+    await start()
+    await delta(REPLY)
+    await interim(REPLY)
+    await complete('Noted the hand-back.')
+
+    await backgroundStart()
+    await backgroundComplete(REPLY)
+
+    expect(assistantMessages()).toEqual([REPLY, 'Noted the hand-back.'])
+  })
+
+  it('still prints a repeated reply after the user spoke again', async () => {
+    mountStream()
+    await start()
+    await delta(REPLY)
+    await interim(REPLY)
+    await complete(REPLY)
+
+    const state = getState()
+
+    stream.states.set(SID, {
+      ...state,
+      messages: [...state.messages, { id: 'user-2', parts: [textPart('status?')], role: 'user' }]
+    })
+
+    await backgroundStart()
+    await backgroundComplete(REPLY)
+
+    expect(assistantMessages()).toEqual([REPLY, REPLY])
+  })
+})
