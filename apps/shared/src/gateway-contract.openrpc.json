@@ -3031,6 +3031,24 @@
       }
     },
     {
+      "name": "session.send",
+      "summary": "Queue a peer message durably and deliver it as the target's next turn (resuming it if needed).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionSendParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionSendResult"
+        }
+      }
+    },
+    {
       "name": "session.set_hidden",
       "summary": "Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage.",
       "params": [
@@ -26741,6 +26759,148 @@
           }
         },
         "title": "SessionSaveResult",
+        "type": "object"
+      },
+      "SessionSendParams": {
+        "additionalProperties": false,
+        "description": "Scoped SDK sessions send as themselves (the socket injects the capability); an unscoped client\nsends as ``operator``. ``target`` is a stored session id (a title is only a hint).",
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Body"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Id"
+          },
+          "_session_spawn_capability": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Spawn Capability"
+          }
+        },
+        "title": "SessionSendParams",
+        "type": "object"
+      },
+      "SessionSendResult": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message Id"
+          },
+          "target_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target Session Id"
+          },
+          "target_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target Title"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "duplicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duplicate"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SessionSendResult",
         "type": "object"
       },
       "SessionSetHiddenParams": {

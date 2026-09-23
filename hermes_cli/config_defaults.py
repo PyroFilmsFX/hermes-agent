@@ -40,6 +40,22 @@ DEFAULT_CONFIG = {
     # least-recently-active DETACHED sessions (no live client); reopening re-resumes from disk.
     # 0/null disables.
     "max_live_sessions": 16,
+    # Always-on cross-session messaging (cntrl carry; tui_gateway/session_mailbox.py). A message to a
+    # session with no live process is stored in state.db and delivered as a turn: live, by resuming
+    # the session (bounded below), or when it next starts / at gateway startup. Pinned sessions are
+    # revived at startup (up to max_resident_sessions) and exempt from idle/LRU/WS-orphan reaping.
+    "peer_mailbox": {
+        "enabled": True,
+        "resume_on_send": True,
+        "max_concurrent_resumes": 2,
+        "per_target_resume_interval_s": 120,
+        "max_attempts": 5,
+        "max_body_chars": 16000,
+        "startup_delay_s": 30,
+        "retry_interval_s": 60,
+        "pinned_resident": True,
+        "max_resident_sessions": 3,
+    },
     "session": {
         # Per-terminal `hermes -c`: each CLI session writes a breadcrumb under
         # $HERMES_HOME/terminal-sessions/<terminal-id>, so bare -c/--continue resumes THIS
@@ -260,6 +276,9 @@ DEFAULT_CONFIG = {
                 "max_depth": 2,
                 "rate_per_minute": 5,
             },
+            # Durable cross-session messaging (cntrl carry): exposes `session_send` on the same
+            # scoped bridge. Gateway-side delivery policy lives in the top-level `peer_mailbox` block.
+            "session_send": {"enabled": True},
             # Native Claude Task tools and the shared on-disk task feed. cntrl defaults this on;
             # the upstream PR candidate flips it to false before landing upstream.
             "task_tools": True,

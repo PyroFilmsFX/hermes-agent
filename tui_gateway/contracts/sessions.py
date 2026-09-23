@@ -283,6 +283,33 @@ method("session.task_create", params=SessionTaskCreateParams, result=SessionTask
        doc="Create and start a peer session for an SDK session's task (session_spawn; off by default).")
 
 
+# ── session.send (cntrl carry: durable cross-session messaging, tui_gateway/session_mailbox.py) ─
+
+
+class SessionSendParams(Params):
+    """Scoped SDK sessions send as themselves (the socket injects the capability); an unscoped client
+    sends as ``operator``. ``target`` is a stored session id (a title is only a hint)."""
+
+    target: str | None = None
+    body: str | None = None
+    request_id: str | None = None
+    session_spawn_capability: str | None = Field(default=None, alias="_session_spawn_capability")
+
+
+class SessionSendResult(Result):
+    status: str  # delivered-live | resumed-and-delivered | queued | failed
+    message_id: int | None = None
+    target_session_id: str | None = None
+    target_title: str | None = None
+    detail: str | None = None
+    error: str | None = None
+    duplicate: bool | None = None
+
+
+method("session.send", params=SessionSendParams, result=SessionSendResult,
+       doc="Queue a peer message durably and deliver it as the target's next turn (resuming it if needed).")
+
+
 # ── stored-row mutation ───────────────────────────────────────────────────────────────────────
 
 

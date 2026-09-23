@@ -20,6 +20,15 @@ from tui_gateway.event_replay import replay_epoch
 
 _log = logging.getLogger(__name__)
 
+# RPCs a scoped session-spawn connection may call (the capability is injected server-side for both).
+_SCOPED_SPAWN_METHODS = frozenset({"session.task_create", "session.send"})
+
+
+def _schedule_peer_mailbox_startup() -> None:
+    from tui_gateway.session_mailbox import schedule_startup_delivery
+
+    schedule_startup_delivery()
+
 # Scale-to-zero: tell the (separate) gateway process a dashboard/desktop/TUI client is attached via
 # the mtime of a marker file it reads in its idle predicate (gateway/scale_to_zero.py). Clients ping
 # every 15s; one write per 5s per process is plenty.
@@ -350,6 +359,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         for start, what in (
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
             (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+            (_schedule_peer_mailbox_startup, "peer mailbox startup scheduling"),
         ):
             try:
                 start()
@@ -387,8 +397,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             req_id = req.get("id") if isinstance(req, dict) else None
             req_method = req.get("method") if isinstance(req, dict) else None
             scoped_capability = getattr(transport, "session_spawn_capability", None)
-            if scoped_capability is not None and req_method != "session.task_create":
-                await _reply(_error(4403, "session-spawn connection permits session.task_create only", req_id),
+            if scoped_capability is not None and req_method not in _SCOPED_SPAWN_METHODS:
+                await _reply(_error(4403, "session-spawn connection permits session.task_create and session.send only", req_id),
                              "scoped_method_rejected", "scoped session-spawn method rejected peer=%s method=%s", peer, req_method)
                 continue
             if scoped_capability is not None:

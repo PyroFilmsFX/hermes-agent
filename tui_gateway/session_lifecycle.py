@@ -419,6 +419,14 @@ def _ws_session_is_detached(session: dict | None) -> bool:
     return bool(session and not session.get("_finalized") and session.get("transport") is _detached_ws_transport)
 
 
+def _ws_session_is_resident(session: dict | None) -> bool:
+    """Pinned resident session (cntrl carry, session_mailbox.py): never reaped for lack of a client."""
+    if not (session and session.get("pinned_resident")):
+        return False
+    from tui_gateway.session_mailbox import session_is_resident
+    return session_is_resident(session)
+
+
 def _ws_session_is_orphaned(session: dict | None) -> bool:
     """True if a WS session sits on ``_detached_ws_transport`` (where ``handle_ws`` parks disconnected clients), idle."""
     return bool(_ws_session_is_detached(session) and not session.get("running"))
@@ -573,7 +581,7 @@ def _schedule_ws_orphan_reap(
 ) -> None:
     """After a grace window, reap session ``sid`` iff it's still orphaned. Called from the WS-disconnect path; a
     reconnect or ``session.resume`` cancels the reap by re-binding a live transport. Disabled when grace is 0."""
-    if _WS_ORPHAN_REAP_GRACE_S <= 0:
+    if _WS_ORPHAN_REAP_GRACE_S <= 0 or _ws_session_is_resident(_sessions.get(sid)):
         return
 
     def _reap() -> None:
@@ -589,7 +597,7 @@ def _schedule_ws_orphan_reap(
             if current is None:
                 _pending_ws_reaps.pop(sid, None)
                 return
-            if not _ws_session_is_detached(current):
+            if not _ws_session_is_detached(current) or _ws_session_is_resident(current):
                 # This Timer is abandoning the interrupt claim because another
                 # writer moved the live record off the detached transport.
                 # Do not leave reattach RPCs fenced with 4009, or let this

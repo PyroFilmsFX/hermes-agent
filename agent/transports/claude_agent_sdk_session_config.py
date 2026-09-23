@@ -883,7 +883,10 @@ def _build_hermes_tools_mcp_config(
         env["HERMES_SESSION_ID"] = str(hermes_session_id)
         spawn_policy = _provider_config().get("session_spawn")
         spawn_enabled = bool(spawn_policy.get("enabled", True)) if isinstance(spawn_policy, dict) else True
-        if spawn_enabled:
+        # cntrl carry: session_send (durable peer messaging) rides the same scoped capability.
+        send_policy = _provider_config().get("session_send")
+        send_enabled = bool(send_policy.get("enabled", True)) if isinstance(send_policy, dict) else True
+        if spawn_enabled or send_enabled:
             from agent.transports.hermes_gateway_session_bridge import capability_file_path, issue_scoped_capability
             if capability := issue_scoped_capability(str(hermes_session_id)):
                 from hermes_constants import get_hermes_home

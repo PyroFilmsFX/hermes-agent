@@ -85,6 +85,14 @@ def _(rid, params: dict) -> dict:
     return create_task_session(rid, params)
 
 
+@method("session.send")
+def _(rid, params: dict) -> dict:
+    """Durable cross-session message: live delivery, resume-on-send, or queued (cntrl carry, #11)."""
+    from tui_gateway.session_mailbox import send_rpc
+
+    return send_rpc(rid, params)
+
+
 def _profile_build_scope(profile_home):
     """Bind HERMES_HOME + secret + terminal scope for an agent build: the same composition a turn
     binds (``_session_profile_runtime_scope``). Home alone leaves ``get_secret()`` on the LAUNCH
@@ -883,9 +891,20 @@ def _resume_eager(ctx: _Resume) -> dict:
 
 @method("session.resume")
 def _(rid, params: dict) -> dict:
+    resumed: list = []
+    response = _session_resume(rid, params, resumed)
+    if resumed:  # cntrl carry: pinned residency + drain queued peer mail (tui_gateway/session_mailbox.py)
+        with contextlib.suppress(Exception):
+            from tui_gateway.session_mailbox import after_session_resume
+            after_session_resume(resumed[0], params, response)
+    return response
+
+
+def _session_resume(rid, params: dict, resumed: list) -> dict:
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
     ctx = _Resume(rid, params, target)
+    resumed.append(ctx)
     # Profile scope: a DEDICATED handle we own until the agent takes it; else the shared launch db.
     ctx.db, ctx.owns_db = _profile_session_db(ctx.profile_home)
     try:
