@@ -68,6 +68,24 @@ def _registry_entry(platform):
     return None
 
 
+def _platform_allowlist_envs(platform) -> tuple[str, str]:
+    """``(<P>_ALLOWED_USERS, <P>_ALLOW_ALL_USERS)`` var names for a platform, or ``("", "")``.
+
+    Built-in map first, then the platform registry: plugin platforms are absent from
+    ``_ALLOWED_USERS_ENV`` and declare their own ``allowed_users_env`` / ``allow_all_env``. Every
+    caller resolves through here so the authorization verdict and the unauthorized-DM behavior can
+    never disagree about whether a platform has an allowlist (#9337).
+    """
+    allow_env = _ALLOWED_USERS_ENV.get(platform, "")
+    allow_all_env = _ALLOW_ALL_ENV.get(platform, "")
+    if platform is not None and platform not in _ALLOWED_USERS_ENV:
+        entry = _registry_entry(platform)
+        with contextlib.suppress(Exception):
+            allow_env = getattr(entry, "allowed_users_env", "") or allow_env
+            allow_all_env = getattr(entry, "allow_all_env", "") or allow_all_env
+    return allow_env, allow_all_env
+
+
 def _coerce_allow_set(raw) -> set[str]:
     """Parse an allowlist (YAML list, JSON list literal string, or comma-separated scalar) into a set of strings."""
     if raw is None:
@@ -571,13 +589,7 @@ class GatewayAuthorizationMixin:
         if not user_id:
             return False
 
-        platform_allow_env = _ALLOWED_USERS_ENV.get(source.platform, "")
-        platform_allow_all_var = _ALLOW_ALL_ENV.get(source.platform, "")
-        if source.platform not in _ALLOWED_USERS_ENV:
-            entry = _registry_entry(source.platform)
-            with contextlib.suppress(Exception):
-                platform_allow_env = getattr(entry, "allowed_users_env", "") or platform_allow_env
-                platform_allow_all_var = getattr(entry, "allow_all_env", "") or platform_allow_all_var
+        platform_allow_env, platform_allow_all_var = _platform_allowlist_envs(source.platform)
         if platform_allow_all_var and _env_truthy(platform_allow_all_var):
             return True
         # Adapter-verified role auth (Discord DISCORD_ALLOWED_ROLES). ``is True``: no MagicMock pass.
@@ -659,8 +671,10 @@ class GatewayAuthorizationMixin:
                 return "pair"
             if dm_policy in {"allowlist", "disabled"}:
                 return "ignore"
-            # Historical: Yuanbao is absent from this allowlist-aware default.
-            env_key = "" if platform == Platform.YUANBAO else _ALLOWED_USERS_ENV.get(platform, "")
+            # Historical: Yuanbao is absent from this allowlist-aware default. Plugin platforms
+            # resolve through the registry, exactly as ``_principal_authorized`` does — otherwise an
+            # allowlisted plugin platform reads as unrestricted here and strangers get pairing codes.
+            env_key = "" if platform == Platform.YUANBAO else _platform_allowlist_envs(platform)[0]
             allowlist_keys = [env_key, _GROUP_USER_ENV.get(platform), _GROUP_CHAT_ENV.get(platform), *allowlist_keys]
         if any(key and _auth_env(key).strip() for key in allowlist_keys):
             return "ignore"

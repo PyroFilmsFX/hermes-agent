@@ -416,6 +416,37 @@ def test_qqbot_with_allowlist_ignores_unauthorized_dm(monkeypatch):
     assert behavior == "ignore"
 
 
+def test_plugin_platform_allowlist_flips_dm_behavior(monkeypatch):
+    """A PLUGIN platform's allowlist counts too, via the platform registry.
+
+    Same #9337 miss as QQBOT above, one layer out: plugin platforms are absent from the built-in
+    env map, so ``_get_unauthorized_dm_behavior`` read Photon as unrestricted and handed strangers
+    pairing codes while ``_principal_authorized`` (registry fallback) was denying them. Asserted as
+    a relation on one runner — setting PHOTON_ALLOWED_USERS is what changes the verdict.
+    """
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("PHOTON_ALLOWED_USERS", raising=False)
+
+    # Register the photon plugin so the env-var lookup resolves (as the simplex test above does).
+    from gateway.platform_registry import PlatformEntry, platform_registry
+    platform_registry.register(PlatformEntry(
+        name="photon",
+        label="iMessage via Photon",
+        adapter_factory=lambda cfg: None,
+        check_fn=lambda: True,
+        allowed_users_env="PHOTON_ALLOWED_USERS",
+        allow_all_env="PHOTON_ALLOW_ALL_USERS",
+    ))
+
+    photon = Platform("photon")
+    config = GatewayConfig(platforms={photon: PlatformConfig(enabled=True)})
+    runner, _adapter = _make_runner(photon, config)
+
+    assert runner._get_unauthorized_dm_behavior(photon) == "pair"
+    monkeypatch.setenv("PHOTON_ALLOWED_USERS", "+15550000001")
+    assert runner._get_unauthorized_dm_behavior(photon) == "ignore"
+
+
 # ---------------------------------------------------------------------------
 # "decline" behavior: one-time polite decline instead of a pairing code (#88028)
 # ---------------------------------------------------------------------------
