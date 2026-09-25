@@ -487,6 +487,9 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
     assert turn.final_text == "answer to both"
     assert elapsed < 4.0, "the host turn must not wait out its timeout"
     assert all("answer to both" not in " ".join(texts) for texts, _items in delivered)
+    # The peer message that started the folded turn still gets its card.
+    assert any(item.get("kind") == "peer_in" and item.get("uuid") == "peer-in-1"
+               for _texts, items in delivered for item in (items or []))
 
 
 def test_bash_background_task_is_not_a_subagent_and_agent_task_is_not_a_process():

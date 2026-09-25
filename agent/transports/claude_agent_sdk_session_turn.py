@@ -90,6 +90,12 @@ def _is_own_prompt_echo(message: Any) -> bool:
     return not any(type(block).__name__ == "ToolResultBlock" for block in content)
 
 
+def _prefold_peer_items(session: Any) -> list:
+    """The peer messages buffered in an injected burst before the host prompt folded into it."""
+    return [dict(item) for item in getattr(session, "_unsolicited_items", None) or []
+            if isinstance(item, dict) and item.get("kind") == "peer_in"]
+
+
 def _clear_unsolicited_projection(session: Any) -> None:
     """Discard the current unsolicited burst's text and structured projections."""
     session._unsolicited_text.clear()
@@ -125,6 +131,25 @@ class ClaudeSdkTurnMixin:
     _pending_rename_ack: Optional[str] = None
     _deferred_rename: Optional[str] = None
     _host_prompt_folded: bool = False
+
+    def _deliver_prefold_peer_items(self) -> None:
+        """A fold hands the injected turn's answer to the host turn, but the peer message that
+        started it still needs its card: deliver the buffered peer_in items on the background
+        lane (display + persistence) instead of discarding them with the partial text."""
+        items = _prefold_peer_items(self)
+        callback = getattr(self, "_on_unsolicited_result", None)
+        if not items or callback is None:
+            return
+        try:
+            import inspect
+
+            inspect.signature(callback).bind([], items)
+        except (TypeError, ValueError):
+            return  # a texts-only callback has no peer-card channel
+        try:
+            callback([], items)
+        except Exception:
+            logger.warning("claude-agent-sdk: pre-fold peer card delivery raised", exc_info=True)
 
     # ---------- per-turn ----------
 
@@ -871,18 +896,20 @@ class ClaudeSdkTurnMixin:
                     # The same ack's assistant text: never relayed or projected as this
                     # turn's words. The pending name stays until its ResultMessage lands.
                     continue
-                if (
-                    type(message).__name__ == "ResultMessage"
-                    and not getattr(self, "_host_prompt_folded", False)
-                    and _is_injected_origin(getattr(message, "origin", None))
+                if type(message).__name__ == "ResultMessage" and _is_injected_origin(
+                    getattr(message, "origin", None)
                 ):
                     # ResultMessage.origin names the message that triggered its
                     # turn: a peer/task-notification result belongs to a separate
                     # injected turn. Hand it to the background path instead —
                     # unless the reader saw this turn's prompt folded INTO that
                     # injected turn; then its single result is this turn's answer.
-                    self._handle_unsolicited(message)
-                    continue
+                    # One fold unlocks exactly one result.
+                    if getattr(self, "_host_prompt_folded", False):
+                        self._host_prompt_folded = False
+                    else:
+                        self._handle_unsolicited(message)
+                        continue
                 self._handle_compact_boundary(message)
                 # Task lifecycle and provisional Bash records are stream
                 # concerns, not foreground-turn visibility. Observe before
@@ -1074,6 +1101,7 @@ class ClaudeSdkTurnMixin:
                     await release_ack
                 else:
                     self._turn_inbox = None
+                    self._host_prompt_folded = False
                 # Stream death can win the release handshake after the
                 # terminal ResultMessage was already delivered.  The reader's
                 # death path acknowledges queued operations so waiters wake,
@@ -1084,6 +1112,7 @@ class ClaudeSdkTurnMixin:
                 if self._stream_ended is not None:
                     if self._turn_inbox is inbox:
                         self._turn_inbox = None
+                    self._host_prompt_folded = False
                     out["stream_ended"] = True
                 elif self._turn_inbox is None:
                     # The stream is free: apply a rename refused while this turn owned it.
@@ -1275,6 +1304,7 @@ class ClaudeSdkTurnMixin:
                             # attach to a later unrelated result.
                             self._host_prompt_folded = True
                             self._unsolicited_burst_open = False
+                            self._deliver_prefold_peer_items()
                             if self._unsolicited_text or self._unsolicited_items:
                                 logger.warning(
                                     "claude-agent-sdk: host prompt replayed mid-burst; discarding "
@@ -1320,6 +1350,7 @@ class ClaudeSdkTurnMixin:
                             RuntimeError("SDK message stream release owner mismatch")
                         )
                         continue
+                    self._host_prompt_folded = False
                     self._turn_inbox = None
                 else:  # pragma: no cover - internal invariant
                     claim_ack.set_exception(

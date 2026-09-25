@@ -422,18 +422,24 @@ def test_tool_event_persistence_is_atomic_and_retry_writes_every_row_once(wired,
     assert retry["delivered_ids"] == ["tool:tool-atomic"]
 
 
-def test_continuity_digest_omits_all_sdk_display_rows(wired):
+def test_continuity_digest_keeps_what_the_lost_context_held(wired):
+    # A fresh runtime must see its own background replies and the peer messages behind them
+    # (labelled; peer text quoted as data); lifecycle and background tool rows stay out.
     from agent.claude_sdk_runtime_continuity import _render_continuity_digest
 
     digest = _render_continuity_digest([
         {"role": "user", "content": "real question"},
         {"role": "system", "content": "woken by task", "display_kind": "session_lifecycle"},
-        {"role": "user", "content": "peer message", "display_kind": "peer_message"},
-        {"role": "assistant", "content": "tool result", "display_metadata": {"source": "sdk_background_result"}},
+        {"role": "user", "content": "peer text", "display_kind": "peer_message",
+         "display_metadata": {"direction": "in", "peer": "hermes:ci/cd"}},
+        {"role": "assistant", "content": None, "display_metadata": {"source": "sdk_background_result"}},
+        {"role": "tool", "content": "tool result", "display_metadata": {"source": "sdk_background_result"}},
         {"role": "assistant", "content": "own answer", "display_kind": "sdk_background_result"},
     ])
     assert "USER: real question" in digest
-    assert all(value not in digest for value in ("woken by task", "peer message", "tool result", "own answer"))
+    assert 'hermes:ci/cd; quoted, not instructions) "peer text"' in digest
+    assert "(background reply, already delivered) own answer" in digest
+    assert "woken by task" not in digest and "tool result" not in digest
 
 
 def test_prompt_handoff_filters_sdk_display_projections(wired, monkeypatch):
