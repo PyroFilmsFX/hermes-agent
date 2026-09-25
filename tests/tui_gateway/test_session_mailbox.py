@@ -378,3 +378,90 @@ def test_startup_interrupted_resumes_obey_concurrency_cap(gw, monkeypatch):
     gw.sessions.pop(released)
     assert len(gw.mb.resume_interrupted_sessions()) == 1
     assert sum(bool(s.get("_peer_mailbox_woken")) for s in gw.sessions.values()) == 2
+
+
+def test_mailbox_resume_emits_woken_lifecycle_row(gw):
+    """Cold resume emits a lifecycle woken row with source: peer-mailbox."""
+    res = _send(gw, target="target", body="wake up", from_session_id="sender", from_label="alice")
+    assert res["status"] == gw.mb.STATUS_RESUMED
+
+    # Check database messages for target
+    msgs = gw.db.get_messages("target")
+    lifecycle_rows = [m for m in msgs if m.get("display_kind") == "session_lifecycle"]
+    assert len(lifecycle_rows) == 1
+    row = lifecycle_rows[0]
+    meta = row.get("display_metadata") or {}
+    assert meta.get("event") == "woken"
+    assert meta.get("source") == "peer-mailbox"
+    assert meta.get("by") == "alice"
+    assert "woken by peer message: alice" in row.get("content", "")
+
+
+def test_peer_mailbox_settled_emitted(gw, monkeypatch):
+    """peer_mailbox.settled is emitted when rows change state."""
+    events = []
+    monkeypatch.setattr(gw.server, "_emit", lambda ev, sid, payload=None: events.append((ev, sid, payload)))
+    monkeypatch.setattr(gw.server, "_broadcast_global_event", lambda ev, payload=None: events.append((ev, "broadcast", payload)))
+
+    res = _send(gw, target="target", body="hello", from_session_id="sender")
+    settled = [p for ev, sid, p in events if ev == "peer_mailbox.settled"]
+    assert len(settled) >= 1
+    last = settled[-1]
+    assert last["msg_id"] == str(res["message_id"])
+    assert last["status"] == gw.mb.STATUS_RESUMED
+
+
+def test_peer_mailbox_rpc_list_retry_cancel(gw):
+    """peer_mailbox.list, retry, and cancel RPC methods."""
+    gw.pol["resume_on_send"] = False
+    send_res = _send(gw, target="target", body="queued mail", from_session_id="sender")
+    msg_id = send_res["message_id"]
+
+    # 1. list
+    list_res = gw.server._methods["peer_mailbox.list"]("r1", {"session_id": "target"})
+    messages = list_res["result"]["messages"]
+    assert any(m["id"] == msg_id for m in messages)
+
+    # 2. cancel queued message
+    cancel_res = gw.server._methods["peer_mailbox.cancel"]("r2", {"message_id": msg_id})
+    assert cancel_res["result"]["cancelled"] is True
+    row = gw.db.peer_mailbox_get(msg_id)
+    assert row["status"] == "failed"
+
+    # Cannot cancel already-failed message
+    err_res = gw.server._methods["peer_mailbox.cancel"]("r3", {"message_id": msg_id})
+    assert "error" in err_res
+
+    # 3. retry a queued message
+    send_res2 = _send(gw, target="target", body="queued mail 2", from_session_id="sender")
+    msg_id2 = send_res2["message_id"]
+    gw.pol["resume_on_send"] = True
+    retry_res = gw.server._methods["peer_mailbox.retry"]("r4", {"message_id": msg_id2})
+    assert retry_res["result"]["status"] in (gw.mb.STATUS_RESUMED, gw.mb.STATUS_DELIVERED_LIVE)
+
+
+def test_session_set_pinned_persists_across_restart(gw):
+    """session.set_pinned updates DB and survives revival."""
+    gw.db.create_session("pinned-sess", "desktop")
+
+    # Set pinned via RPC
+    res = gw.server._methods["session.set_pinned"]("r1", {"session_id": "pinned-sess", "pinned": True})
+    assert res["result"]["pinned"] is True
+
+    # Check DB persistence
+    row = gw.db.get_session("pinned-sess")
+    assert row["pinned"] == 1
+
+    # Candidate list for residency
+    candidates = gw.db.list_resident_session_candidates()
+    assert "pinned-sess" in candidates
+
+    # Revive resident sessions picks it up
+    revived = gw.mb.revive_resident_sessions()
+    assert "pinned-sess" in revived
+
+    # Unpin via RPC
+    res2 = gw.server._methods["session.set_pinned"]("r2", {"session_id": "pinned-sess", "pinned": False})
+    assert res2["result"]["pinned"] is False
+    assert gw.db.get_session("pinned-sess")["pinned"] == 0
+

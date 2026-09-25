@@ -143,10 +143,13 @@ def _cwd_info(session: dict, cwd: str, branch=None) -> dict:
 def _session_row_summary(row: dict, *, tip_row: dict | None = None, resolved_id=None) -> dict:
     """Compact session.list row; ``tip_row``/``resolved_id`` come from the compression tip."""
     tip_row = tip_row or row
-    return {"id": row["id"], **({} if resolved_id is None else {"resolved_id": resolved_id}),
-            "title": row.get("title") or "", "preview": tip_row.get("preview") or "",
-            "started_at": row.get("started_at") or 0, "message_count": tip_row.get("message_count") or 0,
-            "source": row.get("source") or ""}
+    res = {"id": row["id"], **({} if resolved_id is None else {"resolved_id": resolved_id}),
+           "title": row.get("title") or "", "preview": tip_row.get("preview") or "",
+           "started_at": row.get("started_at") or 0, "message_count": tip_row.get("message_count") or 0,
+           "source": row.get("source") or ""}
+    if row.get("pinned") is not None:
+        res["pinned"] = bool(row.get("pinned"))
+    return res
 
 
 # Hidden from human listings (sub-agent runs, kanban workers); a deny-list so new platforms surface automatically.
@@ -1129,6 +1132,83 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"hidden": hidden, "session_key": key})
         except Exception as e:
             return _err(rid, 5007, str(e))
+
+
+@method("session.set_pinned")
+def _(rid, params: dict) -> dict:
+    """Set/clear ``pinned`` on a session + lineage:
+    LIVE runtime id first (updating live `pinned_resident`), then stored id/key in the profile db."""
+    pinned = is_truthy_value(params.get("pinned", True))
+    session, err = _sess_nowait(params, rid)
+    with (_profile_db(params, writer=True) if session is None else _session_db(session)) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        try:
+            if session is not None:
+                key = session["session_key"]
+                db.set_session_pinned(key, pinned)
+                session["pinned_resident"] = pinned
+                if not pinned:
+                    session.pop("pinned_resident", None)
+            else:
+                target = _str_param(params, "session_id")
+                if not (key := db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else target):
+                    return err
+                db.set_session_pinned(key, pinned)
+            return _ok(rid, {"pinned": pinned, "session_key": key})
+        except Exception as e:
+            return _err(rid, 5007, str(e))
+
+
+@method("peer_mailbox.list")
+def _(rid, params: dict) -> dict:
+    """List peer mailbox messages for a session or globally."""
+    session_id = _str_param(params, "session_id")
+    limit = int(params.get("limit") or 50)
+    pending_only = is_truthy_value(params.get("pending_only", False))
+    home = _profile_home(params.get("profile")) if params.get("profile") else None
+    profile_home = str(home) if home else None
+    from tui_gateway.session_mailbox import list_messages
+    try:
+        messages = list_messages(session_id=session_id or None, limit=limit,
+                                 pending_only=pending_only, profile_home=profile_home)
+        return _ok(rid, {"messages": messages})
+    except Exception as e:
+        return _err(rid, 5006, str(e))
+
+
+@method("peer_mailbox.retry")
+def _(rid, params: dict) -> dict:
+    """Retry delivery of a queued peer mailbox message."""
+    msg_id = params.get("message_id")
+    if msg_id is None:
+        return _err(rid, 4004, "message_id is required")
+    home = _profile_home(params.get("profile")) if params.get("profile") else None
+    profile_home = str(home) if home else None
+    from tui_gateway.session_mailbox import retry_message
+    try:
+        status, detail = retry_message(int(msg_id), profile_home=profile_home)
+        return _ok(rid, {"message_id": int(msg_id), "status": status, "detail": detail})
+    except Exception as e:
+        return _err(rid, 5006, str(e))
+
+
+@method("peer_mailbox.cancel")
+def _(rid, params: dict) -> dict:
+    """Cancel a queued peer mailbox message."""
+    msg_id = params.get("message_id")
+    if msg_id is None:
+        return _err(rid, 4004, "message_id is required")
+    home = _profile_home(params.get("profile")) if params.get("profile") else None
+    profile_home = str(home) if home else None
+    from tui_gateway.session_mailbox import cancel_message
+    try:
+        ok = cancel_message(int(msg_id), profile_home=profile_home)
+        if not ok:
+            return _err(rid, 4009, "message cannot be cancelled (not queued or delivery in progress)")
+        return _ok(rid, {"message_id": int(msg_id), "status": "failed", "cancelled": True})
+    except Exception as e:
+        return _err(rid, 5006, str(e))
 
 
 @_session_method("message.react")

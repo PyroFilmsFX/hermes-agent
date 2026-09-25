@@ -356,6 +356,84 @@ method("session.set_hidden", params=SessionSetHiddenParams, result=SessionSetHid
        doc="Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage.")
 
 
+class SessionSetPinnedParams(Params):
+    """``session_id`` is a live runtime id first, else a stored id / key / title."""
+
+    session_id: str
+    pinned: bool = True
+    profile: str | None = None
+
+
+class SessionSetPinnedResult(Result):
+    pinned: bool
+    session_key: str
+
+
+method("session.set_pinned", params=SessionSetPinnedParams, result=SessionSetPinnedResult,
+       doc="Set/clear pinned on a session + lineage (persists across restarts and keeps B-lite residency).")
+
+
+class PeerMailboxListParams(ProfileParams):
+    session_id: str | None = None
+    limit: int = 50
+    pending_only: bool = False
+
+
+class PeerMailboxMessage(Result):
+    id: int
+    target_session_id: str
+    from_session_id: str = ""
+    from_label: str = ""
+    target_hint: str = ""
+    body: str = ""
+    status: str
+    attempts: int = 0
+    last_error: str | None = None
+    created_at: float = 0.0
+    claimed_at: float | None = None
+    claim_owner: str | None = None
+    delivered_at: float | None = None
+    delivered_via: str | None = None
+    direction: str | None = None
+
+
+class PeerMailboxListResult(Result):
+    messages: list[PeerMailboxMessage]
+
+
+method("peer_mailbox.list", params=PeerMailboxListParams, result=PeerMailboxListResult,
+       doc="List peer mailbox messages for a session or globally.")
+
+
+class PeerMailboxRetryParams(ProfileParams):
+    message_id: int
+
+
+class PeerMailboxRetryResult(Result):
+    message_id: int
+    status: str
+    detail: str = ""
+
+
+method("peer_mailbox.retry", params=PeerMailboxRetryParams, result=PeerMailboxRetryResult,
+       doc="Retry delivery of a queued peer mailbox message immediately.")
+
+
+class PeerMailboxCancelParams(ProfileParams):
+    message_id: int
+
+
+class PeerMailboxCancelResult(Result):
+    message_id: int
+    status: str
+    cancelled: bool
+
+
+method("peer_mailbox.cancel", params=PeerMailboxCancelParams, result=PeerMailboxCancelResult,
+       doc="Cancel a queued peer mailbox message.")
+
+
+
 class SessionWorkspaceMoveParams(ProfileParams):
     session_key: str
     cwd: str

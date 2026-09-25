@@ -470,7 +470,7 @@ def _lifecycle_source_label(source: object) -> str:
     value = str(source or "")
     if value.endswith("/scheduled-trigger"):
         return "scheduled trigger"
-    if value.endswith("/peer-send-message") or value == "peer":
+    if value.endswith("/peer-send-message") or value in ("peer", "peer-mailbox"):
         return "peer message"
     if value.startswith("task-notification"):
         return "task notification"
@@ -497,7 +497,7 @@ def _lifecycle_label(metadata: dict) -> str:
         )
     if event == "woken":
         source = _lifecycle_source_label(metadata.get("source"))
-        by = str(metadata.get("by") or "unknown")
+        by = str(metadata.get("by") or metadata.get("from") or "unknown")
         return f"woken by {source}: {by}"
     return "session lifecycle"
 

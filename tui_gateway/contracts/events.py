@@ -691,6 +691,19 @@ event("pairing.changed", ChangeSignalPayload, doc="Pairing state moved; refetch 
 event("bot_relay.outbox.pending", ChangeSignalPayload, doc="A bot-relay outbox envelope is queued; drain it.")
 
 
+class PeerMailboxSettledPayload(Payload):
+    """``tui_gateway/session_mailbox.py::emit_settled``."""
+
+    msg_id: str
+    status: str
+    attempts: int = 0
+
+
+event("peer_mailbox.settled", PeerMailboxSettledPayload,
+      doc="A peer mailbox message transitioned state (settled or updated attempts).")
+
+
+
 __all__ = [
     "BillingBlock", "BillingStepUpVerificationPayload", "BrowserControllerCancelPayload",
     "BrowserControllerCommandPayload", "BrowserProgressPayload", "ChangeSignalPayload", "ErrorPayload",
@@ -698,6 +711,7 @@ __all__ = [
     "MessageInterimPayload", "MessageReaction", "MessageReactionPayload", "MoaAggregatingPayload",
     "MoaPhasePayload", "MoaProgressPayload", "MoaReferencePayload", "NoticePayload",
     "NotificationClearPayload", "NotificationShowPayload", "OpenPayload", "PaneRevealPayload",
+    "PeerMailboxSettledPayload",
     "PetChangedPayload", "PetGenerateProgressPayload", "PetHatchProgressPayload", "PreviewClosePayload",
     "PreviewOpenPayload", "PreviewRestartProgressPayload", "ReactionPayload", "ResumePhaseStatus",
     "ReviewSummaryPayload", "SessionControlSnapshot", "SessionControlUpdatePayload",

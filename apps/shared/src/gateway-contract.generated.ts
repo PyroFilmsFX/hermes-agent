@@ -2704,6 +2704,60 @@ export interface SessionSetHiddenResult {
   hidden: boolean
   session_key: string
 }
+/** ``session_id`` is a live runtime id first, else a stored id / key / title. */
+export interface SessionSetPinnedParams {
+  session_id: string
+  pinned?: boolean
+  profile?: string | null
+}
+export interface SessionSetPinnedResult {
+  pinned: boolean
+  session_key: string
+}
+export interface PeerMailboxListParams {
+  profile?: string | null
+  session_id?: string | null
+  limit?: number
+  pending_only?: boolean
+}
+export interface PeerMailboxListResult {
+  messages: PeerMailboxMessage[]
+}
+export interface PeerMailboxMessage {
+  id: number
+  target_session_id: string
+  from_session_id?: string
+  from_label?: string
+  target_hint?: string
+  body?: string
+  status: string
+  attempts?: number
+  last_error?: string | null
+  created_at?: number
+  claimed_at?: number | null
+  claim_owner?: string | null
+  delivered_at?: number | null
+  delivered_via?: string | null
+  direction?: string | null
+}
+export interface PeerMailboxRetryParams {
+  profile?: string | null
+  message_id: number
+}
+export interface PeerMailboxRetryResult {
+  message_id: number
+  status: string
+  detail?: string
+}
+export interface PeerMailboxCancelParams {
+  profile?: string | null
+  message_id: number
+}
+export interface PeerMailboxCancelResult {
+  message_id: number
+  status: string
+  cancelled: boolean
+}
 export interface SessionWorkspaceMoveParams {
   profile?: string | null
   session_key: string
@@ -4207,6 +4261,12 @@ export interface PetHatchProgressPayload {
 }
 /** ``change_watcher._CHANGE_WATCHES`` payload fn — ``{}`` for every watch except pet.changed. */
 export type ChangeSignalPayload = Record<string, unknown>
+/** ``tui_gateway/session_mailbox.py::emit_settled``. */
+export interface PeerMailboxSettledPayload {
+  msg_id: string
+  status: string
+  attempts?: number
+}
 export interface RequestCancelPayload {
   id: string
   method: string
@@ -4397,6 +4457,12 @@ export interface RpcMethods {
   'paste.collapse': { params: PasteCollapseParams; result: PasteCollapseResult }
   /** Render a PDF's pages to PNG and queue them as images for the next turn. */
   'pdf.attach': { params: PdfAttachParams; result: PdfAttachResult }
+  /** Cancel a queued peer mailbox message. */
+  'peer_mailbox.cancel': { params: PeerMailboxCancelParams; result: PeerMailboxCancelResult }
+  /** List peer mailbox messages for a session or globally. */
+  'peer_mailbox.list': { params: PeerMailboxListParams; result: PeerMailboxListResult }
+  /** Retry delivery of a queued peer mailbox message immediately. */
+  'peer_mailbox.retry': { params: PeerMailboxRetryParams; result: PeerMailboxRetryResult }
   /** Stop an in-flight pet generate/hatch by token (idempotent). */
   'pet.cancel': { params: PetCancelParams; result: PetCancelResult }
   /** Half-block cell frames (or a kitty placement) for one pet state. */
@@ -4555,6 +4621,8 @@ export interface RpcMethods {
   'session.send': { params: SessionSendParams; result: SessionSendResult }
   /** Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage. */
   'session.set_hidden': { params: SessionSetHiddenParams; result: SessionSetHiddenResult }
+  /** Set/clear pinned on a session + lineage (persists across restarts and keeps B-lite residency). */
+  'session.set_pinned': { params: SessionSetPinnedParams; result: SessionSetPinnedResult }
   /** Rendered /status text for the session. */
   'session.status': { params: SessionStatusParams; result: SessionStatusResult }
   /** Inject text into the next tool result without interrupting the turn. */
@@ -4747,6 +4815,9 @@ export const RPC_METHODS = [
   'model.save_key',
   'paste.collapse',
   'pdf.attach',
+  'peer_mailbox.cancel',
+  'peer_mailbox.list',
+  'peer_mailbox.retry',
   'pet.cancel',
   'pet.cells',
   'pet.disable',
@@ -4826,6 +4897,7 @@ export const RPC_METHODS = [
   'session.save',
   'session.send',
   'session.set_hidden',
+  'session.set_pinned',
   'session.status',
   'session.steer',
   'session.task_create',
@@ -4978,6 +5050,8 @@ export interface BackendGatewayEventMap {
   'pairing.changed': ChangeSignalPayload
   /** Focus / reveal a named desktop pane. */
   'pane.reveal': PaneRevealPayload
+  /** A peer mailbox message transitioned state (settled or updated attempts). */
+  'peer_mailbox.settled': PeerMailboxSettledPayload
   /** The active pet / its spritesheet changed (watcher). */
   'pet.changed': PetChangedPayload
   /** Pet base-draft generation progress. */
@@ -5091,6 +5165,7 @@ export const GATEWAY_EVENT_TYPES = [
   'notification.show',
   'pairing.changed',
   'pane.reveal',
+  'peer_mailbox.settled',
   'pet.changed',
   'pet.generate.progress',
   'pet.hatch.progress',

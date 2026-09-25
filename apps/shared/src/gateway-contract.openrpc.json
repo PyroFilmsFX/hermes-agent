@@ -1645,6 +1645,60 @@
       }
     },
     {
+      "name": "peer_mailbox.cancel",
+      "summary": "Cancel a queued peer mailbox message.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PeerMailboxCancelParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PeerMailboxCancelResult"
+        }
+      }
+    },
+    {
+      "name": "peer_mailbox.list",
+      "summary": "List peer mailbox messages for a session or globally.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PeerMailboxListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PeerMailboxListResult"
+        }
+      }
+    },
+    {
+      "name": "peer_mailbox.retry",
+      "summary": "Retry delivery of a queued peer mailbox message immediately.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PeerMailboxRetryParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PeerMailboxRetryResult"
+        }
+      }
+    },
+    {
       "name": "pet.cancel",
       "summary": "Stop an in-flight pet generate/hatch by token (idempotent).",
       "params": [
@@ -3063,6 +3117,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SessionSetHiddenResult"
+        }
+      }
+    },
+    {
+      "name": "session.set_pinned",
+      "summary": "Set/clear pinned on a session + lineage (persists across restarts and keeps B-lite residency).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionSetPinnedParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionSetPinnedResult"
         }
       }
     },
@@ -16251,6 +16323,315 @@
         "title": "PdfPage",
         "type": "object"
       },
+      "PeerMailboxCancelParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "title": "PeerMailboxCancelParams",
+        "type": "object"
+      },
+      "PeerMailboxCancelResult": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "message_id",
+          "status",
+          "cancelled"
+        ],
+        "title": "PeerMailboxCancelResult",
+        "type": "object"
+      },
+      "PeerMailboxListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "pending_only": {
+            "default": false,
+            "title": "Pending Only",
+            "type": "boolean"
+          }
+        },
+        "title": "PeerMailboxListParams",
+        "type": "object"
+      },
+      "PeerMailboxListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/PeerMailboxMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "title": "PeerMailboxListResult",
+        "type": "object"
+      },
+      "PeerMailboxMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "target_session_id": {
+            "title": "Target Session Id",
+            "type": "string"
+          },
+          "from_session_id": {
+            "default": "",
+            "title": "From Session Id",
+            "type": "string"
+          },
+          "from_label": {
+            "default": "",
+            "title": "From Label",
+            "type": "string"
+          },
+          "target_hint": {
+            "default": "",
+            "title": "Target Hint",
+            "type": "string"
+          },
+          "body": {
+            "default": "",
+            "title": "Body",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Error"
+          },
+          "created_at": {
+            "default": 0.0,
+            "title": "Created At",
+            "type": "number"
+          },
+          "claimed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed At"
+          },
+          "claim_owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claim Owner"
+          },
+          "delivered_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivered At"
+          },
+          "delivered_via": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivered Via"
+          },
+          "direction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Direction"
+          }
+        },
+        "required": [
+          "id",
+          "target_session_id",
+          "status"
+        ],
+        "title": "PeerMailboxMessage",
+        "type": "object"
+      },
+      "PeerMailboxRetryParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "title": "PeerMailboxRetryParams",
+        "type": "object"
+      },
+      "PeerMailboxRetryResult": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "status"
+        ],
+        "title": "PeerMailboxRetryResult",
+        "type": "object"
+      },
+      "PeerMailboxSettledPayload": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/session_mailbox.py::emit_settled``.",
+        "properties": {
+          "msg_id": {
+            "title": "Msg Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "msg_id",
+          "status"
+        ],
+        "title": "PeerMailboxSettledPayload",
+        "type": "object"
+      },
       "PeerRouteStatus": {
         "additionalProperties": false,
         "properties": {
@@ -26954,6 +27335,57 @@
         "title": "SessionSetHiddenResult",
         "type": "object"
       },
+      "SessionSetPinnedParams": {
+        "additionalProperties": false,
+        "description": "``session_id`` is a live runtime id first, else a stored id / key / title.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "pinned": {
+            "default": true,
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionSetPinnedParams",
+        "type": "object"
+      },
+      "SessionSetPinnedResult": {
+        "additionalProperties": false,
+        "properties": {
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "session_key": {
+            "title": "Session Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pinned",
+          "session_key"
+        ],
+        "title": "SessionSetPinnedResult",
+        "type": "object"
+      },
       "SessionStatusParams": {
         "additionalProperties": false,
         "properties": {
@@ -34429,6 +34861,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/PaneRevealPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "peer_mailbox.settled",
+      "summary": "A peer mailbox message transitioned state (settled or updated attempts).",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PeerMailboxSettledPayload"
           }
         }
       ]

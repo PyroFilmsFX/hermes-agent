@@ -159,7 +159,57 @@ def _find_live(session_key: str, profile_home: str | None) -> tuple[str, dict] |
     return server._find_live_session_by_key(session_key, profile_home or None)
 
 
-def _submit(sid: str, text: str) -> dict:
+def emit_settled(msg_id: Any, status: str, attempts: int = 0, sender_sid: str = "") -> None:
+    """Emit peer_mailbox.settled event to sender session and broadcast."""
+    from tui_gateway import server
+
+    payload = {
+        "msg_id": str(msg_id),
+        "status": status,
+        "attempts": int(attempts),
+    }
+    if sender_sid:
+        server._emit("peer_mailbox.settled", sender_sid, payload)
+    server._broadcast_global_event("peer_mailbox.settled", payload)
+
+
+def _emit_mailbox_woken_lifecycle(sid: str, row: dict, profile_home: str | None = None) -> None:
+    from tui_gateway import server
+
+    now = time.time()
+    sender_label = str(row.get("from_label") or row.get("from_session_id") or "another session")
+    metadata = {
+        "event": "woken",
+        "source": "peer-mailbox",
+        "by": sender_label,
+        "from": sender_label,
+        "from_session_id": str(row.get("from_session_id") or ""),
+        "completed_at": now,
+        "msg_id": str(row.get("id") or ""),
+    }
+    label = f"woken by peer message: {sender_label}"
+    lifecycle_row = {
+        "role": "system",
+        "content": label,
+        "display_kind": "session_lifecycle",
+        "display_metadata": metadata,
+        "timestamp": now,
+    }
+    with contextlib.suppress(Exception):
+        with _open_db(profile_home) as sdb:
+            if sdb is not None:
+                target_sid = _tip(sdb, str(row.get("target_session_id") or ""))
+                sdb.append_messages_batch(target_sid, [lifecycle_row])
+    with server._sessions_lock:
+        session = server._sessions.get(sid)
+        if session is not None:
+            history = list(session.get("history") or [])
+            history.append(lifecycle_row)
+            session["history"] = history
+            session["history_version"] = int(session.get("history_version", 0)) + 1
+
+
+def _submit(sid: str, text: str, *, display_kind: str | None = None, display_metadata: dict | None = None) -> dict:
     """``prompt.submit(queued=True)`` with NO bound transport: a peer turn must not re-point the session's
     client transport (a live desktop window keeps streaming it), and it never interrupts a turn in flight."""
     from tui_gateway import server
@@ -167,7 +217,12 @@ def _submit(sid: str, text: str) -> dict:
 
     token = bind_transport(None)
     try:
-        return server._methods["prompt.submit"](f"peer-mailbox:{sid}", {"session_id": sid, "text": text, "queued": True})
+        params: dict[str, Any] = {"session_id": sid, "text": text, "queued": True}
+        if display_kind:
+            params["display_kind"] = display_kind
+        if display_metadata:
+            params["display_metadata"] = display_metadata
+        return server._methods["prompt.submit"](f"peer-mailbox:{sid}", params)
     finally:
         reset_transport(token)
 
@@ -298,14 +353,26 @@ def _deliver_native_claimed(db, row: dict, live: tuple[str, dict], *, pol: dict)
         return _submit_claimed(db, row, sid, via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
     if not db.peer_mailbox_mark_delivered(row["id"], _OWNER, "native"):
         logger.warning("peer mailbox: row %s accepted natively but its claim was lost before settlement", row["id"])
+    emit_settled(row["id"], STATUS_DELIVERED_NATIVE, int(row.get("attempts") or 0), str(row.get("from_session_id") or ""))
     return STATUS_DELIVERED_NATIVE, "accepted by the live Claude session"
 
 
 def _submit_claimed(db, row: dict, sid: str, *, via: str, ok_status: str, pol: dict) -> tuple[str, str]:
     """Deliver a row WE hold the claim on. A refused submit returns the row to the queue (or fails it once
     ``max_attempts`` refusals accumulated); an accepted one is marked delivered and never resent."""
+    meta = {
+        "direction": "in",
+        "peer": str(row.get("from_label") or row.get("from_session_id") or "peer"),
+        "from": str(row.get("from_label") or row.get("from_session_id") or ""),
+        "from_session_id": str(row.get("from_session_id") or ""),
+        "to": str(row.get("target_session_id") or ""),
+        "msg_id": str(row.get("id") or ""),
+        "via": via,
+        "status": ok_status,
+        "attempts": int(row.get("attempts") or 0),
+    }
     try:
-        response = _submit(sid, _envelope(row))
+        response = _submit(sid, _envelope(row), display_kind="peer_message", display_metadata=meta)
     except Exception as exc:  # noqa: BLE001 - raised before acceptance
         response = {"error": {"message": str(exc)}}
     if isinstance(response, dict) and response.get("error"):
@@ -313,9 +380,13 @@ def _submit_claimed(db, row: dict, sid: str, *, via: str, ok_status: str, pol: d
         message = error.get("message") if isinstance(error, dict) else str(error)
         status = db.peer_mailbox_release(row["id"], _OWNER, f"delivery refused: {message}",
                                          max_attempts=int(pol["max_attempts"]))
-        return (STATUS_FAILED if status == "failed" else STATUS_QUEUED), f"delivery refused: {message}"
+        res_status = STATUS_FAILED if status == "failed" else STATUS_QUEUED
+        attempts = int(row.get("attempts") or 0) + 1
+        emit_settled(row["id"], res_status, attempts, str(row.get("from_session_id") or ""))
+        return res_status, f"delivery refused: {message}"
     if not db.peer_mailbox_mark_delivered(row["id"], _OWNER, via):
         logger.warning("peer mailbox: row %s accepted but its claim was lost before settlement", row["id"])
+    emit_settled(row["id"], ok_status, int(row.get("attempts") or 0), str(row.get("from_session_id") or ""))
     return ok_status, "accepted as the session's next turn"
 
 
@@ -332,6 +403,7 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
     with contextlib.suppress(Exception):
         if not db.get_session(target):
             db.peer_mailbox_fail(row["id"], "target session no longer exists")
+            emit_settled(row["id"], STATUS_FAILED, int(row.get("attempts") or 0), str(row.get("from_session_id") or ""))
             return STATUS_FAILED, "target session no longer exists"
     if not allow_resume:
         return STATUS_QUEUED, "target is not live; queued until it next starts"
@@ -345,11 +417,15 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
         if not sid:
             status = db.peer_mailbox_release(row["id"], _OWNER, f"resume failed: {error}",
                                              max_attempts=int(pol["max_attempts"]))
-            return (STATUS_FAILED if status == "failed" else STATUS_QUEUED), f"resume failed: {error}"
+            res_status = STATUS_FAILED if status == "failed" else STATUS_QUEUED
+            attempts = int(row.get("attempts") or 0) + 1
+            emit_settled(row["id"], res_status, attempts, str(row.get("from_session_id") or ""))
+            return res_status, f"resume failed: {error}"
         from tui_gateway import server
         with server._sessions_lock:
             if (session := server._sessions.get(sid)) is not None and not session.get("pinned_resident"):
                 session["_peer_mailbox_woken"] = True
+        _emit_mailbox_woken_lifecycle(sid, row, profile_home)
         return _submit_claimed(db, row, sid, via="resume", ok_status=STATUS_RESUMED, pol=pol)
     finally:
         _gate.release(target)
@@ -400,6 +476,8 @@ def send_message(
                         "detail": row.get("last_error") or "already accepted under this request_id"}
             status, detail = _deliver_row(db, row, profile_home=profile_home,
                                           allow_resume=bool(pol["resume_on_send"]), pol=pol)
+            if status == STATUS_QUEUED:
+                emit_settled(row["id"], STATUS_QUEUED, int(row.get("attempts") or 0), str(from_session_id or ""))
     except Exception as exc:  # noqa: BLE001 - tool boundary: report, never raise
         logger.warning("peer mailbox send failed", exc_info=True)
         return {"status": STATUS_FAILED, "error": f"peer mailbox error: {exc}"}
@@ -698,8 +776,59 @@ def send_rpc(rid: Any, params: dict) -> dict:
     return server._ok(rid, result)
 
 
+def list_messages(session_id: str | None = None, limit: int = 50, pending_only: bool = False, profile_home: str | None = None) -> list[dict]:
+    with _open_db(profile_home) as db:
+        if db is None:
+            return []
+        if session_id:
+            tip = _tip(db, session_id)
+            rows = db.peer_mailbox_for_session(tip, limit=limit, pending_only=pending_only)
+        else:
+            rows = db.peer_mailbox_list_all(limit=limit, pending_only=pending_only)
+        out = []
+        for r in rows:
+            row_dict = dict(r)
+            if session_id:
+                row_dict["direction"] = "out" if str(row_dict.get("from_session_id")) == session_id else "in"
+            out.append(row_dict)
+        return out
+
+
+def retry_message(message_id: int, profile_home: str | None = None) -> tuple[str, str]:
+    pol = policy()
+    with _open_db(profile_home) as db:
+        if db is None:
+            return STATUS_FAILED, "database unavailable"
+        row = db.peer_mailbox_get(message_id)
+        if not row:
+            return STATUS_FAILED, "message not found"
+        if row.get("status") == "delivered":
+            return row.get("delivered_via", "delivered"), "message is already delivered"
+        if row.get("status") == "claimed":
+            return STATUS_QUEUED, "delivery already in progress"
+        status, detail = _deliver_row(db, row, profile_home=profile_home, allow_resume=True, pol=pol)
+        return status, detail
+
+
+def cancel_message(message_id: int, profile_home: str | None = None) -> bool:
+    with _open_db(profile_home) as db:
+        if db is None:
+            return False
+        row = db.peer_mailbox_get(message_id)
+        if not row:
+            return False
+        if row.get("status") != "queued":
+            return False
+        ok = db.peer_mailbox_cancel(message_id, reason="cancelled by user")
+        if ok:
+            emit_settled(message_id, STATUS_FAILED, int(row.get("attempts") or 0), str(row.get("from_session_id") or ""))
+        return ok
+
+
 __all__ = [
     "STATUS_DELIVERED_LIVE", "STATUS_FAILED", "STATUS_QUEUED", "STATUS_RESUMED", "after_session_resume",
-    "drain_pending", "drain_session", "policy", "recover_stale_claims", "resume_interrupted_sessions", "revive_resident_sessions",
+    "cancel_message", "drain_pending", "drain_session", "emit_settled", "list_messages", "policy",
+    "recover_stale_claims", "resume_interrupted_sessions", "retry_message", "revive_resident_sessions",
     "schedule_drain", "schedule_startup_delivery", "send_message", "send_rpc", "session_is_resident",
 ]
+

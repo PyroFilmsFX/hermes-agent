@@ -163,6 +163,30 @@ class SessionPeerMailboxMixin:
             "UPDATE peer_mailbox SET status = 'failed', last_error = ? WHERE id = ? AND status IN ('queued', 'claimed')",
             (str(error)[:2000], int(message_id))) == 1
 
+    def peer_mailbox_get(self, message_id: int) -> Optional[Dict[str, Any]]:
+        self.ensure_peer_mailbox()
+        rows = self._mailbox_read_all("SELECT * FROM peer_mailbox WHERE id = ?", (int(message_id),))
+        return rows[0] if rows else None
+
+    def peer_mailbox_cancel(self, message_id: int, reason: str = "cancelled by user") -> bool:
+        self.ensure_peer_mailbox()
+        return self._write_rowcount(
+            "UPDATE peer_mailbox SET status = 'failed', last_error = ? WHERE id = ? AND status = 'queued'",
+            (str(reason)[:2000], int(message_id))) == 1
+
+    def peer_mailbox_for_session(self, session_id: str, limit: int = 50, *, pending_only: bool = False) -> List[Dict[str, Any]]:
+        status_filter = "AND status IN ('queued', 'claimed') " if pending_only else ""
+        return self._mailbox_read_all(
+            f"SELECT * FROM peer_mailbox WHERE (target_session_id = ? OR from_session_id = ?) {status_filter}"
+            f"ORDER BY id DESC LIMIT ?",
+            (str(session_id), str(session_id), int(limit)))
+
+    def peer_mailbox_list_all(self, limit: int = 50, *, pending_only: bool = False) -> List[Dict[str, Any]]:
+        status_filter = "WHERE status IN ('queued', 'claimed') " if pending_only else ""
+        return self._mailbox_read_all(
+            f"SELECT * FROM peer_mailbox {status_filter}ORDER BY id DESC LIMIT ?",
+            (int(limit),))
+
     def list_resident_session_candidates(self, limit: int = 3) -> List[str]:
         """Pinned, unarchived, top-level interactive sessions, most recently active first (B-lite residency)."""
         rows = self._mailbox_read_all(
