@@ -925,7 +925,6 @@ class ClaudeSdkTurnMixin:
                     if getattr(self, "_host_prompt_folded", False):
                         self._host_prompt_folded = False
                     else:
-                        _flush_interim_assistant()
                         self._handle_unsolicited(message)
                         continue
                 self._handle_compact_boundary(message)
@@ -1201,6 +1200,8 @@ class ClaudeSdkTurnMixin:
                         )
                         continue
                 self._handle_unsolicited(residue)
+            if held_interim_assistant is not None and not out.get("terminal_result_accepted"):
+                _flush_interim_assistant()
         out["interrupt_observed"] = interrupted or boundary_interrupt
         out["billing_mode"] = self._reported_billing_mode()
         out["billing_evidence"] = dict(self._billing_evidence)

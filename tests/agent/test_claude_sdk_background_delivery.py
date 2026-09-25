@@ -629,6 +629,50 @@ def test_injected_final_is_delivered_without_interim_duplicate(origin_kind):
     assert interim == []
 
 
+def test_diverted_injected_result_does_not_flush_host_final_paragraph():
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, _make_session,
+    )
+
+    interim, background = [], []
+    injected = ResultMessage(result="peer result", uuid="peer-result")
+    injected.origin = {"kind": "peer", "from": "peer-session", "body": "ping"}
+    session, _holder = _make_session(
+        script=[
+            AssistantMessage(content=[TextBlock("held host paragraph")]),
+            injected,
+            ResultMessage(result="held host paragraph", uuid="host-result"),
+        ],
+        on_interim_assistant=interim.append,
+        on_unsolicited_result=lambda texts, items=None, delivery_id=None: background.append(texts),
+    )
+    try:
+        turn = session.run_turn("host question", turn_timeout=5)
+    finally:
+        session.close()
+
+    assert turn.final_text == "held host paragraph"
+    assert background == [["peer result"]]
+    assert interim == []
+
+
+def test_stream_end_flushes_held_assistant_as_partial_once():
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    interim = []
+    session, _holder = _make_session(
+        script=[AssistantMessage(content=[TextBlock("partial host paragraph")])],
+        on_interim_assistant=interim.append,
+    )
+    try:
+        turn = session.run_turn("host question", turn_timeout=5)
+    finally:
+        session.close()
+
+    assert turn.error is not None
+    assert interim == ["partial host paragraph"]
+
+
 def test_multi_step_turn_relays_intermediate_prose_but_not_final_answer():
     from tests.agent.claude_sdk_fakes import (
         AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, _make_session,
