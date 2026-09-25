@@ -1786,6 +1786,8 @@ body.guest-pointer-lock :is(webview, iframe) {
 [data-slot='composer-root'] {
   width: 100%;
   padding-inline: 5px;
+  backdrop-filter: blur(0.75rem);
+  -webkit-backdrop-filter: blur(0.75rem);
 }
 
 /* Popped-out (floating) composer: compact width + an even 5px transparent grab
@@ -1799,6 +1801,8 @@ body.guest-pointer-lock :is(webview, iframe) {
 
 [data-slot='composer-root'][data-popped-out] {
   padding: 5px;
+  backdrop-filter: blur(0.75rem);
+  -webkit-backdrop-filter: blur(0.75rem);
 }
 
 /* Dock glow intensity scale — dimmer in light mode (the primary glow reads
@@ -1861,6 +1865,8 @@ body.guest-pointer-lock :is(webview, iframe) {
     transparent,
     color-mix(in srgb, var(--ui-chat-surface-background) 88%, transparent)
   ) !important;
+  backdrop-filter: blur(0.75rem);
+  -webkit-backdrop-filter: blur(0.75rem);
 }
 
 [data-slot='composer-surface'] {
@@ -1898,6 +1904,8 @@ body.guest-pointer-lock :is(webview, iframe) {
 
 [data-slot='composer-root'][data-thread-scrolled-up] {
   --composer-fill: color-mix(in srgb, var(--dt-card) 48%, transparent);
+  backdrop-filter: blur(0.75rem);
+  -webkit-backdrop-filter: blur(0.75rem);
 }
 
 /* Tool/thinking blocks now live at message-text alignment (no leading
