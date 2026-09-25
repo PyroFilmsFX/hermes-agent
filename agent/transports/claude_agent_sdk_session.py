@@ -1002,6 +1002,33 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         )
         return True
 
+    def send_peer_message(self, text: str, origin: dict[str, Any]) -> bool:
+        """Inject peer-origin input; the SDK holds it until the current CLI turn reaches a boundary."""
+        if not text or not text.strip():
+            return False
+        client, loop = self._client, self._loop
+        if client is None or loop is None:
+            return False
+        query = None
+        try:
+            query = client.query(_sdk_user_message_stream(text.strip(), origin=origin))
+            future = asyncio.run_coroutine_threadsafe(query, loop)
+
+            def _finish_peer(done: Any) -> None:
+                try:
+                    done.result()
+                except Exception:
+                    logger.debug("SDK peer query failed after scheduling", exc_info=True)
+
+            future.add_done_callback(_finish_peer)
+        except Exception:
+            if query is not None and hasattr(query, "close"):
+                query.close()
+            logger.debug("SDK peer query scheduling failed", exc_info=True)
+            return False
+        logger.info("claude-agent-sdk: injected native peer message (%d chars)", len(text.strip()))
+        return True
+
     def build_option_fields(self) -> dict[str, Any]:
         """The ClaudeAgentOptions field dict — plain data so tests can assert
         on it without importing the SDK."""

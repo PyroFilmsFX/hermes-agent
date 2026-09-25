@@ -70,6 +70,75 @@ def test_live_target_gets_the_message_as_a_queued_turn(gw):
     assert gw.db.peer_mailbox_get(result["message_id"])["status"] == "delivered"
 
 
+def _claude_live_session(send_peer_message, *, running=False):
+    agent = SimpleNamespace(api_mode="claude_agent_sdk", _claude_sdk_session=SimpleNamespace(
+        send_peer_message=send_peer_message))
+    return {"session_key": "target", "profile_home": None, "agent": agent, "running": running}
+
+
+def test_idle_live_claude_target_uses_native_peer_injection(gw):
+    received = []
+    gw.sessions["live-claude"] = _claude_live_session(
+        lambda body, origin: received.append((body, origin)) or True)
+
+    result = _send(gw)
+
+    assert result["status"] == "delivered-native"
+    assert gw.submits == []
+    assert received == [("ping", {
+        "kind": "peer", "subkind": "peer-send-message", "from": "manager",
+        "fromSession": "sender", "msg_id": str(result["message_id"]), "body": "ping",
+    })]
+    row = gw.db.peer_mailbox_get(result["message_id"])
+    assert row["status"] == "delivered" and row["delivered_via"] == "native"
+
+
+def test_busy_live_claude_target_uses_sdk_boundary_queue_once(gw):
+    received = []
+    gw.sessions["live-claude"] = _claude_live_session(
+        lambda body, origin: received.append((body, origin)) or True, running=True)
+
+    result = _send(gw)
+    assert result["status"] == "delivered-native"
+    assert len(received) == 1 and gw.submits == []
+    assert gw.mb.drain_session("target") == 0
+    assert gw.db.peer_mailbox_get(result["message_id"])["delivered_via"] == "native"
+
+
+def test_native_claude_injection_failure_falls_back_to_live_submit_once(gw):
+    def fail(_body, _origin):
+        raise RuntimeError("SDK unavailable")
+
+    gw.sessions["live-claude"] = _claude_live_session(fail)
+    result = _send(gw)
+
+    assert result["status"] == "delivered-live"
+    assert len(gw.submits) == 1
+    assert "ping" in gw.submits[0]["text"]
+    assert gw.db.peer_mailbox_get(result["message_id"])["delivered_via"] == "live"
+
+
+def test_native_peer_hint_requires_live_claude_sender_and_target(gw, monkeypatch):
+    from agent import claude_sdk_runtime_continuity
+
+    sender = SimpleNamespace(api_mode="claude_agent_sdk", _claude_sdk_session=object())
+    gw.sessions["sender-live"] = {"session_key": "sender", "profile_home": None, "agent": sender}
+    gw.sessions["target-live"] = _claude_live_session(lambda _body, _origin: True)
+    monkeypatch.setattr(claude_sdk_runtime_continuity, "_sdk_session_name", lambda _agent: "hermes:manager desk")
+
+    result = _send(gw)
+    assert result["native_peer"] == "hermes:manager desk"
+
+    gw.sessions["target-live"]["agent"].api_mode = "openai"
+    without_native_target = _send(gw, body="ordinary target")
+    assert "native_peer" not in without_native_target
+
+    gw.sessions["sender-live"]["agent"].api_mode = "openai"
+    gw.sessions["target-live"]["agent"].api_mode = "claude_agent_sdk"
+    without_native_sender = _send(gw, body="ordinary sender")
+    assert "native_peer" not in without_native_sender
+
+
 def test_dead_target_is_resumed_on_send_and_delivered(gw):
     result = _send(gw)
     assert result["status"] == "resumed-and-delivered"

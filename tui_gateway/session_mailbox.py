@@ -3,8 +3,10 @@
 A message sent to a stored Hermes session is never dropped because the session has no live process:
 
 1. ``send_message`` writes it to the durable ``peer_mailbox`` table (``hermes_state_peer_mailbox``) FIRST.
-2. It then tries to deliver it as the session's next turn (``prompt.submit(queued=True)``):
-   - target live in this gateway          -> ``delivered-live``
+2. It then tries the target's live transport:
+   - idle live Claude SDK target          -> native peer-origin SDK input -> ``delivered-native``
+   - busy live Claude SDK target          -> native SDK input, held to its next boundary
+   - live non-Claude target               -> ``prompt.submit(queued=True)`` -> ``delivered-live``
    - target not live, resume allowed      -> ``session.resume`` (cold) + submit -> ``resumed-and-delivered``
    - resume capped / rate-limited / off   -> ``queued`` (delivered later, see 3)
    - unknown target / attempts exhausted  -> ``failed``
@@ -45,6 +47,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 STATUS_DELIVERED_LIVE = "delivered-live"
+STATUS_DELIVERED_NATIVE = "delivered-native"
 STATUS_RESUMED = "resumed-and-delivered"
 STATUS_QUEUED = "queued"
 STATUS_FAILED = "failed"
@@ -254,6 +257,50 @@ def _envelope(row: dict) -> str:
     return f"{head}\n{row.get('body') or ''}{tail}"
 
 
+def _live_claude_sdk(session: dict) -> Any | None:
+    """Return the live Claude SDK transport owned by this gateway session, if any."""
+    agent = session.get("agent")
+    if getattr(agent, "api_mode", "") != "claude_agent_sdk":
+        return None
+    return getattr(agent, "_claude_sdk_session", None)
+
+
+def _peer_origin(row: dict) -> dict[str, Any]:
+    return {
+        "kind": "peer",
+        "subkind": "peer-send-message",
+        "from": str(row.get("from_label") or row.get("from_session_id") or "another session"),
+        "fromSession": str(row.get("from_session_id") or ""),
+        "msg_id": str(row.get("id") or ""),
+        "body": str(row.get("body") or ""),
+    }
+
+
+def _deliver_native_claimed(db, row: dict, live: tuple[str, dict], *, pol: dict) -> tuple[str, str] | None:
+    """Inject a peer-origin message into an idle, live Claude SDK session.
+
+    ``None`` means this is not a native target. The SDK holds input for a busy CLI turn
+    until its next boundary; a declined/failed native attempt falls through to the live prompt path.
+    """
+    sid, session = live
+    sdk_session = _live_claude_sdk(session)
+    if sdk_session is None:
+        return None
+    if not db.peer_mailbox_claim(row["id"], _OWNER):
+        return STATUS_QUEUED, "another delivery of this message is in progress"
+    try:
+        accepted = sdk_session.send_peer_message(str(row.get("body") or ""), _peer_origin(row))
+    except Exception:
+        logger.debug("peer mailbox native delivery failed for %s", sid, exc_info=True)
+        accepted = False
+    if not accepted:
+        # The same claimed row falls back to the Hermes queue; its dedupe key remains intact.
+        return _submit_claimed(db, row, sid, via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
+    if not db.peer_mailbox_mark_delivered(row["id"], _OWNER, "native"):
+        logger.warning("peer mailbox: row %s accepted natively but its claim was lost before settlement", row["id"])
+    return STATUS_DELIVERED_NATIVE, "accepted by the live Claude session"
+
+
 def _submit_claimed(db, row: dict, sid: str, *, via: str, ok_status: str, pol: dict) -> tuple[str, str]:
     """Deliver a row WE hold the claim on. A refused submit returns the row to the queue (or fails it once
     ``max_attempts`` refusals accumulated); an accepted one is marked delivered and never resent."""
@@ -276,6 +323,9 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
     target = _tip(db, str(row["target_session_id"]))
     live = _find_live(target, profile_home)
     if live is not None:
+        native = _deliver_native_claimed(db, row, live, pol=pol)
+        if native is not None:
+            return native
         if not db.peer_mailbox_claim(row["id"], _OWNER):
             return STATUS_QUEUED, "another delivery of this message is in progress"
         return _submit_claimed(db, row, live[0], via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
@@ -308,7 +358,10 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
 def _status_of_existing(row: dict) -> str:
     status = row.get("status")
     if status == "delivered":
-        return STATUS_RESUMED if row.get("delivered_via") == "resume" else STATUS_DELIVERED_LIVE
+        return {
+            "resume": STATUS_RESUMED,
+            "native": STATUS_DELIVERED_NATIVE,
+        }.get(row.get("delivered_via"), STATUS_DELIVERED_LIVE)
     return STATUS_FAILED if status == "failed" else STATUS_QUEUED
 
 
@@ -352,7 +405,19 @@ def send_message(
         return {"status": STATUS_FAILED, "error": f"peer mailbox error: {exc}"}
     if status == STATUS_RESUMED:
         schedule_drain(tip, profile_home)  # anything else queued for the woken session rides along
-    return {**base, "status": status, "detail": detail}
+    result = {**base, "status": status, "detail": detail}
+    if (sender := _find_live(from_session_id, profile_home)) is not None:
+        sender_agent = sender[1].get("agent")
+        if _live_claude_sdk(sender[1]) is not None:
+            target_live = _find_live(tip, profile_home)
+            if target_live is not None and _live_claude_sdk(target_live[1]) is not None:
+                with contextlib.suppress(Exception):
+                    target_agent = target_live[1].get("agent")
+                    from agent.claude_sdk_runtime_continuity import _sdk_session_name
+                    native_peer = _sdk_session_name(target_agent)
+                    if native_peer.startswith("hermes:"):
+                        result["native_peer"] = native_peer
+    return result
 
 
 def drain_session(session_key: str, profile_home: str | None = None) -> int:
@@ -372,10 +437,15 @@ def drain_session(session_key: str, profile_home: str | None = None) -> int:
                 live = _find_live(session_key, profile_home)
                 if live is None:
                     return delivered
-                if not db.peer_mailbox_claim(row["id"], _OWNER):
-                    continue
-                status, _ = _submit_claimed(db, row, live[0], via="drain", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
-                delivered += status == STATUS_DELIVERED_LIVE
+                native = _deliver_native_claimed(db, row, live, pol=pol)
+                if native is not None:
+                    status, _ = native
+                else:
+                    if not db.peer_mailbox_claim(row["id"], _OWNER):
+                        continue
+                    status, _ = _submit_claimed(db, row, live[0], via="drain", ok_status=STATUS_DELIVERED_LIVE,
+                                                pol=pol)
+                delivered += status in (STATUS_DELIVERED_LIVE, STATUS_DELIVERED_NATIVE)
     return delivered
 
 
@@ -425,7 +495,7 @@ def drain_pending(profile_home: str | None = None, limit: int = 20) -> int:
             if not rows:
                 continue
             status, _ = _deliver_row(db, rows[0], profile_home=profile_home, allow_resume=True, pol=pol)
-            if status in (STATUS_DELIVERED_LIVE, STATUS_RESUMED):
+            if status in (STATUS_DELIVERED_LIVE, STATUS_DELIVERED_NATIVE, STATUS_RESUMED):
                 delivered += 1 + drain_session(_tip(db, target), profile_home)
     return delivered
 

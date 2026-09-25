@@ -175,6 +175,46 @@ def test_transport_schedules_query_on_a_live_turn(monkeypatch):
     "exception is retrieved, not logged at teardown"
 
 
+def test_peer_message_uses_sdk_stream_with_peer_origin_when_idle(monkeypatch):
+    mod, stub, queried = _transport(turn_inbox=None)
+    scheduled = []
+
+    class _Fut:
+        def add_done_callback(self, cb):
+            scheduled.append(cb)
+
+    monkeypatch.setattr(
+        mod.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _Fut(), raising=False,
+    )
+    origin = {"kind": "peer", "subkind": "peer-send-message", "msg_id": "7", "body": "hello"}
+
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, " hello ", origin) is True
+
+    async def collect(stream):
+        return [message async for message in stream]
+
+    assert asyncio.run(collect(queried[0])) == [{
+        "type": "user", "message": {"role": "user", "content": "hello"},
+        "parent_tool_use_id": None, "origin": origin,
+    }]
+    assert len(scheduled) == 1
+
+
+def test_peer_message_uses_sdk_queue_when_a_turn_is_in_flight(monkeypatch):
+    mod, stub, queried = _transport(turn_inbox=object())
+    scheduled = []
+
+    class _Fut:
+        def add_done_callback(self, cb):
+            scheduled.append(cb)
+
+    monkeypatch.setattr(
+        mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: _Fut(), raising=False,
+    )
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer"}) is True
+    assert len(queried) == 1 and len(scheduled) == 1
+
+
 def test_transport_declines_when_client_or_loop_missing(monkeypatch):
     mod, stub, queried = _transport(turn_inbox=object(), client=False)
     assert mod.ClaudeAgentSdkSession.steer(stub, "note") is False

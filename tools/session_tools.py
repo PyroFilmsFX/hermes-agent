@@ -31,9 +31,10 @@ SESSION_SEND_SCHEMA = {
     "name": "session_send",
     "description": (
         "Send a message to another Hermes session by stored session id (or its title as a hint). "
-        "The message is stored durably and delivered as that session's next turn even when it is not "
-        "running: it is resumed on demand, or delivered when it next starts. Returns an honest status: "
-        "delivered-live, resumed-and-delivered, queued, or failed."
+        "The message is stored durably and delivered through the target's native Claude peer channel "
+        "when available, otherwise as its next turn. Dead targets are resumed on demand or queued until "
+        "they next start. A live Claude sender may receive a native_peer name for direct SendMessage. "
+        "Returns delivered-native, delivered-live, resumed-and-delivered, queued, or failed."
     ),
     "parameters": {
         "type": "object",
