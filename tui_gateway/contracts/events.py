@@ -317,6 +317,7 @@ class TodoUpdatedPayload(Payload):
 
     todos: list[JsonValue]
     revision: int
+    source: str | None = None
 
 
 event("todo.updated", TodoUpdatedPayload, doc="Full todo snapshot after a todo tool ran.")

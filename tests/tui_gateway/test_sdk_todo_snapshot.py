@@ -54,7 +54,20 @@ def test_snapshot_normalizes_tasks_and_skips_partial_files(tmp_path):
             {"id": "4", "content": "Removed", "status": "cancelled"},
         ],
         "revision": 1,
+        "source": "sdk_tasks",
     }
+
+
+def test_sdk_task_snapshot_carries_source_marker(tmp_path):
+    root = _task_root(tmp_path, "source-marker")
+    (root / "1.json").write_text(
+        json.dumps({"id": "1", "subject": "Task", "status": "in_progress"})
+    )
+    state = server._sdk_task_snapshot(
+        task_list_id="source-marker", config_dir=str(tmp_path / "claude")
+    )
+    assert state is not None
+    assert state.get("source") == "sdk_tasks"
 
 
 @pytest.mark.parametrize("task_list_id", ["../outside", "absolute-placeholder"])
@@ -201,6 +214,7 @@ def test_eager_resume_uses_the_attachment_hook_for_task_bootstrap(tmp_path, monk
         ("todo.updated", "eager-runtime", {
             "todos": [{"id": "1", "content": "Eager", "status": "pending"}],
             "revision": 1,
+            "source": "sdk_tasks",
         })
     ]
     assert agent._tui_gateway_runtime_sid == "eager-runtime"
@@ -423,6 +437,7 @@ def test_actual_resume_attach_bootstraps_snapshot_without_turn_or_helper(tmp_pat
         ("todo.updated", sid, {
             "todos": [{"id": "1", "content": "Hydrated", "status": "pending"}],
             "revision": 1,
+            "source": "sdk_tasks",
         })
     ]
 

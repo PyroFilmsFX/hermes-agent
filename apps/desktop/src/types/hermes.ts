@@ -731,6 +731,7 @@ export interface SessionResumeResult {
    * that raced with a newer live update. */
   todo_state?: {
     revision?: number
+    source?: string
     todos?: unknown
   }
   /** Epoch seconds the current turn started, or null when idle. */

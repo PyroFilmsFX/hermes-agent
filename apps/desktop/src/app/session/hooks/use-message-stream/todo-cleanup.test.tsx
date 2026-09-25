@@ -57,6 +57,37 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect($todosBySession.get()[SID]).toBeUndefined()
   })
 
+  it('keeps an sdk_tasks list with an in_progress item when the turn completes', () => {
+    mountStream()
+    act(() =>
+      stream.handleEvent({
+        payload: { revision: 1, source: 'sdk_tasks', todos: [todo('a', 'completed'), todo('b', 'in_progress')] },
+        session_id: SID,
+        type: 'todo.updated'
+      })
+    )
+
+    complete()
+
+    expect($todosBySession.get()[SID]).toHaveLength(2)
+    expect($todosBySession.get()[SID]?.[1]?.status).toBe('in_progress')
+  })
+
+  it('keeps an sdk_tasks list with an in_progress item when the turn errors out', () => {
+    mountStream()
+    act(() =>
+      stream.handleEvent({
+        payload: { revision: 1, source: 'sdk_tasks', todos: [todo('a', 'in_progress')] },
+        session_id: SID,
+        type: 'todo.updated'
+      })
+    )
+
+    act(() => stream.handleEvent({ payload: { message: 'boom' }, session_id: SID, type: 'error' }))
+
+    expect($todosBySession.get()[SID]).toHaveLength(1)
+  })
+
   it('applies a dedicated todo snapshot immediately', () => {
     mountStream()
 

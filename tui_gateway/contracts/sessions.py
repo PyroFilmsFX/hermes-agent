@@ -50,6 +50,7 @@ class TodoState(Result):
 
     todos: list[dict[str, JsonValue]]
     revision: int
+    source: str | None = None
 
 
 class AutoContinue(Result):

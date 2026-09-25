@@ -299,6 +299,46 @@ function parseRevision(value: unknown, depth: number): null | number {
 
 export const parseTodoRevision = (value: unknown): null | number => parseRevision(value, 0)
 
+function parseSource(value: unknown, depth: number): null | string {
+  if (depth > 2) {
+    return null
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      return parseSource(JSON.parse(value), depth + 1)
+    } catch {
+      return null
+    }
+  }
+
+  if (!isRecord(value)) {
+    return null
+  }
+
+  if (typeof value.source === 'string' && value.source.trim()) {
+    return value.source.trim()
+  }
+
+  if (Object.hasOwn(value, 'result')) {
+    const res = parseSource(value.result, depth + 1)
+    if (res !== null) {
+      return res
+    }
+  }
+
+  if (Object.hasOwn(value, 'todo_state')) {
+    const res = parseSource(value.todo_state, depth + 1)
+    if (res !== null) {
+      return res
+    }
+  }
+
+  return null
+}
+
+export const parseTodoSource = (value: unknown): null | string => parseSource(value, 0)
+
 /** Latest parseable todo list from one message's aui content parts (tool-call
  *  parts named `todo`; live parts carry `todos`, hydrated ones args/result). */
 export function todosFromMessageContent(content: unknown): null | TodoItem[] {

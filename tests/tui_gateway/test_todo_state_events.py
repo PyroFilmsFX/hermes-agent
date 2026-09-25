@@ -100,6 +100,30 @@ def test_empty_list_at_nonzero_revision_is_a_real_clear():
     assert state == {"todos": [], "revision": 2}
 
 
+def test_normalize_todo_state_preserves_sdk_tasks_source():
+    state = server._normalize_todo_state({
+        "todos": [{"id": "1", "content": "T", "status": "pending"}],
+        "revision": 1,
+        "source": "sdk_tasks",
+    })
+    assert state == {
+        "todos": [{"id": "1", "content": "T", "status": "pending"}],
+        "revision": 1,
+        "source": "sdk_tasks",
+    }
+
+
+def test_normalize_todo_state_omits_source_for_native_todo():
+    state = server._normalize_todo_state({
+        "todos": [{"id": "1", "content": "T", "status": "pending"}],
+        "revision": 1,
+    })
+    assert state == {
+        "todos": [{"id": "1", "content": "T", "status": "pending"}],
+        "revision": 1,
+    }
+
+
 def test_subagent_lifecycle_bypasses_tool_progress_off(monkeypatch):
     """Subagent rows feed the Desktop status stack / TUI spawn tree — application state, not
     tool-progress chrome — so display.tool_progress=off must not swallow them."""

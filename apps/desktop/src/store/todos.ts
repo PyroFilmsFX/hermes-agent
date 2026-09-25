@@ -2,7 +2,7 @@ import { atom, computed } from 'nanostores'
 
 import { keyedTimeouts } from '@/lib/keyed-timeouts'
 import { stableRecord } from '@/lib/stable-array'
-import { parseTodoRevision, parseTodos, type TodoItem } from '@/lib/todos'
+import { parseTodoRevision, parseTodos, parseTodoSource, type TodoItem } from '@/lib/todos'
 
 import { $sessions, lineageAliases } from './session'
 import { $sessionStates } from './session-states'
@@ -18,6 +18,7 @@ import { $sessionStates } from './session-states'
  */
 export const $todosBySession = atom<Record<string, TodoItem[]>>({})
 export const $todoRevisionsBySession = atom<Record<string, number>>({})
+export const $todoSourcesBySession = atom<Record<string, string | undefined>>({})
 
 export const todoListActive = (todos: readonly TodoItem[]) =>
   todos.some(t => t.status === 'pending' || t.status === 'in_progress')
@@ -60,8 +61,19 @@ export const $todoProgressBySession = computed(
 // clear and, because it's read back from history, resurrect on restart). Only
 // a finished list is restored, so its short linger shows the last checkmark.
 // Returns null when there's nothing to restore (caller should clear).
-export function todosForHydration(todos: readonly TodoItem[] | null): TodoItem[] | null {
-  return todos && !todoListActive(todos) ? [...todos] : null
+export function todosForHydration(
+  todos: readonly TodoItem[] | null,
+  source?: string | null
+): TodoItem[] | null {
+  if (!todos) {
+    return null
+  }
+
+  if (source === 'sdk_tasks') {
+    return [...todos]
+  }
+
+  return !todoListActive(todos) ? [...todos] : null
 }
 
 // Once a list finishes (every item completed/cancelled), the final state
@@ -91,7 +103,12 @@ function acceptRevision(sid: string, revision?: null | number): boolean {
   return true
 }
 
-export function setSessionTodos(sid: string, todos: TodoItem[], revision?: null | number) {
+export function setSessionTodos(
+  sid: string,
+  todos: TodoItem[],
+  revision?: null | number,
+  source?: string | null
+) {
   if (!sid) {
     return
   }
@@ -102,6 +119,14 @@ export function setSessionTodos(sid: string, todos: TodoItem[], revision?: null 
 
   clearTimers.cancel(sid)
   $todosBySession.set({ ...$todosBySession.get(), [sid]: todos })
+
+  const sources = $todoSourcesBySession.get()
+  if (source) {
+    $todoSourcesBySession.set({ ...sources, [sid]: source })
+  } else if (sid in sources) {
+    const { [sid]: _drop, ...rest } = sources
+    $todoSourcesBySession.set(rest)
+  }
 
   if (!todoListActive(todos)) {
     clearTimers.schedule(sid, FINISHED_LINGER_MS, () => dropSessionTodos(sid, false))
@@ -116,6 +141,12 @@ function dropSessionTodos(sid: string, forgetRevision: boolean) {
   if (sid in map) {
     const { [sid]: _drop, ...rest } = map
     $todosBySession.set(rest)
+  }
+
+  const sources = $todoSourcesBySession.get()
+  if (sid in sources) {
+    const { [sid]: _drop, ...rest } = sources
+    $todoSourcesBySession.set(rest)
   }
 
   if (forgetRevision) {
@@ -139,8 +170,9 @@ export function clearSessionTodos(sid: string) {
 // still shows the last checkmark landing.
 export function clearActiveSessionTodos(sid: string) {
   const todos = $todosBySession.get()[sid]
+  const source = $todoSourcesBySession.get()[sid]
 
-  if (!todos || !todoListActive(todos)) {
+  if (!todos || !todoListActive(todos) || source === 'sdk_tasks') {
     return
   }
 
@@ -158,6 +190,7 @@ export function restoreSessionTodosFromSnapshot(sid: string, snapshot: unknown, 
   }
 
   const revision = parseTodoRevision(snapshot)
+  const source = parseTodoSource(snapshot)
 
   // An unused store serializes as {todos: [], revision: 0}. That is not a
   // real snapshot. Applying it would stamp watermark 0 and leave an empty
@@ -166,10 +199,10 @@ export function restoreSessionTodosFromSnapshot(sid: string, snapshot: unknown, 
     return
   }
 
-  const visible = running ? todos : todosForHydration(todos)
+  const visible = running ? todos : todosForHydration(todos, source)
 
   if (visible !== null) {
-    setSessionTodos(sid, visible, revision)
+    setSessionTodos(sid, visible, revision, source)
   } else if (acceptRevision(sid, revision)) {
     dropSessionTodos(sid, false)
   }

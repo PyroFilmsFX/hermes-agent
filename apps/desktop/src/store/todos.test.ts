@@ -87,12 +87,25 @@ describe('clearActiveSessionTodos (turn-end cleanup)', () => {
 
     expect($todosBySession.get().s1).toBeUndefined()
   })
+
+  it('skips clearing an active list whose source is sdk_tasks', () => {
+    setSessionTodos('s1', [todo('a', 'in_progress')], 1, 'sdk_tasks')
+
+    clearActiveSessionTodos('s1')
+
+    expect($todosBySession.get().s1).toHaveLength(1)
+  })
 })
 
 describe('todosForHydration (stale-active guard on restore)', () => {
   it('does not restore an active list (stale after a completed turn)', () => {
     expect(todosForHydration([todo('a', 'completed'), todo('b', 'in_progress')])).toBeNull()
     expect(todosForHydration([todo('a', 'pending')])).toBeNull()
+  })
+
+  it('restores an active sdk_tasks list on hydration', () => {
+    const active = [todo('a', 'in_progress')]
+    expect(todosForHydration(active, 'sdk_tasks')).toEqual(active)
   })
 
   it('restores a finished list so its linger shows the final checkmarks', () => {
@@ -132,6 +145,13 @@ describe('revisioned snapshots', () => {
     expect($todosBySession.get().s1).toBeUndefined()
 
     restoreSessionTodosFromSnapshot('s1', snapshot, true)
+    expect($todosBySession.get().s1?.[0]?.id).toBe('active')
+  })
+
+  it('restores an active sdk_tasks snapshot even when the session is idle (reopening)', () => {
+    const snapshot = { revision: 7, source: 'sdk_tasks', todos: [todo('active', 'in_progress')] }
+
+    restoreSessionTodosFromSnapshot('s1', snapshot, false)
     expect($todosBySession.get().s1?.[0]?.id).toBe('active')
   })
 

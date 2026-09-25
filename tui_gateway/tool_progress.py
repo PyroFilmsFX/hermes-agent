@@ -134,7 +134,11 @@ def _normalize_todo_state(value: object) -> dict | None:
     # watermark and blocks unversioned tool.start merges. Empty at revision >= 1 is a real clear.
     if not todos and revision == 0:
         return None
-    return {"todos": todos, "revision": revision}
+    normalized = {"todos": todos, "revision": revision}
+    source = value.get("source")
+    if isinstance(source, str) and source:
+        normalized["source"] = source
+    return normalized
 
 
 def _normalized_sdk_task_tool_name(name: object) -> str:
@@ -315,7 +319,11 @@ def _sdk_task_snapshot(
     # directory containing only partial/corrupt files is not evidence of one.
     if files and not valid_files:
         return None
-    return {"todos": todos, "revision": max(1, int(revision or 0))}
+    return {
+        "todos": todos,
+        "revision": max(1, int(revision or 0)),
+        "source": "sdk_tasks",
+    }
 
 
 def _refresh_sdk_todo_snapshot(
