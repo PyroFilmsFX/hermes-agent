@@ -515,6 +515,83 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
                for _texts, items in delivered for item in (items or []))
 
 
+def test_peer_message_folded_during_host_tool_round_keeps_display_order():
+    """A peer row arriving during a host turn belongs between its tool card and answer."""
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
+        UserMessage, _make_session,
+    )
+
+    events = []
+    peer_origin = {
+        "kind": "peer", "from": "uds:/tmp/peer.sock", "name": "hermes:peer",
+        "body": "please check this",
+    }
+    peer = UserMessage(content="please check this")
+    peer.origin = peer_origin
+    peer.uuid = "peer-folded-1"
+    session, holder = _make_session(
+        script=[],
+        on_tool_use=lambda *_args: events.append(("tool", None)),
+        on_unsolicited_result=lambda texts, items=None, _delivery_id=None: events.append(
+            ("peer", items[0] if items else None)
+        ),
+    )
+    try:
+        session.ensure_started()
+        client = holder["client"]
+
+        async def query_with_folded_peer(text):
+            client.queried.append(text)
+            client.feed(
+                UserMessage(content=str(text)),
+                AssistantMessage(content=[ToolUseBlock(id="tool-1", name="Bash", input={"command": "true"})]),
+                UserMessage(content=[ToolResultBlock(tool_use_id="tool-1", content="done")]),
+                peer,
+                AssistantMessage(content=[TextBlock("host reply")]),
+                ResultMessage(result="host reply", uuid="host-peer-fold-1"),
+            )
+
+        client.query = query_with_folded_peer
+        turn = session.run_turn("host prompt", turn_timeout=5, post_tool_quiet_timeout=0.0)
+        events.append(("reply", turn.final_text))
+    finally:
+        session.close()
+
+    assert [event for event, _value in events] == ["tool", "peer", "reply"]
+    assert events[1][1]["kind"] == "peer_in"
+    assert events[1][1]["uuid"] == "peer-folded-1"
+    assert events[1][1]["text"] == "please check this"
+    assert events[2][1] == "host reply"
+
+
+def test_background_result_before_callback_wiring_is_replayed_when_wired():
+    """A fast CLI result survives the short gap before the turn installs delivery hooks."""
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    delivered = []
+    session = ClaudeAgentSdkSession(cwd="/tmp")
+    assistant = AssistantMessage(content=[TextBlock("early result")])
+    result = ResultMessage(result="early result", uuid="early-result-1")
+    try:
+        session._handle_unsolicited(assistant)
+        session._handle_unsolicited(result)
+        assert delivered == []
+        assert len(session._pending_unsolicited_deliveries) == 1
+        session.set_unsolicited_result_callback(
+            lambda texts, items=None, delivery_id=None: delivered.append(
+                (texts, items, delivery_id)
+            )
+        )
+    finally:
+        session.close()
+
+    assert len(delivered) == 1
+    assert delivered[0][0] == ["early result"]
+    assert any(item.get("text") == "early result" for item in delivered[0][1])
+
+
 def test_bash_background_task_is_not_a_subagent_and_agent_task_is_not_a_process():
     """Owner screenshot 09-16: Agent tasks showed under both Subagents and Background."""
     from agent.transports.claude_sdk_background_tasks import classify_sdk_task

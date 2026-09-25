@@ -356,6 +356,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # (observed live 2026-07-29: answers sat in the CLI session until the
         # operator poked). No callback wired = the historical drop semantics.
         self._on_unsolicited_result = on_unsolicited_result
+        self._pending_unsolicited_deliveries: list[tuple[list[str], list[dict], Optional[str]]] = []
         self._on_unsolicited_start = on_unsolicited_start
         self._on_unsolicited_header = on_unsolicited_header
         self._unsolicited_delivery_id: Optional[str] = None
@@ -785,6 +786,34 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         cleaned = " ".join((name or "").split())
         if cleaned and cleaned != self._session_name:
             self._deferred_rename = cleaned
+
+    def set_unsolicited_result_callback(self, callback: Optional[Callable[..., None]]) -> None:
+        """Install a late background-delivery callback and replay buffered results."""
+        with self._turn_callback_lock:
+            self._on_unsolicited_result = callback
+            pending = list(self._pending_unsolicited_deliveries) if callback else []
+            if callback:
+                self._pending_unsolicited_deliveries.clear()
+        if callback is None:
+            return
+        for texts, items, delivery_id in pending:
+            self._deliver_unsolicited_callback(callback, texts, items, delivery_id)
+
+    @staticmethod
+    def _deliver_unsolicited_callback(callback, texts, items, delivery_id=None) -> None:
+        import inspect
+
+        try:
+            inspect.signature(callback).bind(texts, items, delivery_id)
+        except (TypeError, ValueError):
+            try:
+                inspect.signature(callback).bind(texts, items)
+            except (TypeError, ValueError):
+                callback(texts)
+            else:
+                callback(texts, items)
+        else:
+            callback(texts, items, delivery_id)
 
     def _apply_deferred_rename(self) -> None:
         """Apply a parked rename once no turn owns the stream. Never raises."""

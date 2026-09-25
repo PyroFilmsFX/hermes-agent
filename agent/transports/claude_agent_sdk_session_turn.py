@@ -914,6 +914,13 @@ class ClaudeSdkTurnMixin:
                         self._handle_unsolicited(message)
                         continue
                 self._handle_compact_boundary(message)
+                origin = getattr(message, "origin", None)
+                if (
+                    type(message).__name__ == "UserMessage"
+                    and isinstance(origin, dict)
+                    and origin.get("kind") == "peer"
+                ):
+                    self._deliver_host_peer_item(message, origin)
                 # Task lifecycle and provisional Bash records are stream
                 # concerns, not foreground-turn visibility. Observe before
                 # interrupt/billing gates so draining turns cannot orphan them.
@@ -1178,6 +1185,58 @@ class ClaudeSdkTurnMixin:
                 and str(getattr(block, "name", "")).startswith("mcp__")
             ):
                 out["mcp_tool_seen"] = True
+
+    def _deliver_host_peer_item(self, message: Any, origin: dict) -> None:
+        """Render a peer prompt folded into this host turn at its stream position."""
+        uuid = str(getattr(message, "uuid", None) or "")
+        seen = getattr(self, "_host_peer_seen", None)
+        if seen is None:
+            seen = self._host_peer_seen = set()
+        if uuid and uuid in seen:
+            return
+        if uuid:
+            seen.add(uuid)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            text = content
+        else:
+            text = "\n".join(
+                str(getattr(block, "text", "") or "")
+                for block in content or []
+                if type(block).__name__ == "TextBlock"
+            )
+        item = {
+            "kind": "peer_in",
+            "text": str(origin.get("body") or text),
+            "from": str(origin.get("from") or ""),
+            "name": str(origin.get("name") or ""),
+            "from_session": str(origin.get("fromSession") or ""),
+            "uuid": uuid,
+        }
+        if not item["text"]:
+            return
+        self._deliver_or_buffer_unsolicited([], [item], f"deliv-peer-{uuid}" if uuid else None)
+
+    def _deliver_or_buffer_unsolicited(
+        self, texts: list[str], items: list[dict], delivery_id: Optional[str]
+    ) -> None:
+        callback = getattr(self, "_on_unsolicited_result", None)
+        if callback is None:
+            pending = getattr(self, "_pending_unsolicited_deliveries", None)
+            if pending is None:
+                pending = self._pending_unsolicited_deliveries = []
+            pending.append((list(texts), [dict(item) for item in items], delivery_id))
+            logger.warning(
+                "claude-agent-sdk: retained unsolicited delivery until its callback is wired"
+            )
+            return
+        try:
+            self._deliver_unsolicited_callback(callback, texts, items, delivery_id)
+        except Exception:
+            logger.warning(
+                "claude-agent-sdk: unsolicited-result delivery callback raised — answer may be lost",
+                exc_info=True,
+            )
 
     @staticmethod
     def _project_message_step(
@@ -1511,17 +1570,6 @@ class ClaudeSdkTurnMixin:
             # Subagent streams belong to the parent tool card, not to the
             # session-level unsolicited turn.
             return
-        if self._on_unsolicited_result is None:
-            if name == "ResultMessage":
-                _clear_unsolicited_projection(self)
-                logger.warning(
-                    "claude-agent-sdk: dropped unsolicited ResultMessage (no "
-                    "turn in flight, total=%d) — CLI-initiated turn; see "
-                    "dasbrow-hermes-coder#2",
-                    self._unsolicited_results,
-                )
-            return
-
         items = self._unsolicited_items
         tool_items = self._unsolicited_tool_items
         seen = self._unsolicited_seen
@@ -1703,26 +1751,7 @@ class ClaudeSdkTurnMixin:
                 self._unsolicited_results, len(texts),
                 sum(len(t) for t in texts), len(unsolicited_items),
             )
-            try:
-                import inspect
-
-                callback = self._on_unsolicited_result
-                try:
-                    inspect.signature(callback).bind(texts, unsolicited_items, delivery_id)
-                except (TypeError, ValueError):
-                    try:
-                        inspect.signature(callback).bind(texts, unsolicited_items)
-                    except (TypeError, ValueError):
-                        callback(texts)
-                    else:
-                        callback(texts, unsolicited_items)
-                else:
-                    callback(texts, unsolicited_items, delivery_id)
-            except Exception:
-                logger.warning(
-                    "claude-agent-sdk: unsolicited-result delivery callback "
-                    "raised — answer may be lost", exc_info=True,
-                )
+            self._deliver_or_buffer_unsolicited(texts, unsolicited_items, delivery_id)
         elif name == "AssistantMessage":
             # Buffer top-level text, one entry per message so the burst
             # delivers in message granularity; subagent streams

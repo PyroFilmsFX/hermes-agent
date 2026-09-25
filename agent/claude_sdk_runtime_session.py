@@ -790,6 +790,12 @@ def _refresh_turn_visibility(agent, state: _SdkTurnState) -> None:
                 on_interim_assistant=state.on_interim_assistant,
                 on_tool_iteration=state.on_tool_iteration,
             )
+            # A background completion can beat this turn's runtime callback
+            # setup on a reused session. Reinstall the enabled sink here so
+            # any retained completion is replayed before the host turn starts.
+            background_sink = _background_result_sink(agent)
+            if background_sink is not None:
+                live_session.set_unsolicited_result_callback(background_sink)
         except Exception:
             logger.debug("claude-sdk visibility callback refresh failed", exc_info=True)
 
