@@ -423,21 +423,71 @@ def test_peer_mailbox_rpc_list_retry_cancel(gw):
     assert any(m["id"] == msg_id for m in messages)
 
     # 2. cancel queued message
-    cancel_res = gw.server._methods["peer_mailbox.cancel"]("r2", {"message_id": msg_id})
+    wrong_cancel = gw.server._methods["peer_mailbox.cancel"](
+        "r2-wrong", {"message_id": msg_id, "session_id": "unrelated"}
+    )
+    assert "error" in wrong_cancel
+    assert gw.db.peer_mailbox_get(msg_id)["status"] == "queued"
+    cancel_res = gw.server._methods["peer_mailbox.cancel"](
+        "r2", {"message_id": msg_id, "session_id": "target"}
+    )
     assert cancel_res["result"]["cancelled"] is True
     row = gw.db.peer_mailbox_get(msg_id)
     assert row["status"] == "failed"
 
     # Cannot cancel already-failed message
-    err_res = gw.server._methods["peer_mailbox.cancel"]("r3", {"message_id": msg_id})
+    err_res = gw.server._methods["peer_mailbox.cancel"](
+        "r3", {"message_id": msg_id, "session_id": "target"}
+    )
     assert "error" in err_res
 
     # 3. retry a queued message
     send_res2 = _send(gw, target="target", body="queued mail 2", from_session_id="sender")
     msg_id2 = send_res2["message_id"]
     gw.pol["resume_on_send"] = True
-    retry_res = gw.server._methods["peer_mailbox.retry"]("r4", {"message_id": msg_id2})
+    wrong_retry = gw.server._methods["peer_mailbox.retry"](
+        "r4-wrong", {"message_id": msg_id2, "session_id": "unrelated"}
+    )
+    assert "error" in wrong_retry
+    assert gw.db.peer_mailbox_get(msg_id2)["status"] == "queued"
+    retry_res = gw.server._methods["peer_mailbox.retry"](
+        "r4", {"message_id": msg_id2, "session_id": "target"}
+    )
     assert retry_res["result"]["status"] in (gw.mb.STATUS_RESUMED, gw.mb.STATUS_DELIVERED_LIVE)
+
+
+def test_peer_mailbox_list_requires_session_scope_and_filters_both_directions(gw):
+    gw.pol["resume_on_send"] = False
+    to_target = _send(gw, target="target", body="target mail", from_session_id="sender")
+    unrelated = _send(gw, target="other", body="other mail", from_session_id="third")
+
+    unscoped = gw.server._methods["peer_mailbox.list"]("r1", {})
+    assert "error" in unscoped
+
+    target_rows = gw.server._methods["peer_mailbox.list"](
+        "r2", {"session_id": "target"}
+    )["result"]["messages"]
+    sender_rows = gw.server._methods["peer_mailbox.list"](
+        "r3", {"session_id": "sender"}
+    )["result"]["messages"]
+    assert [row["id"] for row in target_rows] == [to_target["message_id"]]
+    assert [row["id"] for row in sender_rows] == [to_target["message_id"]]
+    assert all(row["id"] != unrelated["message_id"] for row in target_rows + sender_rows)
+
+
+def test_peer_mailbox_list_clamps_limit(gw, monkeypatch):
+    import tui_gateway.session_mailbox as mailbox
+
+    received = []
+    monkeypatch.setattr(
+        mailbox, "list_messages",
+        lambda **kwargs: received.append(kwargs["limit"]) or [],
+    )
+    for index, requested in enumerate((-5, 999)):
+        gw.server._methods["peer_mailbox.list"](
+            f"r{index}", {"session_id": "target", "limit": requested}
+        )
+    assert received == [1, 200]
 
 
 def test_session_set_pinned_persists_across_restart(gw):

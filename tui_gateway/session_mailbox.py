@@ -780,11 +780,8 @@ def list_messages(session_id: str | None = None, limit: int = 50, pending_only: 
     with _open_db(profile_home) as db:
         if db is None:
             return []
-        if session_id:
-            tip = _tip(db, session_id)
-            rows = db.peer_mailbox_for_session(tip, limit=limit, pending_only=pending_only)
-        else:
-            rows = db.peer_mailbox_list_all(limit=limit, pending_only=pending_only)
+        tip = _tip(db, session_id)
+        rows = db.peer_mailbox_for_session(tip, limit=limit, pending_only=pending_only)
         out = []
         for r in rows:
             row_dict = dict(r)
@@ -794,7 +791,17 @@ def list_messages(session_id: str | None = None, limit: int = 50, pending_only: 
         return out
 
 
-def retry_message(message_id: int, profile_home: str | None = None) -> tuple[str, str]:
+def _row_belongs_to_session(db, row: dict, session_id: str) -> bool:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return False
+    allowed = {session_id, _tip(db, session_id)}
+    return str(row.get("target_session_id") or "") in allowed or str(
+        row.get("from_session_id") or ""
+    ) in allowed
+
+
+def retry_message(message_id: int, session_id: str, profile_home: str | None = None) -> tuple[str, str]:
     pol = policy()
     with _open_db(profile_home) as db:
         if db is None:
@@ -802,6 +809,8 @@ def retry_message(message_id: int, profile_home: str | None = None) -> tuple[str
         row = db.peer_mailbox_get(message_id)
         if not row:
             return STATUS_FAILED, "message not found"
+        if not _row_belongs_to_session(db, row, session_id):
+            return STATUS_FAILED, "message does not belong to session"
         if row.get("status") == "delivered":
             return row.get("delivered_via", "delivered"), "message is already delivered"
         if row.get("status") == "claimed":
@@ -810,12 +819,12 @@ def retry_message(message_id: int, profile_home: str | None = None) -> tuple[str
         return status, detail
 
 
-def cancel_message(message_id: int, profile_home: str | None = None) -> bool:
+def cancel_message(message_id: int, session_id: str, profile_home: str | None = None) -> bool:
     with _open_db(profile_home) as db:
         if db is None:
             return False
         row = db.peer_mailbox_get(message_id)
-        if not row:
+        if not row or not _row_belongs_to_session(db, row, session_id):
             return False
         if row.get("status") != "queued":
             return False
@@ -831,4 +840,3 @@ __all__ = [
     "recover_stale_claims", "resume_interrupted_sessions", "retry_message", "revive_resident_sessions",
     "schedule_drain", "schedule_startup_delivery", "send_message", "send_rpc", "session_is_resident",
 ]
-

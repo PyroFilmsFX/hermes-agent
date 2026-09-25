@@ -1162,9 +1162,11 @@ def _(rid, params: dict) -> dict:
 
 @method("peer_mailbox.list")
 def _(rid, params: dict) -> dict:
-    """List peer mailbox messages for a session or globally."""
+    """List peer mailbox messages involving one session."""
     session_id = _str_param(params, "session_id")
-    limit = int(params.get("limit") or 50)
+    if not session_id:
+        return _err(rid, 4004, "session_id is required")
+    limit = max(1, min(200, int(params.get("limit", 50))))
     pending_only = is_truthy_value(params.get("pending_only", False))
     home = _profile_home(params.get("profile")) if params.get("profile") else None
     profile_home = str(home) if home else None
@@ -1183,11 +1185,16 @@ def _(rid, params: dict) -> dict:
     msg_id = params.get("message_id")
     if msg_id is None:
         return _err(rid, 4004, "message_id is required")
+    session_id = _str_param(params, "session_id")
+    if not session_id:
+        return _err(rid, 4004, "session_id is required")
     home = _profile_home(params.get("profile")) if params.get("profile") else None
     profile_home = str(home) if home else None
     from tui_gateway.session_mailbox import retry_message
     try:
-        status, detail = retry_message(int(msg_id), profile_home=profile_home)
+        status, detail = retry_message(int(msg_id), session_id, profile_home=profile_home)
+        if detail == "message does not belong to session":
+            return _err(rid, 4004, detail)
         return _ok(rid, {"message_id": int(msg_id), "status": status, "detail": detail})
     except Exception as e:
         return _err(rid, 5006, str(e))
@@ -1199,11 +1206,14 @@ def _(rid, params: dict) -> dict:
     msg_id = params.get("message_id")
     if msg_id is None:
         return _err(rid, 4004, "message_id is required")
+    session_id = _str_param(params, "session_id")
+    if not session_id:
+        return _err(rid, 4004, "session_id is required")
     home = _profile_home(params.get("profile")) if params.get("profile") else None
     profile_home = str(home) if home else None
     from tui_gateway.session_mailbox import cancel_message
     try:
-        ok = cancel_message(int(msg_id), profile_home=profile_home)
+        ok = cancel_message(int(msg_id), session_id, profile_home=profile_home)
         if not ok:
             return _err(rid, 4009, "message cannot be cancelled (not queued or delivery in progress)")
         return _ok(rid, {"message_id": int(msg_id), "status": "failed", "cancelled": True})

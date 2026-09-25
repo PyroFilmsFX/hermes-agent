@@ -87,10 +87,16 @@ describe('SessionMailboxPopover component', () => {
 
     // Click Retry
     fireEvent.click(retryBtn)
-    expect(mockRequest).toHaveBeenCalledWith('peer_mailbox.retry', { message_id: 101 })
+    expect(mockRequest).toHaveBeenCalledWith('peer_mailbox.retry', {
+      message_id: 101,
+      session_id: 'sess-test-2'
+    })
 
     // Click Cancel
     fireEvent.click(cancelBtn)
-    expect(mockRequest).toHaveBeenCalledWith('peer_mailbox.cancel', { message_id: 101 })
+    expect(mockRequest).toHaveBeenCalledWith('peer_mailbox.cancel', {
+      message_id: 101,
+      session_id: 'sess-test-2'
+    })
   })
 })

@@ -57,7 +57,10 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
       return
     }
     try {
-      await gateway.request<PeerMailboxRetryResult>('peer_mailbox.retry', { message_id: messageId })
+      await gateway.request<PeerMailboxRetryResult>('peer_mailbox.retry', {
+        message_id: messageId,
+        session_id: sessionId
+      })
       void fetchMailbox()
     } catch (err) {
       console.warn('Failed to retry peer message', err)
@@ -70,7 +73,10 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
       return
     }
     try {
-      await gateway.request<PeerMailboxCancelResult>('peer_mailbox.cancel', { message_id: messageId })
+      await gateway.request<PeerMailboxCancelResult>('peer_mailbox.cancel', {
+        message_id: messageId,
+        session_id: sessionId
+      })
       void fetchMailbox()
     } catch (err) {
       console.warn('Failed to cancel peer message', err)
