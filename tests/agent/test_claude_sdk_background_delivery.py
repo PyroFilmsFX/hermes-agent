@@ -444,6 +444,51 @@ def test_peer_burst_that_straddles_admission_never_answers_the_host_turn():
     assert session._unsolicited_burst_open is False
 
 
+def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
+    """Live 2026-09-24 (session ce3d96): a peer turn was running when the owner's prompt
+    arrived. The CLI folded the queued prompt into that turn at a tool boundary (it replays
+    the prompt mid-turn, proven with a live probe) and answered both with ONE ResultMessage
+    that keeps the peer origin. Routing that result to the background lane left the host turn
+    waiting out its 600 s timeout, the answer landed late as a background row, and the runtime
+    was retired. After a mid-burst replay, the result is the host turn's answer."""
+    import time as _time
+
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
+    )
+
+    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other", "body": "ping"}
+    folded = ResultMessage(result="answer to both", uuid="folded-res-1")
+    folded.origin = peer_origin
+    delivered = []
+    # The fake replays the host prompt on query(), like --replay-user-messages; the script
+    # is the rest of the (folded) injected turn.
+    session, holder = _make_session(
+        script=[AssistantMessage(content=[TextBlock("answer to both")]), folded],
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    try:
+        session.ensure_started()
+        peer_in = UserMessage(content="ping")
+        peer_in.origin = peer_origin
+        peer_in.uuid = "peer-in-1"
+        holder["client"].feed(peer_in)
+        deadline = _time.time() + 2
+        while not session._unsolicited_burst_open and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session._unsolicited_burst_open
+        started = _time.time()
+        turn = session.run_turn("host question", turn_timeout=5.0)
+        elapsed = _time.time() - started
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert turn.final_text == "answer to both"
+    assert elapsed < 4.0, "the host turn must not wait out its timeout"
+    assert all("answer to both" not in " ".join(texts) for texts, _items in delivered)
+
+
 def test_bash_background_task_is_not_a_subagent_and_agent_task_is_not_a_process():
     """Owner screenshot 09-16: Agent tasks showed under both Subagents and Background."""
     from agent.transports.claude_sdk_background_tasks import classify_sdk_task

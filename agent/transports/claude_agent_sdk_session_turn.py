@@ -124,6 +124,7 @@ class ClaudeSdkTurnMixin:
 
     _pending_rename_ack: Optional[str] = None
     _deferred_rename: Optional[str] = None
+    _host_prompt_folded: bool = False
 
     # ---------- per-turn ----------
 
@@ -860,12 +861,16 @@ class ClaudeSdkTurnMixin:
                     # claimed the stream: the CLI's ack, never this turn's result.
                     self._pending_rename_ack = None
                     continue
-                if type(message).__name__ == "ResultMessage" and _is_injected_origin(
-                    getattr(message, "origin", None)
+                if (
+                    type(message).__name__ == "ResultMessage"
+                    and not getattr(self, "_host_prompt_folded", False)
+                    and _is_injected_origin(getattr(message, "origin", None))
                 ):
                     # ResultMessage.origin names the message that triggered its
-                    # turn: a peer/task-notification result can never answer
-                    # this host turn. Hand it to the background path instead.
+                    # turn: a peer/task-notification result belongs to a separate
+                    # injected turn. Hand it to the background path instead —
+                    # unless the reader saw this turn's prompt folded INTO that
+                    # injected turn; then its single result is this turn's answer.
                     self._handle_unsolicited(message)
                     continue
                 self._handle_compact_boundary(message)
@@ -1251,15 +1256,20 @@ class ClaudeSdkTurnMixin:
                         # turn. Only an echo of the host's own prompt proves
                         # the CLI moved on.
                         if _is_own_prompt_echo(message):
-                            # The injected turn ended without its terminal
-                            # result (e.g. a cut-off burst): its partial text
-                            # must never attach to a later unrelated result.
+                            # The CLI replays a queued prompt when it consumes it.
+                            # Mid-burst, that means it folded the host prompt INTO
+                            # the injected turn at a tool boundary (live probe
+                            # 2026-09-24): the injected turn's one ResultMessage,
+                            # peer origin and all, now answers the host turn.
+                            # (cntrl carry) Its pre-fold partial text must never
+                            # attach to a later unrelated result.
+                            self._host_prompt_folded = True
                             self._unsolicited_burst_open = False
                             if self._unsolicited_text or self._unsolicited_items:
                                 logger.warning(
-                                    "claude-agent-sdk: discarding %d stale unsolicited text(s) "
-                                    "buffered before this turn — their terminal "
-                                    "ResultMessage never arrived",
+                                    "claude-agent-sdk: host prompt replayed mid-burst; discarding "
+                                    "%d stale unsolicited text(s) buffered before it (a folded "
+                                    "injected turn, or a burst whose result never arrived)",
                                     len(self._unsolicited_text),
                                 )
                             _clear_unsolicited_projection(self)
@@ -1292,6 +1302,7 @@ class ClaudeSdkTurnMixin:
                             RuntimeError("SDK message stream already has a turn owner")
                         )
                         continue
+                    self._host_prompt_folded = False
                     self._turn_inbox = inbox
                 elif operation == "release":
                     if self._turn_inbox is not inbox:
