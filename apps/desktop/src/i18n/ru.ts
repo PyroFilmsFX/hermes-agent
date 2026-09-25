@@ -2603,6 +2603,8 @@ export const ru = defineLocale({
     },
     newSessionIn: label => `Новый сеанс в ${label}`,
     showMoreIn: (count, label) => `Показать ещё ${count} в ${label}`,
+    laneRollup: (count, running) =>
+      `${count} ${RU_PLURAL(count, 'ветка', 'ветки', 'веток')}${running && running > 0 ? ` · ${running} выполняется` : ''}`,
     loading: 'Загрузка…',
     loadMore: 'Загрузить ещё',
     loadCount: step => `Загрузить ещё ${step}`,

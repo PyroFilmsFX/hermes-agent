@@ -15,11 +15,13 @@ import { removeWorktreePath } from '@/store/projects'
 
 import { SidebarRowStack } from '../chrome'
 
+import { ConductorLaneRollup } from './lane-rollup'
 import { useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
 import {
   mergeRepoWorktreeGroups,
   overlayRepoLanes,
+  partitionConductorLanes,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   type SidebarWorkspaceTree
@@ -78,7 +80,7 @@ export function EnteredProjectContent({
   )
 }
 
-function RepoFlatSection({
+export function RepoFlatSection({
   repo,
   showHeader,
   renderRows,
@@ -140,6 +142,11 @@ function RepoFlatSection({
       (removedWorktrees.includes(group.id) && group.path && discoveredWorktreePaths.has(group.path))
   )
 
+  const { regular, conductor } = useMemo(() => partitionConductorLanes(ordered), [ordered])
+  const homeIndex = regular.findIndex(group => group.isHome || group.isMain)
+  const beforeLanes = homeIndex >= 0 ? regular.slice(0, homeIndex + 1) : []
+  const afterLanes = homeIndex >= 0 ? regular.slice(homeIndex + 1) : regular
+
   // Removal asks how: actually `git worktree remove` it, or just hide the lane
   // and leave the worktree on disk. A dirty worktree escalates to a force prompt
   // instead of erroring (those changes are usually throwaway).
@@ -165,20 +172,34 @@ function RepoFlatSection({
     }
   }
 
+  const renderGroup = (group: SidebarSessionGroup) => (
+    <SidebarWorkspaceGroup
+      group={group}
+      key={group.id}
+      // The kanban bucket is read-only: it aggregates many task worktrees, so
+      // "new session here" and "remove worktree" have no single target.
+      onNewSession={group.isKanban ? undefined : onNewSession}
+      onNewSessionSplit={group.isKanban ? undefined : onNewSessionSplit}
+      onRemove={group.isMain || group.isKanban ? undefined : () => setRemoveTarget(group)}
+      renderRows={renderRows}
+    />
+  )
+
   const body = (
     <>
-      {ordered.map(group => (
-        <SidebarWorkspaceGroup
-          group={group}
-          key={group.id}
-          // The kanban bucket is read-only: it aggregates many task worktrees, so
-          // "new session here" and "remove worktree" have no single target.
-          onNewSession={group.isKanban ? undefined : onNewSession}
-          onNewSessionSplit={group.isKanban ? undefined : onNewSessionSplit}
-          onRemove={group.isMain || group.isKanban ? undefined : () => setRemoveTarget(group)}
+      {beforeLanes.map(renderGroup)}
+      {conductor.length > 0 && (
+        <ConductorLaneRollup
+          key={`${repo.path || repo.id}::lanes`}
+          lanes={conductor}
+          onNewSession={onNewSession}
+          onNewSessionSplit={onNewSessionSplit}
+          onRemoveLane={setRemoveTarget}
           renderRows={renderRows}
+          repoRoot={repo.path || repo.id}
         />
-      ))}
+      )}
+      {afterLanes.map(renderGroup)}
     </>
   )
 

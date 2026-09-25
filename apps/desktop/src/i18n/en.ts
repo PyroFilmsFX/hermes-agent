@@ -2829,6 +2829,8 @@ export const en: Translations = {
     },
     newSessionIn: label => `New session in ${label}`,
     showMoreIn: (count, label) => `Show ${count} more in ${label}`,
+    laneRollup: (count, running) =>
+      `${count} ${count === 1 ? 'lane' : 'lanes'}${running && running > 0 ? ` · ${running} running` : ''}`,
     loading: 'Loading…',
     loadMore: 'Load more',
     loadCount: step => `Load ${step} more`,

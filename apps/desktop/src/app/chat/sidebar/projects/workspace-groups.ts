@@ -115,6 +115,97 @@ export function kanbanWorktreeDir(path: string): null | string {
   return path.match(KANBAN_DIR_RE)?.[1] ?? null
 }
 
+const LANE_PREFIX_RE = /^lane[-/]/
+
+const isPrBase = (name?: string | null): boolean => {
+  if (!name) {
+    return false
+  }
+
+  const trimmed = name.trim()
+
+  return trimmed === 'pr-base' || trimmed.startsWith('pr-base-')
+}
+
+/**
+ * Predicate to identify conductor lane worktrees.
+ * Returns true when any of these hold:
+ *  - the path contains a "/.claude/worktrees/lane-" or "/.claude/worktrees/lane/" segment
+ *  - the path basename matches /^lane[-/]/
+ *  - the branch matches /^lane[-/]/
+ *  - the basename or branch equals "pr-base" or starts with "pr-base-"
+ * Never true for isMain.
+ */
+export function isConductorLane(
+  worktree:
+    | HermesGitWorktree
+    | SidebarSessionGroup
+    | {
+        path?: null | string
+        branch?: null | string
+        label?: string
+        isMain?: boolean
+        isKanban?: boolean
+      }
+): boolean {
+  if (worktree.isMain || ('isKanban' in worktree && worktree.isKanban)) {
+    return false
+  }
+
+  const path = worktree.path || ''
+  const normalizedPath = path.replace(/\\/g, '/')
+
+  const hasClaudeLaneSegment =
+    normalizedPath.includes('/.claude/worktrees/lane-') ||
+    normalizedPath.includes('/.claude/worktrees/lane/') ||
+    normalizedPath.startsWith('.claude/worktrees/lane-') ||
+    normalizedPath.startsWith('.claude/worktrees/lane/')
+
+  const base = baseName(path) ?? ''
+  const branch = ('branch' in worktree && worktree.branch ? worktree.branch : '').trim()
+  const label = ('label' in worktree && worktree.label ? worktree.label : '').trim()
+
+  return (
+    hasClaudeLaneSegment ||
+    LANE_PREFIX_RE.test(base) ||
+    LANE_PREFIX_RE.test(branch) ||
+    LANE_PREFIX_RE.test(label) ||
+    isPrBase(base) ||
+    isPrBase(branch) ||
+    isPrBase(label)
+  )
+}
+
+export interface ConductorLanePartition extends Array<SidebarSessionGroup[]> {
+  0: SidebarSessionGroup[]
+  1: SidebarSessionGroup[]
+  regular: SidebarSessionGroup[]
+  conductor: SidebarSessionGroup[]
+}
+
+/**
+ * Partition lanes into regular lanes and conductor lanes.
+ * Preserved as a pure function to leave room for future parent-session marker grouping (e.g. `.hermes-parent`).
+ */
+export function partitionConductorLanes(groups: SidebarSessionGroup[]): ConductorLanePartition {
+  const regular: SidebarSessionGroup[] = []
+  const conductor: SidebarSessionGroup[] = []
+
+  for (const group of groups) {
+    if (isConductorLane(group)) {
+      conductor.push(group)
+    } else {
+      regular.push(group)
+    }
+  }
+
+  const result = [regular, conductor] as unknown as ConductorLanePartition
+  result.regular = regular
+  result.conductor = conductor
+
+  return result
+}
+
 /** Label for a main-checkout lane whose session recorded no branch. */
 export const DEFAULT_BRANCH_LABEL = 'main'
 

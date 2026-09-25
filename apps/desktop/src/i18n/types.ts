@@ -2450,6 +2450,7 @@ export interface Translations {
     }
     newSessionIn: (label: string) => string
     showMoreIn: (count: number, label: string) => string
+    laneRollup: (count: number, running?: number) => string
     loading: string
     loadMore: string
     loadCount: (step: number) => string
