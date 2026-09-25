@@ -45,6 +45,18 @@ def tool_name_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     return mapping
 
 
+_MCP_TOOL_PREFIX_RE = re.compile(r"^mcp__(.+?)__(.+)$")
+
+
+def normalize_media_tool_name(tool_name: Any) -> str:
+    """Normalise tool name before media checks by stripping an 'mcp__<server>__' prefix."""
+    if not tool_name or not isinstance(tool_name, str):
+        return ""
+    match = _MCP_TOOL_PREFIX_RE.match(tool_name)
+    return match.group(2) if match else tool_name
+
+
+
 def _computer_use_capture_basename(path: Any) -> str:
     """Canonical (lowercased) capture basename for either separator style, or ''."""
     basename = re.split(r"[/\\]", str(path or "").strip().strip("`\"'"))[-1]
@@ -116,7 +128,8 @@ def _canonical_capture_paths(turn_messages: List[Dict[str, Any]]) -> Dict[str, s
         if msg.get("role") not in {"tool", "function"}:
             continue
         call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if str(msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or "") != "computer_use":
+        raw_name = str(msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or "")
+        if normalize_media_tool_name(raw_name) != "computer_use":
             continue
         for path in _iter_computer_use_capture_paths(msg.get("content")):
             basename = _computer_use_capture_basename(path)

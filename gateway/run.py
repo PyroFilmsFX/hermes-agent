@@ -1340,6 +1340,7 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
 
 # Tool output may hold literal MEDIA: examples (docs, logs); only deliberate media producers may auto-append.
 _AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate"}
+from gateway.media_repair import normalize_media_tool_name as _normalize_media_tool_name  # noqa: E402
 
 # Replay-history canonicalization lives in agent/replay_cleanup.py so every resume
 # surface and the send path share one implementation.
@@ -1414,10 +1415,12 @@ def _collect_auto_append_media_tags(
         if msg.get("role") not in ("tool", "function"):
             continue
         call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if tool_name_by_call_id.get(call_id) not in _AUTO_APPEND_MEDIA_TOOL_NAMES:
+        tool_name = _normalize_media_tool_name(
+            tool_name_by_call_id.get(call_id) or str(msg.get("name") or msg.get("tool_name") or "")
+        )
+        if tool_name not in _AUTO_APPEND_MEDIA_TOOL_NAMES:
             continue
         content = str(msg.get("content") or "")
-        tool_name = tool_name_by_call_id.get(call_id)
         # image_generate emits a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
         if tool_name == "image_generate" and "MEDIA:" not in content:
             try:
@@ -1474,7 +1477,10 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
         if role == "assistant":
             continue
         cid = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if tool_name_by_call_id.get(cid) == "image_generate":
+        cid_tool_name = _normalize_media_tool_name(
+            tool_name_by_call_id.get(cid) or str(msg.get("name") or msg.get("tool_name") or "")
+        )
+        if cid_tool_name == "image_generate":
             try:
                 payload = json.loads(content)
             except Exception:

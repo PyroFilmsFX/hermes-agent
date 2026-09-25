@@ -326,6 +326,84 @@ caption
         assert tags == []
         assert voice is False
 
+    def test_sdk_mcp_qualified_media_tool_auto_attach(self):
+        """Auto-attach media emitted by MCP-qualified SDK-lane tool calls (mcp__<server>__<tool>)."""
+        from gateway.run import _collect_auto_append_media_tags
+
+        # Positive case: Claude Agent SDK lane produces mcp__hermes-tools__text_to_speech
+        sdk_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_sdk_tts",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__hermes-tools__text_to_speech",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_sdk_tts",
+                "content": "[[audio_as_voice]]\nMEDIA:/tmp/tts_sdk_output.ogg",
+            },
+        ]
+        tags, voice = _collect_auto_append_media_tags(sdk_messages, history_offset=0)
+        assert tags == ["MEDIA:/tmp/tts_sdk_output.ogg"]
+        assert voice is True
+
+        # Negative case 1: custom tool named "my_text_to_speech" without mcp__ prefix
+        my_tts_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_my_tts",
+                        "type": "function",
+                        "function": {
+                            "name": "my_text_to_speech",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_my_tts",
+                "content": "[[audio_as_voice]]\nMEDIA:/tmp/my_tts_output.ogg",
+            },
+        ]
+        tags, voice = _collect_auto_append_media_tags(my_tts_messages, history_offset=0)
+        assert tags == []
+        assert voice is False
+
+        # Negative case 2: MCP tool from another server that is not a media producer (e.g. mcp__x__other_tool)
+        other_mcp_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_other",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__x__other_tool",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_other",
+                "content": "Doc snippet: MEDIA:/tmp/not_for_delivery.png",
+            },
+        ]
+        tags, voice = _collect_auto_append_media_tags(other_mcp_messages, history_offset=0)
+        assert tags == []
+        assert voice is False
 
     def test_collect_history_media_paths_includes_image_generate_json(self):
         """Regression for #46627: the history media-path collector must pick up
