@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Any, Dict, Iterator, List
 
+from agent.tool_identity import strip_mcp_namespace
+
 logger = logging.getLogger(__name__)
 
 # Absolute-path prefix for canonical capture paths: Windows drive letter, POSIX
@@ -45,16 +47,12 @@ def tool_name_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     return mapping
 
 
-_MCP_TOOL_PREFIX_RE = re.compile(r"^mcp__(.+?)__(.+)$")
-
-
 def normalize_media_tool_name(tool_name: Any) -> str:
-    """Normalise tool name before media checks by stripping an 'mcp__<server>__' prefix."""
+    """Bare name for Hermes' own MCP-routed tools (``mcp__hermes-tools__text_to_speech``);
+    third-party MCP names stay qualified, so another server's same-named tool never auto-attaches."""
     if not tool_name or not isinstance(tool_name, str):
         return ""
-    match = _MCP_TOOL_PREFIX_RE.match(tool_name)
-    return match.group(2) if match else tool_name
-
+    return strip_mcp_namespace(tool_name)
 
 
 def _computer_use_capture_basename(path: Any) -> str:
