@@ -256,8 +256,9 @@ def test_unsolicited_peer_turn_projects_ordered_items_once():
             "source": "peer", "by": "Peer Name", "uuid": "peer-in-1",
         },
         {
-            "kind": "peer_in", "text": "incoming body", "from": "peer-id",
-            "name": "Peer Name", "from_session": "peer-session", "uuid": "peer-in-1",
+                "kind": "peer_in", "text": "incoming body", "from": "peer-id",
+                "name": "Peer Name", "from_session": "peer-session",
+                "msg_id": "peer-in-1", "uuid": "peer-in-1",
         },
         {
             "kind": "tool", "tool_use_id": "tool-1", "name": "SendMessage",
