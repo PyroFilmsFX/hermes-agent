@@ -59,3 +59,55 @@ def test_tool_subscription_captures_conversation_anchors(tmp_path, monkeypatch):
         metadata = kn.list_notify_subs(conn, result["task_id"])[0]["delivery_metadata"]
         assert metadata["scope_id"] == "guild"
         assert metadata["parent_chat_id"] == "forum"
+
+
+def test_session_id_skips_environ_fallback_when_session_context_engaged(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    import gateway.session_context as sc
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-foreign-session")
+    kb.init_db()
+
+    # 1. When session context is engaged and session ContextVar is unset:
+    # skip os.environ fallback so the stale session id does not leak.
+    saved_engaged = sc._session_context_engaged
+    try:
+        sc._session_context_engaged = True
+        sc.reset_session_vars()
+        result = json.loads(kt._handle_create(dict(title="t1", assignee="default")))
+        assert result["ok"], result
+        with kbc.connect_closing() as conn:
+            task = kb.get_task(conn, result["task_id"])
+            assert task.session_id is None
+    finally:
+        sc._session_context_engaged = saved_engaged
+
+    # 2. When session context is NOT engaged (CLI invocation):
+    # os.environ fallback is preserved.
+    saved_engaged = sc._session_context_engaged
+    try:
+        sc._session_context_engaged = False
+        sc.reset_session_vars()
+        result = json.loads(kt._handle_create(dict(title="t2", assignee="default")))
+        assert result["ok"], result
+        with kbc.connect_closing() as conn:
+            task = kb.get_task(conn, result["task_id"])
+            assert task.session_id == "stale-foreign-session"
+    finally:
+        sc._session_context_engaged = saved_engaged
+
+    # 3. When session ContextVar IS set:
+    # contextvar value is used.
+    tokens = sc.set_session_vars(session_id="bound-session")
+    try:
+        result = json.loads(kt._handle_create(dict(title="t3", assignee="default")))
+        assert result["ok"], result
+        with kbc.connect_closing() as conn:
+            task = kb.get_task(conn, result["task_id"])
+            assert task.session_id == "bound-session"
+    finally:
+        sc.clear_session_vars(tokens)
+

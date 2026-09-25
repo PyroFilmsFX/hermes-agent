@@ -878,8 +878,19 @@ def _handle_create(args: dict, **kw) -> str:
                     if _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
         # The worker/API runtime may be transient; the owning task's origin is durable.
+        context_sid = None
+        try:
+            from gateway.session_context import _SESSION_ID, _UNSET, session_context_engaged
+            val = _SESSION_ID.get()
+            if val is not _UNSET and val:
+                context_sid = str(val)
+            elif not session_context_engaged():
+                context_sid = os.environ.get("HERMES_SESSION_ID")
+        except Exception:
+            context_sid = os.environ.get("HERMES_SESSION_ID")
         session_id = (args.get("session_id") or (self_task.session_id if self_task else None)
-                      or _current_origin_session_id() or os.environ.get("HERMES_SESSION_ID"))
+                      or _current_origin_session_id() or context_sid)
+
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
