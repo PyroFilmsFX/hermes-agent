@@ -1401,6 +1401,7 @@ class TestSessionRename:
                 while session._turn_inbox is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 client.feed(
+                    AssistantMessage(content=[TextBlock("Session renamed to: hermes:new")]),
                     ResultMessage(result="Session renamed to: hermes:new", uuid="uuid-rename"),
                     AssistantMessage(content=[TextBlock("real answer")]),
                     ResultMessage(result="real answer", uuid="u-2"),
@@ -1411,6 +1412,7 @@ class TestSessionRename:
             turn = session.run_turn("next", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
             thread.join(timeout=5)
             assert turn.final_text == "real answer"
+            assert "Session renamed" not in repr(turn.projected_messages)
             assert session._pending_rename_ack is None
         finally:
             session.close()

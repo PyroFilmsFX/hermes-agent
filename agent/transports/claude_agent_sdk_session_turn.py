@@ -854,12 +854,22 @@ class ClaudeSdkTurnMixin:
                 early_sid = getattr(message, "session_id", None)
                 if early_sid:
                     self._session_id = early_sid
-                if type(message).__name__ == "ResultMessage" and _is_rename_ack(
-                    getattr(message, "result", None), [], getattr(self, "_pending_rename_ack", None)
+                pending_rename = getattr(self, "_pending_rename_ack", None)
+                if pending_rename and type(message).__name__ == "ResultMessage" and _is_rename_ack(
+                    getattr(message, "result", None), [], pending_rename
                 ):
                     # A /rename issued at the previous release answered after this turn
                     # claimed the stream: the CLI's ack, never this turn's result.
                     self._pending_rename_ack = None
+                    continue
+                if pending_rename and type(message).__name__ == "AssistantMessage" and _is_rename_ack(
+                    None,
+                    ["".join(str(getattr(block, "text", "") or "")
+                             for block in (getattr(message, "content", None) or []))],
+                    pending_rename,
+                ):
+                    # The same ack's assistant text: never relayed or projected as this
+                    # turn's words. The pending name stays until its ResultMessage lands.
                     continue
                 if (
                     type(message).__name__ == "ResultMessage"

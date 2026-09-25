@@ -677,8 +677,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         if cleaned == self._session_name:
             self._deferred_rename = None
             return True
-        if self._turn_inbox is not None:
-            # A turn owns the stream; /rename now would interleave with it. Park it for the
+        if self._turn_inbox is not None or getattr(self, "_turn_claim_requested", False):
+            # A turn owns (or is claiming) the stream; /rename now would interleave with it. Park it for the
             # release (_apply_deferred_rename); the caller's rotation stays the fallback.
             self._deferred_rename = cleaned
             return False
