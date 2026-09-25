@@ -141,6 +141,59 @@ class TestModuleSurface:
         assert first is True
         assert second is True, "MCP reconstruction must reuse the logical conversation's exposure decision"
 
+    def test_session_spawn_exposure_restart_reprobe_is_opt_in(self, monkeypatch, tmp_path):
+        import hashlib
+        import json
+        import agent.transports.hermes_tools_mcp_server as m
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["agent"]["claude_agent_sdk"]["session_send"]["reprobe_on_restart"] is False
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        m._SESSION_SPAWN_EXPOSURE_CACHE.clear()
+        monkeypatch.setattr(m, "_session_send_reprobe_enabled", lambda: False)
+        calls = []
+        monkeypatch.setattr(m, "session_spawn_available", lambda: calls.append(True) or True)
+        path = tmp_path / "runtime/session-spawn/exposure" / f"{hashlib.sha256(b'legacy').hexdigest()}.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"session_id": "legacy", "exposed": False}), encoding="utf-8")
+        assert m._session_spawn_exposure_decision("legacy") is False
+        assert calls == []
+
+    def test_session_spawn_exposure_reprobes_legacy_false_once_and_persists_boot(self, monkeypatch, tmp_path):
+        import hashlib
+        import json
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        m._SESSION_SPAWN_EXPOSURE_CACHE.clear()
+        monkeypatch.setattr(m, "_session_send_reprobe_enabled", lambda: True)
+        monkeypatch.setattr(m, "session_spawn_available", lambda: True)
+        path = tmp_path / "runtime/session-spawn/exposure" / f"{hashlib.sha256(b'legacy').hexdigest()}.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"session_id": "legacy", "exposed": False}), encoding="utf-8")
+        assert m._session_spawn_exposure_decision("legacy") is True
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert stored["exposed"] is True and stored["boot_id"] == m._BACKEND_BOOT_ID
+
+    def test_session_spawn_exposure_does_not_reprobe_same_boot_or_config_disabled(self, monkeypatch, tmp_path):
+        import hashlib
+        import json
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(m, "_session_send_reprobe_enabled", lambda: True)
+        calls = []
+        monkeypatch.setattr(m, "session_spawn_available", lambda: calls.append(True) or True)
+        for sid, reason, boot in (("same", "bridge unavailable", m._BACKEND_BOOT_ID),
+                                  ("disabled", "disabled by config", "previous-backend")):
+            m._SESSION_SPAWN_EXPOSURE_CACHE.clear()
+            path = tmp_path / "runtime/session-spawn/exposure" / f"{hashlib.sha256(sid.encode()).hexdigest()}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"session_id": sid, "exposed": False,
+                                       "reason": reason, "boot_id": boot}), encoding="utf-8")
+            assert m._session_spawn_exposure_decision(sid) is False
+        assert calls == []
+
 
 
 

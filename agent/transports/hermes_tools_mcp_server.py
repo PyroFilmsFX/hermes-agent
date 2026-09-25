@@ -21,6 +21,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import uuid
 from typing import Any, Callable, Optional
 
 from agent.transports.hermes_tool_exposure import exposed_tools_for_profile, session_spawn_available
@@ -28,6 +30,8 @@ from agent.transports.hermes_tools_mcp_server_shims import stateless_shim_defini
 
 logger = logging.getLogger(__name__)
 _SESSION_SPAWN_EXPOSURE_CACHE: dict[str, bool] = {}
+_SESSION_SPAWN_EXPOSURE_LOCK = threading.Lock()
+_BACKEND_BOOT_ID = uuid.uuid4().hex
 
 
 def _log_bridge_unavailable_reason(session_id: str) -> None:
@@ -48,6 +52,11 @@ def _log_bridge_unavailable_reason(session_id: str) -> None:
 
 
 def _session_spawn_exposure_decision(session_id: str | None) -> bool:
+    with _SESSION_SPAWN_EXPOSURE_LOCK:
+        return _session_spawn_exposure_decision_locked(session_id)
+
+
+def _session_spawn_exposure_decision_locked(session_id: str | None) -> bool:
     """Persist the first capability verdict for one logical SDK conversation."""
     sid = str(session_id or "").strip()
     if not sid:
@@ -61,17 +70,55 @@ def _session_spawn_exposure_decision(session_id: str | None) -> bool:
         stored = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
         if isinstance(stored, dict) and isinstance(stored.get("exposed"), bool):
             verdict = stored["exposed"]
+            if verdict and stored.get("boot_id") != _BACKEND_BOOT_ID:
+                stored["boot_id"] = _BACKEND_BOOT_ID
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                from utils import atomic_json_write
+                atomic_json_write(path, stored, indent=2, mode=0o600)
+            elif not verdict and _session_send_reprobe_enabled():
+                same_boot = stored.get("boot_id") == _BACKEND_BOOT_ID
+                disabled = stored.get("reason") == "disabled by config"
+                if not same_boot and not disabled:
+                    verdict = bool(session_spawn_available())
+                    reason = "" if verdict else _session_spawn_unavailable_reason()
+                    if not verdict:
+                        _log_bridge_unavailable_reason(sid)
+                    from utils import atomic_json_write
+                    atomic_json_write(path, {"session_id": sid, "exposed": verdict,
+                                             "reason": reason, "boot_id": _BACKEND_BOOT_ID},
+                                      indent=2, mode=0o600)
         else:
             verdict = bool(session_spawn_available())
             if not verdict:
                 _log_bridge_unavailable_reason(sid)
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             from utils import atomic_json_write
-            atomic_json_write(path, {"session_id": sid, "exposed": verdict}, indent=2, mode=0o600)
+            reason = "" if verdict else _session_spawn_unavailable_reason()
+            atomic_json_write(path, {"session_id": sid, "exposed": verdict, "reason": reason,
+                                     "boot_id": _BACKEND_BOOT_ID}, indent=2, mode=0o600)
     except Exception:
         verdict = bool(session_spawn_available())
     _SESSION_SPAWN_EXPOSURE_CACHE[sid] = verdict
     return verdict
+
+
+def _session_send_reprobe_enabled() -> bool:
+    try:
+        from agent.transports.claude_agent_sdk_session_config import _provider_config
+        cfg = _provider_config().get("session_send")
+        return bool(cfg.get("reprobe_on_restart", False)) if isinstance(cfg, dict) else False
+    except Exception:
+        return False
+
+
+def _session_spawn_unavailable_reason() -> str:
+    try:
+        from tools.session_tools import session_send_enabled, session_spawn_enabled
+        if not session_send_enabled() and not session_spawn_enabled():
+            return "disabled by config"
+    except Exception:
+        pass
+    return "bridge unavailable"
 
 # The ``[mcp_servers.<name>]`` key under which the runtime migration registers this server. Every
 # codex-side reference to it (worker ``-c mcp_servers.<name>.env.*`` overrides, elicitation

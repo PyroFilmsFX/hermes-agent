@@ -278,7 +278,12 @@ DEFAULT_CONFIG = {
             },
             # Durable cross-session messaging (cntrl carry): exposes `session_send` on the same
             # scoped bridge. Gateway-side delivery policy lives in the top-level `peer_mailbox` block.
-            "session_send": {"enabled": True},
+            "session_send": {
+                "enabled": True,
+                # A false bridge verdict is normally sticky to preserve the cached tool schema. Opt in to
+                # one re-probe after backend restart to recover from a transient startup route miss.
+                "reprobe_on_restart": False,
+            },
             # Native Claude Task tools and the shared on-disk task feed. cntrl defaults this on;
             # the upstream PR candidate flips it to false before landing upstream.
             "task_tools": True,
