@@ -2559,6 +2559,7 @@ export interface ConnectionRequestPayload {
 export interface TodoState {
   todos: Record<string, unknown>[]
   revision: number
+  source?: string | null
 }
 /** A crash-interrupted turn was scheduled to continue right after this resume. */
 export interface AutoContinue {
@@ -4072,6 +4073,7 @@ export interface ToolOutputRiskPayload {
 export interface TodoUpdatedPayload {
   todos: unknown[]
   revision: number
+  source?: string | null
 }
 /** ``agent/credits_tracker.py::AgentNotice`` via notice_callback, and ``server._await_agent_ready``'s slow-build notice. ``level``: info | warn | error | success; ``kind``: sticky | ttl | agent. */
 export interface NotificationShowPayload {
