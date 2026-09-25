@@ -26387,6 +26387,11 @@
             "default": "",
             "title": "Source",
             "type": "string"
+          },
+          "pinned": {
+            "default": false,
+            "title": "Pinned",
+            "type": "boolean"
           }
         },
         "required": [

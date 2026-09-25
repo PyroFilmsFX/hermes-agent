@@ -99,7 +99,9 @@ class TestClaudeAgentSdkDefaults:
             },
             # session_send: durable cross-session messaging (inventory item 11, owner-approved
             # 2026-09-23). Rides the same scoped bridge; delivery is bounded by peer_mailbox.
-            "session_send": {"enabled": True},
+            # reprobe_on_restart (U1.13): opt-in re-evaluation of a persisted exposed:false after a
+            # backend restart; off by default because it costs that conversation one cache miss.
+            "session_send": {"enabled": True, "reprobe_on_restart": False},
         }
         for key, expected in fork_truthy.items():
             assert block[key] == expected, f"fork default for {key!r} drifted"

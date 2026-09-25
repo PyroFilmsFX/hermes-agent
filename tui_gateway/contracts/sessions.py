@@ -203,6 +203,7 @@ class SessionListRow(Result):
     started_at: float = 0
     message_count: int = 0
     source: str = ""
+    pinned: bool = False  # B-lite residency chip in the sidebar (sessions.pinned)
 
 
 class SessionListResult(Result):

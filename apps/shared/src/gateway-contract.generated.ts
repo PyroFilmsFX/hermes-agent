@@ -2611,6 +2611,7 @@ export interface SessionListRow {
   started_at?: number
   message_count?: number
   source?: string
+  pinned?: boolean
 }
 export interface SessionMostRecentParams {
   profile?: string | null
