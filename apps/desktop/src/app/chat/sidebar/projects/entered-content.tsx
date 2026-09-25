@@ -20,6 +20,7 @@ import { useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
 import {
   mergeRepoWorktreeGroups,
+  normalizePath,
   overlayRepoLanes,
   partitionConductorLanes,
   type SidebarProjectTree,
@@ -190,7 +191,7 @@ export function RepoFlatSection({
       {beforeLanes.map(renderGroup)}
       {conductor.length > 0 && (
         <ConductorLaneRollup
-          key={`${repo.path || repo.id}::lanes`}
+          key={`${normalizePath(repo.path || repo.id)}::lanes`}
           lanes={conductor}
           onNewSession={onNewSession}
           onNewSessionSplit={onNewSessionSplit}

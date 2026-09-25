@@ -11,7 +11,7 @@ import { SidebarRowStack } from '../chrome'
 
 import { useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
-import type { SidebarSessionGroup } from './workspace-groups'
+import { normalizePath, type SidebarSessionGroup } from './workspace-groups'
 import { WorkspaceHeader } from './workspace-header'
 
 export interface ConductorLaneRollupProps {
@@ -36,7 +36,7 @@ export function ConductorLaneRollup({
   onRemoveLane
 }: ConductorLaneRollupProps) {
   const { t } = useI18n()
-  const nodeId = `${repoRoot}::lanes`
+  const nodeId = `${normalizePath(repoRoot)}::lanes`
   const [open, toggleOpen] = useWorkspaceNodeOpen(nodeId, false)
 
   // M counts conductor lanes containing at least one session with a running arc (live turn)

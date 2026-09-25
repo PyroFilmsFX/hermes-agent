@@ -2316,7 +2316,7 @@ export const zhHant = defineLocale({
     },
     newSessionIn: label => `在 ${label} 中新建工作階段`,
     showMoreIn: (count, label) => `在 ${label} 中再顯示 ${count} 個`,
-    laneRollup: (count, running) => `${count} 個泳道${running && running > 0 ? ` · ${running} 個執行中` : ''}`,
+    laneRollup: (count, running) => `${count} 個工作樹${running && running > 0 ? ` · ${running} 個執行中` : ''}`,
     loading: '載入中…',
     loadMore: '載入更多',
     loadCount: step => `再載入 ${step} 個`,

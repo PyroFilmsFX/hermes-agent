@@ -209,6 +209,33 @@ describe('ConductorLaneRollup', () => {
     expect(container.querySelector('[data-running-dot]')).toBeTruthy()
     expect(container.querySelector('[data-running-arc]')).toBeTruthy()
   })
+
+  it('normalizes repoRoot so "/repo/" and "/repo" share open-state', () => {
+    const lanes = [makeLane({ id: '/repo/.claude/worktrees/lane-1', label: 'lane-1' })]
+
+    const { unmount } = render(
+      <ConductorLaneRollup
+        lanes={lanes}
+        renderRows={() => null}
+        repoRoot="/repo/"
+      />
+    )
+
+    // Expand via "/repo/"
+    fireEvent.click(screen.getByRole('button', { name: /1 lane/ }))
+    expect($sidebarWorkspaceNodeOpen.get()['/repo::lanes']).toBe(true)
+    unmount()
+
+    // Render with "/repo" (no trailing slash) - should already be open
+    render(
+      <ConductorLaneRollup
+        lanes={lanes}
+        renderRows={() => null}
+        repoRoot="/repo"
+      />
+    )
+    expect(screen.getByTitle(/lane-1/)).toBeTruthy()
+  })
 })
 
 describe('RepoFlatSection integration', () => {

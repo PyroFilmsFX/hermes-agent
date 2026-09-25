@@ -79,7 +79,7 @@ const segments = (path: string): string[] =>
     .filter(Boolean)
 
 /** A path with trailing separators stripped, for stable equality checks. */
-const normalizePath = (path: null | string | undefined): string => (path ?? '').replace(/[/\\]+$/, '')
+export const normalizePath = (path: null | string | undefined): string => (path ?? '').replace(/[/\\]+$/, '')
 
 // Windows spellings: drive-letter (`C:\…`), UNC (`\\srv`, `//srv`), or any
 // backslash-rooted path (`\wsl.localhost\…`). A single leading `/` stays POSIX.
@@ -115,25 +115,14 @@ export function kanbanWorktreeDir(path: string): null | string {
   return path.match(KANBAN_DIR_RE)?.[1] ?? null
 }
 
-const LANE_PREFIX_RE = /^lane[-/]/
-
-const isPrBase = (name?: string | null): boolean => {
-  if (!name) {
-    return false
-  }
-
-  const trimmed = name.trim()
-
-  return trimmed === 'pr-base' || trimmed.startsWith('pr-base-')
-}
+const CLAUDE_WORKTREE_LANE_RE = /(?:^|\/)\.claude\/worktrees\/(?:lane-|lane\/)/i
 
 /**
  * Predicate to identify conductor lane worktrees.
  * Returns true when any of these hold:
- *  - the path contains a "/.claude/worktrees/lane-" or "/.claude/worktrees/lane/" segment
- *  - the path basename matches /^lane[-/]/
- *  - the branch matches /^lane[-/]/
- *  - the basename or branch equals "pr-base" or starts with "pr-base-"
+ *  - (a) the normalised path contains a "/.claude/worktrees/" segment whose next segment starts with "lane-" or "lane/"
+ *  - (b) the branch starts with "lane/" (the conductor's slash form), anywhere
+ *  - (c) the branch or path basename is exactly "pr-base"
  * Never true for isMain.
  */
 export function isConductorLane(
@@ -155,25 +144,19 @@ export function isConductorLane(
   const path = worktree.path || ''
   const normalizedPath = path.replace(/\\/g, '/')
 
-  const hasClaudeLaneSegment =
-    normalizedPath.includes('/.claude/worktrees/lane-') ||
-    normalizedPath.includes('/.claude/worktrees/lane/') ||
-    normalizedPath.startsWith('.claude/worktrees/lane-') ||
-    normalizedPath.startsWith('.claude/worktrees/lane/')
+  if (CLAUDE_WORKTREE_LANE_RE.test(normalizedPath)) {
+    return true
+  }
+
+  const branch = (('branch' in worktree && worktree.branch) || ('label' in worktree && worktree.label) || '').trim()
+
+  if (branch.startsWith('lane/')) {
+    return true
+  }
 
   const base = baseName(path) ?? ''
-  const branch = ('branch' in worktree && worktree.branch ? worktree.branch : '').trim()
-  const label = ('label' in worktree && worktree.label ? worktree.label : '').trim()
 
-  return (
-    hasClaudeLaneSegment ||
-    LANE_PREFIX_RE.test(base) ||
-    LANE_PREFIX_RE.test(branch) ||
-    LANE_PREFIX_RE.test(label) ||
-    isPrBase(base) ||
-    isPrBase(branch) ||
-    isPrBase(label)
-  )
+  return branch === 'pr-base' || base === 'pr-base'
 }
 
 export interface ConductorLanePartition extends Array<SidebarSessionGroup[]> {

@@ -2970,7 +2970,7 @@ export const zh = defineLocale({
     },
     newSessionIn: label => `在 ${label} 中新建会话`,
     showMoreIn: (count, label) => `在 ${label} 中再显示 ${count} 个`,
-    laneRollup: (count, running) => `${count} 个泳道${running && running > 0 ? ` · ${running} 个运行中` : ''}`,
+    laneRollup: (count, running) => `${count} 个工作树${running && running > 0 ? ` · ${running} 个运行中` : ''}`,
     loading: '加载中…',
     loadMore: '加载更多',
     loadCount: step => `再加载 ${step} 个`,

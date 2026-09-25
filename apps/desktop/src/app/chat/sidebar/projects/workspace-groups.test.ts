@@ -80,39 +80,19 @@ describe('isConductorLane', () => {
       reason: 'Windows path contains \\.claude\\worktrees\\lane\\',
       wt: { branch: 'w_2026', isMain: false, path: 'C:\\repo\\.claude\\worktrees\\lane\\w_2026' }
     },
-    // Positive: path basename matches /^lane[-/]/
+    // Positive: Windows relative path with .Claude\worktrees\lane-x
     {
       expected: true,
-      reason: 'path basename matches ^lane-',
-      wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-worker-1' }
+      reason: 'Windows path with .Claude\\worktrees\\lane-x (case-insensitive .claude)',
+      wt: { branch: 'feat', isMain: false, path: '.Claude\\worktrees\\lane-x' }
     },
-    {
-      expected: true,
-      reason: 'path basename matches ^lane-wm-',
-      wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-wm-something' }
-    },
-    {
-      expected: true,
-      reason: 'Windows path basename matches ^lane-',
-      wt: { branch: 'feat', isMain: false, path: 'C:\\repos\\hermes\\lane-1' }
-    },
-    // Positive: branch matches /^lane[-/]/
-    {
-      expected: true,
-      reason: 'branch matches ^lane-',
-      wt: { branch: 'lane-pf-s1', isMain: false, path: '/repos/hermes/wt1' }
-    },
+    // Positive: branch matches ^lane/
     {
       expected: true,
       reason: 'branch matches ^lane/',
       wt: { branch: 'lane/20260925T0459Z_69a9', isMain: false, path: '/repos/hermes/wt2' }
     },
-    {
-      expected: true,
-      reason: 'branch matches ^lane-wm-',
-      wt: { branch: 'lane-wm-abc', isMain: false, path: '/repos/hermes/wt3' }
-    },
-    // Positive: basename or branch equals "pr-base" or starts with "pr-base-"
+    // Positive: basename or branch equals "pr-base"
     {
       expected: true,
       reason: 'basename equals pr-base',
@@ -120,18 +100,8 @@ describe('isConductorLane', () => {
     },
     {
       expected: true,
-      reason: 'basename starts with pr-base-',
-      wt: { branch: 'other', isMain: false, path: '/repos/hermes/pr-base-feature' }
-    },
-    {
-      expected: true,
       reason: 'branch equals pr-base',
       wt: { branch: 'pr-base', isMain: false, path: '/repos/hermes/wt4' }
-    },
-    {
-      expected: true,
-      reason: 'branch starts with pr-base-',
-      wt: { branch: 'pr-base-hotfix', isMain: false, path: '/repos/hermes/wt5' }
     },
     // Negative: isMain is true (never true for isMain)
     {
@@ -142,7 +112,7 @@ describe('isConductorLane', () => {
     {
       expected: false,
       reason: 'main worktree with lane branch',
-      wt: { branch: 'lane-1', isMain: true, path: '/repos/hermes/lane-1' }
+      wt: { branch: 'lane/1', isMain: true, path: '/repos/hermes/lane-1' }
     },
     {
       expected: false,
@@ -154,16 +124,70 @@ describe('isConductorLane', () => {
       reason: 'standard main worktree',
       wt: { branch: 'main', isMain: true, path: '/repos/hermes' }
     },
+    // Negative: branch "lane-detection" outside .claude
+    {
+      expected: false,
+      reason: 'branch lane-detection outside .claude',
+      wt: { branch: 'lane-detection', isMain: false, path: '/repos/hermes/wt' }
+    },
+    // Negative: branch ^lane- outside .claude
+    {
+      expected: false,
+      reason: 'branch lane-pf-s1 outside .claude',
+      wt: { branch: 'lane-pf-s1', isMain: false, path: '/repos/hermes/wt1' }
+    },
+    {
+      expected: false,
+      reason: 'branch lane-wm-abc outside .claude',
+      wt: { branch: 'lane-wm-abc', isMain: false, path: '/repos/hermes/wt3' }
+    },
+    // Negative: basename "lane-x" outside .claude
+    {
+      expected: false,
+      reason: 'basename lane-x outside .claude',
+      wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-x' }
+    },
+    {
+      expected: false,
+      reason: 'path basename lane-worker-1 outside .claude',
+      wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-worker-1' }
+    },
+    {
+      expected: false,
+      reason: 'Windows path basename lane-1 outside .claude',
+      wt: { branch: 'feat', isMain: false, path: 'C:\\repos\\hermes\\lane-1' }
+    },
+    // Negative: branch or basename "pr-base-auth" and "pr-base-*" (not exact pr-base)
+    {
+      expected: false,
+      reason: 'branch pr-base-auth',
+      wt: { branch: 'pr-base-auth', isMain: false, path: '/repos/hermes/wt5' }
+    },
+    {
+      expected: false,
+      reason: 'basename pr-base-auth',
+      wt: { branch: 'other', isMain: false, path: '/repos/hermes/pr-base-auth' }
+    },
+    {
+      expected: false,
+      reason: 'basename starts with pr-base-',
+      wt: { branch: 'other', isMain: false, path: '/repos/hermes/pr-base-feature' }
+    },
+    {
+      expected: false,
+      reason: 'branch starts with pr-base-',
+      wt: { branch: 'pr-base-hotfix', isMain: false, path: '/repos/hermes/wt5' }
+    },
     // Negative: branch "feature/lane-thing"
     {
       expected: false,
-      reason: 'branch feature/lane-thing does not match ^lane[-/]',
+      reason: 'branch feature/lane-thing does not match ^lane/',
       wt: { branch: 'feature/lane-thing', isMain: false, path: '/repos/hermes/wt' }
     },
     // Negative: path ".../my-lane"
     {
       expected: false,
-      reason: 'path .../my-lane does not match ^lane[-/]',
+      reason: 'path .../my-lane does not match ^lane/',
       wt: { branch: 'my-lane', isMain: false, path: '/repos/hermes/my-lane' }
     },
     // Negative: other non-conductor paths/branches
@@ -193,17 +217,19 @@ describe('partitionConductorLanes', () => {
     const regularLane = lane({ id: '/repo/feat', label: 'feat', path: '/repo/feat' })
     const kanbanLane = lane({ id: '/repo::kanban', isKanban: true, label: 'kanban' })
 
-    const conductor1 = lane({ id: '/repo/lane-1', label: 'lane-1', path: '/repo/lane-1' })
-    const conductor2 = lane({ id: '/repo/lane/w_2', label: 'lane/w_2', path: '/repo/.claude/worktrees/lane/w_2' })
-    const conductor3 = lane({ id: '/repo/lane-wm-3', label: 'lane-wm-3', path: '/repo/lane-wm-3' })
+    const conductor1 = lane({ id: '/repo/.claude/worktrees/lane-1', label: 'lane-1', path: '/repo/.claude/worktrees/lane-1' })
+    const conductor2 = lane({ id: '/repo/.claude/worktrees/lane/w_2', label: 'lane/w_2', path: '/repo/.claude/worktrees/lane/w_2' })
+    const conductor3 = lane({ id: '/repo/other-dir', label: 'lane/slash-branch', path: '/repo/other-dir' })
     const conductor4 = lane({ id: '/repo/pr-base', label: 'pr-base', path: '/repo/pr-base' })
-    const conductor5 = lane({ id: '/repo/pr-base-auth', label: 'pr-base-auth', path: '/repo/pr-base-auth' })
 
-    const all = [homeLane, conductor1, regularLane, conductor2, conductor3, kanbanLane, conductor4, conductor5]
+    const userLane1 = lane({ id: '/repo/lane-detection', label: 'lane-detection', path: '/repo/lane-detection' })
+    const userLane2 = lane({ id: '/repo/pr-base-auth', label: 'pr-base-auth', path: '/repo/pr-base-auth' })
+
+    const all = [homeLane, conductor1, regularLane, conductor2, userLane1, conductor3, kanbanLane, conductor4, userLane2]
     const { regular, conductor } = partitionConductorLanes(all)
 
-    expect(conductor.map(g => g.label)).toEqual(['lane-1', 'lane/w_2', 'lane-wm-3', 'pr-base', 'pr-base-auth'])
-    expect(regular.map(g => g.label)).toEqual(['main', 'feat', 'kanban'])
+    expect(conductor.map(g => g.label)).toEqual(['lane-1', 'lane/w_2', 'lane/slash-branch', 'pr-base'])
+    expect(regular.map(g => g.label)).toEqual(['main', 'feat', 'lane-detection', 'kanban', 'pr-base-auth'])
 
     // Array destructuring compatibility
     const [arrReg, arrCond] = partitionConductorLanes(all)

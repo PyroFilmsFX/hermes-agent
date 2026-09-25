@@ -2015,7 +2015,8 @@ export const ar = defineLocale({
     },
     newSessionIn: label => `جلسة جديدة في ${label}`,
     showMoreIn: (count, label) => `إظهار ${count} أخرى في ${label}`,
-    laneRollup: (count, running) => `${count} مسار${running && running > 0 ? ` · ${running} قيد التشغيل` : ''}`,
+    laneRollup: (count, running) =>
+      `${count} ${count === 1 ? 'مسار' : 'مسارات'}${running && running > 0 ? ` · ${running} قيد التشغيل` : ''}`,
     loading: 'جار التحميل...',
     loadMore: 'تحميل المزيد',
     loadCount: step => `تحميل ${step} أخرى`,
