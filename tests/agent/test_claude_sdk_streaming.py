@@ -1457,23 +1457,60 @@ class TestSessionRename:
             session.close()
 
     def test_rename_timeout_releases_claim_and_reparks(self, monkeypatch):
+        import contextlib
         import agent.transports.claude_agent_sdk_session as sdk_session_mod
 
-        monkeypatch.setattr(sdk_session_mod, "_RENAME_ACK_TIMEOUT_SECONDS", 0.02)
         session, holder = _make_hold_open_session(script=[], session_name="hermes:old")
+
+        ack_waiting = threading.Event()
+        trigger_timeout = threading.Event()
+        rename_finished = threading.Event()
+        original_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(fut, timeout):
+            if timeout == sdk_session_mod._RENAME_ACK_TIMEOUT_SECONDS:
+                task = asyncio.ensure_future(fut)
+                try:
+                    ack_waiting.set()
+                    await asyncio.to_thread(trigger_timeout.wait)
+                    raise asyncio.TimeoutError()
+                finally:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+            return await original_wait_for(fut, timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+        original_run_claimed = session._run_claimed_rename
+
+        async def tracked_run_claimed(name):
+            try:
+                await original_run_claimed(name)
+            finally:
+                rename_finished.set()
+
+        session._run_claimed_rename = tracked_run_claimed
+
         try:
             session.ensure_started()
             assert session.rename("hermes:new") is True
-            deadline = time.monotonic() + 2
-            while session._deferred_rename is None and time.monotonic() < deadline:
-                time.sleep(0.01)
+
+            assert ack_waiting.wait(timeout=5.0)
+            assert session._turn_inbox is not None
+            assert session._rename_claim_requested is True
+            assert session._deferred_rename is None
+            assert "/rename hermes:new" in holder["client"].queried
+
+            trigger_timeout.set()
+            assert rename_finished.wait(timeout=5.0)
+
             assert session._deferred_rename == "hermes:new"
-            while session._turn_inbox is not None and time.monotonic() < deadline:
-                time.sleep(0.01)
             assert session._turn_inbox is None
             assert session._rename_claim_requested is False
             assert "/rename hermes:new" in holder["client"].queried
         finally:
+            trigger_timeout.set()
             session.close()
 
     def test_rename_claim_ack_after_stream_death_clears_request(self):
