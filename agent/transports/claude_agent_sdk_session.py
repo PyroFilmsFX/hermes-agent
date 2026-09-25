@@ -255,8 +255,17 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._max_buffer_size = _configured_max_buffer_size()
         self._client_factory = client_factory  # test seam
         self._include_hermes_tools = include_hermes_tools
-        # Hermes-side session id, exported to the hermes-tools MCP subprocess
-        # so the stateless session_search shim can exclude its own lineage.
+        # Hermes-side session id, exported to the CLI subprocess and hermes-tools MCP
+        # subprocess so the CLI environment and session_search shim always carry THIS
+        # session's id (and never a sibling session's ambient id).
+        if hermes_session_id is None:
+            try:
+                from gateway.session_context import _SESSION_ID, _UNSET
+                val = _SESSION_ID.get()
+                if val is not _UNSET and val:
+                    hermes_session_id = str(val)
+            except Exception:
+                pass
         self._hermes_session_id = hermes_session_id
         self._task_list_id = task_list_id
         self._task_env = dict(task_env) if task_env is not None else None
@@ -1288,6 +1297,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             metered_allowed=self._allow_metered,
             task_list_id=self._task_list_id,
             task_env=getattr(self, "_task_env", None),
+            hermes_session_id=self._hermes_session_id,
         )
 
         fields = {

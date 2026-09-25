@@ -88,6 +88,7 @@ def _sdk_env_overrides(
     metered_allowed: Optional[bool] = None,
     task_list_id: Optional[str] = None,
     task_env: Optional[dict[str, str]] = None,
+    hermes_session_id: Optional[str] = None,
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
@@ -126,6 +127,25 @@ def _sdk_env_overrides(
             )
             continue
         overrides[key] = value
+
+    # Explicit session identity for the spawned CLI. The SDK spawns the CLI with
+    # the inherited parent process env ({**os.environ, ..., **options.env}), so an
+    # un-overridden key inherits the ambient process value. In a multiplexed
+    # backend (tui_gateway, gateway), os.environ["HERMES_SESSION_ID"] holds
+    # whichever session last initialized; without an explicit override, a sibling
+    # session's id leaks into the Claude CLI (and its Bash tool subprocesses).
+    if hermes_session_id is not None:
+        overrides["HERMES_SESSION_ID"] = str(hermes_session_id)
+    else:
+        try:
+            from gateway.session_context import _SESSION_ID, _UNSET, session_context_engaged
+            val = _SESSION_ID.get()
+            if val is not _UNSET and val:
+                overrides["HERMES_SESSION_ID"] = str(val)
+            elif session_context_engaged() and os.environ.get("HERMES_SESSION_ID"):
+                overrides["HERMES_SESSION_ID"] = ""
+        except Exception:
+            pass
     return overrides
 
 
@@ -873,6 +893,14 @@ def _build_hermes_tools_mcp_config(
     # not process-wide os.environ; the child must discover the same profile's
     # owner lease and state registry.
     env["PYTHONPATH"] = _hermes_repo_root() + os.pathsep + os.environ.get("PYTHONPATH", "")
+    if hermes_session_id is None:
+        try:
+            from gateway.session_context import _SESSION_ID, _UNSET
+            val = _SESSION_ID.get()
+            if val is not _UNSET and val:
+                hermes_session_id = str(val)
+        except Exception:
+            pass
     if hermes_session_id:
         # Lets the stateless session_search shim exclude the calling
         # session's own lineage from recall results (#26567). The shim reads

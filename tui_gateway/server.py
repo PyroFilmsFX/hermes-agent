@@ -1278,7 +1278,12 @@ def _attach_built_agent(sid: str, current: dict, agent) -> None:
                         lambda **kwargs: bootstrap_sdk_todo_snapshot(str(sid), **kwargs)
                     )
                     effective_env = dict(os.environ)
-                    effective_env.update(_sdk_env_overrides(task_list_id=task_list_id))
+                    effective_env.update(
+                        _sdk_env_overrides(
+                            task_list_id=task_list_id,
+                            hermes_session_id=getattr(agent, "session_id", None) or str(sid),
+                        )
+                    )
                     task_root = getattr(agent, "_claude_sdk_task_store_root", None)
                     if not task_root:
                         task_root = _resolve_sdk_task_store_root(
