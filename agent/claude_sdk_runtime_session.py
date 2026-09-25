@@ -21,6 +21,7 @@ from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
 from agent.claude_sdk_runtime_fallback import _consume_agent_interrupt
 from agent.claude_sdk_runtime_continuity import (
+    _continuity_digest_source,
     _claude_sdk_session_lock,
     _clear_claude_sdk_session_if_current,
     _publish_claude_sdk_session,
@@ -806,7 +807,7 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             resumed = bool(resume_id)
             send_input = user_input
             if not resume_id and len(messages) > 1:
-                digest = _render_continuity_digest(messages[:-1])
+                digest = _render_continuity_digest(_continuity_digest_source(agent, messages))
                 if digest:
                     if isinstance(user_input, list):
                         send_input = [

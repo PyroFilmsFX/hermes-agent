@@ -67,6 +67,15 @@ def test_background_answer_excluded_before_alternation_repair(source, tmp_path):
                 db.append_message(session_id=agent.session_id, **row)
             messages, display = db.get_resume_conversations(agent.session_id)
             assert [row["content"] for row in display] == [row["content"] for row in history]
+            # A fresh-session digest reads the stored DISPLAY transcript, so the runtime's own
+            # background reply survives a restart even though model history drops it.
+            from agent.claude_sdk_runtime_continuity import _continuity_digest_source
+
+            agent._session_db = db
+            sourced = _render_continuity_digest(
+                _continuity_digest_source(agent, [*messages, {"role": "user", "content": "next"}]))
+            assert "(background reply, already delivered) background answer B" in sourced
+            assert "ordinary answer A" in sourced and "question U" in sourced
         finally:
             db.close()
     api_messages, _ = build_api_messages(
@@ -75,10 +84,9 @@ def test_background_answer_excluded_before_alternation_repair(source, tmp_path):
     )
     assert [row["content"] for row in api_messages] == ["ordinary answer A", "question U"]
     digest = _render_continuity_digest(messages)
-    # The digest is context for a FRESH runtime that lost its CLI context: the background
-    # answer is kept, labelled as already delivered (the provider API messages above never
-    # carry it).
-    assert "(background reply, already delivered) background answer B" in digest
+    # Model history never carries the background answer (the fresh-session digest reads the
+    # display transcript instead; see the database branch above).
+    assert "background answer B" not in digest
     assert "ordinary answer A" in digest and "question U" in digest
     if source == "iteration":
         assert prepared.current_turn_user_idx == 1

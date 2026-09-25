@@ -489,6 +489,32 @@ def _order_by_timestamp(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [row for _, row in sorted(zip(stamps, rows), key=lambda pair: pair[0])]
 
 
+def _continuity_digest_source(agent, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Prior rows for a fresh-session digest: the stored DISPLAY transcript when available.
+
+    Model history drops background replies and peer messages before the runtime sees it (DB
+    model history and prepare_iteration both filter them), so building the digest from
+    ``messages`` could never include them. Falls back to ``messages[:-1]``. Never raises."""
+    fallback = list(messages[:-1]) if messages else []
+    db = getattr(agent, "_session_db", None)
+    session_id = str(getattr(agent, "session_id", "") or "")
+    if db is None or not session_id or not hasattr(db, "get_resume_conversations"):
+        return fallback
+    try:
+        _model, display = db.get_resume_conversations(session_id)
+    except Exception:
+        logger.debug("continuity digest: display history read failed", exc_info=True)
+        return fallback
+    rows = [row for row in (display or []) if isinstance(row, dict)]
+    if not rows:
+        return fallback
+    current = messages[-1] if messages else None
+    if (isinstance(current, dict) and rows[-1].get("role") == "user"
+            and rows[-1].get("content") == current.get("content")):
+        rows = rows[:-1]  # the in-flight prompt was already persisted
+    return rows
+
+
 def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     """Bounded text preamble for a FRESH SDK session that has prior Hermes
     history (resume impossible: no stored id, or the stored one went stale).
