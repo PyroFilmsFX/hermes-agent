@@ -123,6 +123,7 @@ class ClaudeSdkTurnMixin:
     """Turn driver, stream consumer and reader loop (see module docstring)."""
 
     _pending_rename_ack: Optional[str] = None
+    _deferred_rename: Optional[str] = None
 
     # ---------- per-turn ----------
 
@@ -852,6 +853,13 @@ class ClaudeSdkTurnMixin:
                 early_sid = getattr(message, "session_id", None)
                 if early_sid:
                     self._session_id = early_sid
+                if type(message).__name__ == "ResultMessage" and _is_rename_ack(
+                    getattr(message, "result", None), [], getattr(self, "_pending_rename_ack", None)
+                ):
+                    # A /rename issued at the previous release answered after this turn
+                    # claimed the stream: the CLI's ack, never this turn's result.
+                    self._pending_rename_ack = None
+                    continue
                 if type(message).__name__ == "ResultMessage" and _is_injected_origin(
                     getattr(message, "origin", None)
                 ):
@@ -1062,6 +1070,9 @@ class ClaudeSdkTurnMixin:
                     if self._turn_inbox is inbox:
                         self._turn_inbox = None
                     out["stream_ended"] = True
+                elif self._turn_inbox is None:
+                    # The stream is free: apply a rename refused while this turn owned it.
+                    self._apply_deferred_rename()
             with self._interrupt_commit_lock:
                 # Any steer whose query was abandoned by interruption, stream
                 # death, or release must not be mistaken for a later turn's

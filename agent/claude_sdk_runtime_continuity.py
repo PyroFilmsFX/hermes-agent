@@ -292,6 +292,11 @@ def rename_claude_sdk_session(agent, *, busy: bool = False) -> str:
             applied = bool(live.rename(name))
         except Exception:
             logger.debug("SDK rename failed; deferring to rotation", exc_info=True)
+    elif hasattr(live, "defer_rename"):
+        try:
+            live.defer_rename(name)  # applied at the stream release, even for CLI-originated turns
+        except Exception:
+            logger.debug("SDK rename park failed; rotation remains the fallback", exc_info=True)
     if not applied:
         agent._claude_sdk_rename_pending = True
         logger.info("claude-agent-sdk: rename to %r deferred to the next turn (session busy)", name)

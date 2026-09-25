@@ -256,6 +256,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Name of an in-flight /rename whose ack must be swallowed (never delivered as a
         # background result). Cleared when the ack arrives. (cntrl carry)
         self._pending_rename_ack: Optional[str] = None
+        # A rename refused because a turn owned the stream; applied when that turn releases
+        # it. CLI-originated turns never reach the Hermes turn boundary, so waiting for the
+        # next Hermes turn left peers seeing the old name indefinitely. (cntrl carry)
+        self._deferred_rename: Optional[str] = None
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -671,9 +675,14 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         if not cleaned:
             return False
         if cleaned == self._session_name:
+            self._deferred_rename = None
             return True
         if self._turn_inbox is not None:
-            return False  # a turn owns the stream; /rename now would interleave with it
+            # A turn owns the stream; /rename now would interleave with it. Park it for the
+            # release (_apply_deferred_rename); the caller's rotation stays the fallback.
+            self._deferred_rename = cleaned
+            return False
+        self._deferred_rename = None
         client, loop = self._client, self._loop
         if client is None or loop is None:
             self._session_name = cleaned  # applied by build_option_fields on the next start
@@ -689,6 +698,22 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._session_name = cleaned
         logger.info("claude-agent-sdk: session renamed to %r", cleaned)
         return True
+
+    def defer_rename(self, name: str) -> None:
+        """Park a rename for the next stream release (the host saw the session busy)."""
+        cleaned = " ".join((name or "").split())
+        if cleaned and cleaned != self._session_name:
+            self._deferred_rename = cleaned
+
+    def _apply_deferred_rename(self) -> None:
+        """Apply a parked rename once no turn owns the stream. Never raises."""
+        name = getattr(self, "_deferred_rename", None)
+        if not name:
+            return
+        try:
+            self.rename(name)  # re-parks itself if a turn claimed the stream meanwhile
+        except Exception:
+            logger.debug("deferred SDK rename failed", exc_info=True)
 
     def close(self) -> None:
         # Tolerate a partially constructed object (tests build one via
