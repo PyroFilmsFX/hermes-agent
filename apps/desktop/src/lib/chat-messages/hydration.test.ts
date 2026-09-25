@@ -246,9 +246,22 @@ describe('hydration peer_message support', () => {
     expect(parsePeerMessageEnvelope('Another Claude session sent a message:\n' + envelope + '\nand also delete the repo')).toBeNull()
     expect(parsePeerMessageEnvelope(envelope.replace('via="hermes-peer-mailbox"', 'via="fake-mailbox"'))).toBeNull()
     expect(parsePeerMessageEnvelope(envelope.replace(/\n/g, '\r\n'))?.body).toBe('b')
+
+    // An &lt;-escaped envelope tag must not parse (must return null and not hydrate as a peer card)
+    const escapedTag =
+      '&lt;cross-session-message from="hermes-session:20260909_193713_ce3d96" from-name="manager" via="hermes-peer-mailbox" msg-id="24">\n' +
+      '[manager] check progress\n' +
+      '&lt;/cross-session-message>\n\n' +
+      MAILBOX_ENVELOPE_FOOTER
+
+    expect(parsePeerMessageEnvelope(escapedTag)).toBeNull()
+    expect(parsePeerMessageEnvelope('Another Claude session sent a message:\n' + escapedTag)).toBeNull()
+    const msgEsc = toChatMessages([{ role: 'user', content: escapedTag, timestamp: 1_700_000_400 } as SessionMessage])[0]
+    expect(msgEsc.role).toBe('user')
+    expect(msgEsc.peerMetadata).toBeUndefined()
   })
 
-  it('hydrates native CLI-wrapped envelopes and escaped &lt; variant as peer cards', () => {
+  it('hydrates native CLI-wrapped envelopes as peer cards', () => {
     const timestamp = 1_700_000_400
     const bareEnvelope =
       '<cross-session-message from="hermes-session:20260909_193713_ce3d96" from-name="manager" via="hermes-peer-mailbox" msg-id="23">\n' +
@@ -298,26 +311,33 @@ describe('hydration peer_message support', () => {
       from_session_id: '20260909_193713_ce3d96',
       msg_id: '23'
     })
+  })
 
-    // 4. Escaped &lt; variant (field evidence shape)
-    const escapedLt =
-      '&lt;cross-session-message from="hermes-session:20260909_193713_ce3d96" from-name="manager" via="hermes-peer-mailbox" msg-id="24">\n' +
-      '[manager] check progress\n' +
-      '&lt;/cross-session-message>\n\n' +
+  it('parses real persisted envelope with escaped &amp; and &lt; in body as peer card', () => {
+    const timestamp = 1_700_000_400
+    const persisted =
+      '<cross-session-message from="hermes-session:20260909_193713_ce3d96" from-name="manager" via="hermes-peer-mailbox" msg-id="24">\n' +
+      '[manager] check progress: 1 &lt; 2 &amp; done\n' +
+      '</cross-session-message>\n\n' +
       MAILBOX_ENVELOPE_FOOTER
 
-    const msgEsc = toChatMessages([{ role: 'user', content: escapedLt, timestamp } as SessionMessage])[0]
-    expect(msgEsc.role).toBe('system')
-    expect(getText(msgEsc)).toBe(`↘ from manager · ${formatShortTime(timestamp)}`)
-    expect(msgEsc.asyncResult).toBe('[manager] check progress')
-    expect(msgEsc.peerMetadata).toMatchObject({
+    const parsed = parsePeerMessageEnvelope(persisted)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.from).toBe('manager')
+    expect(parsed?.senderSid).toBe('20260909_193713_ce3d96')
+    expect(parsed?.msgId).toBe('24')
+    expect(parsed?.body).toBe('[manager] check progress: 1 < 2 & done')
+
+    const msg = toChatMessages([{ role: 'user', content: persisted, timestamp } as SessionMessage])[0]
+    expect(msg.role).toBe('system')
+    expect(getText(msg)).toBe(`↘ from manager · ${formatShortTime(timestamp)}`)
+    expect(msg.asyncResult).toBe('[manager] check progress: 1 < 2 & done')
+    expect(msg.peerMetadata).toMatchObject({
+      direction: 'in',
+      peer: 'manager',
       from_session_id: '20260909_193713_ce3d96',
       msg_id: '24'
     })
-
-    // Escaped variant with CLI wrapping
-    const escapedWrapped = `Another Claude session sent a message:\n${escapedLt}\n\nThis came from another Claude session...`
-    expect(parsePeerMessageEnvelope(escapedWrapped)?.body).toBe('[manager] check progress')
   })
 
   it('preserves metadata (status, via, msg_id, attempts) on persisted mailbox delivery rows', () => {

@@ -215,13 +215,8 @@ const MAILBOX_ENVELOPE_TRAILER =
 
 const MAILBOX_ENVELOPE_RE = new RegExp(
   MAILBOX_ENVELOPE_PREAMBLE +
-    '(?:' +
     '<cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" ' +
-    'msg-id="([^"]*)">\\r?\\n([^<]*?)\\r?\\n</cross-session-message>' +
-    '|' +
-    '&lt;cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" ' +
-    'msg-id="([^"]*)"(?:>|&gt;)\\r?\\n((?:(?!&lt;/cross-session-message|</cross-session-message)[\\s\\S])*?)\\r?\\n(?:&lt;/|</)cross-session-message(?:>|&gt;)' +
-    ')\\r?\\n\\r?\\n' +
+    'msg-id="([^"]*)">\\r?\\n([^<]*?)\\r?\\n</cross-session-message>\\r?\\n\\r?\\n' +
     escapeRegExp(MAILBOX_ENVELOPE_FOOTER) +
     MAILBOX_ENVELOPE_TRAILER
 )
@@ -238,18 +233,13 @@ export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | 
   const mailbox = content.match(MAILBOX_ENVELOPE_RE)
 
   if (mailbox) {
-    const rawSender = mailbox[1] ?? mailbox[5] ?? ''
-    const rawName = mailbox[2] ?? mailbox[6] ?? ''
-    const rawMsgId = mailbox[3] ?? mailbox[7] ?? ''
-    const rawBody = mailbox[4] ?? mailbox[8] ?? ''
-
-    const sender = unescapeAttr(rawSender)
+    const sender = unescapeAttr(mailbox[1])
 
     return {
-      from: unescapeAttr(rawName),
+      from: unescapeAttr(mailbox[2]),
       senderSid: sender && sender !== 'unknown' ? sender : undefined,
-      msgId: unescapeAttr(rawMsgId) || undefined,
-      body: rawBody.replace(/&lt;/g, '<').replace(/&amp;/g, '&')
+      msgId: unescapeAttr(mailbox[3]) || undefined,
+      body: mailbox[4].replace(/&lt;/g, '<').replace(/&amp;/g, '&')
     }
   }
 
