@@ -52,6 +52,10 @@ from agent.transports.claude_agent_sdk_session_watchdog import (
 logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 
 
+# Unsolicited deliveries retained while no result callback is wired (G2.4); newest kept.
+_MAX_RETAINED_UNSOLICITED = 16
+
+
 def _is_human_origin(message: Any) -> bool:
     """Return whether the SDK attributed a result to an application query."""
     origin = getattr(message, "origin", None)
@@ -1258,6 +1262,10 @@ class ClaudeSdkTurnMixin:
             if pending is None:
                 pending = self._pending_unsolicited_deliveries = []
             pending.append((list(texts), [dict(item) for item in items], delivery_id))
+            # With background delivery off no callback is ever wired: keep only the newest few so a
+            # long-lived session cannot grow this without bound.
+            if len(pending) > _MAX_RETAINED_UNSOLICITED:
+                del pending[: len(pending) - _MAX_RETAINED_UNSOLICITED]
             logger.warning(
                 "claude-agent-sdk: retained unsolicited delivery until its callback is wired"
             )
@@ -1602,6 +1610,8 @@ class ClaudeSdkTurnMixin:
             # Subagent streams belong to the parent tool card, not to the
             # session-level unsolicited turn.
             return
+        if not hasattr(self, "_unsolicited_items"):
+            return  # no projection state (partially built session): nothing to buffer into
         items = self._unsolicited_items
         tool_items = self._unsolicited_tool_items
         seen = self._unsolicited_seen

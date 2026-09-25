@@ -733,3 +733,21 @@ def test_a_woken_turn_closes_the_tool_cards_it_opens():
 
     assert [name for _id, name in opened] == ["Bash", "SendMessage"]
     assert sorted(closed) == sorted(opened), "every card a woken turn opens must be closed with its result"
+
+
+def test_retained_unsolicited_deliveries_are_bounded_without_a_callback():
+    """Background delivery off = no result callback is ever wired; retaining every peer/task
+    delivery "until the callback exists" would grow without bound on a long-lived session."""
+    from agent.transports import claude_agent_sdk_session_turn as turn_mod
+    from tests.agent.claude_sdk_fakes import _make_session
+
+    session, _holder = _make_session(script=[])
+    try:
+        assert session._on_unsolicited_result is None
+        for index in range(turn_mod._MAX_RETAINED_UNSOLICITED + 9):
+            session._deliver_or_buffer_unsolicited([f"answer {index}"], [], f"deliv-{index}")
+        pending = session._pending_unsolicited_deliveries
+        assert len(pending) == turn_mod._MAX_RETAINED_UNSOLICITED
+        assert pending[-1][2] == f"deliv-{turn_mod._MAX_RETAINED_UNSOLICITED + 8}"
+    finally:
+        session.close()
