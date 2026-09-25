@@ -715,25 +715,29 @@ class TestContinuity:
         assert "shadowed imports" in sent
         assert sent.endswith("and the tests?")
 
-    def test_projected_bg_row_excluded_from_continuity_digest(self):
-        # Binding amendment (sdk-echo-approval-fixes): rows projected by the
-        # background-result lane are the agent's OWN delivered answers —
-        # the digest re-presenting them is double-presentation, the exact
-        # pathology the lane fixes. Marked rows never enter the digest.
+    def test_projected_bg_row_enters_the_digest_labelled_as_delivered(self):
+        # Supersedes the sdk-echo-approval-fixes exclusion: a fresh runtime that never saw
+        # its own background replies re-asked answered questions (ce3d96, 2026-09-24). They
+        # are kept, labelled as already delivered, in time order (background rows are written
+        # when delivered, not when produced); lifecycle and background tool rows stay out.
         from agent.claude_sdk_runtime_continuity import _render_continuity_digest
 
         digest = _render_continuity_digest([
-            {"role": "user", "content": "run the research"},
+            {"role": "user", "content": "run the research", "timestamp": 1.0},
+            {"role": "assistant", "content": "a normal reply", "timestamp": 3.0},
             {
                 "role": "assistant",
                 "content": "the full background report",
                 "display_kind": "sdk_background_result",
+                "timestamp": 2.0,
             },
-            {"role": "assistant", "content": "a normal reply"},
+            {"role": "system", "content": "woken by peer message: x", "display_kind": "session_lifecycle",
+             "timestamp": 2.5},
         ])
-        assert "the full background report" not in digest
-        assert "run the research" in digest
-        assert "a normal reply" in digest
+        assert "(background reply, already delivered) the full background report" in digest
+        assert "woken by peer message" not in digest
+        assert (digest.index("run the research") < digest.index("the full background report")
+                < digest.index("a normal reply"))
 
     def test_no_digest_on_brand_new_conversation(self, monkeypatch):
         agent, _db = self._db_agent(persisted_sdk_id=None)

@@ -75,7 +75,10 @@ def test_background_answer_excluded_before_alternation_repair(source, tmp_path):
     )
     assert [row["content"] for row in api_messages] == ["ordinary answer A", "question U"]
     digest = _render_continuity_digest(messages)
-    assert "background answer B" not in digest
+    # The digest is context for a FRESH runtime that lost its CLI context: the background
+    # answer is kept, labelled as already delivered (the provider API messages above never
+    # carry it).
+    assert "(background reply, already delivered) background answer B" in digest
     assert "ordinary answer A" in digest and "question U" in digest
     if source == "iteration":
         assert prepared.current_turn_user_idx == 1

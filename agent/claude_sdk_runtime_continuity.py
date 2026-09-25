@@ -454,18 +454,51 @@ def _is_sdk_display_only_row(message: Any) -> bool:
     return isinstance(metadata, dict) and metadata.get("source") == "sdk_background_result"
 
 
+def _continuity_digest_row(message: Any) -> Optional[Dict[str, Any]]:
+    """A transcript row as digest context, or None for rows the model never saw as text."""
+    if not isinstance(message, dict):
+        return None
+    kind = message.get("display_kind")
+    metadata = message.get("display_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if kind == "session_lifecycle":
+        return None
+    content = message.get("content")
+    if kind == "sdk_background_result" or metadata.get("source") == "sdk_background_result":
+        if message.get("role") != "assistant" or not content:
+            return None  # the background turn's tool rows
+        return {"role": "assistant", "content": f"(background reply, already delivered) {content}",
+                "timestamp": message.get("timestamp")}
+    if kind == "peer_message":
+        if not content:
+            return None
+        peer = str(metadata.get("peer") or "").strip()
+        label = "peer message from" if metadata.get("direction") == "in" else "peer message to"
+        return {"role": message.get("role"), "content": f"({label} {peer or 'a peer'}) {content}",
+                "timestamp": message.get("timestamp")}
+    return message
+
+
+def _order_by_timestamp(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stable time order when every row carries a numeric timestamp; storage order otherwise."""
+    stamps = [row.get("timestamp") for row in rows]
+    if not rows or not all(isinstance(t, (int, float)) and not isinstance(t, bool) for t in stamps):
+        return rows
+    return [row for _, row in sorted(zip(stamps, rows), key=lambda pair: pair[0])]
+
+
 def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     """Bounded text preamble for a FRESH SDK session that has prior Hermes
     history (resume impossible: no stored id, or the stored one went stale).
     Reuses _digest_history's compaction, then flattens to capped text."""
-    # Projected background results are the agent's OWN answers, already
-    # delivered outbound; re-presenting them here is the double-presentation
-    # pathology the background lane exists to kill. Filter before the
-    # compaction pass — _digest_history may rebuild dicts and drop the mark.
-    prior_messages = [
-        m for m in (prior_messages or [])
-        if not _is_sdk_display_only_row(m)
-    ]
+    # Background replies and peer messages are what the lost CLI context held: dropping them
+    # made a fresh runtime re-ask questions the owner had already answered (session ce3d96,
+    # 2026-09-24). Keep them, labelled so a background reply reads as already delivered, and
+    # relabel before the compaction pass — _digest_history may rebuild dicts and drop the mark.
+    # Background rows are written when delivered, not when produced, so order by time.
+    prior_messages = _order_by_timestamp(
+        [row for row in map(_continuity_digest_row, prior_messages or []) if row is not None]
+    )
     try:
         from agent.background_review import _digest_history
 
