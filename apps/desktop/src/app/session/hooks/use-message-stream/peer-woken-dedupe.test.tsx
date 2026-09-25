@@ -77,7 +77,9 @@ describe('peer-woken turns render exactly once under their header (#U1.10)', () 
         type: 'message.start',
         payload: {
           background: true,
-          delivery_id: deliveryId
+          delivery_id: deliveryId,
+          user_message: 'please check the system status',
+          turn_author: 'peer_agent'
         }
       })
     })
@@ -103,6 +105,8 @@ describe('peer-woken turns render exactly once under their header (#U1.10)', () 
     const localMessages = states.get(SID)!.messages
     // Live view: lifecycle (system) + peer_message (system) + assistant reply
     expect(localMessages).toHaveLength(3)
+    expect(localMessages.filter(m => m.peerMetadata?.direction === 'in')).toHaveLength(1)
+    expect(localMessages.filter(m => m.role === 'user' && m.deliveryId === deliveryId)).toHaveLength(0)
     const assistantLive = localMessages.filter(m => m.role === 'assistant')
     expect(assistantLive).toHaveLength(1)
     expect(assistantLive[0].deliveryId).toBe(deliveryId)

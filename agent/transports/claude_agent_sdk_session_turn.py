@@ -1248,6 +1248,7 @@ class ClaudeSdkTurnMixin:
             "from": str(origin.get("from") or ""),
             "name": str(origin.get("name") or ""),
             "from_session": str(origin.get("fromSession") or ""),
+            "msg_id": str(origin.get("msg_id") or uuid),
             "uuid": uuid,
         }
         if not item["text"]:
@@ -1703,6 +1704,7 @@ class ClaudeSdkTurnMixin:
                         "from": str(origin.get("from") or ""),
                         "name": str(origin.get("name") or ""),
                         "from_session": str(origin.get("fromSession") or ""),
+                        "msg_id": str(origin.get("msg_id") or uuid),
                         "uuid": uuid,
                     })
                 return

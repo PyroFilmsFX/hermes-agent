@@ -182,7 +182,10 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           if (userText) {
             const peerMessageId = `peer-msg-${deliveryId}`
             const alreadyHasPeer = state.messages.some(
-              m => (m.deliveryId === deliveryId && m.role === 'user') || m.id === peerMessageId
+              m =>
+                (m.deliveryId === deliveryId &&
+                  (m.role === 'user' || (m.role === 'system' && m.peerMetadata?.direction === 'in'))) ||
+                m.id === peerMessageId
             )
             if (!alreadyHasPeer) {
               const peerMessage: ChatMessage = {

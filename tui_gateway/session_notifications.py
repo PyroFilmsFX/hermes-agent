@@ -506,7 +506,7 @@ def _peer_metadata(item: dict, direction: str, completed_at: object = None) -> d
     metadata = {
         "direction": direction,
         "peer": ((item.get("name") or item.get("from")) if direction == "in" else item.get("to")),
-        "msg_id": item.get("uuid") if direction == "in" else item.get("tool_use_id"),
+        "msg_id": (item.get("msg_id") or item.get("uuid")) if direction == "in" else item.get("tool_use_id"),
         "completed_at": completed_at,
     }
     if direction == "in":
@@ -618,7 +618,11 @@ def _notif_deliver_sdk_header(sid: str, session: dict, header_items: list[dict],
         "background": True,
         "delivery_id": delivery_id,
     }
-    if user_prompt_text:
+    peer_in_header_emitted = any(
+        display_kind == "peer_message" and metadata.get("direction") == "in"
+        for _item_id, _row, _text, display_kind, metadata in pending_rows
+    )
+    if user_prompt_text and not peer_in_header_emitted:
         stream_start_payload["user_message"] = user_prompt_text
         stream_start_payload["turn_author"] = "peer_agent"
     _emit("message.start", sid, stream_start_payload)

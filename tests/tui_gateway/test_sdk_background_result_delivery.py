@@ -493,7 +493,8 @@ def test_sdk_woken_delivery_id_on_header_and_complete(wired):
     # 1. Header is delivered before streaming starts
     header_items = [
         {"kind": "lifecycle", "event": "woken", "source": "peer", "by": "peer-bot", "uuid": "peer-uuid-1"},
-        {"kind": "peer_in", "text": "hey agent", "name": "peer-bot", "uuid": "peer-uuid-1"},
+        {"kind": "peer_in", "text": "hey agent", "name": "peer-bot", "uuid": "peer-uuid-1",
+         "msg_id": "mailbox-row-42"},
     ]
     server._notif_deliver_sdk_header("ui-1", session, header_items, delivery_id)
 
@@ -507,6 +508,16 @@ def test_sdk_woken_delivery_id_on_header_and_complete(wired):
     ]
     assert all(did == delivery_id for did in header_delivery_ids)
     assert delivery_id in header_delivery_ids
+    peer_cards = [
+        payload for event, _sid, payload in header_emitted
+        if event == "message.complete" and payload.get("display_kind") == "peer_message"
+    ]
+    assert peer_cards[0]["display_metadata"]["msg_id"] == "mailbox-row-42"
+    stream_starts = [
+        payload for event, _sid, payload in header_emitted
+        if event == "message.start" and payload.get("delivery_id") == delivery_id
+    ]
+    assert all("user_message" not in payload for payload in stream_starts)
 
     # 2. Result message completes the delivery
     evt = _event(

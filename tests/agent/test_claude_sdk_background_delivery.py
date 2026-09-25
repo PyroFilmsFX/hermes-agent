@@ -431,7 +431,10 @@ def test_peer_burst_that_straddles_admission_never_answers_the_host_turn():
                 ResultMessage(result="host answer", uuid="host-1")],
         on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
     )
-    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other", "body": "ping"}
+    peer_origin = {
+        "kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other",
+        "body": "ping", "msg_id": "mailbox-row-42",
+    }
     try:
         session.ensure_started()
         client = holder["client"]
@@ -480,7 +483,10 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
         AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
     )
 
-    peer_origin = {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other", "body": "ping"}
+    peer_origin = {
+        "kind": "peer", "from": "uds:/tmp/x.sock", "name": "hermes:other",
+        "body": "ping", "msg_id": "mailbox-row-42",
+    }
     folded = ResultMessage(result="answer to both", uuid="folded-res-1")
     folded.origin = peer_origin
     delivered = []
@@ -512,6 +518,8 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
     assert all("answer to both" not in " ".join(texts) for texts, _items in delivered)
     # The peer message that started the folded turn still gets its card.
     assert any(item.get("kind") == "peer_in" and item.get("uuid") == "peer-in-1"
+               for _texts, items in delivered for item in (items or []))
+    assert any(item.get("msg_id") == "mailbox-row-42"
                for _texts, items in delivered for item in (items or []))
 
 
