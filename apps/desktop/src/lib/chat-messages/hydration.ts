@@ -194,10 +194,39 @@ const PEER_ENVELOPE_FOOTER_RE = /\r?\n\r?\n\[reply with session_send[^\]]*\]\s*$
 export interface ParsedPeerEnvelope {
   from: string
   senderSid?: string
+  msgId?: string
   body: string
 }
 
+// The peer-mailbox envelope (agent/transports/claude_sdk_peer_envelope.py). A native delivery's
+// CLI echo keeps no origin, so this text is the only thing marking it as a peer message.
+const MAILBOX_ENVELOPE_RE =
+  /^<cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" msg-id="([^"]*)">\n([\s\S]*?)\n<\/cross-session-message>\n/
+
+function unescapeAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
 export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | null {
+  const mailbox = content.match(MAILBOX_ENVELOPE_RE)
+
+  if (mailbox) {
+    const sender = unescapeAttr(mailbox[1])
+
+    return {
+      from: unescapeAttr(mailbox[2]),
+      senderSid: sender && sender !== 'unknown' ? sender : undefined,
+      msgId: unescapeAttr(mailbox[3]) || undefined,
+      body: mailbox[4]
+        .replace(/&lt;\/cross-session-message/g, '</cross-session-message')
+        .replace(/&lt;cross-session-message/g, '<cross-session-message')
+    }
+  }
+
   const headerMatch = content.match(PEER_ENVELOPE_HEADER_RE)
 
   if (!headerMatch) {
@@ -495,6 +524,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       (typeof metaRecord?.msg_id === 'string' && metaRecord.msg_id.trim()) ||
       (typeof metaRecord?.delivery_id === 'string' && metaRecord.delivery_id.trim()) ||
       (typeof msgRecord.delivery_id === 'string' && msgRecord.delivery_id.trim()) ||
+      parsedEnvelope?.msgId ||
       undefined
 
     const via = typeof metaRecord?.via === 'string' ? metaRecord.via : undefined

@@ -38,6 +38,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_post_tool_quiet_timeout,
     _configured_turn_timeout,
 )
+from agent.transports.claude_sdk_peer_envelope import effective_origin
 from agent.transports.claude_agent_sdk_session_watchdog import (
     _is_rename_ack,
     _DEFAULT_POST_TOOL_QUIET_STREAMING,
@@ -91,7 +92,7 @@ def _starts_injected_turn(message: Any) -> bool:
     """An injected user message, or assistant output with no turn in flight."""
     name = type(message).__name__
     if name == "UserMessage":
-        return _is_injected_origin(getattr(message, "origin", None))
+        return _is_injected_origin(effective_origin(message))
     return name == "AssistantMessage"
 
 
@@ -99,8 +100,8 @@ def _is_own_prompt_echo(message: Any) -> bool:
     """A replayed Hermes prompt: the CLI has moved on to the host's own turn."""
     if type(message).__name__ != "UserMessage":
         return False
-    if _is_injected_origin(getattr(message, "origin", None)):
-        return False
+    if _is_injected_origin(effective_origin(message)):
+        return False  # a peer envelope is never the host's own prompt
     content = getattr(message, "content", None)
     if isinstance(content, str):
         return bool(content)
@@ -948,7 +949,7 @@ class ClaudeSdkTurnMixin:
                         self._handle_unsolicited(message)
                         continue
                 self._handle_compact_boundary(message)
-                origin = getattr(message, "origin", None)
+                origin = effective_origin(message)
                 if (
                     type(message).__name__ == "UserMessage"
                     and isinstance(origin, dict)
@@ -1697,7 +1698,7 @@ class ClaudeSdkTurnMixin:
             })
 
         if name == "UserMessage":
-            origin = getattr(message, "origin", None)
+            origin = effective_origin(message)
             if isinstance(origin, dict):
                 _append_woken(origin, getattr(message, "content", None), str(getattr(message, "uuid", None) or ""))
             is_woken = isinstance(origin, dict) and (
