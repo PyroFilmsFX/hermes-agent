@@ -592,6 +592,71 @@ def test_background_result_before_callback_wiring_is_replayed_when_wired():
     assert any(item.get("text") == "early result" for item in delivered[0][1])
 
 
+@pytest.mark.parametrize("origin_kind", ["peer", "task-notification"])
+def test_injected_final_is_delivered_without_interim_duplicate(origin_kind):
+    """Peer and task-woken finals use background delivery, never interim text."""
+    import time as _time
+
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session
+
+    interim = []
+    finals = []
+    origin = {
+        "kind": origin_kind, "from": "uds:/tmp/peer.sock", "name": "hermes:peer", "body": "ping"
+    }
+    wake = UserMessage(content="ping")
+    wake.origin = origin
+    wake.uuid = "peer-wake-no-duplicate"
+    session, holder = _make_session(
+        script=[],
+        on_interim_assistant=interim.append,
+        on_unsolicited_result=lambda texts, items=None, delivery_id=None: finals.append(list(texts)),
+    )
+    try:
+        session.ensure_started()
+        holder["client"].feed(
+            wake,
+            AssistantMessage(content=[TextBlock("peer final answer")]),
+            ResultMessage(result="peer final answer", uuid="peer-final-no-duplicate"),
+        )
+        deadline = _time.time() + 3
+        while not finals and _time.time() < deadline:
+            _time.sleep(0.01)
+    finally:
+        session.close()
+
+    assert finals == [["peer final answer"]]
+    assert interim == []
+
+
+def test_multi_step_turn_relays_intermediate_prose_but_not_final_answer():
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, _make_session,
+        UserMessage,
+    )
+
+    interim = []
+    session, holder = _make_session(
+        script=[
+            AssistantMessage(content=[TextBlock("checking the workspace")]),
+            AssistantMessage(content=[TextBlock("running a check"), ToolUseBlock(
+                id="interim-tool", name="Bash", input={"command": "true"}
+            )]),
+            UserMessage(content=[ToolResultBlock(tool_use_id="interim-tool", content="done")]),
+            AssistantMessage(content=[TextBlock("final answer")]),
+            ResultMessage(result="final answer", uuid="multi-step-final"),
+        ],
+        on_interim_assistant=interim.append,
+    )
+    try:
+        turn = session.run_turn("check", turn_timeout=5, post_tool_quiet_timeout=0.0)
+    finally:
+        session.close()
+
+    assert turn.final_text == "final answer"
+    assert interim == ["checking the workspace", "running a check"]
+
+
 def test_bash_background_task_is_not_a_subagent_and_agent_task_is_not_a_process():
     """Owner screenshot 09-16: Agent tasks showed under both Subagents and Background."""
     from agent.transports.claude_sdk_background_tasks import classify_sdk_task

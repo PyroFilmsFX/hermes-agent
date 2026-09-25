@@ -931,7 +931,7 @@ class TestStreaming:
             session.close()
         assert holder["client"].options["include_partial_messages"] is True
 
-    def test_text_only_interim_assistant_message_is_relayed(self):
+    def test_text_only_assistant_before_terminal_result_is_not_relayed_as_interim(self):
         delivered = []
         session, _holder = _make_session(
             script=[
@@ -941,10 +941,11 @@ class TestStreaming:
             on_interim_assistant=delivered.append,
         )
         try:
-            session.run_turn("inspect")
+            turn = session.run_turn("inspect")
         finally:
             session.close()
-        assert delivered == ["checking the details"]
+        assert turn.final_text == "done"
+        assert delivered == []
 
     def test_completed_thinking_block_emits_reasoning_progress(self):
         progress = []

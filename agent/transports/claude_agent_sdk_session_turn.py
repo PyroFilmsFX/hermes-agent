@@ -819,6 +819,14 @@ class ClaudeSdkTurnMixin:
             return out
         interrupted = False
         billing_guarded = False
+        held_interim_assistant: Any = None
+
+        def _flush_interim_assistant() -> None:
+            nonlocal held_interim_assistant
+            if held_interim_assistant is not None:
+                self._notify_interim_assistant(held_interim_assistant)
+                held_interim_assistant = None
+
         try:
             try:
                 await claim_ack
@@ -888,6 +896,7 @@ class ClaudeSdkTurnMixin:
                 ):
                     # A /rename issued at the previous release answered after this turn
                     # claimed the stream: the CLI's ack, never this turn's result.
+                    _flush_interim_assistant()
                     self._pending_rename_ack = None
                     continue
                 if pending_rename and type(message).__name__ == "AssistantMessage" and _is_rename_ack(
@@ -898,6 +907,7 @@ class ClaudeSdkTurnMixin:
                 ):
                     # The same ack's assistant text: never relayed or projected as this
                     # turn's words. The pending name stays until its ResultMessage lands.
+                    _flush_interim_assistant()
                     continue
                 if type(message).__name__ == "ResultMessage" and _is_injected_origin(
                     getattr(message, "origin", None)
@@ -911,6 +921,7 @@ class ClaudeSdkTurnMixin:
                     if getattr(self, "_host_prompt_folded", False):
                         self._host_prompt_folded = False
                     else:
+                        _flush_interim_assistant()
                         self._handle_unsolicited(message)
                         continue
                 self._handle_compact_boundary(message)
@@ -968,6 +979,7 @@ class ClaudeSdkTurnMixin:
                     if pending_steer > 0 and (
                         not is_steer_result or pending_steer_after > 0
                     ):
+                        _flush_interim_assistant()
                         continue
                 self._note_mcp_tool_use(message, out)
                 if not billing_guarded:
@@ -978,7 +990,27 @@ class ClaudeSdkTurnMixin:
                     # drains to its terminal ResultMessage.
                     self._notify_tool_results(message)
                     if not interrupted:
-                        self._notify_interim_assistant(message)
+                        if type(message).__name__ == "AssistantMessage":
+                            # A plain assistant paragraph may be the final
+                            # answer (especially on injected/folded turns).
+                            # Hold it until another assistant step proves the
+                            # turn continues. Text paired with a tool call is
+                            # unambiguously interim and can be relayed now.
+                            _flush_interim_assistant()
+                            blocks = getattr(message, "content", None) or []
+                            has_text = any(
+                                type(block).__name__ == "TextBlock"
+                                and getattr(block, "text", "")
+                                for block in blocks
+                            )
+                            has_tool_use = any(
+                                type(block).__name__ == "ToolUseBlock"
+                                for block in blocks
+                            )
+                            if has_text and not has_tool_use:
+                                held_interim_assistant = message
+                            else:
+                                self._notify_interim_assistant(message)
                 projection, _result_is_error, _result_is_contradictory_success = (
                     self._project_message_step(projector, watch, message, out)
                 )
