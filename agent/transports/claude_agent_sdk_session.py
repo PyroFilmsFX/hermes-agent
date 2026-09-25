@@ -96,6 +96,7 @@ from agent.transports.claude_agent_sdk_session_turn import (
 
 logger = logging.getLogger(__name__)
 _RENAME_ACK_TIMEOUT_SECONDS = 10.0
+_NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
 
 
 def _run_disconnect_without_loop(disconnect_coro: Any) -> bool:
@@ -1140,6 +1141,11 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     logger.debug("SDK peer query failed after scheduling", exc_info=True)
 
             future.add_done_callback(_finish_peer)
+            try:
+                future.result(timeout=_NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
+            except TimeoutError:
+                future.cancel()
+                raise
         except Exception:
             if query is not None and hasattr(query, "close"):
                 query.close()

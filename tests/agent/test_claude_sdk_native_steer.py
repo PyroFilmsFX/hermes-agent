@@ -182,6 +182,8 @@ def test_peer_message_uses_sdk_stream_with_peer_origin_when_idle(monkeypatch):
     class _Fut:
         def add_done_callback(self, cb):
             scheduled.append(cb)
+        def result(self, timeout=None):
+            return None
 
     monkeypatch.setattr(
         mod.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _Fut(), raising=False,
@@ -207,12 +209,57 @@ def test_peer_message_uses_sdk_queue_when_a_turn_is_in_flight(monkeypatch):
     class _Fut:
         def add_done_callback(self, cb):
             scheduled.append(cb)
+        def result(self, timeout=None):
+            return None
 
     monkeypatch.setattr(
         mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: _Fut(), raising=False,
     )
     assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer"}) is True
     assert len(queried) == 1 and len(scheduled) == 1
+
+
+def test_peer_message_declines_when_scheduled_query_fails(monkeypatch):
+    mod, stub, queried = _transport(turn_inbox=None)
+
+    class _Fut:
+        def add_done_callback(self, cb):
+            pass
+        def result(self, timeout=None):
+            raise RuntimeError("SDK query failed")
+        def cancel(self):
+            return True
+
+    monkeypatch.setattr(
+        mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: _Fut(), raising=False,
+    )
+    assert mod.ClaudeAgentSdkSession.send_peer_message(
+        stub, "hello", {"kind": "peer", "msg_id": "row-1"}
+    ) is False
+
+
+def test_peer_message_declines_and_cancels_when_scheduled_query_times_out(monkeypatch):
+    mod, stub, queried = _transport(turn_inbox=None)
+
+    class _Fut:
+        cancelled = False
+        def add_done_callback(self, cb):
+            pass
+        def result(self, timeout=None):
+            assert timeout == 5.0
+            raise TimeoutError("query did not settle")
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    future = _Fut()
+    monkeypatch.setattr(
+        mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: future, raising=False,
+    )
+    assert mod.ClaudeAgentSdkSession.send_peer_message(
+        stub, "hello", {"kind": "peer", "msg_id": "row-2"}
+    ) is False
+    assert future.cancelled is True
 
 
 def test_transport_declines_when_client_or_loop_missing(monkeypatch):

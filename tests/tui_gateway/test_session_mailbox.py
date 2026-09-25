@@ -107,7 +107,7 @@ def test_busy_live_claude_target_uses_sdk_boundary_queue_once(gw):
 
 def test_native_claude_injection_failure_falls_back_to_live_submit_once(gw):
     def fail(_body, _origin):
-        raise RuntimeError("SDK unavailable")
+        return False
 
     gw.sessions["live-claude"] = _claude_live_session(fail)
     result = _send(gw)
@@ -116,6 +116,7 @@ def test_native_claude_injection_failure_falls_back_to_live_submit_once(gw):
     assert len(gw.submits) == 1
     assert "ping" in gw.submits[0]["text"]
     assert gw.db.peer_mailbox_get(result["message_id"])["delivered_via"] == "live"
+    assert gw.db.peer_mailbox_get(result["message_id"])["status"] == "delivered"
 
 
 def test_native_peer_hint_requires_live_claude_sender_and_target(gw, monkeypatch):
