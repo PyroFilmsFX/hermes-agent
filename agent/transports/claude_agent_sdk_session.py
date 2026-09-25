@@ -95,6 +95,7 @@ from agent.transports.claude_agent_sdk_session_turn import (
 )
 
 logger = logging.getLogger(__name__)
+_RENAME_ACK_TIMEOUT_SECONDS = 10.0
 
 
 def _run_disconnect_without_loop(disconnect_coro: Any) -> bool:
@@ -703,6 +704,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._turn_inbox is not None
                 or getattr(self, "_turn_claim_requested", False)
                 or getattr(self, "_rename_claim_requested", False)
+                or getattr(self, "_unsolicited_burst_open", False)
+                or self._stream_ended is not None
             ):
                 # Turn admission and rename admission share this lock. A rename
                 # that loses the race is applied by the owner at release.
@@ -715,7 +718,6 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 return True
             self._rename_claim_requested = True
             self._deferred_rename = None
-            self._pending_rename_ack = cleaned
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._run_claimed_rename(cleaned), loop
@@ -726,7 +728,6 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 logger.debug("SDK /rename scheduling failed", exc_info=True)
                 return False
         future.add_done_callback(_swallow_steer_result)
-        self._session_name = cleaned
         logger.info("claude-agent-sdk: session renamed to %r", cleaned)
         return True
 
@@ -738,12 +739,34 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         if claims is None:
             raise RuntimeError("SDK message reader is not ready to claim rename")
         claim_ack = asyncio.get_running_loop().create_future()
+        timed_out = False
+        claim_granted = False
         try:
             claims.put_nowait(("rename", inbox, claim_ack))
             await claim_ack
+            with self._turn_callback_lock:
+                if self._stream_ended is not None:
+                    return
+                if self._turn_inbox is not inbox or not self._rename_claim_requested:
+                    self._deferred_rename = name
+                    return
+                claim_granted = True
+                self._pending_rename_ack = name
+                self._session_name = name
             await self._client.query(f"/rename {name}")
             while True:
-                message = await inbox.get()
+                try:
+                    message = await asyncio.wait_for(
+                        inbox.get(), timeout=_RENAME_ACK_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    self._deferred_rename = name
+                    logger.warning(
+                        "claude-agent-sdk: /rename acknowledgement timed out; deferring %r",
+                        name,
+                    )
+                    return
                 if isinstance(message, _StreamEnd):
                     raise RuntimeError("SDK stream ended before rename acknowledgement")
                 if type(message).__name__ == "AssistantMessage" and _is_rename_ack(
@@ -767,6 +790,11 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     # then release the stream so a host turn is not held behind
                     # a rename whose acknowledgement has not arrived yet.
                     return
+        except Exception:
+            with self._turn_callback_lock:
+                if self._stream_ended is None:
+                    self._deferred_rename = name
+            raise
         finally:
             if self._turn_inbox is inbox and self._stream_ended is None:
                 release_ack = asyncio.get_running_loop().create_future()
@@ -778,7 +806,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._rename_claim_requested = False
             if acknowledged and getattr(self, "_pending_rename_ack", None) == name:
                 self._pending_rename_ack = None
-            if self._deferred_rename:
+            if self._deferred_rename and claim_granted and not timed_out:
                 self._apply_deferred_rename()
 
     def defer_rename(self, name: str) -> None:

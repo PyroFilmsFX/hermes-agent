@@ -1379,6 +1379,107 @@ class TestSessionRename:
         finally:
             session.close()
 
+    def test_rename_waits_for_open_injected_burst_to_release(self):
+        session, holder = _make_hold_open_session(script=[], session_name="hermes:old")
+        try:
+            session.ensure_started()
+            client = holder["client"]
+            peer = UserMessage(content="peer work")
+            peer.origin = {"kind": "peer", "from": "peer-session"}
+            client.feed(peer)
+            deadline = time.monotonic() + 2
+            while not session._unsolicited_burst_open and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert session._unsolicited_burst_open
+
+            assert session.rename("hermes:new") is False
+            assert session._deferred_rename == "hermes:new"
+            assert session._session_name == "hermes:old"
+            assert "/rename hermes:new" not in client.queried
+
+            client.feed(
+                AssistantMessage(content=[TextBlock("peer done")]),
+                ResultMessage(result="peer done", uuid="peer-done"),
+            )
+            deadline = time.monotonic() + 2
+            while "/rename hermes:new" not in client.queried and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert "/rename hermes:new" in client.queried
+        finally:
+            session.close()
+
+    def test_rename_timeout_releases_claim_and_reparks(self, monkeypatch):
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+
+        monkeypatch.setattr(sdk_session_mod, "_RENAME_ACK_TIMEOUT_SECONDS", 0.02)
+        session, holder = _make_hold_open_session(script=[], session_name="hermes:old")
+        try:
+            session.ensure_started()
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while session._deferred_rename is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert session._deferred_rename == "hermes:new"
+            while session._turn_inbox is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert session._turn_inbox is None
+            assert session._rename_claim_requested is False
+            assert "/rename hermes:new" in holder["client"].queried
+        finally:
+            session.close()
+
+    def test_rename_claim_ack_after_stream_death_clears_request(self):
+        import agent.transports.claude_agent_sdk_session as sdk_session_mod
+
+        class DiesAfterRenameAck(ClaudeAgentSdkSession):
+            async def _reader_loop(self):
+                operation, _inbox, ack = await self._turn_claims.get()
+                assert operation == "rename"
+                self._stream_ended = sdk_session_mod._StreamEnd(error="dead")
+                ack.set_result(None)
+
+        def factory(options=None):
+            return _FakeClient(options=options)
+
+        session = DiesAfterRenameAck(cwd="/tmp", client_factory=factory)
+        try:
+            session.ensure_started()
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while session._rename_claim_requested and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert session._stream_ended is not None
+            assert session._turn_inbox is None
+            assert session._rename_claim_requested is False
+            assert session._pending_rename_ack is None
+            assert session._client.queried == []
+        finally:
+            session.close()
+
+    def test_failed_rename_claim_keeps_name_until_a_later_claim(self):
+        class TurnWinsRename(ClaudeAgentSdkSession):
+            async def _reader_loop(self):
+                operation, _inbox, ack = await self._turn_claims.get()
+                assert operation == "rename"
+                ack.set_exception(RuntimeError("turn already owns stream"))
+
+        session = TurnWinsRename(
+            cwd="/tmp", client_factory=lambda options=None: _FakeClient(options=options)
+        )
+        session._session_name = "hermes:old"
+        try:
+            session.ensure_started()
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while session._rename_claim_requested and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert session._session_name == "hermes:old"
+            assert session._pending_rename_ack is None
+            assert session._deferred_rename == "hermes:new"
+            assert session._rename_claim_requested is False
+        finally:
+            session.close()
+
     def test_rename_and_turn_claim_are_serialized(self):
         # Both callers start together repeatedly. The SDK reader must give each
         # query its own terminal result, and the rename acknowledgement is never
@@ -1529,6 +1630,9 @@ class TestSessionRename:
             thread.join(timeout=5)
             client = holder["client"]
             assert session.rename("hermes:target") is True
+            deadline = time.monotonic() + 2
+            while session._pending_rename_ack is None and time.monotonic() < deadline:
+                time.sleep(0.01)
             assert session._pending_rename_ack == "hermes:target"
             # Text starting with "Session renamed to:" but not matching the pending rename target
             other_text = "Session renamed to: completely_different"
@@ -1591,6 +1695,9 @@ class TestSessionRename:
         thread.start()
         try:
             session.run_turn("big task", turn_timeout=5, post_tool_quiet_timeout=0.0, watch_poll_interval=0.02)
+            deadline = time.monotonic() + 2
+            while "/rename hermes:mid" not in holder["client"].queried and time.monotonic() < deadline:
+                time.sleep(0.01)
         finally:
             stop.set()
             thread.join(timeout=5)
@@ -1599,6 +1706,9 @@ class TestSessionRename:
         # Never interleaved with the turn that owned the stream; issued at its release.
         assert "/rename hermes:mid" not in seen["queried_mid_turn"]
         queried = holder["client"].queried
+        deadline = time.monotonic() + 2
+        while "/rename hermes:mid" not in queried and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert queried.index("/rename hermes:mid") > queried.index("big task")
 
 

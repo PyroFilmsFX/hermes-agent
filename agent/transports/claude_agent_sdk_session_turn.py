@@ -1421,6 +1421,7 @@ class ClaudeSdkTurnMixin:
                             self._handle_unsolicited(message)
                             if type(message).__name__ == "ResultMessage":
                                 self._unsolicited_burst_open = False
+                                self._apply_deferred_rename()
                     elif inbox is not None:
                         inbox.put_nowait(message)
                     else:
@@ -1429,6 +1430,7 @@ class ClaudeSdkTurnMixin:
                         self._handle_unsolicited(message)
                         if type(message).__name__ == "ResultMessage":
                             self._unsolicited_burst_open = False
+                            self._apply_deferred_rename()
                     # Message wins ties with a claim. Re-arm first, then loop:
                     # every immediately available pre-claim FIFO entry is
                     # classified unsolicited before the claim is acknowledged.
