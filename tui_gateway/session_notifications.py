@@ -10,6 +10,9 @@ import json
 from .method_ctx import bind_module
 
 
+_MAX_RETAINED_SDK_HEADER_IDS = 512
+
+
 def _notif_locked_sessions(fn, default):
     """Run ``fn(_sessions)`` under ``_sessions_lock``; ``default`` on failure (poller must never crash)."""
     try:
@@ -532,9 +535,13 @@ def _notif_deliver_sdk_header(sid: str, session: dict, header_items: list[dict],
     now = time.time()
 
     header_seen = session.setdefault("_sdk_header_seen", set())
+    header_order = session.setdefault("_sdk_header_seen_order", [])
     if delivery_id in header_seen:
         return
     header_seen.add(delivery_id)
+    header_order.append(delivery_id)
+    if len(header_order) > _MAX_RETAINED_SDK_HEADER_IDS:
+        header_seen.discard(header_order.pop(0))
 
     pending_rows = []
     user_prompt_text = ""

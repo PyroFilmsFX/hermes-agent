@@ -546,3 +546,14 @@ def test_sdk_woken_delivery_id_on_header_and_complete(wired):
     assistant_rows = [r for r in db.rows if r.get("role") == "assistant" and r.get("content") == "reply from agent"]
     assert len(assistant_rows) == 1
     assert assistant_rows[0].get("display_metadata", {}).get("delivery_id") == delivery_id
+
+
+def test_sdk_header_seen_ids_keep_only_the_newest_512(wired):
+    _emitted, _db = wired
+    session = _session()
+    for index in range(520):
+        server._notif_deliver_sdk_header("ui-1", session, [], f"delivery-{index}")
+
+    assert len(session["_sdk_header_seen"]) == 512
+    assert "delivery-0" not in session["_sdk_header_seen"]
+    assert "delivery-519" in session["_sdk_header_seen"]

@@ -803,3 +803,29 @@ def test_retained_unsolicited_deliveries_are_bounded_without_a_callback():
         assert pending[-1][2] == f"deliv-{turn_mod._MAX_RETAINED_UNSOLICITED + 8}"
     finally:
         session.close()
+
+
+def test_session_deduplication_id_sets_keep_only_the_newest_entries():
+    from agent.transports import claude_agent_sdk_session_turn as turn_mod
+    from tests.agent.claude_sdk_fakes import ResultMessage, UserMessage, _make_session
+
+    session, _holder = _make_session(script=[], on_unsolicited_result=lambda *_args: None)
+    try:
+        max_ids = 512
+        count = max_ids + 8
+        for index in range(count):
+            session._handle_unsolicited(
+                ResultMessage(result=f"background {index}", uuid=f"result-{index}")
+            )
+            peer = UserMessage(content=f"peer {index}")
+            peer.uuid = f"peer-{index}"
+            session._deliver_host_peer_item(peer, {"kind": "peer", "body": f"peer {index}"})
+
+        assert len(session._unsolicited_delivered) == max_ids
+        assert len(session._host_peer_seen) == max_ids
+        assert "result-0" not in session._unsolicited_delivered
+        assert f"result-{count - 1}" in session._unsolicited_delivered
+        assert "peer-0" not in session._host_peer_seen
+        assert f"peer-{count - 1}" in session._host_peer_seen
+    finally:
+        session.close()

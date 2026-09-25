@@ -54,6 +54,26 @@ logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 
 # Unsolicited deliveries retained while no result callback is wired (G2.4); newest kept.
 _MAX_RETAINED_UNSOLICITED = 16
+_MAX_RETAINED_UNSOLICITED_IDS = 512
+
+
+def _remember_recent_id(owner: Any, seen_name: str, order_name: str, value: str) -> bool:
+    """Remember an id while keeping each session-local dedupe index bounded."""
+    seen = getattr(owner, seen_name, None)
+    if seen is None:
+        seen = set()
+        setattr(owner, seen_name, seen)
+    if value in seen:
+        return False
+    order = getattr(owner, order_name, None)
+    if order is None:
+        order = []
+        setattr(owner, order_name, order)
+    seen.add(value)
+    order.append(value)
+    if len(order) > _MAX_RETAINED_UNSOLICITED_IDS:
+        seen.discard(order.pop(0))
+    return True
 
 
 def _is_human_origin(message: Any) -> bool:
@@ -1187,7 +1207,9 @@ class ClaudeSdkTurnMixin:
                     ):
                         uuid = getattr(residue, "uuid", None)
                         if uuid:
-                            self._unsolicited_delivered.add(uuid)
+                            _remember_recent_id(
+                                self, "_unsolicited_delivered", "_unsolicited_delivered_order", uuid
+                            )
                         self._unsolicited_results += 1
                         buffered = len(self._unsolicited_text)
                         _clear_unsolicited_projection(self)
@@ -1229,10 +1251,10 @@ class ClaudeSdkTurnMixin:
         seen = getattr(self, "_host_peer_seen", None)
         if seen is None:
             seen = self._host_peer_seen = set()
-        if uuid and uuid in seen:
+        if uuid and not _remember_recent_id(
+            self, "_host_peer_seen", "_host_peer_seen_order", uuid
+        ):
             return
-        if uuid:
-            seen.add(uuid)
         content = getattr(message, "content", None)
         if isinstance(content, str):
             text = content
@@ -1762,7 +1784,9 @@ class ClaudeSdkTurnMixin:
                 # The CLI's own "/rename" acknowledgement — never a background result.
                 self._pending_rename_ack = None
                 if uuid:
-                    self._unsolicited_delivered.add(uuid)
+                    _remember_recent_id(
+                        self, "_unsolicited_delivered", "_unsolicited_delivered_order", uuid
+                    )
                 logger.debug("claude-agent-sdk: swallowed /rename ack %r", (result_text or "")[:60])
                 return
             if isinstance(result_text, str) and result_text.strip():
@@ -1783,7 +1807,9 @@ class ClaudeSdkTurnMixin:
                 ):
                     unsolicited_items.append({"kind": "text", "text": result_text})
             if uuid:
-                self._unsolicited_delivered.add(uuid)
+                _remember_recent_id(
+                    self, "_unsolicited_delivered", "_unsolicited_delivered_order", uuid
+                )
             if not texts and not unsolicited_items:
                 logger.warning(
                     "claude-agent-sdk: unsolicited ResultMessage carried no "
