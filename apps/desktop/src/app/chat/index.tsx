@@ -73,6 +73,7 @@ import { isRouteSessionMismatch } from './route-session-state'
 import { useRuntimeMessageRepository } from './runtime-repository'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
 import { useSessionView } from './session-view'
+import { SessionMailboxPopover } from '@/components/session/mailbox-popover'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { routedSessionIsLoading, threadLoadingState } from './thread-loading'
 import {
@@ -183,6 +184,7 @@ function ChatHeader({
         >
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
+        <SessionMailboxPopover className="pointer-events-auto ml-1" sessionId={selectedSessionId || activeSessionId || ''} />
       </div>
     </header>
   )

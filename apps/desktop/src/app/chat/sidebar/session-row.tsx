@@ -208,6 +208,30 @@ function SidebarSessionRowImpl({
     trailing.push({ key: 'pr', node: <PrTag pr={pr} /> })
   }
 
+  const isRowPinned = isPinned || Boolean(session.pinned)
+
+  if (isRowPinned) {
+    trailing.push({
+      key: 'pinned',
+      node: (
+        <Tip label={isPinned ? 'Unpin' : 'Pin'} side="top">
+          <button
+            type="button"
+            data-slot="session-pinned-chip"
+            aria-label={isPinned ? 'Unpin' : 'Pin'}
+            className="flex size-4 shrink-0 items-center justify-center rounded-[3px] text-(--ui-text-tertiary) hover:text-foreground focus-visible:outline-none"
+            onClick={event => {
+              event.stopPropagation()
+              onPin()
+            }}
+          >
+            <Codicon name="pin" size="0.75rem" />
+          </button>
+        </Tip>
+      )
+    })
+  }
+
   const showAge = pinnedAge || card
 
   if (figures.length || showAge) {

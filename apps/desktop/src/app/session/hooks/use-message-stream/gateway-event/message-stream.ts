@@ -3,7 +3,7 @@ import type { BillingBlock } from '@hermes/shared'
 import { burstVibeHearts } from '@/components/chat/vibe-hearts'
 import { reportFirstBuildTurnComplete } from '@/components/onboarding-chat/first-build'
 import { translateNow } from '@/i18n'
-import { assistantTextPart, type ChatMessage, textPart } from '@/lib/chat-messages'
+import { assistantTextPart, type ChatMessage, type PeerMetadata, textPart } from '@/lib/chat-messages'
 import { peerMessageLabel, sessionLifecycleBody, sessionLifecycleLabel } from '@/lib/chat-messages/hydration'
 import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
@@ -16,7 +16,7 @@ import { notify } from '@/store/notifications'
 import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
-import { setCurrentUsage, setTurnStartedAt } from '@/store/session'
+import { $messages, setCurrentUsage, setTurnStartedAt } from '@/store/session'
 import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control'
 import { markBackgroundSessionFinished, setBackgroundDeliveryActive } from '@/store/session-states'
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
@@ -103,6 +103,61 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     sessionStateByRuntimeIdRef,
     updateSessionState
   } = deps
+
+  if (event.type === 'peer_mailbox.settled') {
+    const p = (event.payload || {}) as { msg_id?: string; status?: string; attempts?: number }
+    const msgId = p.msg_id
+    const status = p.status
+    const attempts = p.attempts
+
+    if (!msgId || !status) {
+      return true
+    }
+
+    for (const [sId, state] of sessionStateByRuntimeIdRef.current.entries()) {
+      const idx = state.messages.findIndex(m => m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId)
+      if (idx !== -1) {
+        updateSessionState(sId, st => ({
+          ...st,
+          messages: st.messages.map(m => {
+            if (m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId) {
+              return {
+                ...m,
+                peerMetadata: {
+                  ...m.peerMetadata,
+                  status,
+                  ...(attempts !== undefined ? { attempts } : {})
+                }
+              }
+            }
+            return m
+          })
+        }))
+      }
+    }
+
+    const currentMessages = $messages.get()
+    const activeIdx = currentMessages.findIndex(m => m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId)
+    if (activeIdx !== -1) {
+      $messages.set(
+        currentMessages.map(m => {
+          if (m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId) {
+            return {
+              ...m,
+              peerMetadata: {
+                ...m.peerMetadata,
+                status,
+                ...(attempts !== undefined ? { attempts } : {})
+              }
+            }
+          }
+          return m
+        })
+      )
+    }
+
+    return true
+  }
 
   if (event.type === 'message.start') {
     if (!sessionId) {
@@ -464,11 +519,35 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           const direction = displayMetadata?.direction === 'out' ? 'out' : 'in'
 
           const peer =
-            typeof displayMetadata?.peer === 'string' && displayMetadata.peer.trim()
-              ? displayMetadata.peer.trim()
-              : 'peer'
+            (typeof displayMetadata?.peer === 'string' && displayMetadata.peer.trim()) ||
+            (typeof displayMetadata?.from === 'string' && displayMetadata.from.trim()) ||
+            (typeof displayMetadata?.to === 'string' && displayMetadata.to.trim()) ||
+            'peer'
 
           const label = peerMessageLabel(direction, peer, finalText, occurredAt)
+
+          const msgId =
+            (typeof displayMetadata?.msg_id === 'string' && displayMetadata.msg_id.trim()) ||
+            (typeof displayMetadata?.delivery_id === 'string' && displayMetadata.delivery_id.trim()) ||
+            effectiveDeliveryId ||
+            undefined
+
+          const peerMetadata: PeerMetadata = {
+            direction,
+            peer,
+            from: typeof displayMetadata?.from === 'string' ? displayMetadata.from : undefined,
+            from_session_id:
+              typeof displayMetadata?.from_session_id === 'string'
+                ? displayMetadata.from_session_id
+                : typeof displayMetadata?.sender_sid === 'string'
+                  ? displayMetadata.sender_sid
+                  : undefined,
+            to: typeof displayMetadata?.to === 'string' ? displayMetadata.to : undefined,
+            msg_id: msgId,
+            via: typeof displayMetadata?.via === 'string' ? displayMetadata.via : undefined,
+            status: typeof displayMetadata?.status === 'string' ? displayMetadata.status : undefined,
+            attempts: typeof displayMetadata?.attempts === 'number' ? displayMetadata.attempts : undefined
+          }
 
           sealedMessage = {
             id: existing?.id ?? nextBackgroundMessageId('peer'),
@@ -478,7 +557,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
             pending: false,
-            ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {})
+            ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {}),
+            peerMetadata
           }
         } else {
           // sdk_background_result or general background completion

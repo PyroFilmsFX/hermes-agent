@@ -5,9 +5,11 @@ import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { SCAFFOLD_GLYPH_CLASS, SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
+import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
 import { ToolIcon } from '@/components/ui/tool-icon'
+import type { PeerMetadata } from '@/lib/chat-messages/types'
 import { LinkifiedText } from '@/lib/external-link'
 import { cn } from '@/lib/utils'
 
@@ -15,13 +17,56 @@ const SLASH_STATUS_RE = /^slash:(?<command>\/[^\n]+)\n(?<output>[\s\S]*)$/
 const STEER_NOTE_RE = /^steer:(?<text>[\s\S]+)$/
 const REVIEW_NOTE_RE = /^review:(?<label>[^:\n]+):?\s*(?<detail>[\s\S]*)$/
 
+export interface PeerStatusChipProps {
+  status?: string
+  attempts?: number
+}
+
+export function formatPeerStatusLabel(status: string, attempts?: number): string {
+  if (status === 'queued' && attempts !== undefined && attempts > 0) {
+    return `queued (${attempts} ${attempts === 1 ? 'attempt' : 'attempts'})`
+  }
+  return status
+}
+
+export const PeerStatusChip: FC<PeerStatusChipProps> = ({ status, attempts }) => {
+  if (!status) {
+    return null
+  }
+
+  let variant: 'destructive' | 'warn' | 'muted' = 'muted'
+
+  if (status === 'failed') {
+    variant = 'destructive'
+  } else if (status === 'queued' || status.startsWith('queued')) {
+    variant = 'warn'
+  } else {
+    variant = 'muted'
+  }
+
+  const label = formatPeerStatusLabel(status, attempts)
+
+  return (
+    <Badge
+      className="font-mono text-[0.6rem] tracking-tight"
+      data-slot="peer-status-chip"
+      data-status={status}
+      size="xs"
+      variant={variant}
+    >
+      {label}
+    </Badge>
+  )
+}
+
 interface BackgroundResultProps {
   text: string
   report: string
   process?: boolean
+  peerMetadata?: PeerMetadata
 }
 
-export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, process }) => {
+export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, process, peerMetadata }) => {
   const [open, setOpen] = useState(false)
 
   return (
@@ -46,6 +91,9 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
             </span>
           )}
           <span className={cn(SCAFFOLD_LABEL_CLASS, 'min-w-0 truncate')}>{text}</span>
+          {peerMetadata?.status && (
+            <PeerStatusChip attempts={peerMetadata.attempts} status={peerMetadata.status} />
+          )}
         </ScaffoldRow>
       </div>
       {open &&
@@ -64,6 +112,7 @@ export const SystemMessage: FC = () => {
   const text = useAuiState(s => messageContentText(s.message.content))
   const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult ?? s.message.metadata.custom?.peerMessage)
   const processResult = useAuiState(s => s.message.metadata.custom?.asyncResultKind === 'process')
+  const peerMetadata = useAuiState(s => s.message.metadata.custom?.peerMetadata as PeerMetadata | undefined)
 
   if (!text) {
     return null
@@ -73,6 +122,7 @@ export const SystemMessage: FC = () => {
     return (
       <MessagePrimitive.Root className="w-full min-w-0 self-start" data-role="system" data-slot="aui_system-message-root">
         <BackgroundResult
+          peerMetadata={peerMetadata}
           process={processResult}
           report={typeof asyncResult === 'string' ? asyncResult : ''}
           text={text}

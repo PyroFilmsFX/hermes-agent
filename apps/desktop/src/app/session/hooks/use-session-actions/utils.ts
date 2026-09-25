@@ -175,7 +175,8 @@ const COMPARED_FIELDS = [
   // Turn wall-clock duration — stamps the visible "⏱ 38s" badge, so a change
   // must re-render (set once at completion; stable afterwards).
   'durationS',
-  'deliveryId'
+  'deliveryId',
+  'peerMetadata'
 ] as const
 
 const IGNORED_FIELDS = ['attachmentRefs', 'parts', 'rowId'] as const
@@ -287,7 +288,13 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     // Interim gates the action footer, so flipping it must repaint (e.g. a
     // previewed final settling onto a sealed interim bubble restores the bar).
     (a.interim ?? false) !== (b.interim ?? false) ||
-    !chatReactionsEquivalent(a.reactions, b.reactions)
+    !chatReactionsEquivalent(a.reactions, b.reactions) ||
+    (a.peerMetadata?.msg_id ?? null) !== (b.peerMetadata?.msg_id ?? null) ||
+    (a.peerMetadata?.status ?? null) !== (b.peerMetadata?.status ?? null) ||
+    (a.peerMetadata?.attempts ?? null) !== (b.peerMetadata?.attempts ?? null) ||
+    (a.peerMetadata?.direction ?? null) !== (b.peerMetadata?.direction ?? null) ||
+    (a.peerMetadata?.peer ?? null) !== (b.peerMetadata?.peer ?? null) ||
+    (a.peerMetadata?.via ?? null) !== (b.peerMetadata?.via ?? null)
   ) {
     return false
   }

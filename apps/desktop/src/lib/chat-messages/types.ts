@@ -49,6 +49,21 @@ export type ChatMessage = {
   reactions?: MessageReaction[]
   /** Stable peer-woken / background delivery ID across streaming and persistence. */
   deliveryId?: string
+  /** Peer message delivery metadata (direction, peer, msg_id, status, attempts). */
+  peerMetadata?: PeerMetadata
+}
+
+export interface PeerMetadata {
+  direction?: 'in' | 'out'
+  peer?: string
+  from?: string
+  from_session_id?: string
+  to?: string
+  target_session_id?: string
+  msg_id?: string
+  via?: string
+  status?: string
+  attempts?: number
 }
 
 export type GatewayEventPayload = {

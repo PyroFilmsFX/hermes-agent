@@ -23,6 +23,7 @@ beforeEach(() => {
 
 import type { GatewayEventName } from '@hermes/shared'
 
+import type { ChatMessage } from '@/lib/chat-messages'
 import { handleMessageStreamEvent } from './message-stream'
 import type { GatewayEventContext } from './types'
 
@@ -219,5 +220,103 @@ describe('handleMessageStreamEvent background delivery contracts', () => {
 
     handleMessageStreamEvent(ctx)
     expect($unreadFinishedSessionIds.get()).not.toContain('s1')
+  })
+
+  it('updates a queued peer message status when peer_mailbox.settled arrives', async () => {
+    const { $messages } = await import('@/store/session')
+    const ctx = context('peer_mailbox.settled' as GatewayEventName)
+    ctx.event = {
+      type: 'peer_mailbox.settled',
+      payload: { msg_id: 'msg-settle-100', status: 'delivered-live', attempts: 1 }
+    } as unknown as GatewayEventContext['event']
+
+    const queuedPeerMessage: ChatMessage = {
+      id: 'p-1',
+      role: 'system',
+      parts: [{ type: 'text', text: '↗ to worker: deploy' }],
+      asyncResult: 'deploy',
+      peerMetadata: {
+        msg_id: 'msg-settle-100',
+        direction: 'out',
+        peer: 'worker',
+        status: 'queued',
+        attempts: 1
+      }
+    }
+
+    let sessionState = {
+      busy: false,
+      awaitingResponse: false,
+      interrupted: false,
+      messages: [queuedPeerMessage],
+      storedSessionId: 's1',
+      streamId: null
+    } as unknown as ReturnType<GatewayEventContext['deps']['updateSessionState']>
+
+    ctx.deps.sessionStateByRuntimeIdRef.current.set('s1', sessionState)
+    ctx.deps.updateSessionState = vi.fn((_sid, updater) => {
+      sessionState = updater(sessionState)
+      return sessionState
+    })
+
+    $messages.set([queuedPeerMessage])
+
+    const handled = handleMessageStreamEvent(ctx)
+    expect(handled).toBe(true)
+
+    // Checked in session state
+    expect(sessionState.messages[0].peerMetadata?.status).toBe('delivered-live')
+    expect(sessionState.messages[0].peerMetadata?.attempts).toBe(1)
+
+    // Checked in $messages store
+    expect($messages.get()[0].peerMetadata?.status).toBe('delivered-live')
+  })
+
+  it('populates peerMetadata on peer_message completion', () => {
+    const ctx = context('message.complete')
+    ctx.payload = {
+      background: true,
+      display_kind: 'peer_message',
+      text: 'Outbound command body',
+      display_metadata: {
+        direction: 'out',
+        to: 'worker-node',
+        msg_id: 'out-42',
+        status: 'queued',
+        attempts: 2
+      }
+    } as unknown as GatewayEventContext['payload']
+
+    let currentState = {
+      busy: false,
+      awaitingResponse: false,
+      interrupted: false,
+      messages: [],
+      storedSessionId: 's1',
+      streamId: null
+    } as unknown as ReturnType<GatewayEventContext['deps']['updateSessionState']>
+
+    ctx.deps.updateSessionState = vi.fn((_sid, updater) => {
+      currentState = updater(currentState)
+      return currentState
+    })
+
+    const handled = handleMessageStreamEvent(ctx)
+    expect(handled).toBe(true)
+    expect(currentState.messages).toHaveLength(1)
+
+    const msg = currentState.messages[0]
+    expect(msg.role).toBe('system')
+    expect(msg.peerMetadata).toEqual({
+      direction: 'out',
+      peer: 'worker-node',
+      from: undefined,
+      from_session_id: undefined,
+      to: 'worker-node',
+      msg_id: 'out-42',
+      via: undefined,
+      status: 'queued',
+      attempts: 2
+    })
   })
 })

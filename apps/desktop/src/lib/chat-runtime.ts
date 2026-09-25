@@ -419,7 +419,8 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
         custom: {
           ...timelineMeta,
           ...(message.asyncResult ? { asyncResult: message.asyncResult } : {}),
-          ...(message.asyncResultKind ? { asyncResultKind: message.asyncResultKind } : {})
+          ...(message.asyncResultKind ? { asyncResultKind: message.asyncResultKind } : {}),
+          ...(message.peerMetadata ? { peerMetadata: message.peerMetadata } : {})
         }
       }
     } as ThreadMessage

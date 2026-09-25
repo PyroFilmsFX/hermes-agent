@@ -13,7 +13,7 @@ import {
   toolPartFromStoredCall,
   withUniqueToolCallIds
 } from './tool-parts'
-import type { ChatMessage, ChatMessagePart } from './types'
+import type { ChatMessage, ChatMessagePart, PeerMetadata } from './types'
 
 const ATTACHED_CONTEXT_MARKER_RE = /(?:^|\n)--- Attached Context ---\s*\n/
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
@@ -150,7 +150,7 @@ function lifecycleSourceLabel(source: unknown): string {
     return 'scheduled trigger'
   }
 
-  if (value.endsWith('/peer-send-message') || value === 'peer') {
+  if (value.endsWith('/peer-send-message') || value === 'peer' || value === 'peer-mailbox') {
     return 'peer message'
   }
 
@@ -180,10 +180,32 @@ export function sessionLifecycleLabel(metadata: SessionMessage['display_metadata
   }
 
   if (event === 'woken') {
-    return `woken by ${lifecycleSourceLabel(parsed.source)}: ${String(parsed.by || 'unknown')}`
+    const by = parsed.by ?? parsed.from ?? 'unknown'
+    return `woken by ${lifecycleSourceLabel(parsed.source)}: ${String(by)}`
   }
 
   return 'session lifecycle'
+}
+
+const PEER_ENVELOPE_HEADER_RE = /^\[peer message from\s+([^(]+?)(?:\s+\(session\s+([^)]+)\))?\]\r?\n/
+const PEER_ENVELOPE_FOOTER_RE = /\r?\n\r?\n\[reply with session_send[^\]]*\]\s*$/
+
+export interface ParsedPeerEnvelope {
+  from: string
+  senderSid?: string
+  body: string
+}
+
+export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | null {
+  const headerMatch = content.match(PEER_ENVELOPE_HEADER_RE)
+  if (!headerMatch) {
+    return null
+  }
+  const from = headerMatch[1].trim()
+  const senderSid = headerMatch[2]?.trim()
+  const withoutHeader = content.slice(headerMatch[0].length)
+  const body = withoutHeader.replace(PEER_ENVELOPE_FOOTER_RE, '').trim()
+  return { from, senderSid, body }
 }
 
 function lifecycleValue(value: unknown): string {
@@ -327,7 +349,11 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
   if (message.display_kind === 'peer_message') {
     const meta = parseDisplayMetadata(message.display_metadata)
     const direction = meta?.direction === 'out' || (!meta?.direction && message.role === 'assistant') ? 'out' : 'in'
-    const peer = typeof meta?.peer === 'string' && meta.peer.trim() ? meta.peer.trim() : 'peer'
+    const peer =
+      (typeof meta?.peer === 'string' && meta.peer.trim()) ||
+      (typeof meta?.from === 'string' && meta.from.trim()) ||
+      (typeof meta?.to === 'string' && meta.to.trim()) ||
+      'peer'
 
     return peerMessageLabel(direction, peer, content, message.timestamp)
   }
@@ -441,19 +467,67 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? message.display_content
         : message.content || message.text || message.context || message.name
 
-    const rawDisplayContent = transcriptContent(
-      message.display_kind,
-      timelineDisplayContent(message, displayContentForMessage(message.role, content))
-    )
+    const textContent = textFromUnknown(content)
+    const parsedEnvelope = parsePeerMessageEnvelope(textContent)
+    const isPeerEnvelope = parsedEnvelope !== null
+    const isPeerMessage = message.display_kind === 'peer_message' || isPeerEnvelope
+
+    const metaRecord = parseDisplayMetadata(message.display_metadata)
+    const direction: 'in' | 'out' =
+      metaRecord?.direction === 'out' || (!metaRecord?.direction && message.role === 'assistant') ? 'out' : 'in'
+    const peer =
+      (typeof metaRecord?.peer === 'string' && metaRecord.peer.trim()) ||
+      (typeof metaRecord?.from === 'string' && metaRecord.from.trim()) ||
+      (typeof metaRecord?.to === 'string' && metaRecord.to.trim()) ||
+      parsedEnvelope?.from ||
+      'peer'
+    const msgRecord = message as unknown as Record<string, unknown>
+    const msgId =
+      (typeof metaRecord?.msg_id === 'string' && metaRecord.msg_id.trim()) ||
+      (typeof metaRecord?.delivery_id === 'string' && metaRecord.delivery_id.trim()) ||
+      (typeof msgRecord.delivery_id === 'string' && msgRecord.delivery_id.trim()) ||
+      undefined
+    const via = typeof metaRecord?.via === 'string' ? metaRecord.via : undefined
+    const status = typeof metaRecord?.status === 'string' ? metaRecord.status : undefined
+    const attempts = typeof metaRecord?.attempts === 'number' ? metaRecord.attempts : undefined
+
+    const peerMetadata: PeerMetadata | undefined = isPeerMessage
+      ? {
+          direction,
+          peer,
+          from: typeof metaRecord?.from === 'string' ? metaRecord.from : parsedEnvelope?.from,
+          from_session_id:
+            typeof metaRecord?.from_session_id === 'string'
+              ? metaRecord.from_session_id
+              : (typeof metaRecord?.sender_sid === 'string'
+                ? metaRecord.sender_sid
+                : parsedEnvelope?.senderSid),
+          to: typeof metaRecord?.to === 'string' ? metaRecord.to : undefined,
+          msg_id: msgId,
+          via,
+          status,
+          attempts
+        }
+      : undefined
+
+    const peerBody = parsedEnvelope ? parsedEnvelope.body : displayContentForMessage(message.role, content)
+    const effectiveDisplayKind = isPeerMessage ? 'peer_message' : message.display_kind
+
+    const rawDisplayContent = isPeerMessage
+      ? peerMessageLabel(direction, peer, peerBody, message.timestamp)
+      : transcriptContent(
+          message.display_kind,
+          timelineDisplayContent(message, displayContentForMessage(message.role, content))
+        )
 
     const displayRole =
-      message.display_kind === 'model_switch' ||
-      message.display_kind === 'async_delegation_complete' ||
-      message.display_kind === 'process_complete' ||
-      message.display_kind === 'auto_continue' ||
-      message.display_kind === 'personality_switch' ||
-      message.display_kind === 'peer_message' ||
-      message.display_kind === 'session_lifecycle'
+      effectiveDisplayKind === 'model_switch' ||
+      effectiveDisplayKind === 'async_delegation_complete' ||
+      effectiveDisplayKind === 'process_complete' ||
+      effectiveDisplayKind === 'auto_continue' ||
+      effectiveDisplayKind === 'personality_switch' ||
+      effectiveDisplayKind === 'peer_message' ||
+      effectiveDisplayKind === 'session_lifecycle'
         ? 'system'
         : message.role
 
@@ -523,11 +597,6 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
-    const msgRecord = message as unknown as Record<string, unknown>
-    const metaRecord =
-      msgRecord.display_metadata && typeof msgRecord.display_metadata === 'object'
-        ? (msgRecord.display_metadata as Record<string, unknown>)
-        : null
     const deliveryId =
       typeof msgRecord.delivery_id === 'string'
         ? msgRecord.delivery_id
@@ -583,12 +652,15 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: asyncResultBody(displayContentForMessage(message.role, message.content || content)) }
         : {}),
       ...(message.display_kind === 'process_complete' ? { asyncResultKind: 'process' as const } : {}),
-      ...(message.display_kind === 'peer_message'
-        ? { asyncResult: displayContentForMessage(message.role, message.content || content) }
-        : {}),
+      ...(isPeerMessage
+        ? { asyncResult: peerBody }
+        : message.display_kind === 'peer_message'
+          ? { asyncResult: displayContentForMessage(message.role, message.content || content) }
+          : {}),
       ...(message.display_kind === 'session_lifecycle'
         ? { asyncResult: sessionLifecycleBody(message.display_metadata) }
         : {}),
+      ...(peerMetadata ? { peerMetadata } : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(deliveryId ? { deliveryId } : {}),
       ...(rowId !== undefined ? { rowId } : {}),

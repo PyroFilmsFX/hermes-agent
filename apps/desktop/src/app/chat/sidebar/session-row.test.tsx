@@ -439,3 +439,47 @@ describe('Inbox-style session card', () => {
     expect(screen.getByText('133 messages')).toBeTruthy()
   })
 })
+
+describe('SidebarSessionRow pinned chip', () => {
+  it('renders pinned chip when isPinned is true and toggles pin on click', () => {
+    const onPin = vi.fn()
+    const { container } = render(
+      <SidebarSessionRow
+        isPinned={true}
+        isSelected={false}
+        onArchive={noop}
+        onDelete={noop}
+        onPin={onPin}
+        onResume={noop}
+        onToggleUnread={noop}
+        session={makeSession({ title: 'Pinned Session' })}
+        unread={false}
+      />
+    )
+
+    const chip = container.querySelector('[data-slot="session-pinned-chip"]')
+    expect(chip).toBeTruthy()
+
+    fireEvent.click(chip!)
+    expect(onPin).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders pinned chip when session.pinned is true even if isPinned prop is false', () => {
+    const { container } = render(
+      <SidebarSessionRow
+        isPinned={false}
+        isSelected={false}
+        onArchive={noop}
+        onDelete={noop}
+        onPin={noop}
+        onResume={noop}
+        onToggleUnread={noop}
+        session={{ ...makeSession({ title: 'Resident Session' }), pinned: true } as unknown as SessionInfo}
+        unread={false}
+      />
+    )
+
+    const chip = container.querySelector('[data-slot="session-pinned-chip"]')
+    expect(chip).toBeTruthy()
+  })
+})

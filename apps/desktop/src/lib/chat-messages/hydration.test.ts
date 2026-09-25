@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionMessage } from '@/types/hermes'
 
-import { formatShortTime, toChatMessages } from './hydration'
+import { formatShortTime, sessionLifecycleLabel, toChatMessages } from './hydration'
 import type { ChatMessage } from './types'
 
 function getText(msg: ChatMessage | undefined): string | undefined {
@@ -174,5 +174,99 @@ describe('hydration peer_message support', () => {
     const messages = toChatMessages([inbound, outbound])
     expect(getText(messages[0])).toContain('↘ from dave')
     expect(getText(messages[1])).toBe('↗ to dave: hello back')
+  })
+
+  it('hydrates persisted inbound envelope row to peer_message card instead of user bubble', () => {
+    const timestamp = 1_700_000_200
+    const rawContent =
+      "[peer message from alice (session sess-42)]\nHere is the data report.\n\n[reply with session_send(session_id='sess-42', message='...')]"
+
+    const row: SessionMessage = {
+      role: 'user',
+      content: rawContent,
+      timestamp
+    }
+
+    const messages = toChatMessages([row])
+    expect(messages).toHaveLength(1)
+    const msg = messages[0]
+
+    expect(msg.role).toBe('system')
+    expect(getText(msg)).toBe(`↘ from alice · ${formatShortTime(timestamp)}`)
+    expect(msg.asyncResult).toBe('Here is the data report.')
+    expect(msg.peerMetadata).toMatchObject({
+      direction: 'in',
+      peer: 'alice',
+      from: 'alice',
+      from_session_id: 'sess-42'
+    })
+  })
+
+  it('preserves metadata (status, via, msg_id, attempts) on persisted mailbox delivery rows', () => {
+    const inboundRow: SessionMessage = {
+      role: 'user',
+      content: 'Inbound report',
+      display_kind: 'peer_message',
+      display_metadata: {
+        direction: 'in',
+        from: 'coordinator',
+        sender_sid: 'sess-coord',
+        msg_id: 'msg-in-1',
+        status: 'delivered-native',
+        via: 'native'
+      } as unknown as Record<string, unknown>,
+      timestamp: 1_700_000_300
+    }
+
+    const outboundRow: SessionMessage = {
+      role: 'assistant',
+      content: 'Task completed successfully',
+      display_kind: 'peer_message',
+      display_metadata: {
+        direction: 'out',
+        to: 'coordinator',
+        msg_id: 'msg-out-2',
+        status: 'queued',
+        attempts: 2
+      } as unknown as Record<string, unknown>,
+      timestamp: 1_700_000_301
+    }
+
+    const messages = toChatMessages([inboundRow, outboundRow])
+    expect(messages).toHaveLength(2)
+
+    expect(messages[0].role).toBe('system')
+    expect(messages[0].peerMetadata).toMatchObject({
+      direction: 'in',
+      peer: 'coordinator',
+      msg_id: 'msg-in-1',
+      status: 'delivered-native',
+      via: 'native'
+    })
+
+    expect(messages[1].role).toBe('system')
+    expect(messages[1].peerMetadata).toMatchObject({
+      direction: 'out',
+      peer: 'coordinator',
+      msg_id: 'msg-out-2',
+      status: 'queued',
+      attempts: 2
+    })
+  })
+
+  it('formats lifecycle woken label for peer-mailbox source as "woken by peer message: <from>"', () => {
+    const label = sessionLifecycleLabel({
+      event: 'woken',
+      source: 'peer-mailbox',
+      by: 'alice'
+    })
+    expect(label).toBe('woken by peer message: alice')
+
+    const labelFromFallback = sessionLifecycleLabel({
+      event: 'woken',
+      source: 'peer-mailbox',
+      from: 'bob'
+    })
+    expect(labelFromFallback).toBe('woken by peer message: bob')
   })
 })
