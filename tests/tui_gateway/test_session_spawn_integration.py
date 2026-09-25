@@ -135,7 +135,10 @@ def test_spawn_websocket_scope_rejects_session_list_even_with_valid_ticket(monke
 
 
 @pytest.mark.parametrize("auth_required", [False, True])
-def test_production_web_server_middleware_accepts_only_capability_principal_for_attach(monkeypatch, tmp_path, auth_required):
+@pytest.mark.parametrize("path", ["/api/session-attach", "/api/session-send-queue"])
+def test_production_web_server_middleware_accepts_only_capability_principal_for_session_bridge(
+    monkeypatch, tmp_path, auth_required, path,
+):
     import httpx
     from agent.transports import hermes_gateway_session_bridge as bridge
     from hermes_cli import web_server
@@ -147,7 +150,10 @@ def test_production_web_server_middleware_accepts_only_capability_principal_for_
     async def exercise():
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
-            return await client.get("/api/session-attach", headers={"X-Hermes-Session-Spawn-Capability": "cap"})
+            headers = {"X-Hermes-Session-Spawn-Capability": "cap"}
+            if path == "/api/session-attach":
+                return await client.get(path, headers=headers)
+            return await client.post(path, json={"target": "target", "body": "hello"}, headers=headers)
 
     response = asyncio.run(exercise())
     assert response.status_code != 401, "real web_server middleware must admit a capability-scoped attach principal"
@@ -207,3 +213,127 @@ def test_attach_route_is_reachable_behind_the_dashboard_spa_catch_all(tmp_path):
         thread.join(timeout=5)
         server._sessions = old_sessions
         bridge.revoke_scoped_capability(cap)
+
+
+@pytest.mark.parametrize(("failure", "expected_code"), [
+    ("capability", "capability_invalid"),
+    ("profile", "profile_mismatch"),
+    ("session", "session_identity_mismatch"),
+    ("registry", "lease_registry_unavailable"),
+    ("lease", "lease_not_found"),
+    ("live", "lease_live_session_mismatch"),
+])
+def test_attach_route_returns_distinct_refusal_codes(monkeypatch, tmp_path, failure, expected_code):
+    import httpx
+    from fastapi import FastAPI
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from tui_gateway import server
+
+    app = FastAPI()
+    server.register_session_spawn_routes(app)
+    live = {"session_key": "owner-key", "session_generation": "generation", "profile_home": str(tmp_path)}
+    monkeypatch.setattr(server, "_sessions", {"owner-runtime": live})
+    token = bridge.issue_scoped_capability("owner-runtime")
+    assert token
+    lease_rows = [{"session_id": "owner-key", "lease_id": "lease",
+                   "metadata": {"live_session_id": "owner-runtime"}}]
+    def registry_snapshot(*_args, **_kwargs):
+        if failure == "registry":
+            raise OSError("registry unavailable")
+        if failure == "lease":
+            return []
+        if failure == "live":
+            return [{**lease_rows[0], "metadata": {"live_session_id": "other-runtime"}}]
+        return lease_rows
+
+    monkeypatch.setattr("hermes_cli.active_sessions.active_session_registry_snapshot", registry_snapshot)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            return await client.get("/api/session-attach", params={
+                "session_id": "other-key" if failure == "session" else "owner-key",
+                "lease_id": "lease", "profile_home": str(tmp_path / "wrong") if failure == "profile" else str(tmp_path),
+            }, headers={"X-Hermes-Session-Spawn-Capability": "invalid" if failure == "capability" else token})
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 403
+    assert response.json()["code"] == expected_code
+
+
+def test_attach_accepts_rotated_session_key_for_same_live_generation(monkeypatch, tmp_path):
+    import httpx
+    from fastapi import FastAPI
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from tui_gateway import server
+
+    app = FastAPI()
+    server.register_session_spawn_routes(app)
+    live = {"session_key": "initial-key", "session_generation": "generation", "profile_home": str(tmp_path)}
+    monkeypatch.setattr(server, "_sessions", {"owner-runtime": live})
+    token = bridge.issue_scoped_capability("owner-runtime")
+    assert token
+    live["session_key"] = "compressed-key"
+    monkeypatch.setattr(
+        "hermes_cli.active_sessions.active_session_registry_snapshot",
+        lambda *_args, **_kwargs: [{"session_id": "compressed-key", "lease_id": "lease",
+                                    "metadata": {"live_session_id": "owner-runtime"}}],
+    )
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            return await client.get("/api/session-attach", params={
+                "session_id": "compressed-key", "lease_id": "lease", "profile_home": str(tmp_path),
+            }, headers={"X-Hermes-Session-Spawn-Capability": token})
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "compressed-key"
+
+
+def test_authenticated_attach_refusal_fallback_queues_durably(monkeypatch, tmp_path):
+    import httpx
+    from fastapi import FastAPI
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    app = FastAPI()
+    server.register_session_spawn_routes(app)
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("target", "desktop")
+    live = {"session_key": "owner-key", "session_generation": "generation", "profile_home": None}
+    monkeypatch.setattr(server, "_sessions", {"owner-runtime": live})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    token = bridge.issue_scoped_capability("owner-runtime")
+    assert token
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            return await client.post("/api/session-send-queue", json={"target": "target", "body": "hello"},
+                                     headers={"X-Hermes-Session-Spawn-Capability": token})
+
+    try:
+        response = asyncio.run(exercise())
+        assert response.status_code == 200
+        assert response.json()["status"] == "queued"
+        [row] = db.peer_mailbox_pending("target")
+        assert row["from_session_id"] == "owner-key"
+        assert row["body"] == "hello"
+        unauthorized = asyncio.run(_post_queue(app, "invalid"))
+        assert unauthorized.status_code == 403
+        assert len(db.peer_mailbox_pending("target")) == 1
+    finally:
+        db.close()
+
+
+async def _post_queue(app, token):
+    import httpx
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        return await client.post("/api/session-send-queue", json={"target": "target", "body": "forged"},
+                                 headers={"X-Hermes-Session-Spawn-Capability": token})

@@ -950,19 +950,30 @@ def register_session_spawn_routes(application) -> None:
         profile_home = request.query_params.get("profile_home", "")
         cap = request.headers.get("X-Hermes-Session-Spawn-Capability", "")
         capability = authorize_scoped_capability(cap)
-        if (capability is None or capability.profile_home != profile_home or
-                session_id != capability.owner_session_key):
+        if capability is None:
             from fastapi.responses import JSONResponse
-            return JSONResponse({"error": "attachment refused"}, status_code=403)
+            return JSONResponse({"error": "capability authentication failed", "code": "capability_invalid"}, status_code=403)
+        if capability.profile_home != profile_home:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "capability profile does not match", "code": "profile_mismatch"}, status_code=403)
+        with _sessions_lock:
+            caller = _sessions.get(capability.owner_session_id)
+        if caller is None or session_id != str(caller.get("session_key") or ""):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "owner session identity does not match", "code": "session_identity_mismatch"}, status_code=403)
         try:
             entries = active_session_registry_snapshot(Path(profile_home), strict=True)
             lease = next((entry for entry in entries if entry.get("lease_id") == lease_id and
                            entry.get("session_id") == session_id), None)
         except Exception:
-            lease = None
-        if lease is None or (lease.get("metadata") or {}).get("live_session_id") != capability.owner_session_id:
             from fastapi.responses import JSONResponse
-            return JSONResponse({"error": "attachment refused"}, status_code=403)
+            return JSONResponse({"error": "owner lease registry is unavailable", "code": "lease_registry_unavailable"}, status_code=403)
+        if lease is None:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "owner lease was not found", "code": "lease_not_found"}, status_code=403)
+        if (lease.get("metadata") or {}).get("live_session_id") != capability.owner_session_id:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "owner lease points to another live session", "code": "lease_live_session_mismatch"}, status_code=403)
         ticket = issue_scoped_transport_ticket(capability)
         scheme = "wss" if request.url.scheme == "https" else "ws"
         host = request.url.hostname or "127.0.0.1"
@@ -975,6 +986,41 @@ def register_session_spawn_routes(application) -> None:
 
     application.add_api_route("/api/session-attach", session_attach, methods=["GET"])
 
+    async def session_send_queue(request: Request):
+        """Authenticate the owner capability and durably queue a peer send when attach is refused."""
+        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
+        from fastapi.responses import JSONResponse
+
+        capability = authorize_scoped_capability(
+            request.headers.get("X-Hermes-Session-Spawn-Capability", ""))
+        if capability is None:
+            return JSONResponse({"error": "capability authentication failed", "code": "capability_invalid"}, status_code=403)
+        with _sessions_lock:
+            caller = _sessions.get(capability.owner_session_id)
+        if caller is None:
+            return JSONResponse({"error": "owner session is unavailable", "code": "owner_session_unavailable"}, status_code=403)
+        try:
+            params = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid request body", "code": "invalid_request"}, status_code=400)
+        if not isinstance(params, dict):
+            return JSONResponse({"error": "invalid request body", "code": "invalid_request"}, status_code=400)
+        target, body = params.get("target"), params.get("body")
+        if not isinstance(target, str) or not target.strip() or not isinstance(body, str):
+            return JSONResponse({"error": "target and body are required", "code": "invalid_request"}, status_code=400)
+        from_session_id = str(caller.get("session_key") or capability.owner_session_id)
+        from_label = from_session_id
+        with contextlib.suppress(Exception):
+            from_label = _session_live_title(caller, from_session_id) or from_session_id
+        from tui_gateway.session_mailbox import send_message
+        result = send_message(
+            target=target.strip(), body=body, from_session_id=from_session_id, from_label=from_label,
+            request_id=params.get("request_id", "") if isinstance(params.get("request_id", ""), str) else "",
+            profile_home=caller.get("profile_home") or None, queue_only=True)
+        return JSONResponse(result)
+
+    application.add_api_route("/api/session-send-queue", session_send_queue, methods=["POST"])
+
     if not any(getattr(route, "path", "") == "/api/session-spawn-ws" for route in getattr(application, "routes", ())):
         async def scoped_ws(websocket: WebSocket):
             from tui_gateway.ws import handle_ws
@@ -983,7 +1029,7 @@ def register_session_spawn_routes(application) -> None:
     _hoist_before_catch_all(application, _SESSION_SPAWN_ROUTE_PATHS)
 
 
-_SESSION_SPAWN_ROUTE_PATHS = frozenset({"/api/session-attach", "/api/session-spawn-ws"})
+_SESSION_SPAWN_ROUTE_PATHS = frozenset({"/api/session-attach", "/api/session-send-queue", "/api/session-spawn-ws"})
 
 
 def _hoist_before_catch_all(application, paths) -> None:

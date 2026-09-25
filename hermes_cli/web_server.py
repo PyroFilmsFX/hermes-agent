@@ -421,13 +421,13 @@ def _has_valid_query_token(request: Request, path: str) -> bool:
 
 
 def _session_attach_capability_principal(request: Request) -> bool:
-    """Authenticate only the private session-attach handshake with its scoped capability.
+    """Authenticate only the private session bridge routes with their scoped capability.
 
     This is deliberately a separate principal from dashboard token/cookie auth: it is accepted
-    for exactly one route and is never marked ``token_authenticated`` or copied to a dashboard
-    session. The route performs the owner/lease binding again before minting its one-use ticket.
+    only for the private bridge routes and is never marked ``token_authenticated`` or copied to a
+    dashboard session. Each route performs its own scoped authorization before acting.
     """
-    if request.url.path != "/api/session-attach":
+    if request.url.path not in {"/api/session-attach", "/api/session-send-queue"}:
         return False
     presented = request.headers.get("X-Hermes-Session-Spawn-Capability", "").strip()
     if not presented:

@@ -445,7 +445,7 @@ def _status_of_existing(row: dict) -> str:
 
 def send_message(
     *, target: str, body: str, from_session_id: str = "", from_label: str = "", request_id: str = "",
-    profile_home: str | None = None,
+    profile_home: str | None = None, queue_only: bool = False,
 ) -> dict:
     """Queue durably, then try to deliver. Always returns ``{"status": ...}`` — never raises."""
     pol = policy()
@@ -476,6 +476,9 @@ def send_message(
             if not created:
                 return {**base, "status": _status_of_existing(row), "duplicate": True,
                         "detail": row.get("last_error") or "already accepted under this request_id"}
+            if queue_only:
+                emit_settled(row["id"], STATUS_QUEUED, int(row.get("attempts") or 0), str(from_session_id or ""))
+                return {**base, "status": STATUS_QUEUED, "detail": "queued after owner gateway attach refusal"}
             status, detail = _deliver_row(db, row, profile_home=profile_home,
                                           allow_resume=bool(pol["resume_on_send"]), pol=pol)
             if status == STATUS_QUEUED:

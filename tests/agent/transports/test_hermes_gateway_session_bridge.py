@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import pytest
+
 from agent.transports import hermes_gateway_session_bridge as bridge
 
 
@@ -141,7 +143,7 @@ def test_capability_expiry_is_terminal_until_explicit_reissue(monkeypatch):
     )
 
 
-def test_capability_binds_current_owner_key_exactly(monkeypatch):
+def test_capability_survives_compression_session_key_rotation(monkeypatch):
     from tui_gateway import server
 
     record = {"session_key": "owner-key", "session_generation": "generation", "profile_home": "/owner"}
@@ -149,9 +151,148 @@ def test_capability_binds_current_owner_key_exactly(monkeypatch):
     token = bridge.issue_scoped_capability("owner")
     assert token
     record["session_key"] = "rotated-key"
-    assert bridge.authorize_scoped_capability(token) is None, (
-        "authorization must reject a capability after owner session-key rotation"
+    assert bridge.authorize_scoped_capability(token) is not None
+
+
+def test_capability_rejects_replacement_live_generation(monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(server, "_sessions", {
+        "owner": {"session_key": "owner-key", "session_generation": "generation"},
+    })
+    token = bridge.issue_scoped_capability("owner")
+    assert token
+    server._sessions["owner"] = {"session_key": "owner-key", "session_generation": "replacement"}
+    assert bridge.authorize_scoped_capability(token) is None
+
+
+@pytest.mark.parametrize(("owners", "expected"), [
+    ([], "owner lease not found in session registry"),
+    ([{"session_id": "owner"}, {"session_id": "owner"}], "owner session has multiple registry leases"),
+])
+def test_discover_url_reports_registry_match_count_separately(monkeypatch, tmp_path, owners, expected):
+    monkeypatch.setattr(
+        "hermes_cli.active_sessions.active_session_registry_snapshot",
+        lambda *_args, **_kwargs: owners,
     )
+    try:
+        bridge._discover_url("owner", tmp_path, "token")
+    except bridge.SessionSpawnBridgeError as exc:
+        assert str(exc) == expected
+    else:
+        raise AssertionError("missing owner lease should fail")
+
+
+@pytest.mark.parametrize("code", [
+    "capability_invalid", "profile_mismatch", "session_identity_mismatch",
+    "lease_not_found", "lease_live_session_mismatch",
+])
+def test_discover_url_reports_gateway_refusal_code(monkeypatch, tmp_path, code):
+    from hermes_cli import active_sessions
+
+    monkeypatch.setattr(active_sessions, "active_session_registry_snapshot", lambda *_args, **_kwargs: [{
+        "session_id": "owner-key", "lease_id": "lease",
+        "metadata": {"live_session_id": "owner", "shared_runtime_url": "http://127.0.0.1:4311"},
+    }])
+
+    class _Response:
+        status_code = 403
+        text = json.dumps({"error": "attach refused", "code": code})
+
+        def raise_for_status(self):
+            import httpx
+
+            raise httpx.HTTPStatusError("forbidden", request=None, response=self)
+
+        def json(self):
+            return json.loads(self.text)
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: _Response())
+    try:
+        bridge._discover_url("owner", tmp_path, "token")
+    except bridge.SessionSpawnBridgeError as exc:
+        assert str(exc) == f"owner gateway attach refused: {code}"
+    else:
+        raise AssertionError("gateway refusal should fail")
+
+
+def test_discover_url_separates_http_status_from_transport_failure(monkeypatch, tmp_path):
+    from hermes_cli import active_sessions
+
+    monkeypatch.setattr(active_sessions, "active_session_registry_snapshot", lambda *_args, **_kwargs: [{
+        "session_id": "owner-key", "lease_id": "lease",
+        "metadata": {"live_session_id": "owner", "shared_runtime_url": "http://127.0.0.1:4311"},
+    }])
+    import httpx
+
+    class _Response:
+        status_code = 503
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("unavailable", request=None, response=self)
+
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: _Response())
+    with pytest.raises(bridge.SessionSpawnBridgeError, match="owner gateway returned HTTP 503 during attach"):
+        bridge._discover_url("owner", tmp_path, "token")
+
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("offline")))
+    with pytest.raises(bridge.SessionSpawnBridgeError, match="owner gateway transport failed during attach"):
+        bridge._discover_url("owner", tmp_path, "token")
+
+
+def test_session_send_queues_after_authenticated_attach_refusal(monkeypatch, tmp_path):
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    monkeypatch.setattr(
+        client, "_rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(bridge.SessionSpawnBridgeError(
+            "owner gateway attach refused: lease_not_found", code="lease_not_found",
+            endpoint="http://127.0.0.1:4311")),
+    )
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "queued", "message_id": 23}
+
+    import httpx
+
+    seen = {}
+
+    def post(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return _Response()
+
+    monkeypatch.setattr(httpx, "post", post)
+    result = client.send_to_session(target="target", body="hello", request_id="request")
+    assert result == {"status": "queued", "message_id": 23}
+    assert seen["json"] == {"target": "target", "body": "hello", "request_id": "request"}
+    assert seen["headers"] == {"X-Hermes-Session-Spawn-Capability": "capability"}
+
+
+def test_session_send_does_not_queue_if_sender_capability_cannot_be_authenticated(monkeypatch, tmp_path):
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    monkeypatch.setattr(
+        client, "_rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(bridge.SessionSpawnBridgeError(
+            "owner gateway attach refused: capability_invalid", code="capability_invalid",
+            endpoint="http://127.0.0.1:4311")),
+    )
+
+    import httpx
+
+    posted = []
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: posted.append((args, kwargs)))
+    try:
+        client.send_to_session(target="target", body="hello")
+    except bridge.SessionSpawnBridgeError as exc:
+        assert str(exc) == "owner gateway attach refused: capability_invalid"
+    else:
+        raise AssertionError("unauthenticated fallback should fail")
+    assert posted == []
 
 
 def test_launch_profile_capability_uses_effective_owner_home(monkeypatch, tmp_path):

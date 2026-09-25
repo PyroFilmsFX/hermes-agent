@@ -37,6 +37,11 @@ _RPC_TIMEOUT_SECONDS = 15.0
 class SessionSpawnBridgeError(RuntimeError):
     """A scoped bridge could not authenticate or reach its owner gateway."""
 
+    def __init__(self, message: str, *, code: str = "", endpoint: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.endpoint = endpoint
+
 
 @dataclass(frozen=True)
 class ScopedSessionCapability:
@@ -162,9 +167,6 @@ def authorize_scoped_capability(token: str | None) -> ScopedSessionCapability | 
         if _effective_owner_home(current) != record.profile_home:
             _capabilities.pop(presented, None)
             return None
-        if str(current.get("session_key") or "") != record.owner_session_key:
-            _capabilities.pop(presented, None)
-            return None
         if time.time() - record.issued_at >= _CAPABILITY_TTL_SECONDS:
             _capabilities.pop(presented, None)
             return None
@@ -191,8 +193,10 @@ def _discover_url(owner_session_id: str, registry_home: Path, token: str = "") -
     owners = [entry for entry in active_session_registry_snapshot(registry_home, strict=True)
               if entry.get("session_id") == owner_session_id or
               (entry.get("metadata") or {}).get("live_session_id") == owner_session_id]
-    if len(owners) != 1:
-        raise SessionSpawnBridgeError("owner gateway attachment was refused")
+    if not owners:
+        raise SessionSpawnBridgeError("owner lease not found in session registry", code="owner_lease_not_found")
+    if len(owners) > 1:
+        raise SessionSpawnBridgeError("owner session has multiple registry leases", code="owner_lease_ambiguous")
     owner = owners[0]
     endpoint = (owner.get("metadata") or {}).get("shared_runtime_url")
     if not isinstance(endpoint, str) or not endpoint:
@@ -215,7 +219,23 @@ def _discover_url(owner_session_id: str, registry_home: Path, token: str = "") -
         response.raise_for_status()
         reply = response.json()
     except Exception as exc:  # noqa: BLE001
-        raise SessionSpawnBridgeError("owner gateway attachment was refused") from exc
+        response = getattr(exc, "response", None)
+        if response is not None and int(getattr(response, "status_code", 0) or 0) == 403:
+            code = "attach_refused"
+            with contextlib.suppress(Exception):
+                body = response.json()
+                if isinstance(body, dict) and body.get("code") in {
+                    "capability_invalid", "profile_mismatch", "session_identity_mismatch",
+                    "lease_registry_unavailable", "lease_not_found", "lease_live_session_mismatch",
+                }:
+                    code = body["code"]
+            raise SessionSpawnBridgeError(f"owner gateway attach refused: {code}", code=code,
+                                          endpoint=endpoint) from exc
+        if response is not None:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            raise SessionSpawnBridgeError(f"owner gateway returned HTTP {status_code} during attach",
+                                          code=f"attach_http_{status_code}") from exc
+        raise SessionSpawnBridgeError("owner gateway transport failed during attach", code="attach_transport") from exc
     url = reply.get("websocket_url") if isinstance(reply, dict) else None
     ws_parts = urlsplit(url) if isinstance(url, str) else None
     try:
@@ -326,7 +346,31 @@ class HermesGatewaySessionBridge:
         params: dict[str, Any] = {"target": target, "body": body}
         if request_id:
             params["request_id"] = request_id
-        return self._rpc("session.send", params)
+        try:
+            return self._rpc("session.send", params)
+        except SessionSpawnBridgeError as exc:
+            if not exc.endpoint or not exc.code or exc.code in {
+                "capability_invalid", "owner_lease_not_found", "owner_lease_ambiguous", "attach_transport",
+            }:
+                raise
+            import httpx
+
+            try:
+                response = httpx.post(
+                    exc.endpoint.rstrip("/") + "/api/session-send-queue",
+                    json=params,
+                    headers={"X-Hermes-Session-Spawn-Capability": self.token},
+                    trust_env=False,
+                    follow_redirects=False,
+                    timeout=3.0,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except Exception as queue_exc:  # noqa: BLE001
+                raise SessionSpawnBridgeError("durable peer queue fallback failed", code="queue_fallback_failed") from queue_exc
+            if not isinstance(result, dict):
+                raise SessionSpawnBridgeError("durable peer queue returned an invalid result", code="queue_fallback_invalid")
+            return result
 
 
 def bridge_available_from_environment() -> bool:
