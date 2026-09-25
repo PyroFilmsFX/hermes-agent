@@ -104,7 +104,19 @@ event("notice", NoticePayload, doc="Informational one-liner for the session (cap
 # ── turn stream ───────────────────────────────────────────────────────────────────────────────
 
 
-event("message.start", None, doc="A turn began streaming; no payload.")
+class MessageStartPayload(Payload):
+    """Usually empty. The SDK background lane (``session_notifications``) marks its rows:
+    ``background`` + ``display_kind``, a ``delivery_id`` shared with the persisted row (U1.10
+    dedupe), and for a peer-woken stream the triggering ``user_message`` / ``turn_author``."""
+
+    background: bool | None = None
+    display_kind: str | None = None
+    delivery_id: str | None = None
+    user_message: str | None = None
+    turn_author: str | None = None
+
+
+event("message.start", MessageStartPayload, doc="A turn began streaming; background-lane rows carry identity.")
 
 
 class StreamDeltaPayload(Payload):
@@ -183,6 +195,12 @@ class MessageCompletePayload(Payload):
     recoverable: bool | None = None
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
+    # SDK background lane (session_notifications): row kind, its display metadata, and the
+    # delivery id the desktop reconciles live rows against.
+    background: bool | None = None
+    display_kind: str | None = None
+    display_metadata: dict[str, JsonValue] | None = None
+    delivery_id: str | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

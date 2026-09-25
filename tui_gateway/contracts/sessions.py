@@ -298,8 +298,9 @@ class SessionSendParams(Params):
 
 
 class SessionSendResult(Result):
-    status: str  # delivered-live | resumed-and-delivered | queued | failed
+    status: str  # delivered-native | delivered-live | resumed-and-delivered | queued | failed
     message_id: int | None = None
+    native_peer: str | None = None  # live Claude target's peer name, for direct SendMessage
     target_session_id: str | None = None
     target_title: str | None = None
     detail: str | None = None

@@ -2671,6 +2671,7 @@ export interface SessionSendParams {
 export interface SessionSendResult {
   status: string
   message_id?: number | null
+  native_peer?: string | null
   target_session_id?: string | null
   target_title?: string | null
   detail?: string | null
@@ -3951,6 +3952,14 @@ export interface ErrorPayload {
 export interface NoticePayload {
   message: string
 }
+/** Usually empty. The SDK background lane (``session_notifications``) marks its rows: ``background`` + ``display_kind``, a ``delivery_id`` shared with the persisted row (U1.10 dedupe), and for a peer-woken stream the triggering ``user_message`` / ``turn_author``. */
+export interface MessageStartPayload {
+  background?: boolean | null
+  display_kind?: string | null
+  delivery_id?: string | null
+  user_message?: string | null
+  turn_author?: string | null
+}
 /** ``prompt_turn._invoke_agent._stream`` (message.delta: ``text`` + optional ``rendered``), ``agent_callbacks._agent_cbs`` (reasoning.delta / thinking.delta), ``tool_progress._progress_reasoning`` (reasoning.available). ``verbose`` rides only when the session's verbose reasoning mode is on. */
 export interface StreamDeltaPayload {
   text: string
@@ -3977,6 +3986,10 @@ export interface MessageCompletePayload {
   recoverable?: boolean | null
   error_surface?: ErrorSurface | null
   partial?: boolean | null
+  background?: boolean | null
+  display_kind?: string | null
+  display_metadata?: Record<string, unknown> | null
+  delivery_id?: string | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'
@@ -5033,8 +5046,8 @@ export interface BackendGatewayEventMap {
   'message.interim': MessageInterimPayload
   /** The agent reacted to a message; paint it live. */
   'message.reaction': MessageReactionPayload
-  /** A turn began streaming; no payload. */
-  'message.start': Record<string, never>
+  /** A turn began streaming; background-lane rows carry identity. */
+  'message.start': MessageStartPayload
   /** The MoA aggregator started. */
   'moa.aggregating': MoaAggregatingPayload
   /** MoA phase transition (currently only ``aggregator``). */
