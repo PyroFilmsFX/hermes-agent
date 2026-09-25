@@ -103,6 +103,8 @@ def _clear_unsolicited_projection(session: Any) -> None:
     session._unsolicited_tool_items.clear()
     session._unsolicited_start_notified = False
     session._unsolicited_seen.clear()
+    session._unsolicited_delivery_id = None
+    session._unsolicited_header_emitted = False
     # Keep this future-proof if a pending wake marker is added as a separate
     # field; today it is represented by the lifecycle item above.
     if hasattr(session, "_unsolicited_woken"):
@@ -1407,6 +1409,28 @@ class ClaudeSdkTurnMixin:
         if inbox is not None:
             inbox.put_nowait(end)
 
+    def _ensure_unsolicited_header_emitted(self) -> None:
+        if getattr(self, "_unsolicited_header_emitted", False):
+            return
+        self._unsolicited_header_emitted = True
+        callback = getattr(self, "_on_unsolicited_header", None)
+        if callback is None:
+            return
+        delivery_id = getattr(self, "_unsolicited_delivery_id", None)
+        if not delivery_id:
+            import uuid
+            delivery_id = f"deliv-{uuid.uuid4().hex[:12]}"
+            self._unsolicited_delivery_id = delivery_id
+        items = getattr(self, "_unsolicited_items", None) or []
+        header_items = [
+            dict(item) for item in items
+            if isinstance(item, dict) and item.get("kind") in ("lifecycle", "peer_in")
+        ]
+        try:
+            callback(delivery_id, header_items)
+        except Exception:
+            logger.debug("claude-agent-sdk unsolicited-header callback failed", exc_info=True)
+
     def _handle_unsolicited(self, message: Any) -> None:
         """Route a message that arrived with no turn in flight.
 
@@ -1441,6 +1465,7 @@ class ClaudeSdkTurnMixin:
             return
         self._observe_sdk_lifecycle(message)
         if name == "StreamEvent":
+            self._ensure_unsolicited_header_emitted()
             self._forward_stream_delta(message)
         if name == "AssistantMessage":
             # CLI-initiated Agent work has no foreground turn, but its child
@@ -1543,6 +1568,8 @@ class ClaudeSdkTurnMixin:
                     except Exception:
                         logger.debug("claude-agent-sdk unsolicited-start callback failed", exc_info=True)
             uuid = str(getattr(message, "uuid", None) or "")
+            if (is_woken or is_peer) and not getattr(self, "_unsolicited_delivery_id", None):
+                self._unsolicited_delivery_id = f"deliv-peer-{uuid}" if uuid else None
             if is_peer:
                 if uuid and uuid in seen:
                     return
@@ -1606,6 +1633,7 @@ class ClaudeSdkTurnMixin:
             result_text = getattr(message, "result", None)
             texts = list(self._unsolicited_text)
             unsolicited_items = list(self._unsolicited_items)
+            delivery_id = getattr(self, "_unsolicited_delivery_id", None)
             _clear_unsolicited_projection(self)
             pending_rename = getattr(self, "_pending_rename_ack", None)
             if pending_rename and _is_rename_ack(result_text, texts, pending_rename):
@@ -1653,11 +1681,16 @@ class ClaudeSdkTurnMixin:
 
                 callback = self._on_unsolicited_result
                 try:
-                    inspect.signature(callback).bind(texts, unsolicited_items)
+                    inspect.signature(callback).bind(texts, unsolicited_items, delivery_id)
                 except (TypeError, ValueError):
-                    callback(texts)
+                    try:
+                        inspect.signature(callback).bind(texts, unsolicited_items)
+                    except (TypeError, ValueError):
+                        callback(texts)
+                    else:
+                        callback(texts, unsolicited_items)
                 else:
-                    callback(texts, unsolicited_items)
+                    callback(texts, unsolicited_items, delivery_id)
             except Exception:
                 logger.warning(
                     "claude-agent-sdk: unsolicited-result delivery callback "

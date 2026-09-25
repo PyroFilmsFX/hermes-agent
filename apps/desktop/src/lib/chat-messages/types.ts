@@ -47,6 +47,8 @@ export type ChatMessage = {
   rowId?: number
   /** Emoji reactions on this message — one per author (see MessageReaction). */
   reactions?: MessageReaction[]
+  /** Stable peer-woken / background delivery ID across streaming and persistence. */
+  deliveryId?: string
 }
 
 export type GatewayEventPayload = {
@@ -58,6 +60,9 @@ export type GatewayEventPayload = {
   status?: string
   message?: string
   id?: string
+  delivery_id?: string
+  user_message?: string
+  turn_author?: unknown
   name?: string
   tool_id?: string
   tool_call_id?: string

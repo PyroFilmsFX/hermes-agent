@@ -342,7 +342,12 @@ class _BackgroundResultDelivery:
     parent_session_id: Any
     model: Any
 
-    def __call__(self, texts: list[str], items: Optional[list[dict]] = None) -> None:
+    def __call__(
+        self,
+        texts: list[str],
+        items: Optional[list[dict]] = None,
+        delivery_id: Optional[str] = None,
+    ) -> None:
         agent = self.agent
         try:
             from tools.approval_context import (
@@ -378,6 +383,8 @@ class _BackgroundResultDelivery:
             }
             if items is not None:
                 event["items"] = list(items)
+            if delivery_id is not None:
+                event["delivery_id"] = delivery_id
             process_registry.completion_queue.put(event)
         except Exception:
             logger.warning(
@@ -469,6 +476,23 @@ def _gateway_unsolicited_start_sink(agent, prompt: str) -> None:
             server._record_turn_marker(session, prompt)
     except Exception:
         logger.debug("could not persist CLI-injected turn marker", exc_info=True)
+
+
+def _gateway_unsolicited_header_sink(agent, delivery_id: str, header_items: list[dict]) -> None:
+    """Relay woken/peer header to desktop before stream deltas begin."""
+    runtime_sid = str(getattr(agent, "_tui_gateway_runtime_sid", "") or "")
+    if not runtime_sid:
+        return
+    try:
+        from tui_gateway import server
+        with server._sessions_lock:
+            session = server._sessions.get(runtime_sid)
+        if not isinstance(session, dict) or session.get("_finalized"):
+            return
+        if hasattr(server, "_notif_deliver_sdk_header"):
+            server._notif_deliver_sdk_header(runtime_sid, session, header_items, delivery_id)
+    except Exception:
+        logger.debug("could not deliver unsolicited SDK header", exc_info=True)
 
 
 def _configured_max_budget_usd() -> Optional[float]:
@@ -643,6 +667,10 @@ def _create_session(
         # replay an already-finished turn after the next restart.
         on_unsolicited_start=(
             functools.partial(_gateway_unsolicited_start_sink, agent)
+            if on_unsolicited_result is not None else None
+        ),
+        on_unsolicited_header=(
+            functools.partial(_gateway_unsolicited_header_sink, agent)
             if on_unsolicited_result is not None else None
         ),
         on_compaction=functools.partial(_on_compaction, agent),

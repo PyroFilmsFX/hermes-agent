@@ -523,6 +523,18 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
+    const msgRecord = message as unknown as Record<string, unknown>
+    const metaRecord =
+      msgRecord.display_metadata && typeof msgRecord.display_metadata === 'object'
+        ? (msgRecord.display_metadata as Record<string, unknown>)
+        : null
+    const deliveryId =
+      typeof msgRecord.delivery_id === 'string'
+        ? msgRecord.delivery_id
+        : typeof metaRecord?.delivery_id === 'string'
+          ? (metaRecord.delivery_id as string)
+          : undefined
+
     if (isDisplayAssistant) {
       if (pendingToolParts.length) {
         if (!appendPartsToActiveAssistant(pendingToolParts, message.timestamp ?? pendingToolTimestamp)) {
@@ -542,6 +554,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
       if (activeAssistant && (currentHasToolCall || activeHasToolCall)) {
         activeAssistant.parts = [...activeAssistant.parts, ...parts]
+        if (deliveryId) {
+          activeAssistant.deliveryId = deliveryId
+        }
         activeAssistant.timestamp = earliestTimestamp(
           activeAssistant.timestamp,
           message.timestamp,
@@ -575,6 +590,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: sessionLifecycleBody(message.display_metadata) }
         : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
+      ...(deliveryId ? { deliveryId } : {}),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(reactions.length ? { reactions } : {}),
       ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})

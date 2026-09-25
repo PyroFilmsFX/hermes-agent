@@ -191,6 +191,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         on_tool_iteration: Optional[Callable[[], None]] = None,
         on_unsolicited_result: Optional[Callable[[list[str], Optional[list[dict]]], None]] = None,
         on_unsolicited_start: Optional[Callable[[str], None]] = None,
+        on_unsolicited_header: Optional[Callable[[str, list[dict]], None]] = None,
         on_compaction: Optional[Callable[[str], None]] = None,
         on_compact_boundary: Optional[Callable[[str], None]] = None,
         # Hybrid MCP bridge (ported from PR #56413): the explicit config
@@ -355,6 +356,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # operator poked). No callback wired = the historical drop semantics.
         self._on_unsolicited_result = on_unsolicited_result
         self._on_unsolicited_start = on_unsolicited_start
+        self._on_unsolicited_header = on_unsolicited_header
+        self._unsolicited_delivery_id: Optional[str] = None
+        self._unsolicited_header_emitted = False
         self._unsolicited_start_notified = False
         self._unsolicited_text: list[str] = []
         # True while a CLI-injected turn (peer message, task notification) is

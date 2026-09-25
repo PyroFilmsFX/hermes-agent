@@ -3,7 +3,7 @@ import type { BillingBlock } from '@hermes/shared'
 import { burstVibeHearts } from '@/components/chat/vibe-hearts'
 import { reportFirstBuildTurnComplete } from '@/components/onboarding-chat/first-build'
 import { translateNow } from '@/i18n'
-import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
+import { assistantTextPart, type ChatMessage, textPart } from '@/lib/chat-messages'
 import { peerMessageLabel, sessionLifecycleBody, sessionLifecycleLabel } from '@/lib/chat-messages/hydration'
 import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
@@ -110,6 +110,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     }
 
     const isBackground = Boolean(payload && 'background' in payload && (payload as Record<string, unknown>).background)
+    const deliveryId = typeof payload?.delivery_id === 'string' ? payload.delivery_id.trim() || null : null
 
     flushQueuedDeltas(sessionId)
 
@@ -117,12 +118,39 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       // For background:true: message.start must NOT touch busy/awaitingResponse/interrupted
       // (it is not the user's turn) and must not be refused when interrupted.
       setBackgroundDeliveryActive(sessionId, true)
-      updateSessionState(sessionId, state => ({
-        ...state,
-        // A new turn starts: the previous turn's sealed interim is no longer a settle target.
-        sealedInterimId: null,
-        streamId: nextBackgroundMessageId('background-stream')
-      }))
+      updateSessionState(sessionId, state => {
+        let messages = state.messages
+        let streamId = deliveryId ? `assistant-stream-${deliveryId}` : nextBackgroundMessageId('background-stream')
+
+        if (deliveryId && payload?.user_message) {
+          const userText = (payload.user_message || '').trim()
+          if (userText) {
+            const peerMessageId = `peer-msg-${deliveryId}`
+            const alreadyHasPeer = state.messages.some(
+              m => (m.deliveryId === deliveryId && m.role === 'user') || m.id === peerMessageId
+            )
+            if (!alreadyHasPeer) {
+              const peerMessage: ChatMessage = {
+                id: peerMessageId,
+                role: 'user',
+                parts: [textPart(userText, occurredAt)],
+                timestamp: occurredAt,
+                deliveryId
+              }
+              messages = [...state.messages, peerMessage]
+            }
+          }
+        }
+
+        return {
+          ...state,
+          messages,
+          deliveryId,
+          // A new turn starts: the previous turn's sealed interim is no longer a settle target.
+          sealedInterimId: null,
+          streamId
+        }
+      })
 
       return true
     }
@@ -161,8 +189,35 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         return state
       }
 
+      let messages = state.messages
+      let streamId = state.streamId
+
+      if (deliveryId && payload?.user_message) {
+        const userText = (payload.user_message || '').trim()
+        if (userText) {
+          const peerMessageId = `peer-msg-${deliveryId}`
+          const alreadyHasPeer = state.messages.some(
+            m => (m.deliveryId === deliveryId && m.role === 'user') || m.id === peerMessageId
+          )
+          if (!alreadyHasPeer) {
+            const peerMessage: ChatMessage = {
+              id: peerMessageId,
+              role: 'user',
+              parts: [textPart(userText, occurredAt)],
+              timestamp: occurredAt,
+              deliveryId
+            }
+            messages = [...state.messages, peerMessage]
+          }
+        }
+        streamId = `assistant-stream-${deliveryId}`
+      }
+
       return {
         ...state,
+        messages,
+        deliveryId,
+        streamId,
         busy: true,
         awaitingResponse: true,
         sawAssistantPayload: false,
@@ -378,7 +433,13 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         payload && 'display_metadata' in payload ? (payload as Record<string, unknown>).display_metadata : undefined
       )
 
+      const deliveryId =
+        typeof payload?.delivery_id === 'string'
+          ? payload.delivery_id.trim() || undefined
+          : undefined
+
       updateSessionState(sessionId, state => {
+        const effectiveDeliveryId = deliveryId ?? state.deliveryId ?? undefined
         const streamId = state.streamId
         const existing = streamId ? state.messages.find(m => m.id === streamId) : null
         const existingToolParts = existing ? existing.parts.filter(p => p.type === 'tool-call') : []
@@ -396,7 +457,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             asyncResult: sessionLifecycleBody(metadata),
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
-            pending: false
+            pending: false,
+            ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {})
           }
         } else if (displayKind === 'peer_message') {
           const direction = displayMetadata?.direction === 'out' ? 'out' : 'in'
@@ -415,7 +477,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             asyncResult: finalText,
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
-            pending: false
+            pending: false,
+            ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {})
           }
         } else {
           // sdk_background_result or general background completion
@@ -425,7 +488,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             parts: [...existingToolParts, { ...assistantTextPart(finalText, occurredAt), completedAt: occurredAt }],
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
-            pending: false
+            pending: false,
+            ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {})
           }
         }
 
@@ -451,8 +515,18 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             ? -1
             : duplicateTailAssistantIndex(state.messages, finalText)
 
+        const deliveryIndex = effectiveDeliveryId
+          ? state.messages.findLastIndex(
+              m =>
+                m.role === 'assistant' &&
+                (m.deliveryId === effectiveDeliveryId || m.id === `assistant-stream-${effectiveDeliveryId}`)
+            )
+          : -1
+
         if (existing && streamId) {
           nextMessages = state.messages.map(m => (m.id === streamId ? sealedMessage : m))
+        } else if (deliveryIndex >= 0) {
+          nextMessages = state.messages.map((m, i) => (i === deliveryIndex ? { ...sealedMessage, id: m.id } : m))
         } else if (interimIndex >= 0) {
           nextMessages = state.messages.map((message, index) =>
             index === interimIndex ? { ...sealedMessage, id: message.id, timestamp: message.timestamp } : message
@@ -471,6 +545,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           ...state,
           messages: nextMessages,
           sealedInterimId: null,
+          deliveryId: null,
           streamId: null
         }
       })
@@ -525,7 +600,14 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           }
         : undefined
 
-    completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure, occurredAt)
+    completeAssistantMessage(
+      sessionId,
+      finalText,
+      payload?.response_previewed,
+      failure,
+      occurredAt,
+      typeof payload?.delivery_id === 'string' ? payload.delivery_id.trim() || undefined : undefined
+    )
 
     // Onboarding's first build: between turns is the only moment Setup may
     // put a check-in into that session (no-op everywhere else).

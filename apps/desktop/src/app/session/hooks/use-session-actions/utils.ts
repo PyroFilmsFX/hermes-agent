@@ -174,7 +174,8 @@ const COMPARED_FIELDS = [
   'completedAt',
   // Turn wall-clock duration — stamps the visible "⏱ 38s" badge, so a change
   // must re-render (set once at completion; stable afterwards).
-  'durationS'
+  'durationS',
+  'deliveryId'
 ] as const
 
 const IGNORED_FIELDS = ['attachmentRefs', 'parts', 'rowId'] as const
@@ -553,7 +554,7 @@ export function preserveLocalPendingTurnMessages(
 
   const newestOptimisticUser = [...previousMessages]
     .reverse()
-    .find(message => message.role === 'user' && message.id.startsWith('user-'))
+    .find(message => message.role === 'user' && (message.id.startsWith('user-') || message.id.startsWith('peer-msg-')))
 
   // A mid-turn redirect inserts its correction as a second optimistic user row
   // directly before the live reply, so one turn can own a contiguous RUN of
@@ -567,7 +568,7 @@ export function preserveLocalPendingTurnMessages(
     for (let index = previousMessages.indexOf(newestOptimisticUser); index >= 0; index -= 1) {
       const candidate = previousMessages[index]
 
-      if (candidate.role === 'user' && candidate.id.startsWith('user-')) {
+      if (candidate.role === 'user' && (candidate.id.startsWith('user-') || candidate.id.startsWith('peer-msg-'))) {
         liveOptimisticUsers.add(candidate)
 
         continue
@@ -599,7 +600,7 @@ export function preserveLocalPendingTurnMessages(
     const ordinal = previousRoleCounts.get(message.role) ?? 0
     previousRoleCounts.set(message.role, ordinal + 1)
 
-    const isOptimisticUser = message.role === 'user' && message.id.startsWith('user-')
+    const isOptimisticUser = message.role === 'user' && (message.id.startsWith('user-') || message.id.startsWith('peer-msg-'))
 
     const isPendingAssistant =
       message.role === 'assistant' && (message.pending === true || message.id.startsWith('assistant-stream-'))
@@ -620,6 +621,27 @@ export function preserveLocalPendingTurnMessages(
       }
 
       continue
+    }
+
+    if (
+      isOptimisticUser &&
+      message.deliveryId &&
+      nextMessages.some(candidate => candidate.role === 'user' && candidate.deliveryId === message.deliveryId)
+    ) {
+      continue
+    }
+
+    if (isPendingAssistant && message.deliveryId) {
+      const matchByDeliveryId = nextMessages.find(
+        candidate => candidate.role === 'assistant' && candidate.deliveryId === message.deliveryId
+      )
+
+      if (matchByDeliveryId) {
+        if (localPendingSupersedes(message, matchByDeliveryId)) {
+          replacements.set(matchByDeliveryId.id, withAuthoritativeTurnState(message, matchByDeliveryId))
+        }
+        continue
+      }
     }
 
     if (isOptimisticUser && !liveOptimisticUsers.has(message)) {
@@ -649,7 +671,8 @@ export function preserveLocalPendingTurnMessages(
       nextMessages.some(
         candidate =>
           candidate.role === 'assistant' &&
-          textWithoutReferenceLines(chatMessageText(candidate)) === textWithoutReferenceLines(chatMessageText(message))
+          ((message.deliveryId && candidate.deliveryId === message.deliveryId) ||
+            textWithoutReferenceLines(chatMessageText(candidate)) === textWithoutReferenceLines(chatMessageText(message)))
       )
     ) {
       continue
@@ -700,7 +723,8 @@ export function preserveLocalPendingTurnMessages(
         candidate =>
           candidate.role === 'assistant' &&
           !isLiveTailRow(candidate) &&
-          (textWithoutReferenceLines(chatMessageText(candidate)) === nextText ||
+          ((message.deliveryId && candidate.deliveryId === message.deliveryId) ||
+            textWithoutReferenceLines(chatMessageText(candidate)) === nextText ||
             isStrictAnswerTextExtension(textWithoutReferenceLines(chatMessageText(candidate)), nextText))
       )
 
@@ -712,7 +736,8 @@ export function preserveLocalPendingTurnMessages(
         candidate =>
           candidate.role === 'assistant' &&
           !isLiveTailRow(candidate) &&
-          isStrictAnswerTextExtension(nextText, textWithoutReferenceLines(chatMessageText(candidate)))
+          ((message.deliveryId && candidate.deliveryId === message.deliveryId) ||
+            isStrictAnswerTextExtension(nextText, textWithoutReferenceLines(chatMessageText(candidate))))
       )
 
       if (committedPrefix) {

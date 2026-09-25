@@ -466,6 +466,164 @@ def _notif_sdk_result_dedup_key(evt: dict) -> tuple:
             hash(repr(evt.get("items") or [])))
 
 
+def _lifecycle_source_label(source: object) -> str:
+    value = str(source or "")
+    if value.endswith("/scheduled-trigger"):
+        return "scheduled trigger"
+    if value.endswith("/peer-send-message") or value == "peer":
+        return "peer message"
+    if value.startswith("task-notification"):
+        return "task notification"
+    if value == "channel" or value.startswith("channel/"):
+        return "channel"
+    return value or "unknown"
+
+
+def _lifecycle_label(metadata: dict) -> str:
+    event = metadata.get("event")
+    if event == "child_exited":
+        exit_code = metadata.get("exit_code")
+        return (
+            f"CLI child exited (code {exit_code})"
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+            else "CLI child exited"
+        )
+    if event == "resumed":
+        count = metadata.get("digest_messages")
+        return (
+            f"session resumed · {count} messages"
+            if isinstance(count, int) and count > 0
+            else "session resumed"
+        )
+    if event == "woken":
+        source = _lifecycle_source_label(metadata.get("source"))
+        by = str(metadata.get("by") or "unknown")
+        return f"woken by {source}: {by}"
+    return "session lifecycle"
+
+
+def _peer_metadata(item: dict, direction: str, completed_at: object = None) -> dict:
+    metadata = {
+        "direction": direction,
+        "peer": ((item.get("name") or item.get("from")) if direction == "in" else item.get("to")),
+        "msg_id": item.get("uuid") if direction == "in" else item.get("tool_use_id"),
+        "completed_at": completed_at,
+    }
+    if direction == "in":
+        metadata["peer_session"] = item.get("from_session")
+    return metadata
+
+
+def _sdk_item_id(item: dict, index: int) -> str:
+    kind = str(item.get("kind") or "item")
+    if kind == "peer_in" and item.get("uuid"):
+        return str(item["uuid"])
+    if kind in {"tool", "peer_out"} and item.get("tool_use_id"):
+        return f"{kind}:{item['tool_use_id']}"
+    return f"{kind}:{index}"
+
+
+def _notif_deliver_sdk_header(sid: str, session: dict, header_items: list[dict], delivery_id: str) -> None:
+    """Emit woken/peer header rows and open the assistant stream carrying delivery_id BEFORE text deltas."""
+    if not delivery_id:
+        return
+    agent = session.get("agent")
+    session_id = str(getattr(agent, "session_id", None) or session.get("session_key") or "")
+    now = time.time()
+
+    header_seen = session.setdefault("_sdk_header_seen", set())
+    if delivery_id in header_seen:
+        return
+    header_seen.add(delivery_id)
+
+    pending_rows = []
+    user_prompt_text = ""
+    for index, item in enumerate(header_items or []):
+        kind = item.get("kind")
+        item_id = _sdk_item_id(item, index)
+        if kind == "lifecycle":
+            metadata = {key: value for key, value in item.items() if key != "kind"}
+            metadata["completed_at"] = now
+            metadata["delivery_id"] = delivery_id
+            label = _lifecycle_label(metadata)
+            if not user_prompt_text:
+                user_prompt_text = label
+            row = {
+                "role": "system",
+                "content": label,
+                "display_kind": "session_lifecycle",
+                "display_metadata": metadata,
+                "delivery_id": delivery_id,
+                "timestamp": now,
+                "_delivery_row_key": f"{item_id}:system",
+            }
+            pending_rows.append((item_id, row, label, "session_lifecycle", metadata))
+        elif kind in {"peer_in", "peer_out"}:
+            direction = "in" if kind == "peer_in" else "out"
+            metadata = _peer_metadata(item, direction, completed_at=now)
+            metadata["delivery_id"] = delivery_id
+            text = str(item.get("text") or "")
+            if not user_prompt_text and direction == "in":
+                user_prompt_text = text
+            row = {
+                "role": "user" if direction == "in" else "assistant",
+                "content": text,
+                "display_kind": "peer_message",
+                "display_metadata": metadata,
+                "delivery_id": delivery_id,
+                "timestamp": now,
+                "_delivery_row_key": f"{item_id}:{'user' if direction == 'in' else 'assistant'}",
+            }
+            pending_rows.append((item_id, row, text, "peer_message", metadata))
+
+    delivered_header_ids = session.setdefault("_sdk_delivered_header_ids", set())
+    if pending_rows and session_id:
+        try:
+            with _session_db(session) as db:
+                if db is not None:
+                    db_rows = []
+                    for item_id, row, _, _, _ in pending_rows:
+                        db_row = dict(row)
+                        db_rows.append(db_row)
+                    db.append_messages_batch(session_id, db_rows)
+            with session.get("history_lock", contextlib.nullcontext()):
+                history_rows = []
+                for item_id, row, _, _, _ in pending_rows:
+                    history_row = dict(row)
+                    history_row.pop("_delivery_row_key", None)
+                    history_rows.append(history_row)
+                session["history"] = list(session.get("history") or []) + history_rows
+                session["history_version"] = int(session.get("history_version", 0)) + len(pending_rows)
+        except Exception:
+            logger.debug("could not persist unsolicited header rows to db", exc_info=True)
+
+    for item_id, row, text, display_kind, metadata in pending_rows:
+        delivered_header_ids.add(item_id)
+        _emit("message.start", sid, {
+            "background": True,
+            "display_kind": display_kind,
+            "delivery_id": delivery_id,
+        })
+        _emit("message.complete", sid, {
+            "text": text,
+            "status": "complete",
+            "background": True,
+            "display_kind": display_kind,
+            "display_metadata": metadata,
+            "delivery_id": delivery_id,
+        })
+
+    # Open assistant stream carrying delivery_id
+    stream_start_payload = {
+        "background": True,
+        "delivery_id": delivery_id,
+    }
+    if user_prompt_text:
+        stream_start_payload["user_message"] = user_prompt_text
+        stream_start_payload["turn_author"] = "peer_agent"
+    _emit("message.start", sid, stream_start_payload)
+
+
 def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue, deferred) -> bool:
     """Show a claude-agent-sdk background result in the desktop chat as the agent's own message.
 
@@ -494,67 +652,27 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
     session_id = str(getattr(agent, "session_id", None) or evt.get("parent_session_id") or session.get("session_key") or "")
     completed_at = evt.get("completed_at")
     work_items = items or [{"kind": "text", "text": payload} for payload in payloads]
+
+    delivery_id = str(evt.get("delivery_id") or "") or None
+
     delivered_ids = evt.setdefault("delivered_ids", [])
     if not isinstance(delivered_ids, list):
         delivered_ids = evt["delivered_ids"] = list(delivered_ids) if delivered_ids else []
     delivered = {str(value) for value in delivered_ids}
+
+    delivered_header_ids = session.get("_sdk_delivered_header_ids") or set()
+    for item_id_val in delivered_header_ids:
+        delivered.add(item_id_val)
+
     persisted_ids = evt.setdefault("persisted_ids", [])
     if not isinstance(persisted_ids, list):
         persisted_ids = evt["persisted_ids"] = list(persisted_ids) if persisted_ids else []
     persisted = {str(value) for value in persisted_ids}
+    for item_id_val in delivered_header_ids:
+        persisted.add(item_id_val)
 
     def _item_id(item: dict, index: int) -> str:
-        kind = str(item.get("kind") or "item")
-        if kind == "peer_in" and item.get("uuid"):
-            return str(item["uuid"])
-        if kind in {"tool", "peer_out"} and item.get("tool_use_id"):
-            return f"{kind}:{item['tool_use_id']}"
-        return f"{kind}:{index}"
-
-    def _peer_metadata(item: dict, direction: str) -> dict:
-        metadata = {
-            "direction": direction,
-            "peer": ((item.get("name") or item.get("from")) if direction == "in" else item.get("to")),
-            "msg_id": item.get("uuid") if direction == "in" else item.get("tool_use_id"),
-            "completed_at": completed_at,
-        }
-        if direction == "in":
-            metadata["peer_session"] = item.get("from_session")
-        return metadata
-
-    def _lifecycle_source_label(source: object) -> str:
-        value = str(source or "")
-        if value.endswith("/scheduled-trigger"):
-            return "scheduled trigger"
-        if value.endswith("/peer-send-message") or value == "peer":
-            return "peer message"
-        if value.startswith("task-notification"):
-            return "task notification"
-        if value == "channel" or value.startswith("channel/"):
-            return "channel"
-        return value or "unknown"
-
-    def _lifecycle_label(metadata: dict) -> str:
-        event = metadata.get("event")
-        if event == "child_exited":
-            exit_code = metadata.get("exit_code")
-            return (
-                f"CLI child exited (code {exit_code})"
-                if isinstance(exit_code, int) and not isinstance(exit_code, bool)
-                else "CLI child exited"
-            )
-        if event == "resumed":
-            count = metadata.get("digest_messages")
-            return (
-                f"session resumed · {count} messages"
-                if isinstance(count, int) and count > 0
-                else "session resumed"
-            )
-        if event == "woken":
-            source = _lifecycle_source_label(metadata.get("source"))
-            by = str(metadata.get("by") or "unknown")
-            return f"woken by {source}: {by}"
-        return "session lifecycle"
+        return _sdk_item_id(item, index)
 
     persisted_row_ids = evt.setdefault("persisted_row_ids", [])
     event_timestamp = completed_at if completed_at is not None else time.time()
@@ -568,19 +686,32 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
             prepared["tool_calls"] = tool_calls
         if tool_call_id is not None:
             prepared["tool_call_id"] = tool_call_id
+        if delivery_id is not None:
+            prepared["delivery_id"] = delivery_id
+            meta = prepared.get("display_metadata")
+            if isinstance(meta, dict):
+                meta = dict(meta)
+                meta.setdefault("delivery_id", delivery_id)
+                prepared["display_metadata"] = meta
         prepared["_delivery_row_key"] = f"{item_id}:{prepared['role']}"
         return prepared
 
     def _emit_text(item: dict, display_kind: str, metadata: dict) -> None:
-        _emit("message.start", sid, {"background": True, "display_kind": display_kind})
-        _emit("message.complete", sid, {
+        start_payload = {"background": True, "display_kind": display_kind}
+        if delivery_id:
+            start_payload["delivery_id"] = delivery_id
+        _emit("message.start", sid, start_payload)
+        complete_payload = {
             "text": str(item.get("text") or ""),
             "status": "complete",
             "background": True,
             "display_kind": display_kind,
             "display_metadata": metadata,
             "usage": _get_usage(agent) if agent is not None else {},
-        })
+        }
+        if delivery_id:
+            complete_payload["delivery_id"] = delivery_id
+        _emit("message.complete", sid, complete_payload)
 
     prepared_items = []
     pending_rows = []
@@ -603,7 +734,7 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
                     }))
             elif kind in {"peer_in", "peer_out"}:
                 direction = "in" if kind == "peer_in" else "out"
-                metadata = _peer_metadata(item, direction)
+                metadata = _peer_metadata(item, direction, completed_at=completed_at)
                 row = {
                     "role": "user" if direction == "in" else "assistant",
                     "content": str(item.get("text") or ""), "display_kind": "peer_message",
@@ -625,6 +756,8 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
                     "function": {"name": tool_name, "arguments": json.dumps(args, ensure_ascii=False, sort_keys=True)},
                 }
                 tool_metadata = {"completed_at": completed_at, "source": "sdk_background_result"}
+                if delivery_id:
+                    tool_metadata["delivery_id"] = delivery_id
                 entry.update(tool_id=tool_id, tool_name=tool_name, args=args, result=result, is_error=is_error)
                 if item_id not in persisted:
                     entry["rows"].extend((
@@ -636,6 +769,8 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
             else:
                 text = str(item.get("text") or "")
                 metadata = {"completed_at": completed_at, "source": "sdk_background_result"}
+                if delivery_id:
+                    metadata["delivery_id"] = delivery_id
                 entry.update(text=text, display_kind="sdk_background_result", metadata=metadata)
                 if item_id not in persisted:
                     entry["rows"].append(_prepared_row(item_id, {
@@ -677,10 +812,16 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
             elif kind in {"peer_in", "peer_out"}:
                 _emit_text(item, entry["display_kind"], entry["metadata"])
             elif kind == "tool":
-                _emit("message.start", sid, {"background": True})
+                tool_start_payload = {"background": True}
+                if delivery_id:
+                    tool_start_payload["delivery_id"] = delivery_id
+                _emit("message.start", sid, tool_start_payload)
                 _on_tool_start(sid, entry["tool_id"], entry["tool_name"], entry["args"])
                 _on_tool_complete(sid, entry["tool_id"], entry["tool_name"], entry["args"], entry["result"], is_error=entry["is_error"])
-                _emit("message.complete", sid, {"text": "", "status": "complete", "background": True})
+                tool_complete_payload = {"text": "", "status": "complete", "background": True}
+                if delivery_id:
+                    tool_complete_payload["delivery_id"] = delivery_id
+                _emit("message.complete", sid, tool_complete_payload)
             else:
                 _emit_text(item, entry["display_kind"], entry["metadata"])
             delivered_ids.append(item_id)

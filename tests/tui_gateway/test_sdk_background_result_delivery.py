@@ -482,3 +482,56 @@ def test_prompt_handoff_filters_sdk_display_projections(wired, monkeypatch):
 def test_formatter_refuses_the_event_type():
     """Any other consumer must never render the phantom 'Background process unknown exited' block."""
     assert format_process_notification(_event()) is None
+
+
+def test_sdk_woken_delivery_id_on_header_and_complete(wired):
+    """Stable delivery ID must appear on both header emission and message.complete (#U1.10)."""
+    emitted, db = wired
+    session, reg = _session(), _registry()
+    delivery_id = "deliv-stable-xyz-123"
+
+    # 1. Header is delivered before streaming starts
+    header_items = [
+        {"kind": "lifecycle", "event": "woken", "source": "peer", "by": "peer-bot", "uuid": "peer-uuid-1"},
+        {"kind": "peer_in", "text": "hey agent", "name": "peer-bot", "uuid": "peer-uuid-1"},
+    ]
+    server._notif_deliver_sdk_header("ui-1", session, header_items, delivery_id)
+
+    # Verify header emissions carry delivery_id
+    header_emitted = list(emitted)
+    assert len(header_emitted) >= 3
+    header_delivery_ids = [
+        payload.get("delivery_id")
+        for event, sid, payload in header_emitted
+        if isinstance(payload, dict) and "delivery_id" in payload
+    ]
+    assert all(did == delivery_id for did in header_delivery_ids)
+    assert delivery_id in header_delivery_ids
+
+    # 2. Result message completes the delivery
+    evt = _event(
+        delivery_id=delivery_id,
+        payloads=["reply from agent"],
+        items=[
+            *header_items,
+            {"kind": "text", "text": "reply from agent"},
+        ],
+    )
+    assert server._notif_handle_event(
+        "ui-1", session, evt, session["_notification_emitted"], reg,
+        format_process_notification, None,
+    ) is True
+
+    # Header items should not be re-emitted, and the final reply must have delivery_id
+    complete_events = [
+        (event, payload)
+        for event, sid, payload in emitted
+        if event == "message.complete" and payload.get("text") == "reply from agent"
+    ]
+    assert len(complete_events) == 1
+    assert complete_events[0][1].get("delivery_id") == delivery_id
+
+    # The persisted row for the assistant answer must also have delivery_id in display_metadata
+    assistant_rows = [r for r in db.rows if r.get("role") == "assistant" and r.get("content") == "reply from agent"]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0].get("display_metadata", {}).get("delivery_id") == delivery_id

@@ -108,6 +108,7 @@ export function useMessageStream({
             return state
           }
 
+          const currentDeliveryId = state.deliveryId ?? null
           const streamId = state.streamId ?? nextStreamMessageId('assistant-stream')
           const groupId = state.pendingBranchGroup ?? undefined
           const prev = state.messages
@@ -122,7 +123,8 @@ export function useMessageStream({
                 parts: seed(),
                 timestamp: occurredAt,
                 pending: true,
-                branchGroupId: groupId
+                branchGroupId: groupId,
+                ...(currentDeliveryId ? { deliveryId: currentDeliveryId } : {})
               }
             ]
           } else {
@@ -131,7 +133,8 @@ export function useMessageStream({
                 ? {
                     ...m,
                     parts: transform(m.parts, m),
-                    pending: opts.pending ? opts.pending(m) : true
+                    pending: opts.pending ? opts.pending(m) : true,
+                    ...(currentDeliveryId && !m.deliveryId ? { deliveryId: currentDeliveryId } : {})
                   }
                 : m
             )
@@ -569,7 +572,8 @@ export function useMessageStream({
       text: string,
       responsePreviewed?: boolean,
       failure?: { error: string; partial: boolean; surface?: ErrorSurface | null },
-      occurredAt = Date.now() / 1000
+      occurredAt = Date.now() / 1000,
+      deliveryId?: string
     ) => {
       let shouldHydrate = false
 
@@ -587,11 +591,13 @@ export function useMessageStream({
             pendingBranchGroup: null,
             sealedInterimId: null,
             streamId: null,
+            deliveryId: null,
             turnStartedAt: null,
             turnLive: false
           }
         }
 
+        const effectiveDeliveryId = deliveryId ?? state.deliveryId ?? null
         const streamId = state.streamId
         const finalText = renderMediaTags(text).trim()
         // Structured failure from the terminal frame wins over the legacy text
@@ -624,6 +630,7 @@ export function useMessageStream({
             parts: completeOpenTimelineParts(message.parts, occurredAt),
             pending: false,
             interim: false,
+            ...(effectiveDeliveryId && !message.deliveryId ? { deliveryId: effectiveDeliveryId } : {}),
             ...(durationS !== undefined ? { durationS } : {}),
             ...(completionError && failure?.surface ? { errorSurface: failure.surface } : {})
           }
@@ -649,6 +656,7 @@ export function useMessageStream({
           timestamp: occurredAt,
           completedAt: occurredAt,
           branchGroupId: state.pendingBranchGroup ?? undefined,
+          ...(effectiveDeliveryId ? { deliveryId: effectiveDeliveryId } : {}),
           ...(durationS !== undefined ? { durationS } : {}),
           ...(completionError && { error: completionError }),
           ...(completionError && failure?.surface ? { errorSurface: failure.surface } : {})
@@ -657,8 +665,22 @@ export function useMessageStream({
         const prev = state.messages
         let nextMessages = prev
 
-        if (streamId && prev.some(m => m.id === streamId)) {
-          nextMessages = prev.map(m => (m.id === streamId ? completeMessage(m) : m))
+        const streamIndex = streamId && prev.some(m => m.id === streamId)
+          ? prev.findIndex(m => m.id === streamId)
+          : -1
+
+        const deliveryIndex = effectiveDeliveryId
+          ? prev.findLastIndex(
+              message =>
+                message.role === 'assistant' &&
+                (message.deliveryId === effectiveDeliveryId || message.id === `assistant-stream-${effectiveDeliveryId}`)
+            )
+          : -1
+
+        const targetIndex = streamIndex >= 0 ? streamIndex : deliveryIndex
+
+        if (targetIndex >= 0) {
+          nextMessages = prev.map((m, i) => (i === targetIndex ? completeMessage(m) : m))
         } else {
           const fallbackIndex = [...prev]
             .reverse()
