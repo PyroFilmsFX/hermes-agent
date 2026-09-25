@@ -449,10 +449,35 @@ def test_missing_task_directory_emits_nothing(tmp_path, monkeypatch):
     monkeypatch.setitem(server._sessions, sid, session)
     monkeypatch.setattr(server, "_emit", lambda *args: events.append(args))
 
+    # Case 1: When there was never an sdk_tasks list, emit nothing
     assert server.bootstrap_sdk_todo_snapshot(
         sid, task_list_id="hermes-missing", config_dir=str(tmp_path / "claude")
     ) is None
     assert events == []
+
+    # Case 2: When cached todo_state has source "sdk_tasks", emit a real clear
+    session["todo_state"] = {
+        "todos": [{"id": "1", "content": "Active task", "status": "pending"}],
+        "revision": 2,
+        "source": "sdk_tasks",
+    }
+    result = server.bootstrap_sdk_todo_snapshot(
+        sid, task_list_id="hermes-missing", config_dir=str(tmp_path / "claude")
+    )
+    assert result == {
+        "todos": [],
+        "revision": 3,
+        "source": "sdk_tasks",
+    }
+    assert events == [
+        ("todo.updated", sid, {
+            "todos": [],
+            "revision": 3,
+            "source": "sdk_tasks",
+        })
+    ]
+    assert session["todo_state"] == result
+
 
 
 def test_sdk_task_completion_refreshes_snapshot_after_tool_complete(tmp_path, monkeypatch):

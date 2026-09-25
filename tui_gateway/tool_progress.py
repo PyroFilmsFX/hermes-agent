@@ -349,11 +349,22 @@ def _refresh_sdk_todo_snapshot(
         task_store_root=task_store_root, revision=revision
     )
     if state is None:
+        if (cached or {}).get("source") == "sdk_tasks" and (cached or {}).get("todos"):
+            state = {
+                "todos": [],
+                "revision": revision,
+                "source": "sdk_tasks",
+            }
+            _cache_todo_state(session, state)
+            if emit:
+                _emit("todo.updated", sid, state)
+            return state
         return None
     _cache_todo_state(session, state)
     if emit:
         _emit("todo.updated", sid, state)
     return state
+
 
 
 def bootstrap_sdk_todo_snapshot(

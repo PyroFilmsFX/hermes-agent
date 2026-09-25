@@ -185,7 +185,14 @@ export function clearActiveSessionTodos(sid: string) {
 export function restoreSessionTodosFromSnapshot(sid: string, snapshot: unknown, running: boolean) {
   const todos = parseTodos(snapshot)
 
-  if (!sid || todos === null) {
+  if (!sid) {
+    return
+  }
+
+  if (todos === null) {
+    if ($todoSourcesBySession.get()[sid] === 'sdk_tasks') {
+      dropSessionTodos(sid, false)
+    }
     return
   }
 
@@ -196,8 +203,12 @@ export function restoreSessionTodosFromSnapshot(sid: string, snapshot: unknown, 
   // real snapshot. Applying it would stamp watermark 0 and leave an empty
   // list in the map.
   if (todos.length === 0 && (revision == null || revision === 0)) {
+    if ($todoSourcesBySession.get()[sid] === 'sdk_tasks') {
+      dropSessionTodos(sid, false)
+    }
     return
   }
+
 
   const visible = running ? todos : todosForHydration(todos, source)
 

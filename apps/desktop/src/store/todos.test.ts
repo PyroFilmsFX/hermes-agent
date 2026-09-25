@@ -4,6 +4,7 @@ import type { TodoItem } from '@/lib/todos'
 
 import {
   $todoRevisionsBySession,
+  $todoSourcesBySession,
   $todosBySession,
   clearActiveSessionTodos,
   clearSessionTodos,
@@ -11,6 +12,7 @@ import {
   setSessionTodos,
   todosForHydration
 } from './todos'
+
 
 const todo = (id: string, status: TodoItem['status']): TodoItem => ({ content: `task ${id}`, id, status })
 
@@ -172,4 +174,16 @@ describe('revisioned snapshots', () => {
     setSessionTodos('s1', [todo('a', 'in_progress')])
     expect($todosBySession.get().s1?.[0]?.id).toBe('a')
   })
+
+  it('drops leftover sdk_tasks list on activate/resume when backend returns no todo_state', () => {
+    setSessionTodos('s1', [todo('active', 'in_progress')], 5, 'sdk_tasks')
+    expect($todosBySession.get().s1?.[0]?.id).toBe('active')
+    expect($todoSourcesBySession.get().s1).toBe('sdk_tasks')
+
+    // Session activate/resume with null / undefined todo_state (backend returned NO todo_state)
+    restoreSessionTodosFromSnapshot('s1', null, false)
+    expect($todosBySession.get().s1).toBeUndefined()
+    expect($todoSourcesBySession.get().s1).toBeUndefined()
+  })
 })
+
