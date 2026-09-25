@@ -1249,6 +1249,7 @@ class ClaudeSdkTurnMixin:
     def _deliver_host_peer_item(self, message: Any, origin: dict) -> None:
         """Render a peer prompt folded into this host turn at its stream position."""
         uuid = str(getattr(message, "uuid", None) or "")
+        msg_id = str(origin.get("msg_id") or uuid)
         seen = getattr(self, "_host_peer_seen", None)
         if seen is None:
             seen = self._host_peer_seen = set()
@@ -1276,7 +1277,7 @@ class ClaudeSdkTurnMixin:
         }
         if not item["text"]:
             return
-        self._deliver_or_buffer_unsolicited([], [item], f"deliv-peer-{uuid}" if uuid else None)
+        self._deliver_or_buffer_unsolicited([], [item], f"deliv-peer-{msg_id}" if msg_id else None)
 
     def _deliver_or_buffer_unsolicited(
         self, texts: list[str], items: list[dict], delivery_id: Optional[str]
@@ -1720,7 +1721,8 @@ class ClaudeSdkTurnMixin:
                         logger.debug("claude-agent-sdk unsolicited-start callback failed", exc_info=True)
             uuid = str(getattr(message, "uuid", None) or "")
             if (is_woken or is_peer) and not getattr(self, "_unsolicited_delivery_id", None):
-                self._unsolicited_delivery_id = f"deliv-peer-{uuid}" if uuid else None
+                msg_id = str(origin.get("msg_id") or uuid)
+                self._unsolicited_delivery_id = f"deliv-peer-{msg_id}" if msg_id else None
             if is_peer:
                 if uuid and uuid in seen:
                     return

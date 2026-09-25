@@ -519,16 +519,66 @@ def _peer_metadata(item: dict, direction: str, completed_at: object = None) -> d
 
 def _sdk_item_id(item: dict, index: int) -> str:
     kind = str(item.get("kind") or "item")
-    if kind == "peer_in" and item.get("uuid"):
-        return str(item["uuid"])
+    if kind == "peer_in" and (item.get("msg_id") or item.get("uuid")):
+        return str(item.get("msg_id") or item.get("uuid"))
     if kind in {"tool", "peer_out"} and item.get("tool_use_id"):
         return f"{kind}:{item['tool_use_id']}"
     return f"{kind}:{index}"
 
 
+def _sdk_delivery_seen_in_history(session: dict, delivery_id: str, *, completed_only: bool = False) -> bool:
+    """Find a previously persisted native delivery after the SDK/gateway objects are rebuilt."""
+    with session.get("history_lock", contextlib.nullcontext()):
+        for row in session.get("history") or []:
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("display_metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if (row.get("delivery_id") or metadata.get("delivery_id")) != delivery_id:
+                continue
+            if not completed_only or row.get("display_kind") == "sdk_background_result":
+                return True
+    return False
+
+
+def _sdk_peer_message_seen_in_history(session: dict, msg_id: str, *, completed_only: bool = False) -> bool:
+    """Match the durable mailbox id even when a resumed SDK assigns the replay a new stream UUID."""
+    with session.get("history_lock", contextlib.nullcontext()):
+        history = session.get("history") or []
+        delivery_ids = set()
+        for row in history:
+            if not isinstance(row, dict) or row.get("display_kind") != "peer_message":
+                continue
+            metadata = row.get("display_metadata")
+            if not isinstance(metadata, dict) or str(metadata.get("msg_id") or "") != msg_id:
+                continue
+            delivery_id = row.get("delivery_id") or metadata.get("delivery_id")
+            if delivery_id:
+                delivery_ids.add(str(delivery_id))
+            elif not completed_only:
+                return True
+        if not completed_only:
+            return bool(delivery_ids)
+        return any(
+            isinstance(row, dict) and row.get("display_kind") == "sdk_background_result"
+            and str((row.get("display_metadata") or {}).get("delivery_id") or "") in delivery_ids
+            for row in history
+        )
+    return False
+
+
 def _notif_deliver_sdk_header(sid: str, session: dict, header_items: list[dict], delivery_id: str) -> None:
     """Emit woken/peer header rows and open the assistant stream carrying delivery_id BEFORE text deltas."""
     if not delivery_id:
+        return
+    if _sdk_delivery_seen_in_history(session, delivery_id):
+        return
+    peer_items = [item for item in header_items if isinstance(item, dict) and item.get("kind") == "peer_in"]
+    if peer_items and all(
+        _sdk_peer_message_seen_in_history(session, str(item.get("msg_id") or item.get("uuid") or ""))
+        for item in peer_items
+    ):
         return
     agent = session.get("agent")
     session_id = str(getattr(agent, "session_id", None) or session.get("session_key") or "")
@@ -665,6 +715,14 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
     work_items = items or [{"kind": "text", "text": payload} for payload in payloads]
 
     delivery_id = str(evt.get("delivery_id") or "") or None
+    if delivery_id and _sdk_delivery_seen_in_history(session, delivery_id, completed_only=True):
+        return True
+    peer_msg_ids = [str(item.get("msg_id") or item.get("uuid") or "") for item in items
+                    if item.get("kind") == "peer_in"]
+    if peer_msg_ids and all(
+        _sdk_peer_message_seen_in_history(session, msg_id, completed_only=True) for msg_id in peer_msg_ids
+    ):
+        return True
 
     delivered_ids = evt.setdefault("delivered_ids", [])
     if not isinstance(delivered_ids, list):

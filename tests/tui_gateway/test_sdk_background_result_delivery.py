@@ -557,3 +557,52 @@ def test_sdk_header_seen_ids_keep_only_the_newest_512(wired):
     assert len(session["_sdk_header_seen"]) == 512
     assert "delivery-0" not in session["_sdk_header_seen"]
     assert "delivery-519" in session["_sdk_header_seen"]
+
+
+def test_native_peer_header_replay_is_suppressed_after_gateway_restart(wired):
+    emitted, db = wired
+    original = _session()
+    peer = {"kind": "peer_in", "text": "do the work", "from": "manager", "msg_id": "23", "uuid": "sdk-uuid-old"}
+    server._notif_deliver_sdk_header("ui-1", original, [peer], "deliv-peer-sdk-uuid-old")
+    assert len(db.rows) == 1
+    assert db.rows[0]["display_metadata"]["msg_id"] == "23"
+    first_emission_count = len(emitted)
+
+    # The gateway and SDK transport are rebuilt, while SessionDB history survives restart. The resumed
+    # SDK can attach a new stream UUID to the same mailbox message id.
+    resumed = _session(history=list(original["history"]))
+    replay = {**peer, "uuid": "sdk-uuid-after-restart"}
+    server._notif_deliver_sdk_header("ui-1", resumed, [replay], "deliv-peer-sdk-uuid-after-restart")
+
+    assert len(db.rows) == 1
+    assert len(emitted) == first_emission_count
+
+
+def test_native_peer_result_replay_is_suppressed_after_gateway_restart(wired):
+    emitted, db = wired
+    original, reg = _session(), _registry()
+    first = _event(
+        delivery_id="deliv-peer-sdk-uuid-old",
+        items=[
+            {"kind": "peer_in", "text": "do the work", "from": "manager", "msg_id": "23", "uuid": "sdk-uuid-old"},
+            {"kind": "text", "text": "done"},
+        ],
+    )
+    assert server._notif_handle_event("ui-1", original, first, original["_notification_emitted"], reg,
+                                      format_process_notification, None)
+    rows_after_first = len(db.rows)
+    events_after_first = len(emitted)
+    assert rows_after_first == 2
+
+    resumed = _session(history=list(original["history"]))
+    replay = _event(
+        delivery_id="deliv-peer-sdk-uuid-after-restart",
+        items=[
+            {"kind": "peer_in", "text": "do the work", "from": "manager", "msg_id": "23", "uuid": "sdk-uuid-after-restart"},
+            {"kind": "text", "text": "done"},
+        ],
+    )
+    assert server._notif_handle_event("ui-1", resumed, replay, resumed["_notification_emitted"], _registry(),
+                                      format_process_notification, None)
+    assert len(db.rows) == rows_after_first
+    assert len(emitted) == events_after_first

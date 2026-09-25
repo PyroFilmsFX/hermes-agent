@@ -158,6 +158,80 @@ def test_dead_target_is_resumed_on_send_and_delivered(gw):
     assert gw.drains == ["target"], "other mail queued for the woken session rides along"
 
 
+@pytest.mark.parametrize("path", ["live", "native", "resume"])
+def test_delivered_mailbox_rows_are_not_replayed_by_restart_drain(gw, monkeypatch, path):
+    native_inputs = []
+    if path == "live":
+        gw.sessions["live"] = {"session_key": "target", "profile_home": None}
+    elif path == "native":
+        gw.sessions["native"] = _claude_live_session(
+            lambda body, origin: native_inputs.append((body, origin)) or True)
+
+    delivered = _send(gw, body=f"already acted via {path}")
+    assert delivered["status"] == {
+        "live": "delivered-live", "native": "delivered-native", "resume": "resumed-and-delivered",
+    }[path]
+    assert gw.db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
+    snapshot = (len(gw.submits), len(native_inputs), len(gw.resumes))
+
+    # Reopen the same SQLite state as a fresh runtime and run its startup drain. A settled row is never
+    # eligible for delivery, including when its original path was native SDK input.
+    from hermes_state import SessionDB
+
+    restarted_db = SessionDB(gw.db.db_path)
+    monkeypatch.setattr(gw.server, "_get_db", lambda: restarted_db)
+    try:
+        assert gw.mb.drain_pending() == 0
+        assert (len(gw.submits), len(native_inputs), len(gw.resumes)) == snapshot
+        assert restarted_db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
+    finally:
+        restarted_db.close()
+
+
+def test_native_mailbox_delivery_is_not_replayed_as_a_new_turn_after_restart(gw, monkeypatch):
+    import threading
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    accepted = []
+    gw.sessions["native"] = _claude_live_session(
+        lambda body, origin: accepted.append((body, origin)) or True)
+    delivered = _send(gw, body="already acted", request_id="manager-23")
+    msg_id = str(delivered["message_id"])
+    assert gw.db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
+    assert len(accepted) == 1
+
+    # The SDK projection already persisted this msg-id before shutdown. On resume, SDK UUIDs can change,
+    # but the durable mailbox id and transcript history remain the same.
+    prior_row = {
+        "role": "user", "content": "already acted", "display_kind": "peer_message",
+        "display_metadata": {"direction": "in", "msg_id": msg_id, "delivery_id": "deliv-peer-old-uuid"},
+        "delivery_id": "deliv-peer-old-uuid",
+    }
+    gw.db.append_message("target", role=prior_row["role"], content=prior_row["content"],
+                         display_kind=prior_row["display_kind"], display_metadata=prior_row["display_metadata"])
+    restarted_db = SessionDB(gw.db.db_path)
+    monkeypatch.setattr(server, "_get_db", lambda: restarted_db)
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload)))
+    try:
+        assert gw.mb.drain_pending() == 0
+        history_count = len(restarted_db.get_messages("target"))
+        resumed = {
+            "agent": SimpleNamespace(session_id="target"), "session_key": "target",
+            "history": [prior_row], "history_lock": threading.Lock(), "history_version": 1,
+        }
+        server._notif_deliver_sdk_header("live-native", resumed, [{
+            "kind": "peer_in", "text": "already acted", "msg_id": msg_id, "uuid": "new-sdk-uuid",
+        }], "deliv-peer-new-sdk-uuid")
+        assert accepted and len(accepted) == 1
+        assert emitted == []
+        assert len(restarted_db.get_messages("target")) == history_count
+        assert restarted_db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
+    finally:
+        restarted_db.close()
+
+
 def test_queued_when_resume_is_off_then_drained_when_the_session_starts(gw):
     gw.pol["resume_on_send"] = False
     first = _send(gw, body="one")
