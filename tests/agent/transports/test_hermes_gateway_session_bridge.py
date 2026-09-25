@@ -242,12 +242,15 @@ def test_discover_url_separates_http_status_from_transport_failure(monkeypatch, 
         bridge._discover_url("owner", tmp_path, "token")
 
 
-def test_session_send_queues_after_authenticated_attach_refusal(monkeypatch, tmp_path):
+@pytest.mark.parametrize("code", [
+    "session_identity_mismatch", "lease_live_session_mismatch", "lease_not_found",
+])
+def test_session_send_queues_after_authenticated_attach_refusal(monkeypatch, tmp_path, code):
     client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
     monkeypatch.setattr(
         client, "_rpc",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(bridge.SessionSpawnBridgeError(
-            "owner gateway attach refused: lease_not_found", code="lease_not_found",
+            f"owner gateway attach refused: {code}", code=code,
             endpoint="http://127.0.0.1:4311")),
     )
 
@@ -292,6 +295,26 @@ def test_session_send_does_not_queue_if_sender_capability_cannot_be_authenticate
         assert str(exc) == "owner gateway attach refused: capability_invalid"
     else:
         raise AssertionError("unauthenticated fallback should fail")
+    assert posted == []
+
+
+@pytest.mark.parametrize("code", [
+    "capability_invalid", "profile_mismatch", "lease_registry_unavailable",
+    "owner_lease_not_found", "owner_lease_ambiguous", "attach_transport", "unexpected_refusal",
+])
+def test_session_send_does_not_queue_after_non_rotation_attach_failure(monkeypatch, tmp_path, code):
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    monkeypatch.setattr(
+        client, "_rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(bridge.SessionSpawnBridgeError(
+            "owner gateway attach refused", code=code, endpoint="http://127.0.0.1:4311")),
+    )
+    posted = []
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: posted.append((args, kwargs)))
+    with pytest.raises(bridge.SessionSpawnBridgeError, match="owner gateway attach refused"):
+        client.send_to_session(target="target", body="hello")
     assert posted == []
 
 

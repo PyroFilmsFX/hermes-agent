@@ -88,6 +88,32 @@ def _(rid, params: dict) -> dict:
 @method("session.send")
 def _(rid, params: dict) -> dict:
     """Durable cross-session message: live delivery, resume-on-send, or queued (cntrl carry, #11)."""
+    from tui_gateway import server
+    from tools.session_tools import session_send_enabled
+
+    token = params.get("_session_spawn_capability")
+    profile_home = None
+    if token is not None:
+        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
+
+        capability = authorize_scoped_capability(token)
+        if capability is None:
+            from tui_gateway.session_mailbox import send_rpc
+            return send_rpc(rid, params)
+        with server._sessions_lock:
+            caller = server._sessions.get(capability.owner_session_id)
+        if caller is None:
+            from tui_gateway.session_mailbox import send_rpc
+            return send_rpc(rid, params)
+        profile_home = caller.get("profile_home") or None
+    elif params.get("profile"):
+        home = server._profile_home(params.get("profile"))
+        profile_home = str(home) if home else None
+    with _session_profile_runtime_scope({"profile_home": profile_home}):
+        send_enabled = session_send_enabled()
+    if not send_enabled:
+        return server._err(rid, 4403, "session_send is disabled")
+
     from tui_gateway.session_mailbox import send_rpc
 
     return send_rpc(rid, params)

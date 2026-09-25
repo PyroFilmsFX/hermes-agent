@@ -201,8 +201,8 @@ def test_native_mailbox_delivery_is_not_replayed_as_a_new_turn_after_restart(gw,
     assert gw.db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
     assert len(accepted) == 1
 
-    # The SDK projection already persisted this msg-id before shutdown. On resume, SDK UUIDs can change,
-    # but the durable mailbox id and transcript history remain the same.
+    # The SDK projection already persisted this msg-id before shutdown. The cold resume below has a
+    # truncated in-memory history, and SDK UUIDs can change, so only the durable DB row can dedupe it.
     prior_row = {
         "role": "user", "content": "already acted", "display_kind": "peer_message",
         "display_metadata": {"direction": "in", "msg_id": msg_id, "delivery_id": "deliv-peer-old-uuid"},
@@ -219,7 +219,7 @@ def test_native_mailbox_delivery_is_not_replayed_as_a_new_turn_after_restart(gw,
         history_count = len(restarted_db.get_messages("target"))
         resumed = {
             "agent": SimpleNamespace(session_id="target"), "session_key": "target",
-            "history": [prior_row], "history_lock": threading.Lock(), "history_version": 1,
+            "history": [], "history_lock": threading.Lock(), "history_version": 1,
         }
         server._notif_deliver_sdk_header("live-native", resumed, [{
             "kind": "peer_in", "text": "already acted", "msg_id": msg_id, "uuid": "new-sdk-uuid",
@@ -230,6 +230,23 @@ def test_native_mailbox_delivery_is_not_replayed_as_a_new_turn_after_restart(gw,
         assert restarted_db.peer_mailbox_get(delivered["message_id"])["status"] == "delivered"
     finally:
         restarted_db.close()
+
+
+def test_sdk_peer_message_dedupe_never_matches_an_empty_msg_id():
+    from tui_gateway.session_notifications import _sdk_peer_message_seen_in_history
+
+    session = {"history": [{"display_kind": "peer_message", "display_metadata": {"msg_id": ""}}]}
+    assert not _sdk_peer_message_seen_in_history(session, "")
+
+
+def test_session_send_rpc_refuses_when_policy_is_disabled(gw, monkeypatch):
+    from tools import session_tools
+
+    monkeypatch.setattr(session_tools, "session_send_enabled", lambda: False)
+    response = gw.server._methods["session.send"]("request", {"target": "target", "body": "hello"})
+
+    assert response["error"]["message"] == "session_send is disabled"
+    assert gw.db.peer_mailbox_pending("target") == []
 
 
 def test_queued_when_resume_is_off_then_drained_when_the_session_starts(gw):

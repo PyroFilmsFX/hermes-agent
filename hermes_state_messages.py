@@ -1095,6 +1095,19 @@ class SessionMessagesMixin:
             f"SELECT COUNT(*) FROM messages WHERE session_id IN ({_placeholders(session_ids)}) AND {active_clause}",
             tuple(session_ids))[0])
 
+    def has_display_message_metadata(self, session_id: str, display_kind: str, metadata_key: str,
+                                     metadata_value: str, *, include_ancestors: bool = True) -> bool:
+        """Whether a display row with the requested metadata exists, bounded to one result."""
+        if not session_id or not display_kind or not metadata_key or not metadata_value:
+            return False
+        session_ids = self._resume_lineage_ids(session_id) if include_ancestors else [session_id]
+        return self._read_one(
+            "SELECT 1 FROM messages WHERE session_id IN "
+            f"({_placeholders(session_ids)}) AND display_kind = ? "
+            "AND CASE WHEN json_valid(display_metadata) "
+            "THEN json_extract(display_metadata, ?) END = ? LIMIT 1",
+            (*session_ids, display_kind, f"$.{metadata_key}", metadata_value)) is not None
+
     def assert_resume_safe(self, session_id: str, max_messages: Optional[int] = None, *, tip_only: bool = False) -> int:
         """Resume row count, or raise ``SessionResumeTooLargeError``. ``max_messages=None`` reads config; 0
         disables the guard without counting. ``tip_only`` bounds only the tip's active rows for callers that

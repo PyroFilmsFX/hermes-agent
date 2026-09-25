@@ -544,14 +544,16 @@ def _sdk_delivery_seen_in_history(session: dict, delivery_id: str, *, completed_
 
 def _sdk_peer_message_seen_in_history(session: dict, msg_id: str, *, completed_only: bool = False) -> bool:
     """Match the durable mailbox id even when a resumed SDK assigns the replay a new stream UUID."""
+    if not msg_id:
+        return False
+    delivery_ids = set()
     with session.get("history_lock", contextlib.nullcontext()):
         history = session.get("history") or []
-        delivery_ids = set()
         for row in history:
             if not isinstance(row, dict) or row.get("display_kind") != "peer_message":
                 continue
             metadata = row.get("display_metadata")
-            if not isinstance(metadata, dict) or str(metadata.get("msg_id") or "") != msg_id:
+            if not isinstance(metadata, dict) or str(metadata.get("msg_id") or "") != str(msg_id):
                 continue
             delivery_id = row.get("delivery_id") or metadata.get("delivery_id")
             if delivery_id:
@@ -559,13 +561,27 @@ def _sdk_peer_message_seen_in_history(session: dict, msg_id: str, *, completed_o
             elif not completed_only:
                 return True
         if not completed_only:
-            return bool(delivery_ids)
-        return any(
+            if delivery_ids:
+                return True
+        elif any(
             isinstance(row, dict) and row.get("display_kind") == "sdk_background_result"
             and str((row.get("display_metadata") or {}).get("delivery_id") or "") in delivery_ids
             for row in history
-        )
-    return False
+        ):
+            return True
+    if completed_only:
+        return False
+
+    # A resumed SDK may restore only the tip's model context, while peer rows remain on a
+    # compressed ancestor. Consult the profile-owned DB only for a native peer replay miss.
+    agent = session.get("agent")
+    session_id = str(session.get("session_key") or getattr(agent, "session_id", None) or "")
+    try:
+        with _session_db(session) as db:
+            return bool(db and db.has_display_message_metadata(
+                session_id, "peer_message", "msg_id", str(msg_id), include_ancestors=True))
+    except Exception:
+        return False
 
 
 def _notif_deliver_sdk_header(sid: str, session: dict, header_items: list[dict], delivery_id: str) -> None:

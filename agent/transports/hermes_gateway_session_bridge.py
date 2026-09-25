@@ -349,8 +349,8 @@ class HermesGatewaySessionBridge:
         try:
             return self._rpc("session.send", params)
         except SessionSpawnBridgeError as exc:
-            if not exc.endpoint or not exc.code or exc.code in {
-                "capability_invalid", "owner_lease_not_found", "owner_lease_ambiguous", "attach_transport",
+            if not exc.endpoint or exc.code not in {
+                "session_identity_mismatch", "lease_live_session_mismatch", "lease_not_found",
             }:
                 raise
             import httpx

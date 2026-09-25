@@ -323,6 +323,12 @@ def test_authenticated_attach_refusal_fallback_queues_durably(monkeypatch, tmp_p
         [row] = db.peer_mailbox_pending("target")
         assert row["from_session_id"] == "owner-key"
         assert row["body"] == "hello"
+        from tools import session_tools
+        monkeypatch.setattr(session_tools, "session_send_enabled", lambda: False)
+        disabled = asyncio.run(exercise())
+        assert disabled.status_code == 403
+        assert disabled.json()["code"] == "session_send_disabled"
+        assert len(db.peer_mailbox_pending("target")) == 1
         unauthorized = asyncio.run(_post_queue(app, "invalid"))
         assert unauthorized.status_code == 403
         assert len(db.peer_mailbox_pending("target")) == 1

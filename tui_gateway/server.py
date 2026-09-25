@@ -999,6 +999,11 @@ def register_session_spawn_routes(application) -> None:
             caller = _sessions.get(capability.owner_session_id)
         if caller is None:
             return JSONResponse({"error": "owner session is unavailable", "code": "owner_session_unavailable"}, status_code=403)
+        from tools.session_tools import session_send_enabled
+        with _session_profile_runtime_scope(caller):
+            send_enabled = session_send_enabled()
+        if not send_enabled:
+            return JSONResponse({"error": "session_send is disabled", "code": "session_send_disabled"}, status_code=403)
         try:
             params = await request.json()
         except Exception:
