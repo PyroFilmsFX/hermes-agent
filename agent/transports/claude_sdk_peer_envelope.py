@@ -29,9 +29,10 @@ _PREAMBLE = (
     r"A peer session sent a message while you were working:)\r?\n\s*)?)"
 )
 _TRAILER = (
-    r"(?:\r?\n\r?\n(?:This came from another Claude session|That \"other Claude session\"|"
-    r"This is from another Claude session|IMPORTANT: This is NOT from your user)[\s\S]*)?\s*\Z"
+    r"(?:\r?\n\r?\n(?P<trailer>(?:This came from another Claude session|That \"other Claude session\"|"
+    r"This is from another Claude session|IMPORTANT: This is NOT from your user)[\s\S]*))?\s*\Z"
 )
+
 
 _ENVELOPE_RE = re.compile(
     _PREAMBLE
@@ -79,7 +80,17 @@ def parse(text: str) -> Optional[dict[str, str]]:
     match = _ENVELOPE_RE.match(text or "")
     if match is None:
         return None
+    trailer = match.group("trailer")
+    if trailer is not None:
+        trimmed = trailer.rstrip()
+        if len(trimmed) > 1200:
+            return None
+        if re.search(r"\r?\n[ \t]*\r?\n", trimmed):
+            return None
+        if "<cross-session-message" in trimmed or "</cross-session-message" in trimmed:
+            return None
     sender = html.unescape(match["sender"])
+
     return {
         "kind": "peer",
         "subkind": "peer-send-message",

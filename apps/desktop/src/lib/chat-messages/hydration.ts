@@ -211,7 +211,7 @@ const MAILBOX_ENVELOPE_PREAMBLE =
   '^\\s*(?:(?:Another Claude session sent a message(?: while you were working)?:|A peer session sent a message while you were working:)\\r?\\n\\s*)?'
 
 const MAILBOX_ENVELOPE_TRAILER =
-  '(?:\\r?\\n\\r?\\n(?:This came from another Claude session|That "other Claude session"|This is from another Claude session|IMPORTANT: This is NOT from your user)[\\s\\S]*)?\\s*$'
+  '(?:\\r?\\n\\r?\\n((?:This came from another Claude session|That "other Claude session"|This is from another Claude session|IMPORTANT: This is NOT from your user)[\\s\\S]*))?\\s*$'
 
 const MAILBOX_ENVELOPE_RE = new RegExp(
   MAILBOX_ENVELOPE_PREAMBLE +
@@ -233,6 +233,23 @@ export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | 
   const mailbox = content.match(MAILBOX_ENVELOPE_RE)
 
   if (mailbox) {
+    const trailer = mailbox[5]
+    if (trailer !== undefined) {
+      const trimmed = trailer.trimEnd()
+      if (trimmed.length > 1200) {
+        return null
+      }
+      if (/\r?\n[ \t]*\r?\n/.test(trimmed)) {
+        return null
+      }
+      if (
+        trimmed.includes('<cross-session-message') ||
+        trimmed.includes('</cross-session-message')
+      ) {
+        return null
+      }
+    }
+
     const sender = unescapeAttr(mailbox[1])
 
     return {
@@ -242,6 +259,7 @@ export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | 
       body: mailbox[4].replace(/&lt;/g, '<').replace(/&amp;/g, '&')
     }
   }
+
 
   const headerMatch = content.match(PEER_ENVELOPE_HEADER_RE)
 
