@@ -84,6 +84,7 @@ class TestBackgroundDeliveryWiring:
         )
         callback = captured.get("on_unsolicited_result")
         assert callback is not None, "flag defaults ON — callback must be wired"
+        assert captured.get("on_unsolicited_start") is not None
         callback(
             ["Research landed — writing up.", "background answer text"],
             [{"kind": "peer_in", "text": "incoming", "uuid": "peer-1"}],
@@ -188,6 +189,9 @@ class TestBackgroundDeliveryWiring:
             messages=[{"role": "user", "content": "hi"}], effective_task_id="t",
         )
         assert captured.get("on_unsolicited_result") is None
+        # No delivery path retires a CLI-injected turn marker here, so none may be written:
+        # an uncleared marker would replay a finished peer/task turn after the next restart.
+        assert captured.get("on_unsolicited_start") is None
 
 
 def test_unsolicited_peer_turn_projects_ordered_items_once():

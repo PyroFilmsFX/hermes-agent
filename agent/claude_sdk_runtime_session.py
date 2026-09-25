@@ -638,7 +638,13 @@ def _create_session(
         on_interim_assistant=on_interim_assistant,
         on_tool_iteration=on_tool_iteration,
         on_unsolicited_result=on_unsolicited_result,
-        on_unsolicited_start=functools.partial(_gateway_unsolicited_start_sink, agent),
+        # Mark a CLI-injected turn only when a result sink exists: that delivery path is what
+        # retires the marker. Without one the result is dropped, and an uncleared marker would
+        # replay an already-finished turn after the next restart.
+        on_unsolicited_start=(
+            functools.partial(_gateway_unsolicited_start_sink, agent)
+            if on_unsolicited_result is not None else None
+        ),
         on_compaction=functools.partial(_on_compaction, agent),
         on_compact_boundary=functools.partial(_on_compact_boundary, agent),
         # Operator budget cap (agent.claude_agent_sdk.max_budget_usd);
