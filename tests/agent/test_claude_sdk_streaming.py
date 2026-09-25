@@ -1378,6 +1378,65 @@ class TestSessionRename:
         finally:
             session.close()
 
+    def test_rename_and_turn_claim_are_serialized(self):
+        # Both callers start together repeatedly. The SDK reader must give each
+        # query its own terminal result, and the rename acknowledgement is never
+        # projected as turn content.
+        for index in range(20):
+            session, holder = _make_hold_open_session(script=[])
+            start = threading.Barrier(2)
+            turn_out = []
+
+            async def query(text):
+                client = holder["client"]
+                client.queried.append(text)
+                if isinstance(text, str) and text.startswith("/rename "):
+                    name = text.removeprefix("/rename ")
+                    client.feed(
+                        AssistantMessage(content=[TextBlock(f"Session renamed to: {name}")]),
+                        ResultMessage(result=f"Session renamed to: {name}", uuid=f"rename-{index}"),
+                    )
+                else:
+                    client.feed(
+                        AssistantMessage(content=[TextBlock(f"turn-{index}")]),
+                        ResultMessage(result=f"turn-{index}", uuid=f"turn-{index}"),
+                    )
+
+            def run_turn():
+                start.wait()
+                turn_out.append(session.run_turn(
+                    f"prompt-{index}", turn_timeout=5, post_tool_quiet_timeout=0.0,
+                    watch_poll_interval=0.01,
+                ))
+
+            def rename():
+                start.wait()
+                session.rename(f"hermes:race-{index}")
+
+            try:
+                session.ensure_started()
+                holder["client"].query = query
+                thread = threading.Thread(target=run_turn, daemon=True)
+                thread.start()
+                rename_thread = threading.Thread(target=rename, daemon=True)
+                rename_thread.start()
+                thread.join(timeout=5)
+                rename_thread.join(timeout=5)
+                assert not thread.is_alive()
+                assert not rename_thread.is_alive()
+                deadline = time.monotonic() + 2
+                client = holder["client"]
+                while sum(isinstance(q, str) and q.startswith("/rename ") for q in client.queried) < 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert [q for q in client.queried if isinstance(q, str) and q.startswith("/rename ")] == [
+                    f"/rename hermes:race-{index}"
+                ]
+                assert len(turn_out) == 1
+                assert turn_out[0].final_text == f"turn-{index}"
+                assert "Session renamed" not in repr(turn_out[0].projected_messages)
+            finally:
+                session.close()
+
     def test_rename_ack_landing_in_the_next_turn_is_not_its_answer(self):
         # A /rename applied at a release can be answered after a queued prompt already
         # claimed the stream; that ack must not close the new turn.

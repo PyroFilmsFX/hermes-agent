@@ -1276,6 +1276,7 @@ class ClaudeSdkTurnMixin:
         iterator = self._client.receive_messages().__aiter__()
         message_task = asyncio.ensure_future(iterator.__anext__())
         claim_task = asyncio.ensure_future(self._turn_claims.get())
+        pending_turn_claims = []
         try:
             while True:
                 done, _pending = await asyncio.wait(
@@ -1341,13 +1342,22 @@ class ClaudeSdkTurnMixin:
                     continue
                 if operation == "claim":
                     if self._turn_inbox is not None:
+                        # A short claimed operation (currently /rename) may
+                        # have won admission just before this turn. Preserve
+                        # FIFO claim order instead of failing the turn.
+                        pending_turn_claims.append((inbox, claim_ack))
+                        continue
+                    self._host_prompt_folded = False
+                    self._turn_inbox = inbox
+                elif operation == "rename":
+                    if self._turn_inbox is not None:
                         claim_ack.set_exception(
                             RuntimeError("SDK message stream already has a turn owner")
                         )
                         continue
                     self._host_prompt_folded = False
                     self._turn_inbox = inbox
-                elif operation == "release":
+                elif operation in ("release", "release_rename"):
                     if self._turn_inbox is not inbox:
                         claim_ack.set_exception(
                             RuntimeError("SDK message stream release owner mismatch")
@@ -1355,6 +1365,20 @@ class ClaudeSdkTurnMixin:
                         continue
                     self._host_prompt_folded = False
                     self._turn_inbox = None
+                    claim_ack.set_result(None)
+                    if pending_turn_claims:
+                        next_inbox, next_ack = pending_turn_claims.pop(0)
+                        if operation == "release_rename":
+                            while not inbox.empty():
+                                next_inbox.put_nowait(inbox.get_nowait())
+                        self._host_prompt_folded = False
+                        self._turn_inbox = next_inbox
+                        if not next_ack.done():
+                            next_ack.set_result(None)
+                    elif operation == "release_rename":
+                        while not inbox.empty():
+                            self._handle_unsolicited(inbox.get_nowait())
+                    continue
                 else:  # pragma: no cover - internal invariant
                     claim_ack.set_exception(
                         RuntimeError(f"unknown SDK stream ownership operation: {operation}")
@@ -1403,6 +1427,9 @@ class ClaudeSdkTurnMixin:
                 except asyncio.QueueEmpty:
                     break
         for _operation, _owner, claim_ack in pending_claims:
+            if not claim_ack.done():
+                claim_ack.set_result(None)
+        for _owner, claim_ack in pending_turn_claims:
             if not claim_ack.done():
                 claim_ack.set_result(None)
         inbox = self._turn_inbox

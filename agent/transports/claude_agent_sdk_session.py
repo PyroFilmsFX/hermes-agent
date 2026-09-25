@@ -346,6 +346,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._turn_claim_ack: Any = None
         self._turn_claims: Any = None
         self._turn_claim_requested = False
+        self._rename_claim_requested = False
         self._unsolicited_results = 0
         self._stream_ended: Optional[_StreamEnd] = None
         # Delivery half of the stream-ownership fix (dasbrow-hermes-coder#2):
@@ -696,27 +697,88 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         if cleaned == self._session_name:
             self._deferred_rename = None
             return True
-        if self._turn_inbox is not None or getattr(self, "_turn_claim_requested", False):
-            # A turn owns (or is claiming) the stream; /rename now would interleave with it. Park it for the
-            # release (_apply_deferred_rename); the caller's rotation stays the fallback.
-            self._deferred_rename = cleaned
-            return False
-        self._deferred_rename = None
-        client, loop = self._client, self._loop
-        if client is None or loop is None:
-            self._session_name = cleaned  # applied by build_option_fields on the next start
-            return True
-        try:
+        with self._turn_callback_lock:
+            if (
+                self._turn_inbox is not None
+                or getattr(self, "_turn_claim_requested", False)
+                or getattr(self, "_rename_claim_requested", False)
+            ):
+                # Turn admission and rename admission share this lock. A rename
+                # that loses the race is applied by the owner at release.
+                self._deferred_rename = cleaned
+                return False
+            client, loop = self._client, self._loop
+            if client is None or loop is None:
+                self._session_name = cleaned  # applied by build_option_fields on the next start
+                self._deferred_rename = None
+                return True
+            self._rename_claim_requested = True
+            self._deferred_rename = None
             self._pending_rename_ack = cleaned
-            future = asyncio.run_coroutine_threadsafe(client.query(f"/rename {cleaned}"), loop)
-            future.add_done_callback(_swallow_steer_result)
-        except Exception:
-            self._pending_rename_ack = None
-            logger.debug("SDK /rename scheduling failed", exc_info=True)
-            return False
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._run_claimed_rename(cleaned), loop
+                )
+            except Exception:
+                self._rename_claim_requested = False
+                self._pending_rename_ack = None
+                logger.debug("SDK /rename scheduling failed", exc_info=True)
+                return False
+        future.add_done_callback(_swallow_steer_result)
         self._session_name = cleaned
         logger.info("claude-agent-sdk: session renamed to %r", cleaned)
         return True
+
+    async def _run_claimed_rename(self, name: str) -> None:
+        """Own the shared reader stream until the CLI acknowledges ``/rename``."""
+        inbox = asyncio.Queue()
+        acknowledged = False
+        claims = self._turn_claims
+        if claims is None:
+            raise RuntimeError("SDK message reader is not ready to claim rename")
+        claim_ack = asyncio.get_running_loop().create_future()
+        try:
+            claims.put_nowait(("rename", inbox, claim_ack))
+            await claim_ack
+            await self._client.query(f"/rename {name}")
+            while True:
+                message = await inbox.get()
+                if isinstance(message, _StreamEnd):
+                    raise RuntimeError("SDK stream ended before rename acknowledgement")
+                if type(message).__name__ == "AssistantMessage" and _is_rename_ack(
+                    None,
+                    ["".join(str(getattr(block, "text", "") or "")
+                             for block in (getattr(message, "content", None) or []))],
+                    name,
+                ):
+                    continue
+                if type(message).__name__ == "ResultMessage" and _is_rename_ack(
+                    getattr(message, "result", None), [], name
+                ):
+                    acknowledged = True
+                    return
+                # The reader should only deliver the claimed operation's ack
+                # here. Keep unrelated messages from becoming a later turn's
+                # answer if the CLI emits an unexpected event in the window.
+                self._handle_unsolicited(message)
+                if type(message).__name__ == "ResultMessage":
+                    # A different CLI result is independent work. Deliver it,
+                    # then release the stream so a host turn is not held behind
+                    # a rename whose acknowledgement has not arrived yet.
+                    return
+        finally:
+            if self._turn_inbox is inbox and self._stream_ended is None:
+                release_ack = asyncio.get_running_loop().create_future()
+                self._turn_claims.put_nowait(("release_rename", inbox, release_ack))
+                await release_ack
+            elif self._turn_inbox is inbox:
+                self._turn_inbox = None
+            with self._turn_callback_lock:
+                self._rename_claim_requested = False
+            if acknowledged and getattr(self, "_pending_rename_ack", None) == name:
+                self._pending_rename_ack = None
+            if self._deferred_rename:
+                self._apply_deferred_rename()
 
     def defer_rename(self, name: str) -> None:
         """Park a rename for the next stream release (the host saw the session busy)."""
