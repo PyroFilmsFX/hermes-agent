@@ -1408,6 +1408,54 @@ class TestSessionRename:
         finally:
             session.close()
 
+    def test_rename_claim_rechecks_burst_that_wins_the_reader_race(self):
+        holder = {}
+        release_burst = threading.Event()
+
+        class BurstWinsReaderClient(_FakeClient):
+            async def receive_messages(self):
+                while not holder["session"]._rename_claim_requested:
+                    await asyncio.sleep(0)
+                peer = UserMessage(content="peer work")
+                peer.origin = {"kind": "peer", "from": "peer-session"}
+                yield peer
+                while not release_burst.is_set():
+                    await asyncio.sleep(0.005)
+                yield AssistantMessage(content=[TextBlock("peer done")])
+                yield ResultMessage(result="peer done", uuid="peer-done")
+                async for message in super().receive_messages():
+                    yield message
+
+        def factory(options=None):
+            client = BurstWinsReaderClient(options=options)
+            holder["client"] = client
+            return client
+
+        session = ClaudeAgentSdkSession(cwd="/tmp", client_factory=factory)
+        holder["session"] = session
+        try:
+            session.ensure_started()
+            assert session.rename("hermes:new") is True
+            deadline = time.monotonic() + 2
+            while (
+                session._deferred_rename != "hermes:new"
+                and not holder["client"].queried
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            assert session._deferred_rename == "hermes:new"
+            assert session._unsolicited_burst_open
+            assert holder["client"].queried == []
+
+            release_burst.set()
+            deadline = time.monotonic() + 2
+            while "/rename hermes:new" not in holder["client"].queried and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert "/rename hermes:new" in holder["client"].queried
+        finally:
+            release_burst.set()
+            session.close()
+
     def test_rename_timeout_releases_claim_and_reparks(self, monkeypatch):
         import agent.transports.claude_agent_sdk_session as sdk_session_mod
 

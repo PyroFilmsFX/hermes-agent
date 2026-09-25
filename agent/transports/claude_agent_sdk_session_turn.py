@@ -1395,6 +1395,8 @@ class ClaudeSdkTurnMixin:
         One reader for the whole client lifetime makes the rule enforceable:
         a message arriving while no turn is in flight is unsolicited BY
         DEFINITION, and gets routed away instead of poisoning the next turn."""
+        from agent.transports.claude_agent_sdk_session import _RenameClaimDeferred
+
         end: _StreamEnd
         iterator = self._client.receive_messages().__aiter__()
         message_task = asyncio.ensure_future(iterator.__anext__())
@@ -1475,6 +1477,11 @@ class ClaudeSdkTurnMixin:
                     self._host_prompt_folded = False
                     self._turn_inbox = inbox
                 elif operation == "rename":
+                    if self._unsolicited_burst_open:
+                        claim_ack.set_exception(
+                            _RenameClaimDeferred("an injected SDK burst owns the stream")
+                        )
+                        continue
                     if self._turn_inbox is not None:
                         claim_ack.set_exception(
                             RuntimeError("SDK message stream already has a turn owner")

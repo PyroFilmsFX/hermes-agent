@@ -99,6 +99,10 @@ _RENAME_ACK_TIMEOUT_SECONDS = 10.0
 _NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
 
 
+class _RenameClaimDeferred(RuntimeError):
+    """A rename claim reached the reader while an injected burst was open."""
+
+
 def _run_disconnect_without_loop(disconnect_coro: Any) -> bool:
     """Run late cleanup without letting an uncooperative coroutine pin teardown."""
     error: list[BaseException] = []
@@ -742,6 +746,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         claim_ack = asyncio.get_running_loop().create_future()
         timed_out = False
         claim_granted = False
+        retry_after_burst = False
         try:
             claims.put_nowait(("rename", inbox, claim_ack))
             await claim_ack
@@ -791,10 +796,11 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     # then release the stream so a host turn is not held behind
                     # a rename whose acknowledgement has not arrived yet.
                     return
-        except Exception:
+        except Exception as exc:
             with self._turn_callback_lock:
                 if self._stream_ended is None:
                     self._deferred_rename = name
+                    retry_after_burst = isinstance(exc, _RenameClaimDeferred)
             raise
         finally:
             if self._turn_inbox is inbox and self._stream_ended is None:
@@ -808,6 +814,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             if acknowledged and getattr(self, "_pending_rename_ack", None) == name:
                 self._pending_rename_ack = None
             if self._deferred_rename and claim_granted and not timed_out:
+                self._apply_deferred_rename()
+            elif retry_after_burst and not self._unsolicited_burst_open:
                 self._apply_deferred_rename()
 
     def defer_rename(self, name: str) -> None:
