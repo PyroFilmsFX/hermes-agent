@@ -465,3 +465,23 @@ def test_session_set_pinned_persists_across_restart(gw):
     assert res2["result"]["pinned"] is False
     assert gw.db.get_session("pinned-sess")["pinned"] == 0
 
+
+
+def test_prompt_submit_honors_peer_message_kind_only_for_the_in_process_mailbox():
+    """A client request always runs with a transport bound; only the mailbox submits with none.
+    A client must not be able to mint a peer_message card "from" another session."""
+    from tui_gateway.methods_prompt import _submit_display
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    params = {"display_kind": "peer_message", "display_metadata": {"direction": "in", "peer": "hermes:x"}}
+    token = bind_transport(None)
+    try:
+        assert _submit_display(params) == ("peer_message", params["display_metadata"])
+    finally:
+        reset_transport(token)
+    token = bind_transport(object())
+    try:
+        assert _submit_display(params) == (None, None)
+        assert _submit_display({"display_kind": "hidden"}) == ("hidden", None)
+    finally:
+        reset_transport(token)

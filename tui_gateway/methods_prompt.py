@@ -17,6 +17,20 @@ _STALE_TARGET_MSG = "target user message is no longer in session history"
 _GROUP_PROBE_FAILED_MSG = "Could not verify this group. Try again after the gateway recovers."
 
 
+
+def _submit_display(params: dict) -> tuple:
+    """(display_kind, display_metadata) prompt.submit may honor. Whitelisted to "hidden" — this RPC
+    must not mint kinds. "peer_message" and its metadata are honored only for the in-process peer
+    mailbox, which submits with no client transport bound (dispatch() always binds one for a real
+    client); otherwise any client could forge a card "from" another session. (cntrl carry)"""
+    from tui_gateway.transport import current_transport
+
+    internal = current_transport() is None
+    requested = params.get("display_kind")
+    kind = requested if requested == "hidden" or (requested == "peer_message" and internal) else None
+    metadata = params.get("display_metadata")
+    return kind, (metadata if internal and isinstance(metadata, dict) else None)
+
 def _history_user_indices(history: list) -> list:
     """Indices of canonical live-user turns, including composite carriers."""
     from agent.context_compressor import user_originated_turn_view
@@ -563,9 +577,7 @@ def _(rid, params: dict) -> dict:
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
     # Off-screen sends (widget intents) type the row so no client renders a bubble;
-    # whitelisted to "hidden" and "peer_message" — this RPC must not mint kinds.
-    display_kind = params.get("display_kind") if params.get("display_kind") in {"hidden", "peer_message"} else None
-    display_metadata = params.get("display_metadata") if isinstance(params.get("display_metadata"), dict) else None
+    display_kind, display_metadata = _submit_display(params)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
