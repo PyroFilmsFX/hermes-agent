@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 _SESSION_SPAWN_EXPOSURE_CACHE: dict[str, bool] = {}
 
 
+def _log_bridge_unavailable_reason(session_id: str) -> None:
+    """Say why the bridge tools stay hidden: the verdict is sticky for the conversation
+    (tool-schema stability), so a silent False hid a route 404 for weeks. (cntrl carry)"""
+    reason = "session_send/session_create disabled by config"
+    try:
+        from agent.transports.hermes_gateway_session_bridge import HermesGatewaySessionBridge, _discover_url
+        from tools.session_tools import session_send_enabled, session_spawn_enabled
+        if session_send_enabled() or session_spawn_enabled():
+            bridge = HermesGatewaySessionBridge.from_environment()
+            _discover_url(bridge.owner_session_id, bridge.registry_home, bridge.token)
+            reason = "bridge became reachable after the probe"
+    except Exception as exc:  # noqa: BLE001
+        cause = exc.__cause__
+        reason = f"{exc}" + (f" ({type(cause).__name__}: {str(cause).splitlines()[0][:160]})" if cause else "")
+    logger.warning("session bridge tools hidden for conversation %s: %s", session_id, reason)
+
+
 def _session_spawn_exposure_decision(session_id: str | None) -> bool:
     """Persist the first capability verdict for one logical SDK conversation."""
     sid = str(session_id or "").strip()
@@ -46,6 +63,8 @@ def _session_spawn_exposure_decision(session_id: str | None) -> bool:
             verdict = stored["exposed"]
         else:
             verdict = bool(session_spawn_available())
+            if not verdict:
+                _log_bridge_unavailable_reason(sid)
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             from utils import atomic_json_write
             atomic_json_write(path, {"session_id": sid, "exposed": verdict}, indent=2, mode=0o600)

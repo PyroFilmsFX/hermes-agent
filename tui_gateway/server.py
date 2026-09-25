@@ -936,6 +936,7 @@ def register_session_spawn_routes(application) -> None:
         reconcile_child_reservations()
     if (any(getattr(route, "path", "") == "/api/session-attach" for route in getattr(application, "routes", ())) and
             any(getattr(route, "path", "") == "/api/session-spawn-ws" for route in getattr(application, "routes", ()) )):
+        _hoist_before_catch_all(application, _SESSION_SPAWN_ROUTE_PATHS)
         return
 
     async def session_attach(request: Request):
@@ -979,6 +980,33 @@ def register_session_spawn_routes(application) -> None:
             from tui_gateway.ws import handle_ws
             await handle_ws(websocket, required_spawn_scope=True)
         application.add_api_websocket_route("/api/session-spawn-ws", scoped_ws)
+    _hoist_before_catch_all(application, _SESSION_SPAWN_ROUTE_PATHS)
+
+
+_SESSION_SPAWN_ROUTE_PATHS = frozenset({"/api/session-attach", "/api/session-spawn-ws"})
+
+
+def _hoist_before_catch_all(application, paths) -> None:
+    """Move ``paths`` ahead of the dashboard SPA catch-all.
+
+    ``hermes serve`` imports this module from its startup lifespan, after ``mount_spa`` already
+    registered ``/{full_path:path}``. Starlette matches routes in order, so an appended
+    ``/api/session-attach`` was answered by the catch-all's "No such API endpoint" 404: the
+    bridge probe failed in every desktop session and ``session_send``/``session_create`` were
+    never exposed. (cntrl carry)"""
+    router = getattr(application, "router", None)
+    routes = getattr(router, "routes", None)
+    if not isinstance(routes, list):
+        return
+    catch_all = next((i for i, route in enumerate(routes)
+                      if "{full_path:path}" in str(getattr(route, "path", ""))), None)
+    if catch_all is None:
+        return
+    moved = [route for route in routes[catch_all:] if getattr(route, "path", "") in paths]
+    if not moved:
+        return
+    kept = [route for route in routes if not any(route is m for m in moved)]
+    routes[:] = kept[:catch_all] + moved + kept[catch_all:]
 
 
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:

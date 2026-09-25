@@ -164,3 +164,46 @@ def test_session_create_does_not_replace_missing_validated_cwd_with_completion_f
     assert response["error"]["code"] == 4004, (
         "a validated spawn cwd is required; session.create must not fall back to the launch cwd"
     )
+
+
+def test_attach_route_is_reachable_behind_the_dashboard_spa_catch_all(tmp_path):
+    """``hermes serve`` mounts the SPA catch-all before the gateway module registers the attach
+    route; the bridge probe must still reach the route, not the catch-all's API 404."""
+    from fastapi import FastAPI
+    import uvicorn
+
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from hermes_cli.web_server_dashboard import mount_spa
+    from tui_gateway import server
+
+    app = FastAPI()
+    mount_spa(app)  # the serve order: SPA first, gateway import later from the lifespan
+    server.register_session_spawn_routes(app)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    live = {"session_key": "owner-stored", "session_generation": "gen-owner", "profile_home": str(tmp_path),
+            "cwd": str(tmp_path), "agent": SimpleNamespace(api_mode="claude_agent_sdk", model="m", provider="p"),
+            "transport": server._stdio_transport}
+    old_sessions = server._sessions
+    server._sessions = {"owner-runtime": live}
+    from hermes_cli.active_sessions import try_acquire_active_session
+    lease, refusal = try_acquire_active_session(
+        session_id="owner-stored", surface="desktop", config={}, registry_home=tmp_path,
+        metadata={"live_session_id": "owner-runtime", "shared_runtime_url": f"http://127.0.0.1:{port}"})
+    assert refusal is None and lease is not None
+    cap = bridge.issue_scoped_capability("owner-runtime")
+    assert cap
+    running = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=running.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 5
+        while not running.started and time.time() < deadline:
+            time.sleep(0.01)
+        assert bridge.HermesGatewaySessionBridge(cap, "owner-stored", tmp_path).is_reachable() is True
+    finally:
+        running.should_exit = True
+        thread.join(timeout=5)
+        server._sessions = old_sessions
+        bridge.revoke_scoped_capability(cap)
