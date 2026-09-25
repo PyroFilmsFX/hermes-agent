@@ -492,6 +492,59 @@ def revive_resident_sessions() -> list[str]:
     return revived
 
 
+def resume_interrupted_sessions() -> list[str]:
+    """Cold-resume fresh interrupted launch-profile sessions through the mailbox resume gate."""
+    from tui_gateway import server
+    from tui_gateway.turn_marker import clear_turn_marker, read_turn_markers
+
+    db = server._get_db()
+    if db is None:
+        return []
+    home = server._hermes_home
+    _enabled, freshness_secs, max_attempts = server._auto_continue_config()
+    pol = policy()
+    resumed: list[str] = []
+    now = time.time()
+    for session_key, marker in read_turn_markers(home).items():
+        if not marker.get("auto_continue", True):
+            continue
+        if (not _enabled or now - float(marker.get("started_at") or 0) > freshness_secs
+                or int(marker.get("attempts") or 0) >= max_attempts):
+            clear_turn_marker(home, session_key)
+            continue
+        target = _tip(db, session_key)
+        try:
+            row = db.get_session(target)
+        except Exception:
+            continue
+        if not row or row.get("source") == "bot_room":
+            continue
+        # A pinned revive or a desktop reconnect may have already resumed this marker and scheduled its
+        # after-resume continuation. Do not dispatch a second resume for the same conversation.
+        if _find_live(target, None) is not None:
+            continue
+        refusal = _gate.acquire(target, pol, _live_woken_count())
+        if refusal:
+            logger.info("interrupted-session resume deferred for %s: %s", target, refusal)
+            continue
+        try:
+            # Preserve the marker's original lineage id through session.resume so its existing
+            # after-resume hook reads the same marker key even when compression rotated to ``target``.
+            sid, error = _resume(session_key, None)
+            if not sid:
+                logger.info("interrupted-session resume failed for %s: %s", target, error)
+                continue
+            with server._sessions_lock:
+                if (session := server._sessions.get(sid)) is not None and not session.get("pinned_resident"):
+                    session["_peer_mailbox_woken"] = True
+            resumed.append(target)
+        finally:
+            _gate.release(target)
+    if resumed:
+        logger.info("peer mailbox: resumed %d interrupted session(s): %s", len(resumed), ", ".join(resumed))
+    return resumed
+
+
 # ── startup + retry loop ────────────────────────────────────────────────
 
 _startup_lock = threading.Lock()
@@ -504,8 +557,6 @@ def schedule_startup_delivery() -> None:
     first) revive pinned residents, then drain queued mail and keep retrying every ``retry_interval_s``."""
     global _startup_ran
     pol = policy()
-    if not pol["enabled"] and not pol["pinned_resident"]:
-        return
     with _startup_lock:
         if _startup_ran:
             return
@@ -516,8 +567,13 @@ def schedule_startup_delivery() -> None:
             return
         with contextlib.suppress(Exception):
             revive_resident_sessions()
+        with contextlib.suppress(Exception):
+            resume_interrupted_sessions()
         while not _stop.is_set():
             try:
+                # A previous pass may have deferred markers at the concurrency cap. Revisit them as
+                # mailbox-woken sessions finish and release their residency slots.
+                resume_interrupted_sessions()
                 drain_pending()
             except Exception:
                 logger.debug("peer mailbox retry pass failed", exc_info=True)
@@ -574,6 +630,6 @@ def send_rpc(rid: Any, params: dict) -> dict:
 
 __all__ = [
     "STATUS_DELIVERED_LIVE", "STATUS_FAILED", "STATUS_QUEUED", "STATUS_RESUMED", "after_session_resume",
-    "drain_pending", "drain_session", "policy", "recover_stale_claims", "revive_resident_sessions",
+    "drain_pending", "drain_session", "policy", "recover_stale_claims", "resume_interrupted_sessions", "revive_resident_sessions",
     "schedule_drain", "schedule_startup_delivery", "send_message", "send_rpc", "session_is_resident",
 ]

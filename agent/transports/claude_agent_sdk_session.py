@@ -189,6 +189,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         on_interim_assistant: Optional[Callable[[str], None]] = None,
         on_tool_iteration: Optional[Callable[[], None]] = None,
         on_unsolicited_result: Optional[Callable[[list[str], Optional[list[dict]]], None]] = None,
+        on_unsolicited_start: Optional[Callable[[str], None]] = None,
         on_compaction: Optional[Callable[[str], None]] = None,
         on_compact_boundary: Optional[Callable[[str], None]] = None,
         # Hybrid MCP bridge (ported from PR #56413): the explicit config
@@ -349,6 +350,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # (observed live 2026-07-29: answers sat in the CLI session until the
         # operator poked). No callback wired = the historical drop semantics.
         self._on_unsolicited_result = on_unsolicited_result
+        self._on_unsolicited_start = on_unsolicited_start
+        self._unsolicited_start_notified = False
         self._unsolicited_text: list[str] = []
         # True while a CLI-injected turn (peer message, task notification) is
         # in flight; the reader keeps routing it to the background path even

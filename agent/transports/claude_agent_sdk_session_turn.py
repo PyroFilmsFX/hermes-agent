@@ -101,6 +101,7 @@ def _clear_unsolicited_projection(session: Any) -> None:
     session._unsolicited_text.clear()
     session._unsolicited_items.clear()
     session._unsolicited_tool_items.clear()
+    session._unsolicited_start_notified = False
     session._unsolicited_seen.clear()
     # Keep this future-proof if a pending wake marker is added as a separate
     # field; today it is represented by the lifecycle item above.
@@ -1524,13 +1525,23 @@ class ClaudeSdkTurnMixin:
             origin = getattr(message, "origin", None)
             if isinstance(origin, dict):
                 _append_woken(origin, getattr(message, "content", None), str(getattr(message, "uuid", None) or ""))
+            is_woken = isinstance(origin, dict) and (
+                origin.get("kind") == "peer" or origin.get("kind") == "task-notification"
+            )
             is_peer = isinstance(origin, dict) and (
                 origin.get("kind") == "peer"
-                or (
-                    origin.get("kind") == "task-notification"
-                    and origin.get("subkind") == "peer-send-message"
-                )
+                or (origin.get("kind") == "task-notification"
+                    and origin.get("subkind") == "peer-send-message")
             )
+            if is_woken and not self._unsolicited_start_notified:
+                self._unsolicited_start_notified = True
+                callback = getattr(self, "_on_unsolicited_start", None)
+                prompt = str(origin.get("body") or _message_text(getattr(message, "content", None)))
+                if callback is not None and prompt.strip():
+                    try:
+                        callback(prompt)
+                    except Exception:
+                        logger.debug("claude-agent-sdk unsolicited-start callback failed", exc_info=True)
             uuid = str(getattr(message, "uuid", None) or "")
             if is_peer:
                 if uuid and uuid in seen:

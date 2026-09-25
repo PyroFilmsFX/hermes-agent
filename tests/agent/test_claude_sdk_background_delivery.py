@@ -220,8 +220,10 @@ def test_unsolicited_peer_turn_projects_ordered_items_once():
             self.result, self.uuid = result, uuid
 
     delivered = []
+    started = []
     session = ClaudeAgentSdkSession(
-        cwd="/tmp", on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items))
+        cwd="/tmp", on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+        on_unsolicited_start=started.append,
     )
     session._handle_unsolicited(UserMessage(
         "ignored envelope text", uuid="peer-in-1",
@@ -241,6 +243,7 @@ def test_unsolicited_peer_turn_projects_ordered_items_once():
     session._handle_unsolicited(ResultMessage("final body", "result-1"))
 
     assert len(delivered) == 1
+    assert started == ["incoming body"]
     texts, items = delivered[0]
     assert texts == ["final body"]
     assert items == [
@@ -260,6 +263,19 @@ def test_unsolicited_peer_turn_projects_ordered_items_once():
         {"kind": "peer_out", "text": "outgoing body", "to": "peer-id", "tool_use_id": "tool-1"},
         {"kind": "text", "text": "final body"},
     ]
+
+
+def test_gateway_unsolicited_start_sink_records_the_live_session_marker(monkeypatch):
+    from types import SimpleNamespace
+    from tui_gateway import server
+    from agent.claude_sdk_runtime_session import _gateway_unsolicited_start_sink
+
+    session = {"session_key": "stored-key", "profile_home": "/profile/home"}
+    monkeypatch.setattr(server, "_sessions", {"runtime-sid": session})
+    recorded = []
+    monkeypatch.setattr(server, "_record_turn_marker", lambda *args: recorded.append(args))
+    _gateway_unsolicited_start_sink(SimpleNamespace(_tui_gateway_runtime_sid="runtime-sid"), "peer task")
+    assert recorded == [(session, "peer task")]
 
 
 def test_terminal_result_text_is_trailing_item_when_it_differs_from_buffered_text():
@@ -318,12 +334,15 @@ def test_scheduled_task_wake_is_the_first_unsolicited_item():
             self.parent_tool_use_id = None
 
     delivered = []
+    started = []
     session = ClaudeAgentSdkSession(
-        cwd="/tmp", on_unsolicited_result=lambda texts, items=None: delivered.append(items)
+        cwd="/tmp", on_unsolicited_result=lambda texts, items=None: delivered.append(items),
+        on_unsolicited_start=started.append,
     )
     session._handle_unsolicited(UserMessage())
 
     assert delivered == []
+    assert started == ["scheduled task details"]
     assert session._unsolicited_items == [{
         "kind": "lifecycle", "event": "woken",
         "source": "task-notification/scheduled-trigger",

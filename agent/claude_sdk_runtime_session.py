@@ -453,6 +453,24 @@ def _background_result_sink(agent) -> Optional[_BackgroundResultDelivery]:
     )
 
 
+def _gateway_unsolicited_start_sink(agent, prompt: str) -> None:
+    """Mark a CLI-injected peer/task turn while it is still running, for restart recovery."""
+    runtime_sid = str(getattr(agent, "_tui_gateway_runtime_sid", "") or "")
+    if not runtime_sid or not prompt.strip():
+        return
+    try:
+        from tui_gateway import server
+        with server._sessions_lock:
+            session = server._sessions.get(runtime_sid)
+        if not isinstance(session, dict) or session.get("_finalized"):
+            return
+        session_key = str(session.get("session_key") or "")
+        if session_key:
+            server._record_turn_marker(session, prompt)
+    except Exception:
+        logger.debug("could not persist CLI-injected turn marker", exc_info=True)
+
+
 def _configured_max_budget_usd() -> Optional[float]:
     """agent.claude_agent_sdk.max_budget_usd from config.yaml.
 
@@ -620,6 +638,7 @@ def _create_session(
         on_interim_assistant=on_interim_assistant,
         on_tool_iteration=on_tool_iteration,
         on_unsolicited_result=on_unsolicited_result,
+        on_unsolicited_start=functools.partial(_gateway_unsolicited_start_sink, agent),
         on_compaction=functools.partial(_on_compaction, agent),
         on_compact_boundary=functools.partial(_on_compact_boundary, agent),
         # Operator budget cap (agent.claude_agent_sdk.max_budget_usd);

@@ -104,3 +104,22 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 "auto_continue": bool(entry.get("auto_continue", True))}
     except Exception:
         return None
+
+
+def read_turn_markers(home: Path | str) -> dict[str, dict[str, Any]]:
+    """Return readable markers in this profile, keyed by their stored session id."""
+    try:
+        with _lock:
+            entries = _load(_marker_path(home))
+        return {
+            key: {
+                "attempts": max(0, int(entry.get("attempts") or 0)),
+                "prompt": str(entry.get("prompt") or ""),
+                "started_at": _started_at(entry),
+                "auto_continue": bool(entry.get("auto_continue", True)),
+            }
+            for key, entry in entries.items()
+            if str(entry.get("prompt") or "").strip()
+        }
+    except Exception:
+        return {}

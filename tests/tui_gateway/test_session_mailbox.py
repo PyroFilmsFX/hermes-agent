@@ -23,6 +23,8 @@ def gw(monkeypatch, tmp_path):
     sessions: dict = {}
     monkeypatch.setattr(server, "_sessions", sessions)
     monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 900.0, 2))
     pol = dict(mb._DEFAULTS, startup_delay_s=0, retry_interval_s=0)
     monkeypatch.setattr(mb, "policy", lambda: pol)
     mb._gate.reset()
@@ -257,3 +259,53 @@ def test_startup_revives_pinned_sessions_up_to_the_cap(gw):
     revived = gw.mb.revive_resident_sessions()
     assert len(revived) == 2 and len(gw.resumes) == 2
     assert all(s.get("pinned_resident") for s in gw.sessions.values())
+
+
+def test_startup_cold_resumes_fresh_unpinned_markers_once(gw, monkeypatch):
+    from tui_gateway.turn_marker import read_turn_marker, record_turn_start
+
+    continued = []
+    def resume(target, profile_home):
+        sid = f"cold-{target}"
+        gw.sessions[sid] = {"session_key": target, "profile_home": profile_home}
+        continued.append(target)
+        return sid, ""
+
+    monkeypatch.setattr(gw.mb, "_resume", resume)
+    record_turn_start(gw.server._hermes_home, "target", "finish this")
+    assert gw.mb.resume_interrupted_sessions() == ["target"]
+    assert continued == ["target"]
+    assert gw.sessions["cold-target"]["_peer_mailbox_woken"] is True
+    assert read_turn_marker(gw.server._hermes_home, "target") is not None
+    assert gw.mb.resume_interrupted_sessions() == []
+    assert continued == ["target"], "a live resumed session owns the marker's continuation"
+
+
+def test_startup_clears_stale_and_over_attempt_markers(gw, monkeypatch):
+    from tui_gateway.turn_marker import read_turn_marker, record_turn_start
+
+    monkeypatch.setattr(gw.server, "_auto_continue_config", lambda: (True, 0.0, 2))
+    record_turn_start(gw.server._hermes_home, "target", "old", attempts=0)
+    record_turn_start(gw.server._hermes_home, "other", "loop", attempts=2)
+    assert gw.mb.resume_interrupted_sessions() == []
+    assert read_turn_marker(gw.server._hermes_home, "target") is None
+    assert read_turn_marker(gw.server._hermes_home, "other") is None
+    assert gw.resumes == []
+
+
+def test_startup_interrupted_resumes_obey_concurrency_cap(gw, monkeypatch):
+    from tui_gateway.turn_marker import record_turn_start
+
+    for key in ("target", "other", "third"):
+        gw.db.create_session(key, "desktop")
+        record_turn_start(gw.server._hermes_home, key, f"resume {key}")
+    gw.pol["max_concurrent_resumes"] = 2
+    monkeypatch.setattr(gw.mb, "_resume", lambda target, home: (
+        (gw.sessions.setdefault(f"cold-{target}", {"session_key": target, "profile_home": home}) and f"cold-{target}"), ""))
+    resumed = gw.mb.resume_interrupted_sessions()
+    assert len(resumed) == 2
+    assert sum(bool(s.get("_peer_mailbox_woken")) for s in gw.sessions.values()) == 2
+    released = next(key for key, session in gw.sessions.items() if session.get("_peer_mailbox_woken"))
+    gw.sessions.pop(released)
+    assert len(gw.mb.resume_interrupted_sessions()) == 1
+    assert sum(bool(s.get("_peer_mailbox_woken")) for s in gw.sessions.values()) == 2

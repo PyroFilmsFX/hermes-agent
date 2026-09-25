@@ -480,6 +480,7 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
     items = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
     if not payloads and not items:
         logger.warning("sdk_background_result for session %s carried no payloads or items — dropping", sid)
+        _retire_turn_marker(session, str(session.get("session_key") or ""))
         return True
     dedup_key = _notif_sdk_result_dedup_key(evt)
     if dedup_key in emitted:
@@ -557,6 +558,7 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
 
     persisted_row_ids = evt.setdefault("persisted_row_ids", [])
     event_timestamp = completed_at if completed_at is not None else time.time()
+    delivered_result = False
 
     def _prepared_row(item_id: str, row: dict, *, tool_calls=None, tool_call_id=None) -> dict:
         """Build the batch row and retain identity metadata for display restoration."""
@@ -684,6 +686,7 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
             delivered_ids.append(item_id)
             delivered.add(item_id)
         emitted.add(dedup_key)
+        delivered_result = True
         logger.info("sdk_background_result delivered to desktop session %s (%d item(s))", sid, len(work_items))
     except Exception as exc:
         _notif_log_failure("sdk_background_result delivery failed", exc)
@@ -692,6 +695,8 @@ def _notif_deliver_sdk_result(sid: str, session: dict, evt: dict, emitted, queue
         else:
             queue.put(evt)
     finally:
+        if delivered_result:
+            _retire_turn_marker(session, str(session.get("session_key") or ""))
         _notif_release_turn(session)
     return True
 
