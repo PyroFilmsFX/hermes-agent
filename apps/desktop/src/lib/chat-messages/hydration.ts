@@ -207,11 +207,23 @@ export const MAILBOX_ENVELOPE_FOOTER =
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+const MAILBOX_ENVELOPE_PREAMBLE =
+  '^\\s*(?:(?:Another Claude session sent a message(?: while you were working)?:|A peer session sent a message while you were working:)\\r?\\n\\s*)?'
+
+const MAILBOX_ENVELOPE_TRAILER =
+  '(?:\\r?\\n\\r?\\n(?:This came from another Claude session|That "other Claude session"|This is from another Claude session|IMPORTANT: This is NOT from your user)[\\s\\S]*)?\\s*$'
+
 const MAILBOX_ENVELOPE_RE = new RegExp(
-  '^<cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" ' +
-    'msg-id="([^"]*)">\\r?\\n([^<]*?)\\r?\\n</cross-session-message>\\r?\\n\\r?\\n' +
+  MAILBOX_ENVELOPE_PREAMBLE +
+    '(?:' +
+    '<cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" ' +
+    'msg-id="([^"]*)">\\r?\\n([^<]*?)\\r?\\n</cross-session-message>' +
+    '|' +
+    '&lt;cross-session-message from="hermes-session:([^"]*)" from-name="([^"]*)" via="hermes-peer-mailbox" ' +
+    'msg-id="([^"]*)"(?:>|&gt;)\\r?\\n((?:(?!&lt;/cross-session-message|</cross-session-message)[\\s\\S])*?)\\r?\\n(?:&lt;/|</)cross-session-message(?:>|&gt;)' +
+    ')\\r?\\n\\r?\\n' +
     escapeRegExp(MAILBOX_ENVELOPE_FOOTER) +
-    '$'
+    MAILBOX_ENVELOPE_TRAILER
 )
 
 function unescapeAttr(value: string): string {
@@ -226,13 +238,18 @@ export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | 
   const mailbox = content.match(MAILBOX_ENVELOPE_RE)
 
   if (mailbox) {
-    const sender = unescapeAttr(mailbox[1])
+    const rawSender = mailbox[1] ?? mailbox[5] ?? ''
+    const rawName = mailbox[2] ?? mailbox[6] ?? ''
+    const rawMsgId = mailbox[3] ?? mailbox[7] ?? ''
+    const rawBody = mailbox[4] ?? mailbox[8] ?? ''
+
+    const sender = unescapeAttr(rawSender)
 
     return {
-      from: unescapeAttr(mailbox[2]),
+      from: unescapeAttr(rawName),
       senderSid: sender && sender !== 'unknown' ? sender : undefined,
-      msgId: unescapeAttr(mailbox[3]) || undefined,
-      body: mailbox[4].replace(/&lt;/g, '<').replace(/&amp;/g, '&')
+      msgId: unescapeAttr(rawMsgId) || undefined,
+      body: rawBody.replace(/&lt;/g, '<').replace(/&amp;/g, '&')
     }
   }
 

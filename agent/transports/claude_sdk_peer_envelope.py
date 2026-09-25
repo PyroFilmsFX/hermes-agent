@@ -24,10 +24,29 @@ FOOTER = ("This came from another Hermes session through the peer mailbox; the s
           "session_send with target set to the session id in the from attribute; the sender may "
           "not be live.")
 
+_PREAMBLE = (
+    r"(?:\A\s*(?:(?:Another Claude session sent a message(?: while you were working)?:|"
+    r"A peer session sent a message while you were working:)\r?\n\s*)?)"
+)
+_TRAILER = (
+    r"(?:\r?\n\r?\n(?:This came from another Claude session|That \"other Claude session\"|"
+    r"This is from another Claude session|IMPORTANT: This is NOT from your user)[\s\S]*)?\s*\Z"
+)
+
 _ENVELOPE_RE = re.compile(
-    r'\A<cross-session-message from="hermes-session:(?P<sender>[^"]*)" from-name="(?P<name>[^"]*)" '
+    _PREAMBLE
+    + r"(?:"
+    r'<cross-session-message from="hermes-session:(?P<sender>[^"]*)" from-name="(?P<name>[^"]*)" '
     r'via="hermes-peer-mailbox" msg-id="(?P<msg_id>[^"]*)">\r?\n(?P<body>[^<]*?)\r?\n'
-    r'</cross-session-message>\r?\n\r?\n' + re.escape(FOOTER) + r'\Z',
+    r"</cross-session-message>"
+    r"|"
+    r'&lt;cross-session-message from="hermes-session:(?P<sender_esc>[^"]*)" from-name="(?P<name_esc>[^"]*)" '
+    r'via="hermes-peer-mailbox" msg-id="(?P<msg_id_esc>[^"]*)"(?:>|&gt;)\r?\n'
+    r"(?P<body_esc>(?:(?!&lt;/cross-session-message|</cross-session-message)[\s\S])*?)\r?\n"
+    r"(?:&lt;/|</)cross-session-message(?:>|&gt;)"
+    r")\r?\n\r?\n"
+    + re.escape(FOOTER)
+    + _TRAILER,
     re.DOTALL,
 )
 
@@ -67,16 +86,20 @@ def parse(text: str) -> Optional[dict[str, str]]:
     match = _ENVELOPE_RE.match(text or "")
     if match is None:
         return None
-    sender = html.unescape(match["sender"])
+    raw_sender = match["sender"] if match["sender"] is not None else match["sender_esc"]
+    raw_name = match["name"] if match["name"] is not None else match["name_esc"]
+    raw_msg_id = match["msg_id"] if match["msg_id"] is not None else match["msg_id_esc"]
+    raw_body = match["body"] if match["body"] is not None else match["body_esc"]
+    sender = html.unescape(raw_sender)
     return {
         "kind": "peer",
         "subkind": "peer-send-message",
         "via": VIA,
-        "from": html.unescape(match["name"]),
+        "from": html.unescape(raw_name),
         "fromSession": "" if sender == "unknown" else sender,
-        "msg_id": html.unescape(match["msg_id"]),
+        "msg_id": html.unescape(raw_msg_id),
         # Reverse exactly the two escapes _escape_body adds, so displayed text matches what was sent.
-        "body": match["body"].replace("&lt;", "<").replace("&amp;", "&"),
+        "body": raw_body.replace("&lt;", "<").replace("&amp;", "&"),
     }
 
 
