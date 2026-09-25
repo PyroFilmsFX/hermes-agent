@@ -26,6 +26,7 @@ export function formatPeerStatusLabel(status: string, attempts?: number): string
   if (status === 'queued' && attempts !== undefined && attempts > 0) {
     return `queued (${attempts} ${attempts === 1 ? 'attempt' : 'attempts'})`
   }
+
   return status
 }
 

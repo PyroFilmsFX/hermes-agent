@@ -375,7 +375,7 @@ method("session.set_pinned", params=SessionSetPinnedParams, result=SessionSetPin
 
 
 class PeerMailboxListParams(ProfileParams):
-    session_id: str | None = None
+    session_id: str  # rows where this session is target or sender (F8 scoping)
     limit: int = 50
     pending_only: bool = False
 
@@ -408,6 +408,7 @@ method("peer_mailbox.list", params=PeerMailboxListParams, result=PeerMailboxList
 
 class PeerMailboxRetryParams(ProfileParams):
     message_id: int
+    session_id: str  # the row must target or come from this session (F8 scoping)
 
 
 class PeerMailboxRetryResult(Result):
@@ -422,6 +423,7 @@ method("peer_mailbox.retry", params=PeerMailboxRetryParams, result=PeerMailboxRe
 
 class PeerMailboxCancelParams(ProfileParams):
     message_id: int
+    session_id: str  # the row must target or come from this session (F8 scoping)
 
 
 class PeerMailboxCancelResult(Result):

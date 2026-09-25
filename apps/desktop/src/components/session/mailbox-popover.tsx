@@ -1,3 +1,9 @@
+import type {
+  PeerMailboxCancelResult,
+  PeerMailboxListResult,
+  PeerMailboxMessage,
+  PeerMailboxRetryResult
+} from '@hermes/shared'
 import { type FC, useCallback, useEffect, useState } from 'react'
 
 import { PeerStatusChip } from '@/components/assistant-ui/thread/system-message'
@@ -7,12 +13,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Tip } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { activeGateway } from '@/store/gateway'
-import type {
-  PeerMailboxCancelResult,
-  PeerMailboxListResult,
-  PeerMailboxMessage,
-  PeerMailboxRetryResult
-} from '@hermes/shared'
 
 export interface SessionMailboxPopoverProps {
   sessionId: string
@@ -28,15 +28,20 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
     if (!sessionId) {
       return
     }
+
     const gateway = activeGateway()
+
     if (!gateway) {
       return
     }
+
     setLoading(true)
+
     try {
       const res = await gateway.request<PeerMailboxListResult>('peer_mailbox.list', {
         session_id: sessionId
       })
+
       setMessages(res?.messages ?? [])
     } catch (err) {
       console.warn('Failed to load peer mailbox', err)
@@ -53,9 +58,11 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
 
   const handleRetry = async (messageId: number) => {
     const gateway = activeGateway()
+
     if (!gateway) {
       return
     }
+
     try {
       await gateway.request<PeerMailboxRetryResult>('peer_mailbox.retry', {
         message_id: messageId,
@@ -69,9 +76,11 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
 
   const handleCancel = async (messageId: number) => {
     const gateway = activeGateway()
+
     if (!gateway) {
       return
     }
+
     try {
       await gateway.request<PeerMailboxCancelResult>('peer_mailbox.cancel', {
         message_id: messageId,
@@ -138,10 +147,12 @@ export const SessionMailboxPopover: FC<SessionMailboxPopoverProps> = ({ sessionI
           <div className="flex flex-col gap-1 max-h-64 overflow-y-auto" data-slot="mailbox-list">
             {messages.map(msg => {
               const isQueued = msg.status === 'queued' || msg.status?.startsWith('queued')
+
               const peerLabel =
                 msg.direction === 'in'
                   ? `↘ from ${msg.from_label || msg.from_session_id || 'peer'}`
                   : `↗ to ${msg.target_hint || msg.target_session_id || 'peer'}`
+
               return (
                 <div
                   className="flex items-center justify-between gap-1.5 rounded-[3px] px-1.5 py-1 hover:bg-muted/40"

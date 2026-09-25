@@ -647,6 +647,7 @@ export function preserveLocalPendingTurnMessages(
         if (localPendingSupersedes(message, matchByDeliveryId)) {
           replacements.set(matchByDeliveryId.id, withAuthoritativeTurnState(message, matchByDeliveryId))
         }
+
         continue
       }
     }

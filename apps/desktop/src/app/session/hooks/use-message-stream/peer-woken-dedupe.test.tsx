@@ -118,6 +118,7 @@ describe('peer-woken turns render exactly once under their header (#U1.10)', () 
       textMsg(`db-peer-${deliveryId}`, 'system', 'please check the system status', { deliveryId }),
       textMsg(`db-reply-${deliveryId}`, 'assistant', 'System status: all healthy.', { deliveryId })
     ]
+
     const reconciled = preserveLocalPendingTurnMessages(hydratedAuthoritative, localMessages)
 
     // Must reconcile to EXACTLY 3 messages: 1 lifecycle + 1 peer + 1 assistant reply.

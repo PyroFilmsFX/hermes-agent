@@ -1,7 +1,6 @@
+import type { PeerMailboxListResult } from '@hermes/shared'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-
-import type { PeerMailboxListResult } from '@hermes/shared'
 
 const mockRequest = vi.fn()
 
@@ -65,6 +64,7 @@ describe('SessionMailboxPopover component', () => {
         }
       ]
     }
+
     mockRequest.mockResolvedValue(messagesResult)
 
     render(<SessionMailboxPopover sessionId="sess-test-2" />)

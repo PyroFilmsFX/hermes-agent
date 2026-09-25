@@ -443,6 +443,7 @@ describe('Inbox-style session card', () => {
 describe('SidebarSessionRow pinned chip', () => {
   it('renders pinned chip when isPinned is true and toggles pin on click', () => {
     const onPin = vi.fn()
+
     const { container } = render(
       <SidebarSessionRow
         isPinned={true}

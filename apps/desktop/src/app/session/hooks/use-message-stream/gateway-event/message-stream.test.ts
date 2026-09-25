@@ -24,6 +24,7 @@ beforeEach(() => {
 import type { GatewayEventName } from '@hermes/shared'
 
 import type { ChatMessage } from '@/lib/chat-messages'
+
 import { handleMessageStreamEvent } from './message-stream'
 import type { GatewayEventContext } from './types'
 
@@ -256,6 +257,7 @@ describe('handleMessageStreamEvent background delivery contracts', () => {
     ctx.deps.sessionStateByRuntimeIdRef.current.set('s1', sessionState)
     ctx.deps.updateSessionState = vi.fn((_sid, updater) => {
       sessionState = updater(sessionState)
+
       return sessionState
     })
 
@@ -298,6 +300,7 @@ describe('handleMessageStreamEvent background delivery contracts', () => {
 
     ctx.deps.updateSessionState = vi.fn((_sid, updater) => {
       currentState = updater(currentState)
+
       return currentState
     })
 

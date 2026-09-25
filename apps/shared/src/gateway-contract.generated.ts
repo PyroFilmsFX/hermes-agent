@@ -2717,7 +2717,7 @@ export interface SessionSetPinnedResult {
 }
 export interface PeerMailboxListParams {
   profile?: string | null
-  session_id?: string | null
+  session_id: string
   limit?: number
   pending_only?: boolean
 }
@@ -2744,6 +2744,7 @@ export interface PeerMailboxMessage {
 export interface PeerMailboxRetryParams {
   profile?: string | null
   message_id: number
+  session_id: string
 }
 export interface PeerMailboxRetryResult {
   message_id: number
@@ -2753,6 +2754,7 @@ export interface PeerMailboxRetryResult {
 export interface PeerMailboxCancelParams {
   profile?: string | null
   message_id: number
+  session_id: string
 }
 export interface PeerMailboxCancelResult {
   message_id: number

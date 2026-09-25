@@ -16341,10 +16341,15 @@
           "message_id": {
             "title": "Message Id",
             "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
           }
         },
         "required": [
-          "message_id"
+          "message_id",
+          "session_id"
         ],
         "title": "PeerMailboxCancelParams",
         "type": "object"
@@ -16389,16 +16394,8 @@
             "title": "Profile"
           },
           "session_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Session Id"
+            "title": "Session Id",
+            "type": "string"
           },
           "limit": {
             "default": 50,
@@ -16411,6 +16408,9 @@
             "type": "boolean"
           }
         },
+        "required": [
+          "session_id"
+        ],
         "title": "PeerMailboxListParams",
         "type": "object"
       },
@@ -16575,10 +16575,15 @@
           "message_id": {
             "title": "Message Id",
             "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
           }
         },
         "required": [
-          "message_id"
+          "message_id",
+          "session_id"
         ],
         "title": "PeerMailboxRetryParams",
         "type": "object"

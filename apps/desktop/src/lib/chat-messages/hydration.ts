@@ -181,6 +181,7 @@ export function sessionLifecycleLabel(metadata: SessionMessage['display_metadata
 
   if (event === 'woken') {
     const by = parsed.by ?? parsed.from ?? 'unknown'
+
     return `woken by ${lifecycleSourceLabel(parsed.source)}: ${String(by)}`
   }
 
@@ -198,13 +199,16 @@ export interface ParsedPeerEnvelope {
 
 export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | null {
   const headerMatch = content.match(PEER_ENVELOPE_HEADER_RE)
+
   if (!headerMatch) {
     return null
   }
+
   const from = headerMatch[1].trim()
   const senderSid = headerMatch[2]?.trim()
   const withoutHeader = content.slice(headerMatch[0].length)
   const body = withoutHeader.replace(PEER_ENVELOPE_FOOTER_RE, '').trim()
+
   return { from, senderSid, body }
 }
 
@@ -349,6 +353,7 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
   if (message.display_kind === 'peer_message') {
     const meta = parseDisplayMetadata(message.display_metadata)
     const direction = meta?.direction === 'out' || (!meta?.direction && message.role === 'assistant') ? 'out' : 'in'
+
     const peer =
       (typeof meta?.peer === 'string' && meta.peer.trim()) ||
       (typeof meta?.from === 'string' && meta.from.trim()) ||
@@ -473,20 +478,25 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     const isPeerMessage = message.display_kind === 'peer_message' || isPeerEnvelope
 
     const metaRecord = parseDisplayMetadata(message.display_metadata)
+
     const direction: 'in' | 'out' =
       metaRecord?.direction === 'out' || (!metaRecord?.direction && message.role === 'assistant') ? 'out' : 'in'
+
     const peer =
       (typeof metaRecord?.peer === 'string' && metaRecord.peer.trim()) ||
       (typeof metaRecord?.from === 'string' && metaRecord.from.trim()) ||
       (typeof metaRecord?.to === 'string' && metaRecord.to.trim()) ||
       parsedEnvelope?.from ||
       'peer'
+
     const msgRecord = message as unknown as Record<string, unknown>
+
     const msgId =
       (typeof metaRecord?.msg_id === 'string' && metaRecord.msg_id.trim()) ||
       (typeof metaRecord?.delivery_id === 'string' && metaRecord.delivery_id.trim()) ||
       (typeof msgRecord.delivery_id === 'string' && msgRecord.delivery_id.trim()) ||
       undefined
+
     const via = typeof metaRecord?.via === 'string' ? metaRecord.via : undefined
     const status = typeof metaRecord?.status === 'string' ? metaRecord.status : undefined
     const attempts = typeof metaRecord?.attempts === 'number' ? metaRecord.attempts : undefined
@@ -623,9 +633,11 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
       if (activeAssistant && (currentHasToolCall || activeHasToolCall)) {
         activeAssistant.parts = [...activeAssistant.parts, ...parts]
+
         if (deliveryId) {
           activeAssistant.deliveryId = deliveryId
         }
+
         activeAssistant.timestamp = earliestTimestamp(
           activeAssistant.timestamp,
           message.timestamp,

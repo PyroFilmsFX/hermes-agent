@@ -216,14 +216,14 @@ function SidebarSessionRowImpl({
       node: (
         <Tip label={isPinned ? 'Unpin' : 'Pin'} side="top">
           <button
-            type="button"
-            data-slot="session-pinned-chip"
             aria-label={isPinned ? 'Unpin' : 'Pin'}
             className="flex size-4 shrink-0 items-center justify-center rounded-[3px] text-(--ui-text-tertiary) hover:text-foreground focus-visible:outline-none"
+            data-slot="session-pinned-chip"
             onClick={event => {
               event.stopPropagation()
               onPin()
             }}
+            type="button"
           >
             <Codicon name="pin" size="0.75rem" />
           </button>

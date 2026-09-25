@@ -116,6 +116,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
     for (const [sId, state] of sessionStateByRuntimeIdRef.current.entries()) {
       const idx = state.messages.findIndex(m => m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId)
+
       if (idx !== -1) {
         updateSessionState(sId, st => ({
           ...st,
@@ -130,6 +131,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
                 }
               }
             }
+
             return m
           })
         }))
@@ -138,6 +140,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
     const currentMessages = $messages.get()
     const activeIdx = currentMessages.findIndex(m => m.peerMetadata?.msg_id === msgId || m.deliveryId === msgId)
+
     if (activeIdx !== -1) {
       $messages.set(
         currentMessages.map(m => {
@@ -151,6 +154,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
               }
             }
           }
+
           return m
         })
       )
@@ -179,14 +183,17 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
         if (deliveryId && payload?.user_message) {
           const userText = (payload.user_message || '').trim()
+
           if (userText) {
             const peerMessageId = `peer-msg-${deliveryId}`
+
             const alreadyHasPeer = state.messages.some(
               m =>
                 (m.deliveryId === deliveryId &&
                   (m.role === 'user' || (m.role === 'system' && m.peerMetadata?.direction === 'in'))) ||
                 m.id === peerMessageId
             )
+
             if (!alreadyHasPeer) {
               const peerMessage: ChatMessage = {
                 id: peerMessageId,
@@ -195,6 +202,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
                 timestamp: occurredAt,
                 deliveryId
               }
+
               messages = [...state.messages, peerMessage]
             }
           }
@@ -252,11 +260,14 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
       if (deliveryId && payload?.user_message) {
         const userText = (payload.user_message || '').trim()
+
         if (userText) {
           const peerMessageId = `peer-msg-${deliveryId}`
+
           const alreadyHasPeer = state.messages.some(
             m => (m.deliveryId === deliveryId && m.role === 'user') || m.id === peerMessageId
           )
+
           if (!alreadyHasPeer) {
             const peerMessage: ChatMessage = {
               id: peerMessageId,
@@ -265,9 +276,11 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
               timestamp: occurredAt,
               deliveryId
             }
+
             messages = [...state.messages, peerMessage]
           }
         }
+
         streamId = `assistant-stream-${deliveryId}`
       }
 

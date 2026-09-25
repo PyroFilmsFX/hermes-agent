@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
 import { cleanup, render } from '@testing-library/react'
 import type { ReactNode } from 'react'
@@ -10,9 +11,10 @@ import { I18nProvider } from '@/i18n'
 import { $composerPopout, $composerPopoutGesturesEnabled } from '@/store/composer-popout'
 import { $threadScrolledUpBySession } from '@/store/thread-scroll'
 
-import { ChatBar, ChatBarFallback } from './index'
 import { ComposerScopeProvider, ComposerSurfaceProvider, MAIN_COMPOSER_SCOPE } from './scope'
 import type { ChatBarState } from './types'
+
+import { ChatBar, ChatBarFallback } from './index'
 
 const stylesCss = fs.readFileSync(path.resolve(__dirname, '../../../styles.css'), 'utf8')
 

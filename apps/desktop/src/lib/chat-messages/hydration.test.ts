@@ -178,6 +178,7 @@ describe('hydration peer_message support', () => {
 
   it('hydrates persisted inbound envelope row to peer_message card instead of user bubble', () => {
     const timestamp = 1_700_000_200
+
     const rawContent =
       "[peer message from alice (session sess-42)]\nHere is the data report.\n\n[reply with session_send(session_id='sess-42', message='...')]"
 
@@ -260,6 +261,7 @@ describe('hydration peer_message support', () => {
       source: 'peer-mailbox',
       by: 'alice'
     })
+
     expect(label).toBe('woken by peer message: alice')
 
     const labelFromFallback = sessionLifecycleLabel({
@@ -267,6 +269,7 @@ describe('hydration peer_message support', () => {
       source: 'peer-mailbox',
       from: 'bob'
     })
+
     expect(labelFromFallback).toBe('woken by peer message: bob')
   })
 })
