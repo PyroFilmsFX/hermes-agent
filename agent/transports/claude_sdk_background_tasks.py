@@ -129,7 +129,7 @@ def _result_status(status: str) -> str:
     return "running"
 
 
-def _observe_tool_use(message: Any, session_key: str, stop_task) -> None:
+def _observe_tool_use(message: Any, session_key: str, stop_task, generation: str = "") -> None:
     if type(message).__name__ != "AssistantMessage":
         return
     for block in getattr(message, "content", None) or []:
@@ -146,10 +146,11 @@ def _observe_tool_use(message: Any, session_key: str, stop_task) -> None:
             tool_use_id=str(_value(block, "id", "") or ""),
             output_file=str(args.get("output_file") or ""),
             stop_task=stop_task,
+            generation=generation,
         )
 
 
-def _observe_tool_result(message: Any, session_key: str) -> None:
+def _observe_tool_result(message: Any, session_key: str, generation: str = "") -> None:
     if type(message).__name__ != "UserMessage":
         return
     envelope = _value(message, "tool_use_result", None)
@@ -167,16 +168,18 @@ def _observe_tool_result(message: Any, session_key: str) -> None:
             process_registry.update_sdk_task(
                 session_key=session_key, tool_use_id=tool_use_id,
                 status="failed", output=output, exit_code=1,
+                generation=generation,
             )
             continue
         if task_id:
             process_registry.update_sdk_task(
                 session_key=session_key, task_id=task_id, tool_use_id=tool_use_id,
                 status=_result_status(status), output=output,
+                generation=generation,
             )
 
 
-def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
+def _observe_task_message(message: Any, session_key: str, stop_task, generation: str = "") -> None:
     name = type(message).__name__
     if not name.startswith("Task"):
         return
@@ -185,7 +188,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
     kind = classify_sdk_task(message)
     if name == "TaskStartedMessage":
         provisional = (
-            process_registry.find_sdk_task(session_key, tool_use_id=tool_use_id)
+            process_registry.find_sdk_task(session_key, tool_use_id=tool_use_id, generation=generation)
             if tool_use_id else None
         )
         # Only shell work belongs in the process view; Agent tasks are shown
@@ -199,6 +202,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
             task_id=task_id,
             tool_use_id=tool_use_id,
             stop_task=stop_task,
+            generation=generation,
         )
         return
     if name == "TaskProgressMessage":
@@ -208,6 +212,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
             tool_use_id=tool_use_id,
             status="running",
             command=str(_value(message, "description", "") or ""),
+            generation=generation,
         )
         return
     if name == "TaskNotificationMessage":
@@ -215,7 +220,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
         # the task lifecycle faster than the reader sees TaskStartedMessage.
         if (
             kind == "shell"
-            and process_registry.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id) is None
+            and process_registry.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id, generation=generation) is None
         ):
             process_registry.register_sdk_task(
                 session_key=session_key,
@@ -223,6 +228,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
                 task_id=task_id,
                 tool_use_id=tool_use_id,
                 stop_task=stop_task,
+                generation=generation,
             )
         process_registry.update_sdk_task(
             session_key=session_key,
@@ -231,6 +237,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
             status=str(_value(message, "status", "") or ""),
             output_file=str(_value(message, "output_file", "") or ""),
             output=_value(message, "summary", "") or "",
+            generation=generation,
         )
         return
     if name == "TaskUpdatedMessage":
@@ -244,6 +251,7 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
             output_file=str(patch.get("output_file") or "") if isinstance(patch, dict) else "",
             output=patch.get("output", "") if isinstance(patch, dict) else "",
             exit_code=patch.get("exit_code") if isinstance(patch, dict) else None,
+            generation=generation,
         )
         return
     if name in {"TaskOutputBlock", "TaskStopBlock"}:
@@ -253,18 +261,31 @@ def _observe_task_message(message: Any, session_key: str, stop_task) -> None:
             tool_use_id=tool_use_id,
             status="stopped" if name == "TaskStopBlock" else "running",
             output=str(_value(message, "output", "") or _value(message, "content", "") or ""),
+            generation=generation,
         )
 
 
-def observe_sdk_message(message: Any, *, session_key: str, stop_task=None) -> None:
+def observe_sdk_message(message: Any, *, session_key: str, stop_task=None, generation: str = "") -> None:
     """Record SDK Bash/task lifecycle messages without touching the transcript."""
     key = str(session_key or "")
     if not key:
         return
     callback = stop_task or _stop_task_callback(key)
-    _observe_tool_use(message, key, callback)
-    _observe_tool_result(message, key)
-    _observe_task_message(message, key, callback)
+    gen = str(generation or "")
+    if not gen:
+        with _controllers_lock:
+            ref = _controllers.get(key)
+        ctrl = ref() if ref is not None else None
+        if ctrl is not None:
+            gen = str(
+                getattr(ctrl, "_instance_generation", "")
+                or getattr(ctrl, "_generation", "")
+                or getattr(ctrl, "generation", "")
+                or ""
+            )
+    _observe_tool_use(message, key, callback, generation=gen)
+    _observe_tool_result(message, key, generation=gen)
+    _observe_task_message(message, key, callback, generation=gen)
     process_registry.prune_sdk_tasks()
 
 

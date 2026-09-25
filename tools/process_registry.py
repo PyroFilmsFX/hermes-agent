@@ -471,6 +471,8 @@ class ProcessSession:
     sdk_owned: bool = False                     # Claude Agent SDK task, not a host/sandbox process
     sdk_task_id: str = ""                       # SDK task id used by ClaudeSDKClient.stop_task()
     sdk_tool_use_id: str = ""                   # ToolUseBlock id linking Bash to TaskStartedMessage
+    sdk_generation: str = ""                    # Claude Agent SDK session instance generation token
+    generation: str = ""                        # Owner/instance generation token (alias for sdk_generation)
     output_file: str = ""                       # SDK task output file, when the SDK reports one
     sdk_stop_task: Any = None                   # live adapter callback; never checkpointed
     # Watcher/notification routing (persisted for crash recovery)
@@ -499,6 +501,12 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (use_pty=True)
+
+    def __post_init__(self) -> None:
+        if self.generation and not self.sdk_generation:
+            self.sdk_generation = self.generation
+        elif self.sdk_generation and not self.generation:
+            self.generation = self.sdk_generation
 
     def append_output(self, text: str) -> None:
         """Append to the rolling output buffer under the session lock, keeping the tail."""
@@ -1648,13 +1656,18 @@ class ProcessRegistry(ProcessCheckpointMixin):
             session = load_completed_results(session_id).get(session_id)
         return self._refresh_detached_session(session if session is not None else self._resolve_prefix(session_id))
 
-    def find_sdk_task(self, session_key: str, *, task_id: str = "", tool_use_id: str = "") -> Optional[ProcessSession]:
+    def find_sdk_task(
+        self, session_key: str, *, task_id: str = "", tool_use_id: str = "", generation: str = "",
+    ) -> Optional[ProcessSession]:
         """Find a live SDK task by its owning Hermes session and SDK identity."""
         key, sdk_task_id, sdk_tool_use_id = str(session_key or ""), str(task_id or ""), str(tool_use_id or "")
+        gen = str(generation or "")
         with self._lock:
             candidates = list(self._running.values()) + list(self._finished.values())
         for session in candidates:
             if not session.sdk_owned or session.session_key != key:
+                continue
+            if gen and (session.generation or session.sdk_generation) and (session.generation or session.sdk_generation) != gen:
                 continue
             if (sdk_task_id and session.sdk_task_id == sdk_task_id) or (
                 sdk_tool_use_id and session.sdk_tool_use_id == sdk_tool_use_id
@@ -1664,10 +1677,11 @@ class ProcessRegistry(ProcessCheckpointMixin):
 
     def register_sdk_task(
         self, *, session_key: str, command: str, task_id: str = "", tool_use_id: str = "",
-        output_file: str = "", stop_task=None,
+        output_file: str = "", stop_task=None, generation: str = "",
     ) -> ProcessSession:
         """Register or enrich one Claude Agent SDK background task."""
-        existing = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id)
+        gen = str(generation or "")
+        existing = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id, generation=gen)
         if existing is not None:
             with existing._lock:
                 if command and (not existing.command or existing.command == "SDK task"):
@@ -1681,10 +1695,16 @@ class ProcessRegistry(ProcessCheckpointMixin):
                     existing.output_file = output_file
                 if stop_task is not None:
                     existing.sdk_stop_task = stop_task
+                if gen:
+                    if not existing.generation:
+                        existing.generation = gen
+                    if not existing.sdk_generation:
+                        existing.sdk_generation = gen
             return existing
         session = self._new_session(
             command or "SDK task", task_id, task_id, str(session_key or ""), None,
             sdk_owned=True, sdk_task_id=str(task_id or ""), sdk_tool_use_id=str(tool_use_id or ""),
+            sdk_generation=gen, generation=gen,
             output_file=str(output_file or ""), sdk_stop_task=stop_task,
         )
         with self._lock:
@@ -1695,9 +1715,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
     def update_sdk_task(
         self, *, session_key: str, task_id: str = "", tool_use_id: str = "", status: str = "",
         command: str = "", output_file: str = "", output: str = "", exit_code: Optional[int] = None,
+        generation: str = "",
     ) -> Optional[ProcessSession]:
         """Apply SDK task progress and move terminal tasks to the normal linger store."""
-        session = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id)
+        session = self.find_sdk_task(session_key, task_id=task_id, tool_use_id=tool_use_id, generation=generation)
         if session is None:
             return None
         with session._lock:
@@ -1737,12 +1758,17 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 self._running.pop(sid, None)
         return len(expired)
 
-    def finalize_sdk_tasks(self, session_key: str, *, status: str = "stopped") -> int:
+    def finalize_sdk_tasks(self, session_key: str, *, status: str = "stopped", generation: Optional[str] = None) -> int:
         """Finish all SDK process records for a session, including provisional ones."""
+        gen_filter = str(generation) if generation is not None and generation != "" else None
         with self._lock:
             sessions = [
                 session for session in self._running.values()
                 if session.sdk_owned and session.session_key == str(session_key or "")
+                and (
+                    gen_filter is None
+                    or (session.generation or session.sdk_generation) == gen_filter
+                )
             ]
         finished = 0
         for session in sessions:
@@ -1751,6 +1777,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 task_id=session.sdk_task_id,
                 tool_use_id=session.sdk_tool_use_id,
                 status=status,
+                generation=session.generation or session.sdk_generation,
             ) is not None:
                 finished += 1
         return finished
@@ -2213,6 +2240,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 entry.update(sdk_owned=True, sdk_task_id=s.sdk_task_id)
                 if s.output_file:
                     entry["output_file"] = s.output_file
+                if s.generation or s.sdk_generation:
+                    entry["generation"] = s.generation or s.sdk_generation
             result.append(entry)
         return result
 

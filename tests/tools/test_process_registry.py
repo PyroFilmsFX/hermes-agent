@@ -3190,3 +3190,46 @@ def test_model_not_found_notice_absent_when_fallback_chain_configured(monkeypatc
     text = _format_async(evt)
     assert text.count("SUBAGENT MODEL REJECTED") == 1
     assert "No fallback chain is configured" not in text
+
+
+def test_finalize_sdk_tasks_generation_isolation(registry):
+    """Old SDK session instance finalize must leave replacement instance's tasks untouched."""
+    session_key = "session-test-generation"
+    t_old = registry.register_sdk_task(
+        session_key=session_key,
+        command="bash old.sh",
+        task_id="task-old",
+        tool_use_id="toolu-old",
+        generation="gen-old",
+    )
+    t_new = registry.register_sdk_task(
+        session_key=session_key,
+        command="bash new.sh",
+        task_id="task-new",
+        tool_use_id="toolu-new",
+        generation="gen-new",
+    )
+
+    running_before = [s["sdk_task_id"] for s in registry.list_sessions(session_key=session_key) if s["status"] == "running"]
+    assert "task-old" in running_before
+    assert "task-new" in running_before
+
+    finished_count = registry.finalize_sdk_tasks(session_key, status="stopped", generation="gen-old")
+    assert finished_count == 1
+
+    old_proc = registry.get(t_old.id)
+    assert old_proc is not None
+    assert old_proc.exited is True
+
+    new_proc = registry.get(t_new.id)
+    assert new_proc is not None
+    assert new_proc.exited is False
+
+    running_after = [s["sdk_task_id"] for s in registry.list_sessions(session_key=session_key) if s["status"] == "running"]
+    assert "task-old" not in running_after
+    assert "task-new" in running_after
+
+    legacy_finished = registry.finalize_sdk_tasks(session_key, status="stopped")
+    assert legacy_finished == 1
+    assert registry.get(t_new.id).exited is True
+

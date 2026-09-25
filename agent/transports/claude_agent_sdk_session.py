@@ -30,6 +30,7 @@ import os
 import contextlib
 import threading
 import time
+import uuid
 from typing import Any, Callable, Optional
 
 from agent.transports.claude_agent_sdk_session_availability import (
@@ -199,6 +200,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # stdio-only behavior.
         agent: Optional[Any] = None,
         tools: Optional[list[dict]] = None,
+        generation: Optional[str] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._model = model
@@ -282,6 +284,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # to the current one.
         self._on_interim_assistant = on_interim_assistant
         self._on_tool_iteration = on_tool_iteration
+        self._instance_generation: str = str(generation) if generation else f"sdk_gen_{uuid.uuid4().hex[:12]}"
+        self._generation: str = self._instance_generation
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -506,6 +510,14 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 pass
         if claimed_thread and loop_thread is not None:
             loop_thread.join(timeout=5.0)
+
+    @property
+    def instance_generation(self) -> str:
+        return getattr(self, "_instance_generation", "")
+
+    @property
+    def generation(self) -> str:
+        return getattr(self, "_instance_generation", "")
 
     def ensure_started(self) -> Optional[str]:
         """Start the loop thread, build the SDK client, connect. Idempotent —

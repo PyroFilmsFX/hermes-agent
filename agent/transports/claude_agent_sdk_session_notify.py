@@ -439,6 +439,12 @@ class ClaudeSdkNotifyMixin:
         """Observe every SDK message before turn-specific interrupt gates."""
         from agent.transports.claude_sdk_background_tasks import observe_sdk_message
 
+        generation = (
+            getattr(self, "_instance_generation", None)
+            or getattr(self, "_generation", None)
+            or getattr(self, "generation", None)
+            or ""
+        )
         observe_sdk_message(
             message,
             session_key=(
@@ -447,6 +453,7 @@ class ClaudeSdkNotifyMixin:
                 or ""
             ),
             stop_task=getattr(self, "stop_task", None),
+            generation=str(generation or ""),
         )
         self._notify_task_message(message)
 
@@ -459,6 +466,12 @@ class ClaudeSdkNotifyMixin:
         session_key = (
             getattr(self, "_sdk_registry_session_key", "")
             or getattr(self, "_hermes_session_id", "")
+            or ""
+        )
+        generation = (
+            getattr(self, "_instance_generation", None)
+            or getattr(self, "_generation", None)
+            or getattr(self, "generation", None)
             or ""
         )
         for task_id, record in list(tasks.items()):
@@ -475,7 +488,11 @@ class ClaudeSdkNotifyMixin:
                 )
         if session_key:
             with contextlib.suppress(Exception):
-                process_registry.finalize_sdk_tasks(session_key, status="stopped")
+                process_registry.finalize_sdk_tasks(
+                    session_key,
+                    status="stopped",
+                    generation=str(generation) if generation else None,
+                )
 
     @staticmethod
     def _sdk_terminal_status(status: Any) -> bool:

@@ -162,3 +162,62 @@ def test_successful_background_bash_result_resolves_task_id(monkeypatch):
 
     records = registry.list_sessions(session_key="session-a")
     assert records[0]["sdk_task_id"] == "task-late"
+
+
+def test_old_instance_finalize_leaves_replacement_records_untouched(monkeypatch):
+    registry = ProcessRegistry()
+    monkeypatch.setattr("agent.transports.claude_sdk_background_tasks.process_registry", registry)
+    monkeypatch.setattr("tools.process_registry.process_registry", registry)
+
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    session_key = "session-rot-1"
+    old_session = ClaudeAgentSdkSession(cwd="/tmp", hermes_session_id=session_key)
+    new_session = ClaudeAgentSdkSession(cwd="/tmp", hermes_session_id=session_key)
+
+    assert old_session.instance_generation != new_session.instance_generation
+
+    # Old session observes a background task
+    old_session._observe_sdk_lifecycle(
+        AssistantMessage([
+            ToolUseBlock(
+                id="toolu-old",
+                name="Bash",
+                input={"command": "npm run build:old", "run_in_background": True},
+            )
+        ])
+    )
+    old_session._observe_sdk_lifecycle(
+        TaskStartedMessage("task-old-1", "npm run build:old", tool_use_id="toolu-old")
+    )
+
+    # Replacement session observes a background task
+    new_session._observe_sdk_lifecycle(
+        AssistantMessage([
+            ToolUseBlock(
+                id="toolu-new",
+                name="Bash",
+                input={"command": "npm run build:new", "run_in_background": True},
+            )
+        ])
+    )
+    new_session._observe_sdk_lifecycle(
+        TaskStartedMessage("task-new-1", "npm run build:new", tool_use_id="toolu-new")
+    )
+
+    running_ids = [s["sdk_task_id"] for s in registry.list_sessions(session_key=session_key) if s["status"] == "running"]
+    assert "task-old-1" in running_ids
+    assert "task-new-1" in running_ids
+
+    # Old session terminates and finalizes
+    old_session._finalize_sdk_tasks()
+
+    running_ids_after = [s["sdk_task_id"] for s in registry.list_sessions(session_key=session_key) if s["status"] == "running"]
+    assert "task-old-1" not in running_ids_after
+    assert "task-new-1" in running_ids_after
+
+    # Replacement task record remains untouched
+    new_task = registry.find_sdk_task(session_key, task_id="task-new-1")
+    assert new_task is not None
+    assert new_task.exited is False
+
