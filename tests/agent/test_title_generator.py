@@ -790,3 +790,82 @@ class TestModelSwitchMarkerNotTitleable:
         assert apply_instant_title(db, "sess-1", "南京市秦淮区 小时级天气预报") == (
             "南京市秦淮区 小时级天气预报"
         )
+
+
+class TestSdkLaneTitleGeneration:
+    """The SDK lane's auxiliary facade is subscription-scoped (auxiliary_client: a failure "must not
+    open a metered recovery route"): titling passes its runtime through, never a rerouted provider."""
+
+    def test_sdk_lane_runtime_is_passed_through_not_rerouted(self):
+        from agent.title_generator import generate_title
+
+        main_runtime = {"provider": "claude-agent-sdk", "model": "claude-sonnet-5", "session_id": "sdk-sess"}
+        captured = {}
+
+        def mock_call_llm(**kwargs):
+            captured.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = '{"title": "SDK Peer Dispatch"}'
+            return resp
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            assert generate_title("Use the session_send tool to send a peer message",
+                                  main_runtime=main_runtime) == "SDK Peer Dispatch"
+        assert captured["main_runtime"] is main_runtime
+
+
+class TestDerivedTitleHeuristic:
+    """Instant/no-LLM fallback: first sentence, filler/imperative openers stripped, capped at ~6 words / 48 chars."""
+
+    def test_first_sentence_and_opener_stripping(self):
+        from agent.title_generator import derive_title
+
+        prompt = (
+            "Use the session_send tool to send target 20260921_9876543210 to peer hermes. "
+            "Please ensure that the response arrives safely."
+        )
+        title = derive_title(prompt)
+        assert title is not None
+        assert not title.lower().startswith("use the")
+        assert "Please ensure" not in title
+        assert len(title) <= 48
+        assert len(title.split()) <= 7
+        assert title.startswith("session_send tool")
+        assert title.endswith("…")
+
+    def test_various_instruction_openers_stripped(self):
+        from agent.title_generator import derive_title
+
+        cases = [
+            ("Please help me debug the broken token refresh flow", "debug the broken token refresh flow"),
+            ("Can you please run tests on the scheduler service", "run tests on the scheduler service"),
+            ("Could you check the gateway logs for errors", "check the gateway logs for errors"),
+            ("I want you to implement the login endpoint", "implement the login endpoint"),
+            ("I need to investigate database connection pool leak", "investigate database connection pool leak"),
+            ("Use git commit to save the current changes", "git commit to save the current changes"),
+            ("The memory usage exceeded threshold on worker 3", "memory usage exceeded threshold on worker"),
+        ]
+        for user_msg, expected_prefix in cases:
+            derived = derive_title(user_msg)
+            assert derived is not None
+            assert derived.startswith(expected_prefix[:20]), f"Failed for {user_msg!r} -> {derived!r}"
+            assert len(derived) <= 48
+
+    def test_user_set_title_always_wins_over_fallback(self, tmp_path):
+        from agent.title_generator import apply_instant_title, auto_title_session
+        from hermes_state import SessionDB
+
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="manual-sess", source="cli")
+        db.set_session_title("manual-sess", "My Hand-Crafted Title")
+
+        # apply_instant_title should not overwrite
+        assert apply_instant_title(db, "manual-sess", "Use the tool to do something") is None
+        assert db.get_session_title("manual-sess") == "My Hand-Crafted Title"
+
+        # auto_title_session fallback should not overwrite
+        with patch("agent.title_generator.generate_title", return_value=None):
+            auto_title_session(db, "manual-sess", "Use the tool to do something")
+        assert db.get_session_title("manual-sess") == "My Hand-Crafted Title"
+        assert db.get_session_title_source("manual-sess") == "user"

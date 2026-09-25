@@ -32,6 +32,7 @@ RuntimeValidator = Callable[[], bool]
 MAX_TITLE_INPUT_CHARS = 1000
 # Cap on the instant derived title; a raw fragment reads worse the longer it runs.
 MAX_DERIVED_TITLE_CHARS = 48
+MAX_DERIVED_TITLE_WORDS = 11
 # Answer-shaped guard: a tiny model sometimes answers instead of titling; longer is rejected, not truncated.
 # Upper bound on accepted title word count. Titling is a 3-7 word task; a small tiny-model sometimes ignores
 # the task and answers the user's message instead — that answer must never become the session title (see the
@@ -204,22 +205,78 @@ def is_titleable_user_message(user_message: str) -> bool:
             and bool(_summarize_user_message(user_message).strip()))
 
 
+_FILLER_OPENERS_RE = re.compile(
+    r"^(?:"
+    r"(?:hey|hi|hello)\s*[,!:]\s*"
+    r"|(?:can|could|would)\s+you\s+(?:please\s+)?(?:to\s+)?"
+    r"|i\s+(?:want|need|would\s+like|'d\s+like)\s+(?:you\s+)?(?:to\s+)?"
+    r"|please\s+(?:help\s+(?:me\s+)?(?:to\s+)?)?"
+    r"|pls\s+"
+    r"|kindly\s+"
+    r"|help\s+me\s+(?:to\s+)?"
+    r"|just\s+"
+    r"|use\s+(?:the\s+)?"
+    r"|using\s+(?:the\s+)?"
+    r"|(?:the|a|an|this|that|my)\s+"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def _first_line(text: str) -> str:
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+
+
+def _first_sentence(text: str) -> str:
+    """Extract the first sentence from the first meaningful line."""
+    line = _first_line(text)
+    if not line:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", line, maxsplit=1)
+    return parts[0].strip()
+
+
+def _strip_filler_openers(text: str) -> str:
+    """Strip filler/imperative openers (e.g. 'use', 'please', 'the', instruction openers)."""
+    current = text.strip()
+    for _ in range(5):
+        m = _FILLER_OPENERS_RE.match(current)
+        if not m:
+            break
+        current = current[m.end():].strip()
+    return current or text.strip()
+
+
 def derive_title(user_message: str) -> Optional[str]:
-    """Instant title: first meaningful line trimmed to a word boundary. No model, never fails."""
-    line = " ".join(_first_line(_summarize_user_message(user_message)).split())
+    """Instant title heuristic: first sentence, filler/imperative openers stripped, capped at ~6 words / 48 chars."""
+    raw_input = _summarize_user_message(user_message)
+    sentence = _first_sentence(raw_input)
+    if not sentence:
+        return None
+    sentence = sentence.rstrip(".!?,;:—-\"'\t ")
+    stripped = _strip_filler_openers(sentence)
+    words = stripped.split()
+    if not words:
+        return None
+    truncated = False
+    if len(words) > MAX_DERIVED_TITLE_WORDS:
+        words = words[:MAX_DERIVED_TITLE_WORDS]
+        truncated = True
+    line = " ".join(words)
     if len(line) > MAX_DERIVED_TITLE_CHARS:
         cut = line[:MAX_DERIVED_TITLE_CHARS]
         space = cut.rfind(" ")
-        line = (cut[:space] if space > MAX_DERIVED_TITLE_CHARS // 2 else cut).rstrip(" ,.;:—-") + "…"
+        line = (cut[:space] if space > MAX_DERIVED_TITLE_CHARS // 2 else cut).rstrip(" ,.;:—-")
+        truncated = True
+    else:
+        line = line.rstrip(" ,.;:—-")
+    if truncated:
+        line += "…"
     return line or None
 
 
 def _strip_title_prefix(text: str) -> str:
     return text[6:].strip() if text.lower().startswith("title:") else text
-
-
-def _first_line(text: str) -> str:
-    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 
 def _extract_title_text(content: str) -> str:
