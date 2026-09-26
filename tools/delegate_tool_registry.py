@@ -15,14 +15,17 @@ logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the 
 _spawn_pause_lock = threading.Lock()
 _spawn_paused: bool = False
 _active_subagents_lock = threading.Lock()
-# subagent_id -> mutable record tracking the live child agent.  Stays only
-# for the lifetime of the run; _run_single_child is the owner.
+# subagent_id -> mutable record tracking a native child or SDK task. Native
+# children live for the run; SDK terminal records stay briefly for snapshots.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
 # subagent_id -> {goal, delegation_id, owner_agent_session_id} retained AFTER the child finishes (bounded FIFO).
 # Child-started background processes routinely outlive the child (its npm ci with notify_on_complete=true finishes
 # after the summary was delivered); their completion notifications reach the parent via the shared completion_queue
 # and need delegation attribution even though the live registry entry is gone.
 _RECENT_SUBAGENTS_CAP = 200
+# SDK terminal rows remain available to the gateway snapshot briefly so a woken
+# desktop turn can reconcile the completion frame before the next poll.
+_SDK_TERMINAL_TTL_SECONDS = 300
 # In-memory tail buffer for SDK child text; the full history lives in the CLI's own transcript.
 _SDK_TRANSCRIPT_BUFFER_CHARS = 16384
 _recent_subagents: Dict[str, Dict[str, Any]] = {}
@@ -131,8 +134,12 @@ def update_sdk_subagent(
                     int(record.get("transcript_dropped") or 0)
                     + max(0, len(joined) - _SDK_TRANSCRIPT_BUFFER_CHARS))
         elif event_type == "subagent.complete":
-            _active_subagents.pop(sid, None)
-            return
+            record["status"] = str(status or "completed")
+            record["accepting_steer"] = False
+            completed_at = record["completed_at"] = time.time()
+            expiry = threading.Timer(_SDK_TERMINAL_TTL_SECONDS, _expire_sdk_subagent, (sid, completed_at))
+            expiry.daemon = True
+            expiry.start()
         if record is not None:
             if sdk_session is not None:
                 record["sdk_session"] = sdk_session
@@ -187,6 +194,14 @@ def _register_subagent(record: Dict[str, Any]) -> None:
         progress_module._active_subagents = _active_subagents
     with _active_subagents_lock:
         _active_subagents[sid] = record
+
+
+def _expire_sdk_subagent(subagent_id: str, completed_at: float) -> None:
+    with _active_subagents_lock:
+        record = _active_subagents.get(subagent_id)
+        if record and record.get("kind") == "sdk" and record.get("completed_at") == completed_at:
+            _active_subagents.pop(subagent_id, None)
+
 
 def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
     """Drop the live record (exact agent identity when given) and keep a bounded attribution stub."""
@@ -310,7 +325,11 @@ def list_active_subagents() -> List[Dict[str, Any]]:
     """Copy of the running subagent tree ({subagent_id, parent_id, depth, goal, model,
     started_at, tool_count, status, ...}); safe from any thread."""
     with _active_subagents_lock:
-        return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
+        return [
+            {k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS}
+            for r in _active_subagents.values()
+            if r.get("kind") != "sdk" or r.get("completed_at") is None
+        ]
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:
     """True when *child_agent* sits below *parent_agent* in the spawn tree (walks the ``_delegate_parent_ref`` weakref

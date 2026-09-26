@@ -2070,6 +2070,7 @@ export interface SubagentListResult {
 /** ``methods_subagents._SUBAGENT_SNAPSHOT_FIELDS`` projection of one live child record. */
 export interface SubagentSnapshot {
   subagent_id: string
+  kind?: string | null
   parent_id?: string | null
   depth?: number | null
   goal?: string | null
@@ -4635,6 +4636,7 @@ export interface SubagentEventPayload {
   task_index: number
   subagent_id?: string | null
   parent_id?: string | null
+  parent_tool_id?: string | null
   child_session_id?: string | null
   delegation_id?: string | null
   depth?: number | null
@@ -4654,6 +4656,8 @@ export interface SubagentEventPayload {
   summary?: string | null
   duration_seconds?: number | null
   tool_preview?: string | null
+  usage?: Record<string, unknown> | null
+  subagent_meta?: Record<string, unknown> | null
 }
 /** ``tools/delegate_tool_results.py::_extract_output_tail`` row. */
 export interface SubagentOutputTailEntry {

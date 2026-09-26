@@ -171,7 +171,7 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
   }
 
   if (SUBAGENT_EVENT_TYPES.has(event.type)) {
-    if (sessionId && payload && !sessionInterrupted(sessionId)) {
+    if (sessionId && payload) {
       if (!nativeSubagentSessionsRef.current.has(sessionId)) {
         pruneDelegateFallbackSubagents(sessionId)
       }

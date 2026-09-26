@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $sessionStates } from '@/store/session-states'
 import { $subagentsBySession, upsertSubagent } from '@/store/subagents'
 
 import { ComposerStatusStack } from './index'
@@ -113,4 +115,33 @@ it('renders status-stack row title from goal for an SDK-shaped payload', () => {
 
   fireEvent.click(screen.getByRole('button', { name: /1 Subagent/ }))
   expect(screen.getByText('SDK researcher goal')).toBeTruthy()
+})
+
+it('keeps a completed subagent visible in the composer until the turn settles', () => {
+  const activeTurn = { ...createClientSessionState(null), busy: true, turnLive: true }
+  $sessionStates.set({ owner: activeTurn })
+
+  upsertSubagent('owner', {
+    subagent_id: 'finished-child',
+    goal: 'Finished research'
+  })
+  upsertSubagent('owner', {
+    subagent_id: 'finished-child',
+    status: 'completed'
+  }, false, 'subagent.complete')
+
+  const view = render(
+    <MemoryRouter>
+      <ComposerStatusStack queue={null} sessionId="owner" />
+    </MemoryRouter>
+  )
+
+  const header = screen.getByRole('button', { name: /1 Subagent/ })
+  fireEvent.click(header)
+  expect(screen.getByText('Finished research')).toBeTruthy()
+  expect(view.container.querySelector('[data-slot="composer-subagents"] .codicon-check')).toBeTruthy()
+
+  act(() => $sessionStates.set({ owner: { ...activeTurn, busy: false, turnLive: false } }))
+  expect(screen.queryByText('Finished research')).toBeNull()
+  $sessionStates.set({})
 })

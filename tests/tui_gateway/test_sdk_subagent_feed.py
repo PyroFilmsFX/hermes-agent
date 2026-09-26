@@ -109,6 +109,34 @@ def test_task_lifecycle_emits_one_complete_for_notification_then_update():
     assert events[2][4]["status"] == "completed"
 
 
+def test_subagent_progress_forwards_metadata_usage_and_parent_tool_id(monkeypatch):
+    from tui_gateway import server
+    from tui_gateway.contracts.events import SubagentEventPayload
+
+    frames = []
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload: frames.append((event, sid, payload)))
+    monkeypatch.setattr(server, "_mirror_subagent_to_child", lambda *args: None)
+
+    server._progress_subagent(
+        "parent-session",
+        "Agent",
+        "",
+        {
+            "goal": "research the issue",
+            "parent_tool_id": "tool-1",
+            "subagent_meta": {"display_name": "Researcher", "requested_model": "model-x"},
+            "usage": {"input_tokens": 12},
+        },
+        "subagent.start",
+    )
+
+    payload = frames[0][2]
+    assert payload["parent_tool_id"] == "tool-1"
+    assert payload["subagent_meta"]["display_name"] == "Researcher"
+    assert payload["usage"] == {"input_tokens": 12}
+    SubagentEventPayload.model_validate(payload)
+
+
 def test_child_tool_and_text_are_scoped_and_not_top_level_cards():
     events = []
     session = _session(events)

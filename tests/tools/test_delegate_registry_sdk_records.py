@@ -24,7 +24,10 @@ def test_sdk_record_has_separate_kind_and_retains_mirrored_text(monkeypatch):
     assert record["sdk_session"] is session
 
     registry.update_sdk_subagent("subagent.complete", task_id="task-1", status="completed")
-    assert "task-1" not in registry._active_subagents
+    record = registry._active_subagents["task-1"]
+    assert record["status"] == "completed"
+    assert record["accepting_steer"] is False
+    assert all(row["subagent_id"] != "task-1" for row in registry.list_active_subagents())
 
 
 def test_sdk_record_does_not_replace_native_record(monkeypatch):

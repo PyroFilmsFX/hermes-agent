@@ -33466,6 +33466,18 @@
             "default": null,
             "title": "Parent Id"
           },
+          "parent_tool_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Parent Tool Id"
+          },
           "child_session_id": {
             "anyOf": [
               {
@@ -33704,6 +33716,32 @@
             ],
             "default": null,
             "title": "Tool Preview"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usage"
+          },
+          "subagent_meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subagent Meta"
           }
         },
         "required": [
@@ -33819,6 +33857,18 @@
           "subagent_id": {
             "title": "Subagent Id",
             "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
           },
           "parent_id": {
             "anyOf": [

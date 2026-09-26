@@ -22,6 +22,7 @@ import { atom, computed } from 'nanostores'
 import { routeSessionId } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, type LayoutNode } from '@/components/pane-shell/tree/model'
+import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import {
   $layoutTree,
   focusedSessionTabAnchor,
@@ -625,6 +626,7 @@ function handleTransition(previous: ClientSessionState | null, next: ClientSessi
     clearReadBaseline(storedId)
   } else if (!next.busy && wasWorking) {
     markSettled(storedId)
+    pruneFinishedSessionSubagents(runtimeId)
 
     // A PRIMARY reconnect reconcile is not a terminal event: it downgrades
     // EVERY busy claim on the socket, live turns included, so lighting the dot
@@ -725,6 +727,7 @@ export function isBackgroundDeliveryActive(sessionId: string): boolean {
  * unread-finished so the unread dot appears.
  */
 export function markBackgroundSessionFinished(sessionIdOrStoredId: string): void {
+  pruneFinishedSessionSubagents(sessionIdOrStoredId)
   const storedId = storedSessionIdForRuntimeId(sessionIdOrStoredId) ?? sessionIdOrStoredId
 
   if (!storedId) {
