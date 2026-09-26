@@ -120,6 +120,11 @@ class ClaudeSdkEventProjector:
     # ---------- per-type projections ----------
 
     def _project_assistant(self, message: Any) -> ProjectionResult:
+        if (
+            getattr(message, "error", None)
+            and getattr(message, "model", None) == "<synthetic>"
+        ):
+            return ProjectionResult()
         text_parts: list[str] = []
         tool_calls: list[dict] = []
         for block in getattr(message, "content", None) or []:
