@@ -5,6 +5,7 @@ import { reportFirstBuildTurnComplete } from '@/components/onboarding-chat/first
 import { translateNow } from '@/i18n'
 import { assistantTextPart, type ChatMessage, type PeerMetadata, textPart } from '@/lib/chat-messages'
 import {
+  nameWokenDividers,
   parsePeerMessageEnvelope,
   peerMessageLabel,
   sessionLifecycleBody,
@@ -33,6 +34,72 @@ import type { GatewayEventContext } from './types'
 
 let backgroundStreamMessageSeq = 0
 const nextBackgroundMessageId = (prefix: string) => `${prefix}-${Date.now()}-${++backgroundStreamMessageSeq}`
+
+// Background items that seal as their own system row (woken divider, peer card). They never take
+// over an assistant bubble, and an assistant item never takes over them.
+const SYSTEM_DELIVERY_KINDS = new Set(['peer_message', 'session_lifecycle'])
+
+/** The bubble one background delivery item streams into (#39).
+
+A woken SDK turn arrives in two phases under one delivery id. While the CLI runs it, the gateway paints
+a provisional bubble (tool cards, any relayed deltas) under the header. When the turn ends, the gateway
+replays the turn as ordered items (text, tool, peer_out, text ...), each wrapped in its own background
+message.start/complete, and persists one row per item. Pointing every item at the same
+assistant-stream-<delivery> id made each completion overwrite the one before it: earlier replies vanished,
+a peer card replaced the reply bubble and carried its tool cards, and the next reply replaced the card.
+
+So: the first replayed item supersedes the provisional bubble (its parts are replaced by the authoritative
+items that follow), and later items group the way hydration groups the persisted rows. A tool item
+continues the delivery's trailing assistant bubble; a text item continues it only when that bubble holds
+a tool call (hydration merges text into an active assistant only across tool rows); anything else, and
+every item after a system row, opens a fresh bubble. */
+function deliveryItemStreamTarget(
+  messages: ChatMessage[],
+  deliveryId: string,
+  displayKind: string | undefined
+): { messages: ChatMessage[]; streamId: null | string } {
+  if (displayKind && SYSTEM_DELIVERY_KINDS.has(displayKind)) {
+    return { messages, streamId: null }
+  }
+
+  const liveId = 'assistant-stream-' + deliveryId
+  const live = messages.find(message => message.id === liveId)
+
+  if (live && live.completedAt === undefined) {
+    // An unsealed bubble under this id is the live phase's provisional paint, or an item start
+    // that never completed: either way the items replayed from here on are what the turn persisted.
+    return {
+      messages: messages.map(message => (message.id === liveId ? { ...message, parts: [] } : message)),
+      streamId: liveId
+    }
+  }
+
+  const last = messages.findLast(message => !message.hidden)
+
+  const continuesLast =
+    last?.role === 'assistant' &&
+    last.deliveryId === deliveryId &&
+    (displayKind !== 'sdk_background_result' || last.parts.some(part => part.type === 'tool-call'))
+
+  if (continuesLast) {
+    return { messages, streamId: last.id }
+  }
+
+  return { messages, streamId: live ? nextBackgroundMessageId(liveId) : liveId }
+}
+
+/** Parts of an assistant bubble a background item seals. An unsealed bubble holds this item's own
+ *  streamed deltas, which the final text replaces (tool cards stay). A bubble an earlier item of the
+ *  same delivery already sealed holds that item's reply, which this item's text follows. */
+function sealedAssistantParts(existing: ChatMessage | null | undefined, finalText: string, occurredAt: number) {
+  const kept = !existing
+    ? []
+    : existing.completedAt === undefined
+      ? existing.parts.filter(part => part.type === 'tool-call')
+      : existing.parts
+
+  return finalText ? [...kept, { ...assistantTextPart(finalText, occurredAt), completedAt: occurredAt }] : kept
+}
 
 function parseDisplayMetadata(metadata: unknown): null | Record<string, unknown> {
   let parsed: unknown = metadata
@@ -193,9 +260,14 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       // For background:true: message.start must NOT touch busy/awaitingResponse/interrupted
       // (it is not the user's turn) and must not be refused when interrupted.
       setBackgroundDeliveryActive(sessionId, true)
+
+      const startDisplayKind =
+        payload && 'display_kind' in payload ? String((payload as Record<string, unknown>).display_kind) : undefined
+
       updateSessionState(sessionId, state => {
-        let messages = state.messages
-        let streamId = deliveryId ? `assistant-stream-${deliveryId}` : nextBackgroundMessageId('background-stream')
+        const itemTarget = deliveryId ? deliveryItemStreamTarget(state.messages, deliveryId, startDisplayKind) : null
+        let messages = itemTarget ? itemTarget.messages : state.messages
+        const streamId: null | string = itemTarget ? itemTarget.streamId : nextBackgroundMessageId('background-stream')
 
         if (deliveryId && payload?.user_message) {
           const userText = (payload.user_message || '').trim()
@@ -203,11 +275,11 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           if (userText) {
             const peerMessageId = `peer-msg-${deliveryId}`
 
-            const alreadyHasPeer = state.messages.some(
-              m =>
-                (m.deliveryId === deliveryId &&
-                  (m.role === 'user' || (m.role === 'system' && m.peerMetadata?.direction === 'in'))) ||
-                m.id === peerMessageId
+            // The SDK header sends the woken divider's own label as user_message when no peer card
+            // came with it (task notification, monitor wake). That label is already on screen as the
+            // divider and no user row is persisted for it, so any header row of this delivery wins.
+            const alreadyHasPeer = messages.some(
+              m => (m.deliveryId === deliveryId && (m.role === 'user' || m.role === 'system')) || m.id === peerMessageId
             )
 
             if (!alreadyHasPeer) {
@@ -219,7 +291,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
                 deliveryId
               }
 
-              messages = [...state.messages, peerMessage]
+              messages = [...messages, peerMessage]
             }
           }
         }
@@ -531,8 +603,10 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       updateSessionState(sessionId, state => {
         const effectiveDeliveryId = deliveryId ?? state.deliveryId ?? undefined
         const streamId = state.streamId
-        const existing = streamId ? state.messages.find(m => m.id === streamId) : null
-        const existingToolParts = existing ? existing.parts.filter(p => p.type === 'tool-call') : []
+        const systemRow = displayKind !== undefined && SYSTEM_DELIVERY_KINDS.has(displayKind)
+        // A system row (divider, peer card) seals as its own row: it never replaces the assistant
+        // bubble in flight, and never carries that bubble's tool cards along as stray labels.
+        const existing = streamId && !systemRow ? state.messages.find(m => m.id === streamId) : null
 
         let sealedMessage: ChatMessage
 
@@ -544,7 +618,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           sealedMessage = {
             id: existing?.id ?? nextBackgroundMessageId('lifecycle'),
             role: 'system',
-            parts: [{ type: 'text', text: label, timestamp: occurredAt }, ...existingToolParts],
+            parts: [{ type: 'text', text: label, timestamp: occurredAt }],
             ...(lifecycleBody ? { asyncResult: lifecycleBody } : {}),
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
@@ -585,7 +659,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
                 ? displayMetadata.from_session_id
                 : typeof displayMetadata?.sender_sid === 'string'
                   ? displayMetadata.sender_sid
-                  : undefined,
+                  : parsePeerMessageEnvelope(finalText)?.senderSid,
             to: typeof displayMetadata?.to === 'string' ? displayMetadata.to : undefined,
             msg_id: msgId,
             via: typeof displayMetadata?.via === 'string' ? displayMetadata.via : undefined,
@@ -596,7 +670,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           sealedMessage = {
             id: existing?.id ?? nextBackgroundMessageId('peer'),
             role: 'system',
-            parts: [{ type: 'text', text: label, timestamp: occurredAt }, ...existingToolParts],
+            parts: [{ type: 'text', text: label, timestamp: occurredAt }],
             asyncResult: finalText,
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
@@ -607,9 +681,9 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         } else {
           // sdk_background_result or general background completion
           sealedMessage = {
-            id: existing?.id ?? nextBackgroundMessageId('assistant'),
+            id: existing?.id ?? streamId ?? nextBackgroundMessageId('assistant'),
             role: 'assistant',
-            parts: [...existingToolParts, { ...assistantTextPart(finalText, occurredAt), completedAt: occurredAt }],
+            parts: sealedAssistantParts(existing, finalText, occurredAt),
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
             pending: false,
@@ -639,13 +713,16 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
             ? -1
             : duplicateTailAssistantIndex(state.messages, finalText)
 
-        const deliveryIndex = effectiveDeliveryId
-          ? state.messages.findLastIndex(
-              m =>
-                m.role === 'assistant' &&
-                (m.deliveryId === effectiveDeliveryId || m.id === `assistant-stream-${effectiveDeliveryId}`)
-            )
-          : -1
+        // Only a completion with no item start of its own (its stream was sealed by an interim) looks
+        // the delivery's bubble up; an item that opened a stream owns exactly that bubble.
+        const deliveryIndex =
+          effectiveDeliveryId && !streamId && sealedMessage.role === 'assistant'
+            ? state.messages.findLastIndex(
+                m =>
+                  m.role === 'assistant' &&
+                  (m.deliveryId === effectiveDeliveryId || m.id === `assistant-stream-${effectiveDeliveryId}`)
+              )
+            : -1
 
         if (existing && streamId) {
           nextMessages = state.messages.map(m => (m.id === streamId ? sealedMessage : m))
@@ -663,6 +740,10 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           )
         } else {
           nextMessages = [...state.messages, sealedMessage]
+        }
+
+        if (systemRow && effectiveDeliveryId) {
+          nextMessages = nameWokenDividers(nextMessages)
         }
 
         return {
