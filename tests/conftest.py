@@ -265,6 +265,14 @@ def _looks_like_credential(name: str) -> bool:
 # HERMES_* vars that change test behavior by being set. Unset all of these
 # unconditionally — individual tests that need them set do so explicitly.
 _HERMES_BEHAVIORAL_VARS = frozenset({
+    # Test-runner selection knobs (scripts/run_tests.sh exports them to every
+    # per-file pytest). Tests that spawn the runner on a probe dir would inherit
+    # them — under CI's HERMES_TEST_SLICE=4/4 the probe slices down to 0 files.
+    "HERMES_TEST_SLICE",
+    "HERMES_TEST_PATHS",
+    "HERMES_TEST_WORKERS",
+    "HERMES_TEST_FILE_TIMEOUT",
+    "HERMES_TEST_FILE_RETRIES",
     # Voice/TTS runtime flags. ``tui_gateway/server.py`` reads these straight
     # off ``os.environ`` at call time (``_voice_mode_enabled`` /
     # ``_voice_tts_enabled``) and, on every completed turn, hands the turn's
