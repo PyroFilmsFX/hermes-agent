@@ -1,0 +1,53 @@
+# cntrl fork only: full per-file suite on free GitHub-hosted runners, sliced 4 ways.
+# Upstream's tests.yml is workflow_call-only on a 96-core org runner a personal fork doesn't
+# have. Push triggers work from any branch that carries this file; enabling Actions on the fork
+# and switching its default branch are owner decisions (manager relay, 2026-09-25).
+name: cntrl fork tests
+
+on:
+  push:
+    branches: [cntrl-hermes, cntrl-hermes-worker, "sync/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cntrl-fork-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'PyroFilmsFX/hermes-agent'
+    name: Tests (slice ${{ matrix.slice }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        # Same extras as upstream's tests.yml, plus the fork's Claude Agent SDK lane.
+        run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web --extra claude-agent-sdk
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh
+        env:
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/4
+          HERMES_TEST_WORKERS: "4"
