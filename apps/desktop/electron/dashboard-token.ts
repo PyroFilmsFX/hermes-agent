@@ -1,6 +1,13 @@
 /**
  * Helpers for local dashboard session-token discovery.
  *
+ * LEGACY ONLY. Current backends never put the token in `GET /` (P0
+ * 2026-09-26): any same-user process could read it there. Main uses these
+ * only for backends that still serve it: a local runtime on the env handoff
+ * (no `--session-token-file`), an older SSH remote, or an older host backend.
+ * For every current backend the fetch finds no token and the caller keeps
+ * the token it minted.
+ *
  * The desktop main process can pass HERMES_DASHBOARD_SESSION_TOKEN when it
  * spawns the local dashboard, but the dashboard is the source of truth for the
  * token it actually serves to the renderer. If those drift, HTTP readiness

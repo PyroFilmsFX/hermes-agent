@@ -338,7 +338,9 @@ def _profile_action_environment(
     """
     profile = _named_profile_from_action(subcommand)
     if profile is None:
-        action_env = dict(os.environ)
+        from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
+        action_env = scrub_desktop_control_plane_env(dict(os.environ))
     else:
         from hermes_cli.env_loader import (
             _PROFILE_MANAGED_ENV_KEYS, _env_keys_defined_in_dotenv, get_secret_source_values,

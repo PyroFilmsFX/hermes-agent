@@ -107,6 +107,7 @@ def main():
         sys.exit(1)
 
     access_token = get_valid_token()
+    # control-plane-env: standalone skill script; it runs inside the agent's already-scrubbed shell env
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_TOKEN"] = access_token
 

@@ -5040,15 +5040,14 @@ class TestServeIndexMissingIndex:
 
 
 class TestHeadlessServeTokenPage:
-    """Headless `hermes serve` must serve the Desktop token handshake page
-    at `/` when the dashboard auth gate is off (#94227).
+    """Headless `hermes serve` must NEVER hand the session token to an unauthenticated
+    request (P0 2026-09-26).
 
-    The Electron renderer boots by fetching `/` and extracting
-    ``window.__HERMES_SESSION_TOKEN__`` for WebSocket auth. Headless serve
-    used to 404 every path, so after an update replaced the backend (and
-    the spawn-token env pin no longer matched the token the new backend
-    generated) the renderer was stuck with a stale token, /api/ws rejected
-    it, and the window white-screened (#95575).
+    It used to serve ``window.__HERMES_SESSION_TOKEN__`` at `/` whenever the auth gate was off
+    (#94227/#95575), which is always true for the loopback Desktop backend, so any same-user
+    process (every agent included) could read the token and drive /api/ws as the Desktop.
+    Electron now takes the token from its own spawn record and hands it to the renderer over
+    IPC; the page keeps only the headless message.
     """
 
     @staticmethod
@@ -5063,44 +5062,39 @@ class TestHeadlessServeTokenPage:
         _web_server_dashboard.mount_spa(spa_app)
         return TestClient(spa_app), ws
 
-    def test_root_serves_token_page_when_not_gated(self, monkeypatch):
-        import re
+    def test_root_on_ungated_headless_backend_never_carries_the_token(self, monkeypatch):
+        import hermes_cli.web_server as ws
 
+        monkeypatch.setattr(ws, "_SESSION_TOKEN", "desktop-spawn-token-must-not-leak")
         client, ws = self._headless_client(monkeypatch, gated=False)
         resp = client.get("/")
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/html")
         assert "no-store" in resp.headers.get("cache-control", "")
-        # Must match the desktop's extraction regex exactly
-        # (apps/desktop/electron/dashboard-token.ts).
-        match = re.search(
-            r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:\\.|[^"\\])*")',
-            resp.text,
-        )
-        assert match, resp.text
-        import json as _json
+        assert "desktop-spawn-token-must-not-leak" not in resp.text
+        assert "__HERMES_SESSION_TOKEN__" not in resp.text
+        assert "Headless backend" in resp.text
 
-        assert _json.loads(match.group(1)) == ws._SESSION_TOKEN
-        assert "window.__HERMES_AUTH_REQUIRED__=false" in resp.text
-
-    def test_root_uses_ssh_token_applied_after_spa_mount(self, monkeypatch):
-        import json
-        import re
-
+    def test_root_never_carries_an_ssh_token_applied_after_mount(self, monkeypatch):
         import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "_SESSION_TOKEN", "before-mount")
         client, ws = self._headless_client(monkeypatch, gated=False)
 
-        ws._apply_ssh_session_token("after-mount")
+        ws._apply_ssh_session_token("after-mount-ssh-token")
         resp = client.get("/")
-        match = re.search(
-            r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:\\.|[^"\\])*")',
-            resp.text,
-        )
+        assert "after-mount-ssh-token" not in resp.text
+        assert "before-mount" not in resp.text
+        assert "__HERMES_SESSION_TOKEN__" not in resp.text
 
-        assert match, resp.text
-        assert json.loads(match.group(1)) == "after-mount"
+    def test_query_strings_and_headers_do_not_unlock_the_token(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "_SESSION_TOKEN", "desktop-spawn-token-must-not-leak")
+        client, ws = self._headless_client(monkeypatch, gated=False)
+        for route in ("/", "/?token=1", "/index.html", "//"):
+            resp = client.get(route, headers={"Origin": "http://127.0.0.1", "Sec-Fetch-Site": "same-origin"})
+            assert "desktop-spawn-token-must-not-leak" not in resp.text, route
 
     def test_root_stays_404_json_when_auth_gated(self, monkeypatch):
         client, ws = self._headless_client(monkeypatch, gated=True)

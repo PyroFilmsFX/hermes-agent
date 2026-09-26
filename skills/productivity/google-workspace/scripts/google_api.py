@@ -87,6 +87,7 @@ def _gws_binary() -> str | None:
 
 
 def _gws_env() -> dict[str, str]:
+    # control-plane-env: standalone skill script; it runs inside the agent's already-scrubbed shell env
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
     return env

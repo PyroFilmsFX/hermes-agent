@@ -200,6 +200,12 @@ import {
 } from './desktop-profile'
 import { resolveDesktopRemoteRoute, v1SshTerminalPoolKey } from './desktop-remote-route'
 import {
+  applySessionTokenHandoff,
+  createSessionTokenFiles,
+  createSessionTokenFileSupportResolver,
+  type SessionTokenHandoff
+} from './desktop-session-token-file'
+import {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
   type DesktopUninstallResult,
@@ -2645,6 +2651,62 @@ async function unwrapWindowsVenvHermesCommand(command, backendArgs) {
 // subcommand (would brick every user mid-upgrade — #54568 follow-up).
 // Fast-path / probe / cache strategy: see backend-serve-support.ts header.
 const backendSupportsServe = createBackendServeSupportResolver(HERMES_HOME, rememberLog)
+
+// Private one-shot session-token files for local backends (P0 2026-09-26):
+// the token reaches the backend on a 0600 file named by `--session-token-file`
+// instead of the inherited HERMES_DASHBOARD_SESSION_TOKEN env var. Runtimes
+// without the flag keep the env handoff. See desktop-session-token-file.ts.
+const sessionTokenFiles = createSessionTokenFiles({
+  fs,
+  homedir: () => os.homedir(),
+  randomHex: bytes => crypto.randomBytes(bytes).toString('hex'),
+  platform: process.platform
+})
+
+function runServeHelp(command: string, args: string[], candidate: { root?: string; env?: Record<string, string> }) {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: candidate.root || undefined,
+      env: { ...process.env, HERMES_HOME, ...(candidate.env || {}) },
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: PROBE_TIMEOUT_MS,
+      windowsHide: true
+    })
+
+    let out = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', chunk => {
+      out += chunk
+    })
+    child.once('error', reject)
+    child.once('close', code => (code === 0 && !child.killed ? resolve(out) : reject(new Error(`serve --help exited ${code}`))))
+  })
+}
+
+const backendSupportsSessionTokenFile = createSessionTokenFileSupportResolver({
+  readFile: target => fs.promises.readFile(target, 'utf8'),
+  runHelp: runServeHelp,
+  log: rememberLog
+})
+
+// Token handoff for one local spawn: a private file when the runtime's `serve`
+// accepts `--session-token-file`, else the legacy env var. The legacy
+// `dashboard --no-open` fallback never gets the flag.
+async function prepareSessionTokenHandoff(backend, token: string): Promise<SessionTokenHandoff | null> {
+  if (!backend.args.includes('serve') || !(await backendSupportsSessionTokenFile(backend))) {
+    return null
+  }
+
+  try {
+    return sessionTokenFiles.write(token)
+  } catch (error) {
+    rememberLog(
+      `[backend] could not write the private session token file (${error instanceof Error ? error.message : String(error)}); using the environment handoff`
+    )
+
+    return null
+  }
+}
 
 // Given a resolved backend whose args target `serve`, return the args the
 // runtime actually understands: unchanged when `serve` is supported, or
@@ -11714,39 +11776,69 @@ async function spawnPoolBackend(
   const backendNonce = crypto.randomBytes(16).toString('hex')
   const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
   assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
+  const tokenHandoff = await prepareSessionTokenHandoff(backend, token)
 
-  const child = spawnOwnedBackend(
-    backend.command,
+  try {
+    assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
+  } catch (error) {
+    sessionTokenFiles.remove(tokenHandoff?.dir)
+    throw error
+  }
+
+  // The token goes in a private file named on argv when the runtime supports
+  // it, and in the env only for runtimes that predate the flag.
+  const spawnPlan = applySessionTokenHandoff(
     backend.args,
-    hiddenWindowsChildOptions({
-      cwd: hermesCwd,
-      env: desktopBackendSpawnEnv(
-        {
-          // Never another profile's dotenv credentials from the Desktop env (#68367).
-          ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile }),
-          HERMES_HOME,
-          ...backend.env,
-          // Pin the gateway's tool/terminal cwd to the same directory we chose for
-          // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
-          // can still point at the install dir even when spawn cwd is home.
-          TERMINAL_CWD: hermesCwd,
-          HERMES_DASHBOARD_SESSION_TOKEN: token,
-          // Marks this dashboard backend as desktop-spawned so it runs the cron
-          // scheduler tick loop (the gateway isn't running under the app).
-          HERMES_DESKTOP: '1',
-          // Exact parent identity lets the backend self-exit after an unclean
-          // Desktop death without mistaking a reused PID for its owner. If the
-          // optional marker probe fails, retain legacy PID-only tracking.
-          ...parentIdentityEnv,
-          HERMES_WEB_DIST: webDist,
-          ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
-        },
-        GUEST_ONBOARDING
-      ),
-      shell: backend.shell,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
+    desktopBackendSpawnEnv(
+      {
+        // Never another profile's dotenv credentials from the Desktop env (#68367).
+        ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile }),
+        HERMES_HOME,
+        ...backend.env,
+        // Pin the gateway's tool/terminal cwd to the same directory we chose for
+        // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
+        // can still point at the install dir even when spawn cwd is home.
+        TERMINAL_CWD: hermesCwd,
+        // Marks this dashboard backend as desktop-spawned so it runs the cron
+        // scheduler tick loop (the gateway isn't running under the app).
+        HERMES_DESKTOP: '1',
+        // Exact parent identity lets the backend self-exit after an unclean
+        // Desktop death without mistaking a reused PID for its owner. If the
+        // optional marker probe fails, retain legacy PID-only tracking.
+        ...parentIdentityEnv,
+        HERMES_WEB_DIST: webDist,
+        ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
+      },
+      GUEST_ONBOARDING
+    ),
+    tokenHandoff,
+    token
   )
+
+  backend.args = spawnPlan.args
+
+  let child
+
+  try {
+    child = spawnOwnedBackend(
+      backend.command,
+      backend.args,
+      hiddenWindowsChildOptions({
+        cwd: hermesCwd,
+        env: spawnPlan.env,
+        shell: backend.shell,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    )
+  } catch (error) {
+    sessionTokenFiles.remove(tokenHandoff?.dir)
+    throw error
+  }
+
+  // The backend unlinks the file as soon as it reads it; the directory goes
+  // when the child does, whatever the reason.
+  child.once('exit', () => sessionTokenFiles.remove(tokenHandoff?.dir))
+  child.once('error', () => sessionTokenFiles.remove(tokenHandoff?.dir))
 
   entry.process = child
   entry.token = token
@@ -11824,11 +11916,17 @@ async function spawnPoolBackend(
 
   const childAlive = () => child.exitCode === null && !child.killed
 
-  const authToken = await adoptServedDashboardToken(baseUrl, token, {
-    childAlive,
-    label: `Hermes backend for profile "${profile}"`,
-    rememberLog
-  })
+  // File handoff: the backend adopted exactly the token we wrote, and it no
+  // longer serves any token at `GET /`, so the spawn record is the only
+  // source. The `/` read survives only for legacy env-handoff runtimes, which
+  // still serve it themselves.
+  const authToken = tokenHandoff
+    ? token
+    : await adoptServedDashboardToken(baseUrl, token, {
+        childAlive,
+        label: `Hermes backend for profile "${profile}"`,
+        rememberLog
+      })
 
   assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
 
@@ -11843,6 +11941,7 @@ async function spawnPoolBackend(
     WebSocketImpl: globalThis.WebSocket,
     ...spawnedBackendProbeOptions(childAlive)
   })
+
   assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
 
   if (!wsProbe.ok) {
@@ -12565,44 +12664,74 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)
+    const tokenHandoff = await prepareSessionTokenHandoff(backend, token)
 
-    const hermesProcess = spawnOwnedBackend(
-      backend.command,
+    try {
+      backendConnectionState.assertCurrentAttempt(connectionAttempt)
+    } catch (error) {
+      sessionTokenFiles.remove(tokenHandoff?.dir)
+      throw error
+    }
+
+    // The token goes in a private file named on argv when the runtime supports
+    // it, and in the env only for runtimes that predate the flag.
+    const spawnPlan = applySessionTokenHandoff(
       backend.args,
-      hiddenWindowsChildOptions({
-        cwd: hermesCwd,
-        env: desktopBackendSpawnEnv(
-          {
-            // Never another profile's dotenv credentials from the Desktop env (#68367).
-            ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: activeProfile }),
-            // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
-            // resolves to the SAME location our resolveHermesHome() picked. Without
-            // this pin, Python falls back to ~/.hermes on every platform — fine on
-            // mac/linux (where our default matches), but on Windows our default is
-            // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
-            // Mismatch would split config / sessions / .env / logs across two
-            // directories. install.ps1 sets HERMES_HOME via setx; the desktop
-            // can't reliably do that, so we set it inline for every spawn.
-            HERMES_HOME,
-            ...backend.env,
-            TERMINAL_CWD: hermesCwd,
-            HERMES_DASHBOARD_SESSION_TOKEN: token,
-            // Marks this dashboard backend as desktop-spawned so it runs the cron
-            // scheduler tick loop (the gateway isn't running under the app).
-            HERMES_DESKTOP: '1',
-            // Exact parent identity lets the backend self-exit after an unclean
-            // Desktop death without mistaking a reused PID for its owner. If the
-            // optional marker probe fails, retain legacy PID-only tracking.
-            ...parentIdentityEnv,
-            HERMES_WEB_DIST: webDist,
-            ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
-          },
-          GUEST_ONBOARDING
-        ),
-        shell: backend.shell,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
+      desktopBackendSpawnEnv(
+        {
+          // Never another profile's dotenv credentials from the Desktop env (#68367).
+          ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: activeProfile }),
+          // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
+          // resolves to the SAME location our resolveHermesHome() picked. Without
+          // this pin, Python falls back to ~/.hermes on every platform — fine on
+          // mac/linux (where our default matches), but on Windows our default is
+          // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
+          // Mismatch would split config / sessions / .env / logs across two
+          // directories. install.ps1 sets HERMES_HOME via setx; the desktop
+          // can't reliably do that, so we set it inline for every spawn.
+          HERMES_HOME,
+          ...backend.env,
+          TERMINAL_CWD: hermesCwd,
+          // Marks this dashboard backend as desktop-spawned so it runs the cron
+          // scheduler tick loop (the gateway isn't running under the app).
+          HERMES_DESKTOP: '1',
+          // Exact parent identity lets the backend self-exit after an unclean
+          // Desktop death without mistaking a reused PID for its owner. If the
+          // optional marker probe fails, retain legacy PID-only tracking.
+          ...parentIdentityEnv,
+          HERMES_WEB_DIST: webDist,
+          ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
+        },
+        GUEST_ONBOARDING
+      ),
+      tokenHandoff,
+      token
     )
+
+    backend.args = spawnPlan.args
+
+    let hermesProcess
+
+    try {
+      hermesProcess = spawnOwnedBackend(
+        backend.command,
+        backend.args,
+        hiddenWindowsChildOptions({
+          cwd: hermesCwd,
+          env: spawnPlan.env,
+          shell: backend.shell,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+      )
+    } catch (error) {
+      sessionTokenFiles.remove(tokenHandoff?.dir)
+      throw error
+    }
+
+    // The backend unlinks the file as soon as it reads it; the directory goes
+    // when the child does, whatever the reason.
+    hermesProcess.once('exit', () => sessionTokenFiles.remove(tokenHandoff?.dir))
+    hermesProcess.once('error', () => sessionTokenFiles.remove(tokenHandoff?.dir))
 
     // Buffer stdout+stderr from the instant of spawn (#93608): an early
     // crash's traceback must survive into the claim error and the
@@ -12746,10 +12875,18 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
 
     const childAlive = () => hermesProcess.exitCode === null && !hermesProcess.killed
 
-    const authToken = await adoptServedDashboardToken(baseUrl, token, {
-      childAlive,
-      rememberLog
-    })
+    // File handoff: the backend adopted exactly the token we wrote and serves
+    // no token at `GET /`, so the spawn record is the only source. A backend
+    // that disagrees fails the /api/ws probe below, which fails this start
+    // rather than adopting a token from anywhere else; the next start spawns
+    // a fresh backend with a fresh token.
+    // The `/` read survives only for legacy env-handoff runtimes.
+    const authToken = tokenHandoff
+      ? token
+      : await adoptServedDashboardToken(baseUrl, token, {
+          childAlive,
+          rememberLog
+        })
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)
 
@@ -17023,6 +17160,7 @@ app.on('before-quit', () => {
 // Close the pooled keep-alive sockets on quit so lingering connections can't
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
+  sessionTokenFiles.removeAll()
   sshIsolatedKeepalives.stopAll()
   destroyKeepaliveAgents()
   nativeNotifications.dispose()

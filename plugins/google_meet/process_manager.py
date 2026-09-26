@@ -78,8 +78,10 @@ def start(url: str, *, out_dir: Optional[Path] = None, headed: bool = False,
     for name in ("transcript.txt", "status.json"):
         with contextlib.suppress(OSError):
             (out / name).unlink()
-    env = {**os.environ, "HERMES_MEET_URL": url, "HERMES_MEET_OUT_DIR": str(out),
-           "HERMES_MEET_GUEST_NAME": guest_name}
+    from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
+    env = scrub_desktop_control_plane_env({**os.environ, "HERMES_MEET_URL": url, "HERMES_MEET_OUT_DIR": str(out),
+                                           "HERMES_MEET_GUEST_NAME": guest_name})
     for value, var in (
         (headed and "1", "HERMES_MEET_HEADED"),
         (auth_state, "HERMES_MEET_AUTH_STATE"),

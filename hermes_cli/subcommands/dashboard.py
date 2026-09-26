@@ -54,6 +54,9 @@ def _configure_serve_parser(parser, *, cmd_dashboard: Callable) -> None:
         "--ssh-session-token-file", dest="ssh_session_token_file", metavar="PATH", default=None,
         help="Read a one-shot Desktop SSH session token from PATH")
     parser.add_argument(
+        "--session-token-file", dest="desktop_session_token_file", metavar="PATH", default=None,
+        help="Read a one-shot local Desktop session token from PATH (deleted after reading)")
+    parser.add_argument(
         "--ssh-owner-nonce", dest="ssh_owner_nonce", metavar="NONCE", default=None,
         help="Identify a Desktop-owned SSH backend process")
     parser.set_defaults(func=cmd_dashboard, no_open=True, headless_backend=True, command="serve")

@@ -41,6 +41,10 @@ DESKTOP_CONTROL_PLANE_ENV_KEYS: frozenset[str] = frozenset({
 PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS: frozenset[str] = frozenset({
     "HERMES_DASHBOARD_SESSION_TOKEN", "HERMES_DESKTOP_REMOTE_TOKEN", "HERMES_DESKTOP_CDP_PORT",
 })
+# The dashboard auth-provider secrets plugins read from ``os.environ`` at runtime: the only
+# control-plane names the seal leaves in the backend's own env (children still never get them).
+_RUNTIME_READ_CONTROL_PLANE_ENV_KEYS: frozenset[str] = (
+    DESKTOP_CONTROL_PLANE_ENV_KEYS - PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS)
 # Shape rule so a control-plane name added later is covered without editing the list: a
 # desktop/dashboard-owned name carrying a credential or debugger marker.
 _CONTROL_PLANE_ENV_PREFIXES = ("HERMES_DASHBOARD_", "HERMES_DESKTOP_")
@@ -56,6 +60,29 @@ def is_desktop_control_plane_env(name: str) -> bool:
         return True
     return upper.startswith(_CONTROL_PLANE_ENV_PREFIXES) and any(
         marker in upper[len("HERMES_"):] for marker in _CONTROL_PLANE_ENV_MARKERS)
+
+
+def is_process_sealed_control_plane_env(name: str) -> bool:
+    """True for a control-plane name the backend keeps OUT of its own ``os.environ`` once sealed:
+    every control-plane name except the auth-provider secrets plugins read at runtime. The
+    shape rule applies, so a future ``HERMES_DESKTOP_*_TOKEN`` is sealed without a list edit."""
+    return is_desktop_control_plane_env(name) and str(name).upper() not in _RUNTIME_READ_CONTROL_PLANE_ENV_KEYS
+
+
+# Set once by the backend's startup seal (``process_identity.seal_desktop_control_plane_env``).
+# After it, the dotenv loader refuses to re-publish sealed names: ``tui_gateway.server`` (and
+# every other late ``load_hermes_dotenv``) runs AFTER the seal, and a token persisted in ``.env``
+# would otherwise come straight back into ``os.environ`` for every implicit-inherit spawn.
+_CONTROL_PLANE_SEALED = False
+
+
+def mark_control_plane_sealed() -> None:
+    global _CONTROL_PLANE_SEALED
+    _CONTROL_PLANE_SEALED = True
+
+
+def control_plane_sealed() -> bool:
+    return _CONTROL_PLANE_SEALED
 
 
 def scrub_desktop_control_plane_env(env: _EnvT) -> _EnvT:

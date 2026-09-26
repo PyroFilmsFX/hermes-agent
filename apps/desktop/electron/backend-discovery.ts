@@ -8,9 +8,10 @@
 // Nothing new has to be published for this. The backend already writes a
 // machine-root `spawn-ledger.json` entry AFTER its socket binds
 // (`hermes_cli/process_identity.py::register_self`, called from
-// `web_server.py` with `detail={host, port, profile}`), and an ungated
-// loopback backend serves its session token at `GET /`
-// (`window.__HERMES_SESSION_TOKEN__`, `web_server_dashboard.py`). The ledger is
+// `web_server.py` with `detail={host, port, profile}`), and the backend
+// publishes its session token 0600 next to its host rendezvous record
+// (`host-published-token.ts`). Current backends never serve the token at
+// `GET /` (P0 2026-09-26); only legacy ones still do. The ledger is
 // DISCOVERY ONLY — a record is never trusted as proof of a usable backend; the
 // HTTP probe and the token handshake are the boundary that validates it.
 //

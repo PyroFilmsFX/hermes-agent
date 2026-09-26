@@ -1453,7 +1453,12 @@ def real_bash() -> str:
 def _no_ambient_desktop_control_plane_env(monkeypatch):
     """Tests run inside live Hermes shells that carry the desktop control-plane
     variables; clear them so child-env assertions don't depend on the host."""
-    from hermes_cli.control_plane_env import is_desktop_control_plane_env
+    import hermes_cli.control_plane_env as _control_plane_env
+    import hermes_cli.process_identity as _process_identity
 
-    for name in [n for n in os.environ if is_desktop_control_plane_env(n)]:
+    for name in [n for n in os.environ if _control_plane_env.is_desktop_control_plane_env(n)]:
         monkeypatch.delenv(name, raising=False)
+    # The startup seal is process-global (sealed flag + the token it keeps); a test that seals
+    # must not leave the dotenv loader refusing names, or a sealed token, for every later test.
+    monkeypatch.setattr(_control_plane_env, "_CONTROL_PLANE_SEALED", False)
+    monkeypatch.setattr(_process_identity, "_SEALED_CONTROL_PLANE_ENV", {})
