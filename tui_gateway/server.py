@@ -339,10 +339,19 @@ def _load_interim_assistant_messages() -> bool:
 
 
 def _shutdown_sessions() -> None:
+    # Fence new Claude CLI spawns first (instant, non-blocking; SIGTERMs live children): an auto-continue or
+    # mailbox resume racing teardown must not start a CLI that outlives us as an orphan (2026-09-25).
+    from agent.transports import claude_agent_sdk_session_child as _sdk_child
+
+    with contextlib.suppress(Exception):
+        _sdk_child.begin_sdk_shutdown()
     # Durable-first: flush transcripts (bounded budget) BEFORE the slow teardown so a supervisor SIGKILL can't lose them.
     for step in (_flush_sessions_before_exit, _release_gateway_wake_owner):
         with contextlib.suppress(Exception):
             step()
+    # Await the CLI children (bounded SIGTERM grace, then SIGKILL) before the per-session close below.
+    with contextlib.suppress(Exception):
+        _sdk_child.reap_sdk_children()
     with _sessions_lock:
         sids = list(_sessions)
     for sid in sids:

@@ -8,10 +8,12 @@ every method resolves through ``ClaudeAgentSdkSession``'s MRO unchanged.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
 import threading
+import weakref
 from typing import Any, Optional
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
@@ -99,6 +101,152 @@ def _force_kill_sdk_child(pid: Optional[int], *, process: Any = None) -> None:
             )
     except (psutil.NoSuchProcess, psutil.Error, OSError):
         pass
+
+
+# ---------- process-wide shutdown fence + live-child registry ----------
+#
+# Incident 2026-09-25: a backend that was already shutting down spawned a
+# fresh CLI child (auto-continue/mailbox resume racing teardown) and exited
+# without terminating it; the orphan (ppid=1) replayed a turn and sent
+# duplicate peer messages. Every session that owns a CLI registers here at
+# the point it assigns its client; shutdown raises the fence (no new
+# registrations → no new spawns) under the same lock it snapshots with, so
+# a session is either reaped or refused, never both missed.
+
+# SIGTERM→SIGKILL grace for the shutdown reap. The CLI exits on SIGTERM in
+# well under a second; this only bounds a wedged child.
+_SHUTDOWN_REAP_GRACE_S = 3.0
+_SHUTDOWN_KILL_WAIT_S = 1.0
+
+_live_lock = threading.Lock()
+_live_sessions: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_shutdown_begun = False
+
+
+class SdkShuttingDownError(RuntimeError):
+    """A CLI spawn was refused because the Hermes backend is shutting down."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "claude-agent-sdk: Hermes backend is shutting down; "
+            "refusing to start a new Claude CLI session"
+        )
+
+
+def sdk_shutdown_begun() -> bool:
+    return _shutdown_begun
+
+
+def _admit_sdk_session(session: Any) -> bool:
+    """Register a session that is about to own a CLI; False once shutdown began."""
+    with _live_lock:
+        if _shutdown_begun:
+            return False
+        _live_sessions.add(session)
+        return True
+
+
+def _forget_sdk_session(session: Any) -> None:
+    with _live_lock:
+        _live_sessions.discard(session)
+
+
+def _live_sdk_children() -> list[tuple[int, Any]]:
+    with _live_lock:
+        sessions = list(_live_sessions)
+    children: list[tuple[int, Any]] = []
+    for session in sessions:
+        pid = _sdk_child_pid(getattr(session, "_client", None))
+        process = _own_sdk_child_process(pid) if pid else None
+        if process is not None:
+            children.append((pid, process))
+    return children
+
+
+def _process_gone(process: Any) -> bool:
+    try:
+        return not process.is_running()
+    except Exception:
+        return True
+
+
+def begin_sdk_shutdown() -> None:
+    """Raise the spawn fence and SIGTERM every live CLI child. Non-blocking.
+
+    Idempotent. Call as early as possible in backend teardown; pair with
+    :func:`reap_sdk_children` to wait out the grace and SIGKILL survivors.
+    """
+    global _shutdown_begun
+    with _live_lock:
+        _shutdown_begun = True
+    for pid, process in _live_sdk_children():
+        try:
+            process.terminate()
+        except Exception:
+            logger.debug("claude-agent-sdk shutdown: SIGTERM %s failed", pid, exc_info=True)
+
+
+def reap_sdk_children(grace: Optional[float] = None) -> int:
+    """Fence spawns, then terminate and await every live CLI child.
+
+    SIGTERM, wait up to ``grace`` seconds (shared deadline), SIGKILL the
+    survivors and wait briefly on them. Returns the number of children
+    signalled. Never raises.
+    """
+    import time
+
+    import psutil
+
+    budget = _SHUTDOWN_REAP_GRACE_S if grace is None else max(0.0, float(grace))
+    try:
+        begin_sdk_shutdown()
+        children = _live_sdk_children()
+        for _pid, process in children:
+            with contextlib.suppress(Exception):
+                process.terminate()
+        deadline = time.monotonic() + budget
+        survivors: list[tuple[int, Any]] = []
+        for pid, process in children:
+            if _process_gone(process):
+                with contextlib.suppress(Exception):
+                    process.wait(timeout=0)
+                continue
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except psutil.TimeoutExpired:
+                survivors.append((pid, process))
+            except Exception:
+                pass
+        for pid, process in survivors:
+            try:
+                if not process.is_running():
+                    continue
+                process.kill()
+                logger.warning(
+                    "claude-agent-sdk shutdown: CLI child %s ignored SIGTERM; killed", pid
+                )
+                process.wait(timeout=_SHUTDOWN_KILL_WAIT_S)
+            except Exception:
+                pass
+        if children:
+            logger.info("claude-agent-sdk shutdown: reaped %d CLI child(ren)", len(children))
+        return len(children)
+    except Exception:
+        logger.debug("claude-agent-sdk shutdown reap failed", exc_info=True)
+        return 0
+
+
+def _reset_sdk_shutdown_state_for_tests() -> None:
+    global _shutdown_begun
+    with _live_lock:
+        _shutdown_begun = False
+        _live_sessions.clear()
+
+
+# Safety net for any process that ran an SDK session (serve, gateway, CLI):
+# never leave a CLI child behind at interpreter exit. Explicit shutdown
+# paths call reap_sdk_children() earlier; a second call is a cheap no-op.
+atexit.register(reap_sdk_children)
 
 
 class ClaudeSdkChildProcessMixin:

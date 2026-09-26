@@ -605,6 +605,18 @@ def _isolate_hermes_home(_hermetic_environment):
 
 
 @pytest.fixture(autouse=True)
+def _reset_claude_sdk_shutdown_fence():
+    """The SDK spawn fence is process-global and one-way by design; a test
+    that drives a backend shutdown path (web lifespan exit,
+    ``tui_gateway.server._shutdown_sessions``) must not leave every later
+    SDK session in the same file refused as "shutting down"."""
+    yield
+    mod = sys.modules.get("agent.transports.claude_agent_sdk_session_child")
+    if mod is not None:
+        mod._reset_sdk_shutdown_state_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_kanban_memory_guard(request, monkeypatch):
     """Pin the kanban dispatcher's memory guard to "no data" for every test.
 

@@ -43,10 +43,14 @@ from agent.transports.claude_agent_sdk_session_sanitize import (
 )
 from agent.transports.claude_agent_sdk_session_child import (
     ClaudeSdkChildProcessMixin,
+    SdkShuttingDownError,
     _SDK_DISCONNECT_TIMEOUT_S,
+    _admit_sdk_session,
     _force_kill_sdk_child,
+    _forget_sdk_session,
     _own_sdk_child_process,
     _sdk_child_pid,
+    sdk_shutdown_begun,
 )
 from agent.transports.claude_agent_sdk_session_input import (
     _coerce_turn_input,
@@ -551,6 +555,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             if self._starting:
                 startup_done = self._startup_done
                 starter = False
+            elif sdk_shutdown_begun():
+                # Backend teardown has begun: a CLI spawned now would outlive
+                # the process as an orphan (2026-09-25 incident).
+                raise SdkShuttingDownError()
             else:
                 self._starting = True
                 self._startup_done.clear()
@@ -618,26 +626,40 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             # Assign BEFORE connect: a connect timeout/cancel leaves a
             # half-connected client whose CLI subprocess close() must still reap
             # — a None _client would skip disconnect and orphan it.
+            # Registration and the shutdown fence share one lock: a session
+            # is either visible to the shutdown reap or refused here, so no
+            # CLI can be spawned (connect) behind the reaper's back.
             with self._turn_callback_lock:
                 retired = self._retiring or self._closed
+                refused = False
                 if not retired:
-                    self._client = startup_client
-            if retired:
+                    if _admit_sdk_session(self):
+                        self._client = startup_client
+                    else:
+                        refused = True
+            if retired or refused:
                 self._cleanup_startup_resources(
                     client=startup_client,
                     loop=startup_loop,
                     loop_thread=startup_loop_thread,
                 )
+                if refused:
+                    raise SdkShuttingDownError()
                 return None
             self._run_coro(startup_client.connect(), timeout=60.0)
             with self._turn_callback_lock:
                 retired = self._retiring or self._closed
-            if retired:
+            # A CLI spawned mid-connect can miss the reaper's pid snapshot;
+            # the starter reaps its own child if shutdown began meanwhile.
+            shutting_down = sdk_shutdown_begun()
+            if retired or shutting_down:
                 self._cleanup_startup_resources(
                     client=startup_client,
                     loop=startup_loop,
                     loop_thread=startup_loop_thread,
                 )
+                if shutting_down and not retired:
+                    raise SdkShuttingDownError()
                 return None
             # From here on exactly ONE consumer owns the SDK stream
             # (claude_agent_sdk_session_turn._reader_loop).
@@ -983,6 +1005,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     _force_kill_sdk_child(pid, process=child_process)
             self._client = None
         self._stop_loop_thread()
+        _forget_sdk_session(self)
 
     def __enter__(self) -> "ClaudeAgentSdkSession":
         return self

@@ -39,6 +39,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_turn_timeout,
 )
 from agent.transports.claude_sdk_peer_envelope import effective_origin
+from agent.transports.claude_agent_sdk_session_child import SdkShuttingDownError
 from agent.transports.claude_agent_sdk_session_watchdog import (
     _is_rename_ack,
     _DEFAULT_POST_TOOL_QUIET_STREAMING,
@@ -239,6 +240,13 @@ class ClaudeSdkTurnMixin:
             started = self.ensure_started()
             if started is None:
                 return self._retired_before_query_result()
+        except SdkShuttingDownError as exc:
+            # Not a config/auth fault and not a rotation: nothing was spawned,
+            # and the runtime must neither rebuild nor mark the run fatal.
+            logger.info("claude-agent-sdk turn refused: %s", exc)
+            result.error = str(exc)
+            result.api_call_made = False
+            return result
         except Exception as exc:
             safe_exc = _safe_sdk_error_text(exc)
             hint = classify_auth_failure(safe_exc)

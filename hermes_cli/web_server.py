@@ -256,6 +256,14 @@ async def _lifespan(app: "FastAPI"):
     try:
         yield
     finally:
+        # Fence Claude CLI spawns before any slow teardown: a turn/resume racing shutdown must not start a CLI
+        # that outlives this backend as an orphan (2026-09-25). Non-blocking; live children get SIGTERM.
+        try:
+            from agent.transports.claude_agent_sdk_session_child import begin_sdk_shutdown
+
+            begin_sdk_shutdown()
+        except Exception:  # noqa: BLE001
+            _log.exception("Shutdown: claude-agent-sdk spawn fence failed")
         hosted_room_start_cancel.set()
         _hosted_groups.stop_hosted_room_service(timeout=5.0)
         hosted_room_start_thread.join(timeout=1.0)
@@ -274,6 +282,13 @@ async def _lifespan(app: "FastAPI"):
             pass
         if os.getenv("HERMES_DESKTOP") == "1":
             _terminate_desktop_managed_gateway()
+        # Await the SDK CLI children (bounded SIGTERM grace, then SIGKILL).
+        try:
+            from agent.transports.claude_agent_sdk_session_child import reap_sdk_children
+
+            reap_sdk_children()
+        except Exception:  # noqa: BLE001
+            _log.exception("Shutdown: claude-agent-sdk child reap failed")
 
 
 def _app_state_default(app: "FastAPI", name: str, factory):
