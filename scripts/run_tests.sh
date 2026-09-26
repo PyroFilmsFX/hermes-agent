@@ -162,8 +162,12 @@ cd "$REPO_ROOT"
 # Pre-building the bytecode cache once here (instead of each subprocess
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
-echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+# Opt-in only (HERMES_TEST_COMPILEALL=1): `-j 0` fans out one compiler per core on every run,
+# while the .pyc cache already persists between runs.
+if [[ "${HERMES_TEST_COMPILEALL:-0}" == "1" ]]; then
+  echo "▶ pre-compiling bytecode cache"
+  "$PYTHON" -m compileall -q -j "${HERMES_TEST_WORKERS:-4}" -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+fi
 
 echo "▶ launching test runner"
 exec env -i \
