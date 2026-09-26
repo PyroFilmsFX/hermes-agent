@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Iterator, Mapping, MutableMapping, overload
+from typing import Iterator, Mapping, MutableMapping
 
 _DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
 # Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
@@ -142,23 +142,20 @@ def kanban_path_is_fenced(path: "os.PathLike[str] | str") -> bool:
     return True
 
 
-@overload
-def delegated_child_subprocess_env(env: Mapping[str, str]) -> dict[str, str]: ...
-
-
-@overload
-def delegated_child_subprocess_env(env: None = None) -> dict[str, str] | None: ...
-
-
 def delegated_child_subprocess_env(
     env: Mapping[str, str] | MutableMapping[str, str] | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, str]:
     """Carry worker/delegate descendant denial across a real process spawn.
 
-    Location and credentials are untouched; callers retain their existing secret policy.
-    Dispatcher workers and supervised tool transports grant their own explicit scope.
+    Always returns an explicit child env (``env`` or a copy of ``os.environ``) with the desktop
+    control plane removed — never ``None``/implicit inheritance: an inherit spawn (skill
+    inline shell, tts, code-exec helpers) would otherwise carry whatever a late ``.env`` reload
+    put back into ``os.environ`` after the backend's startup seal. Other credentials are
+    untouched; callers retain their existing secret policy.
     """
+    from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
     if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
-        return None if env is None else dict(env)
-    return scrub_kanban_env(os.environ if env is None else env)
+        return scrub_desktop_control_plane_env(dict(os.environ if env is None else env))
+    return scrub_desktop_control_plane_env(dict(scrub_kanban_env(os.environ if env is None else env)))

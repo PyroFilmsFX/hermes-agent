@@ -302,9 +302,14 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
                 lookup = {**lookup_env, **resolved} if override else {**resolved, **lookup_env}
                 value = "".join(atom.resolve(lookup) for atom in parse_variables(value))
             resolved[name] = value
+        from hermes_cli.control_plane_env import control_plane_sealed, is_process_sealed_control_plane_env
+
+        sealed = control_plane_sealed()
         for name, value in resolved.items():
             if value is None or (not override and name in os.environ):
                 continue
+            if sealed and is_process_sealed_control_plane_env(name):
+                continue  # the startup seal owns these names: a .env reload must not re-publish them
             current = os.environ.get(name)
             record = _DOTENV_PUBLISHED.get(name)
             ours = record is not None and current == record[1]

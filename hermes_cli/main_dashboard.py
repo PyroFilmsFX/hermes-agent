@@ -740,6 +740,113 @@ def _read_ssh_session_token_file(path: str) -> str:
         if root_fd >= 0:
             os.close(root_fd)
 
+_DESKTOP_SESSION_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,256}")
+
+
+def _read_desktop_session_token_file(path: str) -> str:
+    """Read, then unlink, the local Desktop's one-shot session token (``serve --session-token-file``).
+
+    P0 2026-09-26: the token authenticates /api/ws as the Desktop, and every agent this backend
+    runs is a same-user process. Handing it over in ``HERMES_DASHBOARD_SESSION_TOKEN`` left it in
+    the env that implicit-inherit children copy. Electron now writes it to
+    ``~/.hermes/desktop-local/<32 hex>/<16 hex>.token`` (dir 0700, file 0600, O_EXCL) and this
+    reads it once, BEFORE ``hermes_cli.web_server`` is imported, and deletes the file (and its
+    directory) whatever the outcome. Anchored at ``Path.home()`` like the SSH handoff (#69551):
+    profiles re-home ``get_hermes_home()``, not the Desktop's runtime root. Fails closed
+    (``SystemExit``) on anything unexpected; the caller never falls back to the environment.
+    """
+    import errno as _errno
+    import stat as _stat
+
+    flag = "--session-token-file"
+    if not os.path.isabs(path):
+        raise SystemExit(f"{flag} must be absolute")
+    token_root = Path.home() / ".hermes" / "desktop-local"
+    try:
+        relative = Path(path).relative_to(token_root)
+    except ValueError as exc:
+        raise SystemExit(f"{flag} must be under the desktop-local directory") from exc
+    if len(relative.parts) != 2 or not re.fullmatch(r"[0-9a-f]{32}", relative.parts[0]):
+        raise SystemExit(f"{flag} has an invalid runtime path")
+    if not re.fullmatch(r"[0-9a-f]{16}\.token", relative.parts[1]):
+        raise SystemExit(f"{flag} has an invalid filename")
+
+    directory = token_root / relative.parts[0]
+    token_path = directory / relative.parts[1]
+    if sys.platform == "win32":
+        # No POSIX modes or dir_fd here: refuse links, read, delete. The per-user profile ACL is
+        # what keeps other accounts out of ~/.hermes.
+        try:
+            for candidate in (token_root, directory, token_path):
+                if candidate.is_symlink():
+                    raise SystemExit(f"{flag} is a symlink")
+            if not token_path.is_file():
+                raise SystemExit(f"{flag} is not a regular file")
+            token = token_path.read_text(encoding="utf-8-sig")[:257].strip()
+        except OSError as exc:
+            raise SystemExit(f"{flag} is not accessible") from exc
+        finally:
+            with contextlib.suppress(OSError):
+                token_path.unlink()
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+        if not _DESKTOP_SESSION_TOKEN_RE.fullmatch(token):
+            raise SystemExit(f"{flag} contains an invalid token")
+        return token
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    uid = os.getuid()
+
+    def _check_private_dir(fd: int, what: str) -> None:
+        st = os.fstat(fd)
+        if not _stat.S_ISDIR(st.st_mode):
+            raise SystemExit(f"{flag} has an unsafe {what}")
+        if st.st_uid != uid:
+            raise SystemExit(f"{flag} {what} has the wrong owner")
+        if (st.st_mode & 0o777) != 0o700:
+            raise SystemExit(f"{flag} {what} has unsafe permissions")
+
+    root_fd = directory_fd = file_fd = -1
+    try:
+        try:
+            root_fd = os.open(token_root, directory_flags)
+            _check_private_dir(root_fd, "runtime root")
+            directory_fd = os.open(relative.parts[0], directory_flags, dir_fd=root_fd)
+            _check_private_dir(directory_fd, "parent directory")
+            file_fd = os.open(relative.parts[1], file_flags, dir_fd=directory_fd)
+        except OSError as exc:
+            if exc.errno == _errno.ELOOP:
+                raise SystemExit(f"{flag} is a symlink") from exc
+            raise SystemExit(f"{flag} is not accessible") from exc
+
+        file_stat = os.fstat(file_fd)
+        if not _stat.S_ISREG(file_stat.st_mode):
+            raise SystemExit(f"{flag} is not a regular file")
+        if file_stat.st_uid != uid:
+            raise SystemExit(f"{flag} has the wrong owner")
+        if (file_stat.st_mode & 0o777) & ~0o600:
+            raise SystemExit(f"{flag} has unsafe permissions")
+        if file_stat.st_nlink != 1:
+            raise SystemExit(f"{flag} has extra hard links")
+        with os.fdopen(file_fd, "r", encoding="utf-8-sig") as token_stream:
+            file_fd = -1
+            token = token_stream.read(257).strip()
+        if not _DESKTOP_SESSION_TOKEN_RE.fullmatch(token):
+            raise SystemExit(f"{flag} contains an invalid token")
+        return token
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if directory_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.unlink(relative.parts[1], dir_fd=directory_fd)
+            os.close(directory_fd)
+        if root_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.rmdir(relative.parts[0], dir_fd=root_fd)
+            os.close(root_fd)
+
 
 def _is_electron_packaged_web_dist(path: str) -> bool:
     """True when *path* is an Electron-packaged renderer dist (``app.asar[.unpacked]/dist``).

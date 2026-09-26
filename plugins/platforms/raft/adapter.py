@@ -27,6 +27,8 @@ import weakref
 from pathlib import Path as _Path
 from typing import Any, Deque, Dict, List, Optional
 
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
 try:
     from aiohttp import web
     AIOHTTP_AVAILABLE = True
@@ -377,7 +379,8 @@ class RaftAdapter(BasePlatformAdapter):
                           "--wake-channel-endpoint", endpoint]
         try:
             self._bridge_process = subprocess.Popen(
-                cmd, env={**os.environ, "RAFT_CHANNEL_TOKEN": self._bridge_token}, stdin=subprocess.DEVNULL)
+                cmd, env=scrub_desktop_control_plane_env({**os.environ, "RAFT_CHANNEL_TOKEN": self._bridge_token}),
+                stdin=subprocess.DEVNULL)
             logger.info("[raft] Spawned bridge pid=%d profile=%s endpoint=%s", self._bridge_process.pid, profile, endpoint)
         except Exception:
             logger.exception("[raft] Failed to spawn bridge")

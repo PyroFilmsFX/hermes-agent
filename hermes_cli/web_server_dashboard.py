@@ -111,19 +111,18 @@ def mount_spa(application: FastAPI):
 
         @application.get("/{full_path:path}")
         async def no_frontend(full_path: str):
-            # Desktop token handshake: the Electron shell boots by fetching `/` and reading
-            # ``window.__HERMES_SESSION_TOKEN__`` for /api/ws auth. When headless 404'd every
-            # path, a renderer whose spawn token no longer matched (e.g. after `hermes update`)
-            # white-screened. Serve a token-only page at the exact root, but ONLY when the auth
-            # gate is off: on a gated serve the token must never be readable without auth.
-            # See #94227, #95575.
+            # NEVER the session token (P0 2026-09-26). This used to serve
+            # ``window.__HERMES_SESSION_TOKEN__`` at an unauthenticated `/` whenever the gate was
+            # off (#94227/#95575), which is always the case for the loopback Desktop backend: any
+            # same-user process (every agent included) could read it and drive /api/ws as the
+            # Desktop. Electron holds the token it minted and gives it to the renderer over IPC
+            # (``hermes:connection``); after `hermes update` it uses its own spawn record, or the
+            # host rendezvous token file for an attached backend, or respawns. A gated serve
+            # keeps its historical JSON 404 at `/` too.
             gated = bool(getattr(application.state, "auth_required", False))
             if full_path == "" and not gated:
                 return HTMLResponse(
-                    "<!doctype html><html><head><script>"
-                    f"window.__HERMES_SESSION_TOKEN__={json.dumps(_server()._SESSION_TOKEN)};"
-                    "window.__HERMES_AUTH_REQUIRED__=false;"
-                    f"</script></head><body>{_HEADLESS_MSG}</body></html>",
+                    f"<!doctype html><html><head></head><body>{_HEADLESS_MSG}</body></html>",
                     headers=_NO_STORE,
                 )
             return JSONResponse({"error": _HEADLESS_MSG}, status_code=404)

@@ -392,7 +392,9 @@ async def _exec_buzz(
     input_text: Optional[str] = None, timeout: float = _CLI_TIMEOUT,
 ) -> Tuple[int, str, str]:
     """Run the buzz CLI (argv, never a shell) -> ``(rc, stdout, stderr)``. Key travels via env only."""
-    env = os.environ.copy()
+    from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
+    env = scrub_desktop_control_plane_env(os.environ.copy())
     env["BUZZ_RELAY_URL"] = relay_url
     env["BUZZ_PRIVATE_KEY"] = private_key
     env.pop("BUZZ_AUTH_TAG", None)

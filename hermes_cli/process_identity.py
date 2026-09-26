@@ -242,12 +242,24 @@ def seal_desktop_control_plane_env() -> None:
     (:func:`desktop_session_token`). Idempotent. Called by ``web_server.start_server`` before
     anything can spawn an agent; policy: ``PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS``.
     """
-    from hermes_cli.control_plane_env import PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS
+    from hermes_cli.control_plane_env import is_process_sealed_control_plane_env, mark_control_plane_sealed
 
-    for key in [k for k in os.environ if k.upper() in PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS]:
+    for key in [k for k in os.environ if is_process_sealed_control_plane_env(k)]:
         value = os.environ.pop(key, None)
         if value:
-            _SEALED_CONTROL_PLANE_ENV[key.upper()] = value
+            # setdefault: a token adopted from ``--session-token-file`` is authoritative; a stale
+            # value a .env load published before the seal must not replace it.
+            _SEALED_CONTROL_PLANE_ENV.setdefault(key.upper(), value)
+    mark_control_plane_sealed()
+
+
+def adopt_desktop_session_token(token: str) -> None:
+    """Take the per-spawn desktop session token from the private ``--session-token-file`` handoff
+    (never the environment) and seal immediately. Must run before ``hermes_cli.web_server`` is
+    imported: its module-level ``_SESSION_TOKEN`` resolves through :func:`desktop_session_token`."""
+    if token:
+        _SEALED_CONTROL_PLANE_ENV["HERMES_DASHBOARD_SESSION_TOKEN"] = token
+    seal_desktop_control_plane_env()
 
 
 def desktop_session_token() -> Optional[str]:
@@ -262,8 +274,9 @@ def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
     ``HERMES_DESKTOP=1`` is inherited by every shell and agent child the app launches, so the
     flag alone is not ownership proof (same class as #116107). Desktop hands its backend a
     per-spawn credential the terminal pane never receives (and the terminal tool's env policy
-    strips from agent children): the local pool spawn mints ``HERMES_DASHBOARD_SESSION_TOKEN``,
-    the SSH spawn passes a 0600 token FILE on argv and deliberately sets no token env var.
+    strips from agent children): the local pool spawn hands ``--session-token-file`` (a 0600
+    one-shot file; ``HERMES_DASHBOARD_SESSION_TOKEN`` only for legacy Desktop builds), the SSH
+    spawn passes ``--ssh-session-token-file`` and deliberately sets no token env var.
     ``argv`` defaults to this process's own.
     """
     if os.environ.get("HERMES_DESKTOP") != "1":
@@ -272,7 +285,10 @@ def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
         return True
     from hermes_cli._startup_fast import is_desktop_ssh_backend_argv
 
-    return is_desktop_ssh_backend_argv(list(sys.argv[1:] if argv is None else argv))
+    args = list(sys.argv[1:] if argv is None else argv)
+    if any(a == "--session-token-file" or a.startswith("--session-token-file=") for a in args):
+        return True
+    return is_desktop_ssh_backend_argv(args)
 
 
 def _desktop_spawner_identity() -> tuple[Optional[int], Optional[float]]:

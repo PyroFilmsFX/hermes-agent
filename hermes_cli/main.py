@@ -781,6 +781,7 @@ from hermes_cli.main_dashboard import (
     _install_hangup_protection,
     _is_electron_packaged_web_dist,
     _maybe_setup_dashboard_auth_interactively,
+    _read_desktop_session_token_file,
     _read_ssh_session_token_file,
     _report_dashboard_status,
     _resolve_dashboard_web_dist,
@@ -2738,6 +2739,17 @@ def cmd_dashboard(args):
     # build gate, and start_server.
     _headless_backend = getattr(args, "headless_backend", False)
     _ssh_owner_nonce = _dashboard_validate_serve_args(args, _headless_backend, _token_file)
+    # Local Desktop token handoff (P0 2026-09-26): read + delete the private 0600 file FIRST —
+    # before the ownership checks below consult desktop_session_token() and long before
+    # hermes_cli.web_server is imported (its module-level _SESSION_TOKEN resolves through it).
+    # Adopting also seals the control plane out of os.environ and blocks .env re-publishing.
+    _desktop_token_file = getattr(args, "desktop_session_token_file", None)
+    if _desktop_token_file:
+        if _token_file:
+            raise SystemExit("--session-token-file cannot be combined with --ssh-session-token-file")
+        from hermes_cli.process_identity import adopt_desktop_session_token
+
+        adopt_desktop_session_token(_read_desktop_session_token_file(_desktop_token_file))
     _dashboard_sanitize_desktop_env(_headless_backend)
 
     _attach_to_host_backend(args, _headless_backend)
