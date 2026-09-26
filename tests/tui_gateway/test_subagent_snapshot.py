@@ -87,6 +87,64 @@ def test_snapshot_projects_only_this_sessions_runtime_records(runtime):
         assert finished.wait(10)
 
 
+def test_sdk_subagent_list_keeps_completed_rows_until_ttl(runtime):
+    from tools import delegate_tool_registry as registry
+
+    server, owner, transport, call = runtime
+    registry._register_subagent({
+        "kind": "sdk",
+        "subagent_id": "sdk-child",
+        "goal": "inspect the project",
+        "status": "running",
+        "owner_session_id": "ui-owner",
+        "owner_transport": transport,
+        "owner_session_record": owner,
+        "accepting_steer": True,
+    })
+
+    running = call("subagent.list")["result"]["subagents"]
+    assert [(row["subagent_id"], row["status"]) for row in running] == [("sdk-child", "running")]
+
+    registry.update_sdk_subagent("subagent.complete", task_id="sdk-child", status="completed")
+    completed = call("subagent.list")["result"]["subagents"]
+    assert [(row["subagent_id"], row["status"]) for row in completed] == [("sdk-child", "completed")]
+    assert completed[0]["accepting_steer"] is False
+
+
+def test_sdk_task_teardown_retains_goal_in_event_and_rpc_row(runtime):
+    from agent.transports.claude_agent_sdk_session_notify import ClaudeSdkNotifyMixin
+    from tools import delegate_tool_registry as registry
+
+    server, owner, transport, call = runtime
+    registry._register_subagent({
+        "kind": "sdk",
+        "subagent_id": "sdk-teardown",
+        "goal": "finish the report",
+        "status": "running",
+        "owner_session_id": "ui-owner",
+        "owner_transport": transport,
+        "owner_session_record": owner,
+        "accepting_steer": True,
+    })
+    session = object.__new__(ClaudeSdkNotifyMixin)
+    session._sdk_task_records = {"sdk-teardown": {"goal": "finish the report"}}
+    events = []
+
+    def capture(event, name, preview, args, **kw):
+        events.append((event, kw))
+        registry.update_sdk_subagent(event, task_id=kw["subagent_id"], status=kw.get("status", "running"))
+
+    session._on_subagent_event = capture
+
+    session._finalize_sdk_tasks("interrupted")
+
+    assert events[0][1]["goal"] == "finish the report"
+    rows = call("subagent.list")["result"]["subagents"]
+    assert [(row["subagent_id"], row["goal"], row["status"]) for row in rows] == [
+        ("sdk-teardown", "finish the report", "interrupted")
+    ]
+
+
 def test_live_tail_and_steer_share_exact_owner_and_end_with_child(runtime):
     from run_agent import AIAgent
     from tools.delegate_tool_child_run import _register_child

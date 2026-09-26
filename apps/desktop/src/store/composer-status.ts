@@ -210,8 +210,8 @@ const stabilizeItems = (prev: ComposerStatusItem[] | undefined, next: ComposerSt
 let prevStatusItems: Record<string, ComposerStatusItem[]> = {}
 
 export const $statusItemsBySession = computed(
-  [$goalsBySession, $subagentsBySession, $backgroundStatusBySession, $todosBySession],
-  (goals, subs, background, todos) => {
+  [$goalsBySession, $subagentsBySession, $backgroundStatusBySession, $todosBySession, $sessionStates],
+  (goals, subs, background, todos, sessionStates) => {
     const out: Record<string, ComposerStatusItem[]> = {}
 
     const push = (sid: string, items: ComposerStatusItem[]) => {
@@ -232,7 +232,21 @@ export const $statusItemsBySession = computed(
     }
 
     for (const [sid, list] of Object.entries(subs)) {
-      push(sid, list.filter(s => s.status === 'running' || s.status === 'queued').map(subToItem))
+      const turnLive = Boolean(
+        sessionStates[sid] &&
+          (sessionStates[sid].busy || sessionStates[sid].awaitingResponse || sessionStates[sid].turnLive)
+      )
+      push(
+        sid,
+        list
+          .filter(
+            s =>
+              s.status === 'running' ||
+              s.status === 'queued' ||
+              (turnLive && ['completed', 'failed', 'interrupted'].includes(s.status))
+          )
+          .map(subToItem)
+      )
     }
 
     for (const [sid, list] of Object.entries(background)) {

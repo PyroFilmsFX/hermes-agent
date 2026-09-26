@@ -475,17 +475,18 @@ class ClaudeSdkNotifyMixin:
             or ""
         )
         for task_id, record in list(tasks.items()):
-            tasks.pop(task_id, None)
             self._emit_sdk_subagent(
                 "subagent.complete", task_id, "Agent",
                 str(record.get("goal") or ""), None,
                 parent_tool_id=record.get("parent_tool_id"),
+                goal=str(record.get("goal") or ""),
                 status=status,
             )
             with contextlib.suppress(Exception):
                 delegate_tool_registry.update_sdk_subagent(
                     "subagent.complete", task_id=task_id, status=status,
                 )
+            tasks.pop(task_id, None)
         if session_key:
             with contextlib.suppress(Exception):
                 process_registry.finalize_sdk_tasks(

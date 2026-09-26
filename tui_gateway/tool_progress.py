@@ -695,13 +695,14 @@ def _int_or_skip(v):
 # `tool_name`/`text` are fed from the positional name/preview; `output_tail` is a list of dicts.
 _SUBAGENT_FIELDS = (
     ("subagent_id", bool, str), ("parent_id", bool, str), ("parent_tool_id", bool, str),
+    ("subagent_meta", bool, dict), ("usage", bool, dict),
     ("child_session_id", bool, str),
     ("delegation_id", bool, str), ("depth", _not_none, int), ("model", bool, str), ("tool_count", _not_none, int),
     ("toolsets", bool, _str_list), ("input_tokens", _not_none, _int_or_skip), ("output_tokens", _not_none, _int_or_skip),
     ("reasoning_tokens", _not_none, _int_or_skip), ("api_calls", _not_none, _int_or_skip),
     ("files_read", bool, _str_list), ("files_written", bool, _str_list), ("output_tail", bool, list),
     ("tool_name", bool, str), ("text", bool, str), ("status", bool, str), ("summary", bool, str),
-    ("duration_seconds", _not_none, float), ("usage", bool, dict),
+    ("duration_seconds", _not_none, float),
 )
 
 

@@ -602,6 +602,7 @@ class SubagentSnapshot(Result):
     """``methods_subagents._SUBAGENT_SNAPSHOT_FIELDS`` projection of one live child record."""
 
     subagent_id: str
+    kind: str | None = None
     parent_id: str | None = None
     depth: int | None = None
     goal: str | None = None

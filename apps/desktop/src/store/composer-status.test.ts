@@ -1,8 +1,13 @@
 import { JsonRpcGatewayError } from '@hermes/shared'
+import { cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { useSessionStatusPresence } from '@/app/chat/composer/hooks/use-status-presence'
+import { createClientSessionState } from '@/lib/chat-runtime'
 
 import {
   $backgroundStatusBySession,
+  $statusItemsBySession,
   dismissBackgroundProcess,
   isSessionGoneForBackgroundPolling,
   reconcileBackgroundProcesses,
@@ -12,6 +17,8 @@ import {
 } from './composer-status'
 import { $gateway } from './gateway'
 import { markSessionGone } from './runtime-gone'
+import { $sessionStates } from './session-states'
+import { $subagentsBySession } from './subagents'
 
 vi.mock('./notifications', () => ({ notifyError: vi.fn() }))
 import { notifyError } from './notifications'
@@ -28,6 +35,39 @@ const exited = (id: string, exit_code = 0, command = `cmd ${id}`) => ({
 })
 
 const items = () => $backgroundStatusBySession.get()[SID] ?? []
+
+describe('composer status subagent terminal rows', () => {
+  afterEach(() => {
+    cleanup()
+    $sessionStates.set({})
+    $subagentsBySession.set({})
+  })
+
+  it('does not show a completed child after its parent turn settles', () => {
+    $sessionStates.set({ [SID]: createClientSessionState(null) })
+    $subagentsBySession.set({
+      [SID]: [
+        {
+          filesRead: [],
+          filesWritten: [],
+          goal: 'Finished child',
+          id: 'child-1',
+          parentId: null,
+          startedAt: 1,
+          status: 'completed',
+          stream: [],
+          taskCount: 0,
+          taskIndex: 0,
+          updatedAt: 2
+        }
+      ]
+    })
+
+    expect($statusItemsBySession.get()[SID] ?? []).toEqual([])
+    const { result } = renderHook(() => useSessionStatusPresence(SID))
+    expect(result.current).toBe(false)
+  })
+})
 
 describe('reconcileBackgroundProcesses', () => {
   beforeEach(() => {

@@ -480,6 +480,7 @@ class SubagentEventPayload(Payload):
     task_index: int
     subagent_id: str | None = None
     parent_id: str | None = None
+    parent_tool_id: str | None = None
     child_session_id: str | None = None
     delegation_id: str | None = None
     depth: int | None = None
@@ -499,6 +500,8 @@ class SubagentEventPayload(Payload):
     summary: str | None = None
     duration_seconds: float | None = None
     tool_preview: str | None = None
+    usage: dict[str, JsonValue] | None = None
+    subagent_meta: dict[str, JsonValue] | None = None
 
 
 for _name, _doc in (

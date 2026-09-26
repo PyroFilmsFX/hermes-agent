@@ -11,6 +11,7 @@ import {
   workspaceScopeKey
 } from '@/components/pane-shell/workspace-scope'
 import { $activeGatewayProfile } from '@/store/profile'
+import { $subagentsBySession, upsertSubagent } from '@/store/subagents'
 import {
   $activeSessionId,
   $connection,
@@ -44,6 +45,7 @@ import {
   openSessionTile,
   orderTilesByTree,
   patchSessionTile,
+  publishSessionState,
   recordSessionEventScope,
   releaseSessionTranscript,
   requestForOwnedSession,
@@ -1476,9 +1478,15 @@ describe('isSessionRemote (#94640)', () => {
 describe('background delivery session tracking', () => {
   beforeEach(() => {
     clearAllSessionStates()
+    $subagentsBySession.set({})
     $activeBackgroundSessions.set(new Set())
     $unreadFinishedSessionIds.set([])
     $selectedStoredSessionId.set(null)
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $subagentsBySession.set({})
   })
 
   it('tracks background delivery active state per session', () => {
@@ -1506,5 +1514,25 @@ describe('background delivery session tracking', () => {
 
     expect($unreadFinishedSessionIds.get()).not.toContain('sess-focused')
   })
-})
 
+  it('prunes terminal subagent rows when a background delivery completes', () => {
+    upsertSubagent('sess-bg', { subagent_id: 'finished', status: 'completed' }, false, 'subagent.complete')
+    upsertSubagent('sess-bg', { subagent_id: 'still-running', status: 'running' })
+
+    markBackgroundSessionFinished('sess-bg')
+
+    expect($subagentsBySession.get()['sess-bg']?.map(item => item.id)).toEqual(['still-running'])
+  })
+
+  it('prunes terminal subagent rows when the foreground session settles', () => {
+    const live = { busy: true, storedSessionId: 'sess-live' } as ClientSessionState
+    const settled = { busy: false, storedSessionId: 'sess-live' } as ClientSessionState
+    upsertSubagent('runtime-live', { subagent_id: 'finished', status: 'completed' }, false, 'subagent.complete')
+    upsertSubagent('runtime-live', { subagent_id: 'still-running', status: 'running' })
+
+    publishSessionState('runtime-live', live)
+    publishSessionState('runtime-live', settled)
+
+    expect($subagentsBySession.get()['runtime-live']?.map(item => item.id)).toEqual(['still-running'])
+  })
+})
