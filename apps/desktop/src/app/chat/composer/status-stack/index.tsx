@@ -37,6 +37,7 @@ import { $freeTierRoute, $freeTierStatus, freeTierStripPending } from '@/store/f
 import { $interfaceMode, shownInMode, type Tiered } from '@/store/interface-mode'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $sessionControlBySession, refreshSessionControl } from '@/store/session-control'
+import { $conductorBuildBySession } from '@/store/conductor-build'
 import { knownOwnerForSession } from '@/store/session-states'
 import { $threadScrolledUpBySession } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
@@ -48,6 +49,9 @@ import { StatusItemRow } from './status-row'
 import { SubagentSection } from './subagent-section'
 import { RelayJobsSection } from './relay-jobs-section'
 import { useSubagentSnapshot } from './use-subagent-snapshot'
+import { ConductorBuildStrip } from './conductor-build-strip'
+import { useConductorBuild } from './use-conductor-build'
+import { openConductorPane } from '@/app/chat/conductor-pane'
 
 // Slow safety-net poll for silent exits (processes without notify_on_complete
 // emit no event when they die). Only armed while a running row is on screen.
@@ -130,6 +134,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   // Hydrate always (delegate cards and session dots read the same store after
   // a reload); keep POLLING only while the subagent group is on the shelf.
   useSubagentSnapshot(sessionId, shown(GROUP_TIER.subagent))
+  useConductorBuild(sessionId)
   // Subscribe to THIS session's slice only. Both maps churn on other
   // sessions' activity (subagent ticks, background polls, preview updates in
   // any tile); a whole-map `useStore` re-rendered every mounted stack — one
@@ -139,6 +144,9 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   const items = useSessionSlice($statusItemsBySession, sessionId)
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const controlEntry = useSessionValue($sessionControlBySession, sessionId)
+  const conductorBuild = useStoreSelector($conductorBuildBySession, builds =>
+    sessionId ? builds[sessionId] ?? null : null
+  )
 
   const surfaceId = useComposerSurfaceId()
   const scrollSessionId = sessionId ?? surfaceId
@@ -226,6 +234,10 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
       : []
 
   const sections: { key: string; node: ReactNode }[] = []
+
+  if (conductorBuild) {
+    sections.push({ key: 'conductor', node: <ConductorBuildStrip build={conductorBuild} onOpen={openConductorPane} /> })
+  }
 
   // Billing wall sits at the very top of the stack — it's the most important
   // thing above the composer when the account is out of credits. Rendered here

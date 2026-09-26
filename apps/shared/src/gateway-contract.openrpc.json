@@ -493,6 +493,24 @@
       }
     },
     {
+      "name": "conductor_build.get",
+      "summary": "Read the armed conductor build status for the calling session's workspace.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ConductorBuildResult"
+        }
+      }
+    },
+    {
       "name": "config.get",
       "summary": "Read one normalised config value (or the whole effective config) the way the UIs render it.",
       "params": [
@@ -8338,6 +8356,190 @@
           }
         },
         "title": "CompressionSummary",
+        "type": "object"
+      },
+      "ConductorBuild": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "enum": [
+              "active",
+              "waiting",
+              "blocked",
+              "lease_expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "plan": {
+            "title": "Plan",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "wave_current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wave Current"
+          },
+          "waves_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waves Total"
+          },
+          "waves_done": {
+            "title": "Waves Done",
+            "type": "integer"
+          },
+          "waiting_on": {
+            "title": "Waiting On",
+            "type": "string"
+          },
+          "wait_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Since"
+          },
+          "armed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Armed At"
+          },
+          "lease_expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Expires At"
+          },
+          "lanes_running": {
+            "title": "Lanes Running",
+            "type": "integer"
+          },
+          "lanes_stale": {
+            "title": "Lanes Stale",
+            "type": "integer"
+          },
+          "lanes_build_matched": {
+            "title": "Lanes Build Matched",
+            "type": "integer"
+          },
+          "usd": {
+            "default": null,
+            "title": "Usd",
+            "type": "null"
+          },
+          "usd_source": {
+            "const": "missing",
+            "default": "missing",
+            "title": "Usd Source",
+            "type": "string"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "null"
+          },
+          "unit_id": {
+            "title": "Unit Id",
+            "type": "null"
+          }
+        },
+        "required": [
+          "state",
+          "plan",
+          "run_id",
+          "session_id",
+          "wave_current",
+          "waves_total",
+          "waves_done",
+          "waiting_on",
+          "wait_since",
+          "armed_at",
+          "lease_expires_at",
+          "lanes_running",
+          "lanes_stale",
+          "lanes_build_matched",
+          "stage",
+          "unit_id"
+        ],
+        "title": "ConductorBuild",
+        "type": "object"
+      },
+      "ConductorBuildResult": {
+        "additionalProperties": false,
+        "properties": {
+          "build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConductorBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unreadable": {
+            "default": false,
+            "title": "Unreadable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "build"
+        ],
+        "title": "ConductorBuildResult",
         "type": "object"
       },
       "ConfigGetParams": {

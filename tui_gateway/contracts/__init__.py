@@ -7,6 +7,7 @@ from . import (  # noqa: F401
     config_free_tier_control,
     connectors,
     connectors_operation,
+    conductor_build,
     display,
     events,
     groups_bot_relay,

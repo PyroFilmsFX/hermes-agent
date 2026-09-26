@@ -1130,6 +1130,30 @@ export interface ConnectorPolicySetResult {
   revision: string
   effective: ConnectorPolicyEffectiveUnrestricted | ConnectorPolicyEffectiveDenyAll | ConnectorPolicyEffectiveAllow | ConnectorPolicyEffectiveDeny
 }
+export interface ConductorBuildResult {
+  build: ConductorBuild | null
+  unreadable?: boolean
+}
+export interface ConductorBuild {
+  state: 'active' | 'waiting' | 'blocked' | 'lease_expired'
+  plan: string
+  run_id: string
+  session_id: string
+  wave_current: number | null
+  waves_total: number | null
+  waves_done: number
+  waiting_on: string
+  wait_since: string | number | null
+  armed_at: string | number | null
+  lease_expires_at: string | number | null
+  lanes_running: number
+  lanes_stale: number
+  lanes_build_matched: number
+  usd?: null
+  usd_source?: 'missing'
+  stage: null
+  unit_id: null
+}
 /** ``tools/bot_desktop/runtime.py::DesktopStatus`` plus the lease and the profile it speaks for. */
 export interface DisplayStatus {
   profile: string
@@ -4862,6 +4886,8 @@ export interface RpcMethods {
   'complete.path': { params: CompletePathParams; result: CompletionItemsResult }
   /** Ranked slash-command / skill completions for a ``/`` token. */
   'complete.slash': { params: CompleteSlashParams; result: CompleteSlashResult }
+  /** Read the armed conductor build status for the calling session's workspace. */
+  'conductor_build.get': { params: SessionParams; result: ConductorBuildResult }
   /** Read one normalised config value (or the whole effective config) the way the UIs render it. */
   'config.get': { params: ConfigGetParams; result: ConfigGetResult }
   /** Change one config key (persisted or session-scoped) and read back the normalised value. */
@@ -5326,6 +5352,7 @@ export const RPC_METHODS = [
   'commands.catalog',
   'complete.path',
   'complete.slash',
+  'conductor_build.get',
   'config.get',
   'config.set',
   'config.show',
