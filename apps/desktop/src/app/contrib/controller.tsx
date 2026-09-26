@@ -91,6 +91,7 @@ import { $statusbarVisible } from '@/store/statusbar-prefs'
 import { isBrowserWindow, isHudWindow } from '@/store/windows'
 
 import { BrowserPopoutShell } from '../chat/browser-popout-shell'
+import { ConductorPane, $conductorPaneOpen, openConductorPane } from '../chat/conductor-pane'
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
 import { watchPreviewTiles } from '../chat/preview-tile'
 import { watchRouteTiles } from '../chat/route-tile'
@@ -656,6 +657,52 @@ registerPaneCloser('logs', () => $logsOpen.set(false))
 registerPaneOpener('logs', () => $logsOpen.set(true))
 syncLogsPane($logsOpen.get())
 $logsOpen.listen(syncLogsPane)
+
+// The conductor pane is summoned-only just like logs: it enters the pane
+// registry only while open, and its strip/palette/close controls share one atom.
+let unregisterConductorPane: (() => void) | null = null
+
+const syncConductorPane = (open: boolean) => {
+  if (open) {
+    unregisterConductorPane ??= registry.register({
+      id: 'conductor',
+      area: 'panes',
+      title: 'Conductor',
+      data: {
+        placement: 'bottom',
+        dock: { pane: 'terminal', pos: 'right' },
+        height: '20vh',
+        maxHeight: '80vh'
+      },
+      render: () => idle(<ConductorPane />)
+    })
+    revealTreePane('conductor')
+  } else {
+    unregisterConductorPane?.()
+    unregisterConductorPane = null
+    const tree = $layoutTree.get()
+    if (tree && allPaneIds(tree).includes('conductor')) {
+      removeTreePane('conductor')
+    }
+  }
+}
+
+markCollapsePane('conductor')
+registerPaneCloser('conductor', () => $conductorPaneOpen.set(false))
+registerPaneOpener('conductor', () => $conductorPaneOpen.set(true))
+syncConductorPane($conductorPaneOpen.get())
+$conductorPaneOpen.listen(syncConductorPane)
+
+registry.register(
+  paletteToggle({
+    id: 'conductor.toggle',
+    label: 'Toggle conductor runs',
+    icon: FileText,
+    keywords: ['conductor', 'tb-build', 'runs', 'lanes'],
+    get: () => isPaneVisible('conductor'),
+    set: () => (isPaneVisible('conductor') ? $conductorPaneOpen.set(false) : openConductorPane())
+  })
+)
 
 registry.register(
   paletteToggle({
