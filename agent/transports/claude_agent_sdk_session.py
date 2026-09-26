@@ -97,6 +97,7 @@ from agent.transports.claude_agent_sdk_session_permissions import (
 from agent.transports.claude_agent_sdk_session_turn import (
     ClaudeSdkTurnMixin,
 )
+from agent.transports import claude_sdk_peer_name_lease as _peer_lease
 
 logger = logging.getLogger(__name__)
 _RENAME_ACK_TIMEOUT_SECONDS = 10.0
@@ -283,6 +284,13 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # it. CLI-originated turns never reach the Hermes turn boundary, so waiting for the
         # next Hermes turn left peers seeing the old name indefinitely. (cntrl carry)
         self._deferred_rename: Optional[str] = None
+        # Peer names this session object holds a single-owner lease on (see
+        # claude_sdk_peer_name_lease); two while a live /rename is unacknowledged.
+        # A refused claim spawns the CLI without --name rather than duplicating
+        # another live registrant's name (2026-09-25 orphan incident).
+        self._peer_leases: set[str] = set()
+        self._peer_name_refused = False
+        self._peer_lease_owner_cache: Optional[_peer_lease.LeaseOwner] = None
         # SDK-side session id to resume (#25267 continuity). Verified live:
         # resume restores the model context and keeps the SAME session id; a
         # stale id fails the session start (the caller retires + retries
@@ -622,6 +630,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     loop=startup_loop, loop_thread=startup_loop_thread
                 )
                 return None
+            self._claim_peer_name()
             startup_client = self._build_client()
             # Assign BEFORE connect: a connect timeout/cancel leaves a
             # half-connected client whose CLI subprocess close() must still reap
@@ -647,6 +656,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     raise SdkShuttingDownError()
                 return None
             self._run_coro(startup_client.connect(), timeout=60.0)
+            self._record_peer_cli(startup_client)
             with self._turn_callback_lock:
                 retired = self._retiring or self._closed
             # A CLI spawned mid-connect can miss the reaper's pid snapshot;
@@ -735,6 +745,16 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         if cleaned == self._session_name:
             self._deferred_rename = None
             return True
+        if self._client is not None and self._session_name and not self._peer_lease_move(cleaned):
+            # Another live session holds the target name. Keep this CLI's own
+            # (still leased, still unique) name; True because a rotation would
+            # only rebuild the CLI unnamed.
+            self._deferred_rename = None
+            logger.warning(
+                "claude-agent-sdk: rename to %r refused — another live session holds that peer name",
+                cleaned,
+            )
+            return True
         with self._turn_callback_lock:
             if (
                 self._turn_inbox is not None
@@ -777,6 +797,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         claim_ack = asyncio.get_running_loop().create_future()
         timed_out = False
         claim_granted = False
+        rename_sent = False
         retry_after_burst = False
         try:
             claims.put_nowait(("rename", inbox, claim_ack))
@@ -791,6 +812,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._pending_rename_ack = name
                 self._session_name = name
             await self._client.query(f"/rename {name}")
+            rename_sent = True
             while True:
                 try:
                     message = await asyncio.wait_for(
@@ -844,10 +866,84 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._rename_claim_requested = False
             if acknowledged and getattr(self, "_pending_rename_ack", None) == name:
                 self._pending_rename_ack = None
+            if rename_sent and not timed_out and self._session_name == name:
+                # /rename is a local CLI command applied on receipt (the ack
+                # itself may be swallowed by the reader), so the CLI no longer
+                # carries the old name: free it.
+                self._release_peer_names(keep=name)
             if self._deferred_rename and claim_granted and not timed_out:
                 self._apply_deferred_rename()
             elif retry_after_burst and not self._unsolicited_burst_open:
                 self._apply_deferred_rename()
+
+    # ---------- single-owner peer-name lease ----------
+
+    def _peer_lease_owner(self) -> "_peer_lease.LeaseOwner":
+        owner = getattr(self, "_peer_lease_owner_cache", None)
+        if owner is None:
+            owner = _peer_lease.LeaseOwner.current(
+                getattr(self, "_hermes_session_id", None), self._instance_generation
+            )
+            self._peer_lease_owner_cache = owner
+        return owner
+
+    def _claim_peer_name(self) -> None:
+        """Lease ``--name`` before the spawn; spawn unnamed when a live peer holds it."""
+        name = self._session_name
+        self._peer_name_refused = False
+        if not name:
+            return
+        try:
+            claimed = _peer_lease.claim(name, self._peer_lease_owner())
+        except Exception:
+            logger.debug("claude peer-name lease unavailable; spawning named", exc_info=True)
+            return
+        if claimed:
+            self._peer_leases.add(name)
+            self._release_peer_names(keep=name)
+            return
+        self._peer_name_refused = True
+        logger.warning(
+            "claude-agent-sdk: peer name %r is held by another live session; "
+            "spawning this CLI without --name so peers never see two registrants",
+            name,
+        )
+
+    def _record_peer_cli(self, client: Any) -> None:
+        name = self._session_name
+        if not name or name not in getattr(self, "_peer_leases", ()):
+            return
+        try:
+            _peer_lease.record_cli(name, self._peer_lease_owner(), cli_pid=_sdk_child_pid(client))
+        except Exception:
+            logger.debug("claude peer-name lease: CLI pid not recorded", exc_info=True)
+
+    def _peer_lease_move(self, new: str) -> bool:
+        """Claim ``new`` while the live CLI still carries the old name (both held).
+
+        A CLI that spawned unnamed (refused) may still rename onto a free name."""
+        try:
+            claimed = _peer_lease.move(
+                self._session_name, new, self._peer_lease_owner(), keep_old=True
+            )
+        except Exception:
+            logger.debug("claude peer-name lease move failed; renaming unleased", exc_info=True)
+            return True
+        if claimed:
+            self._peer_leases.add(new)
+            self._peer_name_refused = False
+        return claimed
+
+    def _release_peer_names(self, keep: Optional[str] = None) -> None:
+        leases = getattr(self, "_peer_leases", None)
+        if not leases:
+            return
+        for name in [n for n in leases if n != keep]:
+            leases.discard(name)
+            try:
+                _peer_lease.release(name, self._peer_lease_owner())
+            except Exception:
+                logger.debug("claude peer-name lease release failed", exc_info=True)
 
     def defer_rename(self, name: str) -> None:
         """Park a rename for the next stream release (the host saw the session busy)."""
@@ -1006,6 +1102,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             self._client = None
         self._stop_loop_thread()
         _forget_sdk_session(self)
+        # After the CLI is gone: the name is free only once nobody carries it.
+        self._release_peer_names()
 
     def __enter__(self) -> "ClaudeAgentSdkSession":
         return self
@@ -1405,7 +1503,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # Name the spawned session so peers can find and message it
         # (ListAgents/SendMessage) — the host-router seam.
         extra = dict(fields.get("extra_args") or {})
-        if self._session_name:
+        if self._session_name and not getattr(self, "_peer_name_refused", False):
             extra.setdefault("name", self._session_name)
         # Injected turns (peer SendMessage deliveries, task notifications,
         # scheduled prompts) only appear on the stream as origin-tagged

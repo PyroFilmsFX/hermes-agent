@@ -571,7 +571,10 @@ def send_message(
         sender_agent = sender[1].get("agent")
         if _live_claude_sdk(sender[1]) is not None:
             target_live = _find_live(tip, profile_home)
-            if target_live is not None and _live_claude_sdk(target_live[1]) is not None:
+            target_sdk = _live_claude_sdk(target_live[1]) if target_live is not None else None
+            # A CLI whose peer-name lease was refused spawned unnamed; the computed
+            # name then belongs to ANOTHER live session and must not be hinted.
+            if target_sdk is not None and getattr(target_sdk, "_peer_name_refused", False) is not True:
                 with contextlib.suppress(Exception):
                     target_agent = target_live[1].get("agent")
                     from agent.claude_sdk_runtime_continuity import _sdk_session_name
