@@ -476,6 +476,46 @@ export function useMessageStream({
         }
       }
 
+      // `message.interim` seals the current bubble between assistant steps.
+      // A tool result can still arrive afterward, so settle it onto the
+      // original stable-id card instead of seeding a duplicate in a new bubble.
+      const stableToolId = payload?.tool_id || payload?.tool_call_id || payload?.id
+      if (phase === 'complete' && stableToolId) {
+        let settledSealedTool = false
+        updateSessionState(sessionId, state => {
+          const messageIndex = state.messages.findLastIndex(
+            message =>
+              message.role === 'assistant' &&
+              message.id !== state.streamId &&
+              message.parts.some(part => part.type === 'tool-call' && part.toolCallId === stableToolId)
+          )
+
+          if (messageIndex === -1) {
+            return state
+          }
+
+          settledSealedTool = true
+          return {
+            ...state,
+            messages: state.messages.map((message, index) =>
+              index === messageIndex
+                ? {
+                    ...message,
+                    parts: dedupeGeneratedImageEchoesInParts(
+                      upsertToolPart(message.parts, payload, phase, occurredAt)
+                    ),
+                    completedAt: Math.max(message.completedAt ?? occurredAt, occurredAt)
+                  }
+                : message
+            )
+          }
+        })
+
+        if (settledSealedTool) {
+          return
+        }
+      }
+
       if (!nativeSubagentSessionsRef.current.has(sessionId)) {
         for (const subagentPayload of delegateTaskPayloads(payload, phase, sourceEventType)) {
           upsertSubagent(
@@ -495,7 +535,7 @@ export function useMessageStream({
         occurredAt
       )
     },
-    [flushQueuedDeltas, mutateStream, sessionInterrupted]
+    [flushQueuedDeltas, mutateStream, sessionInterrupted, updateSessionState]
   )
 
   const finalizeInterimAssistantMessage = useCallback(
