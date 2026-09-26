@@ -11,11 +11,19 @@ construction path; these tests run it in-process, end to end.
 
 from __future__ import annotations
 
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
+
+
+@pytest.fixture(autouse=True)
+def _disable_background_title_model(monkeypatch):
+    # Keep instant titles, but these CLI contract tests must not spawn a live
+    # SDK auxiliary query while their main turn is stubbed or refused.
+    monkeypatch.setattr("agent.title_generator._model_title_upgrade_enabled", lambda: False)
 
 
 class _SdkHost(CLIAgentSetupMixin):
@@ -274,7 +282,8 @@ def test_chat_orchestration_exception_records_failure(monkeypatch):
     """chat()'s catch-all (post-thread orchestration dying, NOT
     run_conversation — those become failed result dicts inside run_agent)
     must record the failure so one-shot callers exit nonzero instead of
-    printing "Error: ..." and exiting 0."""
+    printing "Error: ..." and exiting 0. Its error must also survive a
+    terminal redraw in the transcript, exactly once."""
     import cli as cli_mod
 
     monkeypatch.setattr(
@@ -292,8 +301,11 @@ def test_chat_orchestration_exception_records_failure(monkeypatch):
         "_flush_stream",
         lambda: (_ for _ in ()).throw(RuntimeError("display pipeline died")),
     )
+    monkeypatch.setattr(cli_mod, "_OUTPUT_HISTORY", deque(maxlen=200))
+    monkeypatch.setattr(cli_mod, "_OUTPUT_HISTORY_ENABLED", True)
 
     assert shell.chat("hi") is None
     assert shell._last_turn_failed is True
     assert shell._last_turn_failure_reason == "exception"
     assert shell._last_turn_result == {"failed": True, "failure_reason": "exception"}
+    assert list(cli_mod._OUTPUT_HISTORY).count("Error: display pipeline died") == 1

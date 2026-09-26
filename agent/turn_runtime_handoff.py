@@ -136,8 +136,17 @@ def run_whole_turn_runtime(
                 messages=messages, effective_task_id=effective_task_id,
                 should_review_memory=_should_review_memory,
             )
-            return _verdict("return", _with_runtime_attempt_provenance(
-                agent, whole_turn_result, handoff.api_calls + int(whole_turn_result.get("api_calls", 0) or 0)))
+            handoff.api_calls += int(whole_turn_result.get("api_calls", 0) or 0)
+            result = _with_runtime_attempt_provenance(agent, whole_turn_result, handoff.api_calls)
+            from agent.turn_recovery import activate_codex_app_server_fallback
+            if not activate_codex_app_server_fallback(agent, whole_turn_result):
+                return _verdict("return", result)
+            from agent.conversation_loop import _sync_failover_system_message
+            active_system_prompt = _sync_failover_system_message(agent, None, active_system_prompt)
+            api_call_count = handoff.api_calls
+            # Re-enter the generic loop with Codex's projected rows and failed-call accounting.
+            # A fallback into the SDK must pass that loop's untouched-user-boundary check.
+            return _verdict("fallthrough")
 
         sdk_result = _run_sdk_turn(
             agent, user_message=user_message, original_user_message=original_user_message,

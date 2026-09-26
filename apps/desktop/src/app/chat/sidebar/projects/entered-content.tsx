@@ -16,7 +16,7 @@ import { removeWorktreePath } from '@/store/projects'
 import { SidebarRowStack } from '../chrome'
 
 import { ConductorLaneRollup } from './lane-rollup'
-import { useWorkspaceNodeOpen } from './model'
+import { PROJECT_SESSION_PAGE, useRevealedRows, useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
 import {
   mergeRepoWorktreeGroups,
@@ -27,7 +27,7 @@ import {
   type SidebarSessionGroup,
   type SidebarWorkspaceTree
 } from './workspace-groups'
-import { WorkspaceAddButton, WorkspaceHeader } from './workspace-header'
+import { WorkspaceAddButton, WorkspaceHeader, WorkspaceShowMoreRow } from './workspace-header'
 
 // The entered project's body. Main-checkout sessions render directly — no
 // redundant repo/branch header (the breadcrumb already names the project). Only
@@ -55,9 +55,9 @@ export function EnteredProjectContent({
   }
 
   // Home's rows aren't anchored to a folder, so there's no repo or worktree
-  // structure to show — just the chats.
+  // structure to show — just the chats, paged so a huge Home stays cheap.
   if (project.isNoProject) {
-    return <>{renderRows(project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions)))}</>
+    return <HomeSessions project={project} renderRows={renderRows} />
   }
 
   const single = project.repos.length === 1
@@ -77,6 +77,27 @@ export function EnteredProjectContent({
           showHeader={!single}
         />
       ))}
+    </>
+  )
+}
+
+function HomeSessions({
+  project,
+  renderRows
+}: {
+  project: SidebarProjectTree
+  renderRows: (sessions: SessionInfo[]) => React.ReactNode
+}) {
+  const { t } = useI18n()
+  const sessions = useMemo(() => project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions)), [project])
+  const home = useRevealedRows(sessions, PROJECT_SESSION_PAGE)
+
+  return (
+    <>
+      {renderRows(home.shown)}
+      {home.more > 0 && (
+        <WorkspaceShowMoreRow label={t.sidebar.showMoreIn(home.more, project.label)} onClick={home.showMore} />
+      )}
     </>
   )
 }

@@ -104,6 +104,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     completeAssistantMessage,
     finalizeInterimAssistantMessage,
     flushQueuedDeltas,
+    dropQueuedDeltas,
     nativeSubagentSessionsRef,
     sessionStateByRuntimeIdRef,
     updateSessionState
@@ -176,7 +177,17 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     const isBackground = Boolean(payload && 'background' in payload && (payload as Record<string, unknown>).background)
     const deliveryId = typeof payload?.delivery_id === 'string' ? payload.delivery_id.trim() || null : null
 
-    flushQueuedDeltas(sessionId)
+    // Turn-boundary orphan drop (#119543): when no turn is live, anything
+    // still queued belongs to a turn that already ended (a delta reordered
+    // behind its own complete or heartbeat). Flushing it would seed a bubble
+    // the new turn inherits, painting a stale duplicate of the previous
+    // reply. A still-live previous turn (steer) keeps the flush: those bytes
+    // are real output of the bubble on screen.
+    if (sessionStateByRuntimeIdRef.current.get(sessionId)?.turnLive) {
+      flushQueuedDeltas(sessionId)
+    } else {
+      dropQueuedDeltas(sessionId)
+    }
 
     if (isBackground) {
       // For background:true: message.start must NOT touch busy/awaitingResponse/interrupted
@@ -303,6 +314,9 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         // Backend accepted the turn — the no-payload settle gate below may
         // now treat a running=false heartbeat as a real turn end.
         turnLive: true,
+        // A new turn is a new occurrence: the previous turn's late terminal
+        // frame (#119569) can no longer claim its heartbeat-settled bubble.
+        heartbeatSettledStreamId: null,
         // Keep the submit-time seed (submit.ts seedOptimistic) — resetting
         // here would hide the submit→accept round trip from the timer.
         // Backend-originated turns (queue drain elsewhere, goal follow-up)
@@ -716,6 +730,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       payload?.response_previewed,
       failure,
       occurredAt,
+      payload?.persisted_turn,
+      Boolean(payload?.response_transformed),
       typeof payload?.delivery_id === 'string' ? payload.delivery_id.trim() || undefined : undefined
     )
 

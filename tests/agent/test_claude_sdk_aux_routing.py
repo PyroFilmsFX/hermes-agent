@@ -19,7 +19,7 @@ from agent.transports import claude_agent_sdk_session as SESSION
 
 def _plant_sdk(monkeypatch, messages):
     """Install the optional SDK's minimal typed surface for one test."""
-    monkeypatch.setattr("tools.lazy_deps.ensure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pm.ensure_import", lambda *_args, **_kwargs: None)
     module = ModuleType("claude_agent_sdk")
 
     class TextBlock:
@@ -1584,9 +1584,9 @@ def test_sdk_aux_cold_start_ensures_dependency_before_import(monkeypatch):
             raise ModuleNotFoundError("No module named 'claude_agent_sdk'")
         return real_import(name, *args, **kwargs)
 
-    def ensure(feature, *, prompt):
+    def ensure(extra):
         nonlocal sdk_available, captured
-        ensure_calls.append((feature, prompt))
+        ensure_calls.append(extra)
         sdk_available = True
         module, captured = _plant_sdk(monkeypatch, [])
         messages = [
@@ -1600,13 +1600,13 @@ def test_sdk_aux_cold_start_ensures_dependency_before_import(monkeypatch):
         )
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
-    monkeypatch.setattr("tools.lazy_deps.ensure", ensure)
+    monkeypatch.setattr("pm.ensure_import", ensure)
 
     text, usage, _ = asyncio.run(
         AUX._collect_text("prompt", model="claude-sonnet-5")
     )
 
-    assert ensure_calls == [("provider.claude_agent_sdk", False)]
+    assert ensure_calls == ["claude-agent-sdk"]
     assert text == "answer"
     assert usage == {"input_tokens": 2}
     assert captured["prompt"] == "prompt"

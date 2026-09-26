@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import model_tools
+import pytest
 import run_agent
 
 
@@ -69,6 +70,52 @@ def _stub_generic_result_building(monkeypatch, agent, text):
         "_build_assistant_message",
         lambda _message, _finish: {"role": "assistant", "content": text},
     )
+
+
+@pytest.mark.parametrize("fallback_provider,projected", [
+    ("openrouter", False), ("claude-agent-sdk", False), ("claude-agent-sdk", True),
+])
+def test_codex_quota_fallback_keeps_accounting_and_sdk_replay_fence(
+    monkeypatch, fallback_provider, projected,
+):
+    agent = _agent(api_mode="codex_app_server")
+    agent._fallback_chain = [{"provider": fallback_provider, "model": "fallback-chat-model"}]
+    agent._fallback_index = 0
+    calls = []
+
+    def codex_turn(**kwargs):
+        calls.append("codex")
+        if projected:
+            kwargs["messages"].append({"role": "assistant", "content": "already delivered"})
+        return {"error": "rate limit exceeded", "api_calls": 1, "failed": True,
+                "messages": kwargs["messages"], "final_response": "rate limit exceeded"}
+
+    monkeypatch.setattr(agent, "_run_codex_app_server_turn", codex_turn)
+    ordinary = MagicMock(base_url="https://openrouter.ai/api/v1", api_key="fallback")
+    ordinary.chat.completions.create.side_effect = (
+        lambda **_kwargs: calls.append("generic") or _response("fallback online")
+    )
+    _install_fallback_clients(monkeypatch, {fallback_provider: ordinary})
+    _stub_generic_result_building(monkeypatch, agent, "fallback online")
+    monkeypatch.setattr(agent, "_run_claude_agent_sdk_turn", lambda **kwargs: (
+        calls.append("sdk") or {"final_response": "fallback online", "api_calls": 1,
+                                "messages": kwargs["messages"], "completed": True}
+    ))
+    with patch.object(agent, "_spawn_background_review", return_value=None):
+        result = agent.run_conversation("hello")
+
+    assert [m["role"] for m in result["messages"]].count("user") == 1
+    if projected:
+        assert calls == ["codex"]
+        assert result["failed"] is True
+        assert result["api_calls"] == 1
+        assert "already delivered" in [m.get("content") for m in result["messages"]]
+    else:
+        assert calls == ["codex", "sdk" if fallback_provider == "claude-agent-sdk" else "generic"]
+        assert result["final_response"] == "fallback online"
+        assert result["api_calls"] == 2
+        assert result["provider"] == fallback_provider
+        assert f"Provider: {fallback_provider}" in agent._cached_system_prompt
 
 
 def test_sdk_provider_failure_continues_to_generic_with_cumulative_provenance(monkeypatch):

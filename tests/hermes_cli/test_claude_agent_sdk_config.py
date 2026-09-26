@@ -128,7 +128,7 @@ class TestUserConfigMerge:
     """
 
     def _load(self, tmp_path, monkeypatch, user_cfg):
-        import yaml
+        import hermes_yaml as yaml
 
         home = tmp_path / ".hermes"
         home.mkdir()

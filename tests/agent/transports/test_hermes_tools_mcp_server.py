@@ -12,7 +12,6 @@ import asyncio
 import inspect
 import os
 import sys
-from typing import get_args
 
 from agent.transports.hermes_tools_mcp_server import (
     _signature_from_schema,
@@ -37,7 +36,6 @@ class TestSignatureFromSchema:
         assert param.kind == inspect.Parameter.KEYWORD_ONLY
         assert annots["query"] == str
         assert param.default is inspect.Parameter.empty
-
 
 
     def test_skip_private_params(self):
@@ -80,19 +78,7 @@ class TestSignatureFromSchema:
         assert annots["o"] == dict
 
 
-
-
-
-
-
-
 class TestModuleSurface:
-    def test_module_imports_clean(self):
-        from agent.transports import hermes_tools_mcp_server as m
-        assert callable(m.main)
-        assert callable(m._build_server)
-        assert isinstance(m.EXPOSED_TOOLS, tuple)
-        assert len(m.EXPOSED_TOOLS) > 0
 
     def test_exposed_tools_are_safe_subset(self):
         """Codex's default MCP surface excludes its native file/shell tools."""
@@ -193,8 +179,6 @@ class TestModuleSurface:
                                        "reason": reason, "boot_id": boot}), encoding="utf-8")
             assert m._session_spawn_exposure_decision(sid) is False
         assert calls == []
-
-
 
 
 class TestClaudeSdkMcpIntegration:

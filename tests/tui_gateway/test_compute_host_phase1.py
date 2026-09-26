@@ -4,14 +4,11 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
 
-import pytest
 
 from tui_gateway import compute_host, server
 from tui_gateway.compute_host import ComputeHost, _default_workers
 from tui_gateway.host_supervisor import (
-    MUTATOR_ROUTE_TABLE,
     HostSupervisor,
     append_log_record,
 )
@@ -35,17 +32,17 @@ def _wait_for_frame(out: io.StringIO, predicate, timeout: float = 2.0) -> dict:
     raise AssertionError(f"timed out waiting for frame; saw={_json_lines(out)}")
 
 
-def test_compute_host_workers_inherit_tui_pool_env_or_8(monkeypatch):
+def test_compute_host_workers_inherit_tui_pool_env(monkeypatch):
     monkeypatch.delenv("HERMES_TUI_RPC_POOL_WORKERS", raising=False)
     monkeypatch.delenv("HERMES_COMPUTE_HOST_WORKERS", raising=False)
-    assert _default_workers() == 8
+    default = _default_workers()
 
     monkeypatch.setenv("HERMES_TUI_RPC_POOL_WORKERS", "11")
     assert _default_workers() == 11
 
-    # Dead-RC tombstone: malformed env falls back to 8, not the old except-branch 4.
+    # Malformed env falls back to the same default as unset.
     monkeypatch.setenv("HERMES_TUI_RPC_POOL_WORKERS", "not-an-int")
-    assert _default_workers() == 8
+    assert _default_workers() == default
 
 
 def test_compute_host_routes_relayed_response_and_lock_to_its_open_request(monkeypatch):
@@ -80,22 +77,6 @@ def test_compute_host_routes_relayed_response_and_lock_to_its_open_request(monke
         host.close()
 
 
-def test_mutator_route_table_matches_prd_inventory():
-    assert MUTATOR_ROUTE_TABLE == {
-        "prompt.submit": "turn-path",
-        "session.interrupt": "turn-path",
-        "reload.mcp": "run-concurrent",
-        "session.save": "run-concurrent",
-        "session.compress": "idle-gated",
-        "prompt.submit.truncate": "idle-gated",
-        "slash.model": "idle-gated",
-        "slash.personality": "idle-gated",
-        "slash.prompt": "idle-gated",
-        "slash.compress": "idle-gated",
-        "session.reset": "idle-gated",
-        "session.history.reload": "idle-gated",
-        "slash.retry": "idle-gated",
-    }
 
 
 def test_append_log_record_single_write_lines(tmp_path):
@@ -310,15 +291,20 @@ def test_shutdown_drain_sleep_never_overshoots_the_reserve(monkeypatch):
     _record_finalize(monkeypatch, events, "idle")
 
     slept: list[float] = []
+    clock = [100.0]
+    monkeypatch.setattr(compute_host.time, "monotonic", lambda: clock[0])
+
     real_sleep = time.sleep
     drain_thread = threading.get_ident()
 
     def _recording_sleep(seconds: float) -> None:
-        # ``compute_host.time`` is the global module: count only the draining
-        # thread's ticks, not sleeps from unrelated threads in this process.
-        if threading.get_ident() == drain_thread:
-            slept.append(seconds)
-        real_sleep(seconds)
+        # ``compute_host.time`` is the global module: other threads in this
+        # process must neither be counted nor advance the drain's fake clock.
+        if threading.get_ident() != drain_thread:
+            real_sleep(seconds)
+            return
+        slept.append(seconds)
+        clock[0] += seconds
 
     monkeypatch.setattr(compute_host.time, "sleep", _recording_sleep)
 

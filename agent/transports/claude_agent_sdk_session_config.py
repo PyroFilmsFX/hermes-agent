@@ -609,7 +609,7 @@ def _http_mcp_entries_from_config() -> dict[str, dict]:
     from urllib.parse import unquote as _unquote, urlsplit as _urlsplit
 
     try:
-        import yaml as _yaml  # type: ignore
+        import hermes_yaml as _yaml
     except Exception:
         return {}
 

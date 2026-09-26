@@ -258,9 +258,9 @@ async def _collect_text(
     # importing it. On a cold install the main turn may still be lazy-installing
     # claude-agent-sdk when an auxiliary task (title, compression) runs first;
     # importing without this races the install and dies with ModuleNotFoundError.
-    from tools.lazy_deps import ensure as _lazy_ensure
+    from pm import ensure_import
 
-    _lazy_ensure("provider.claude_agent_sdk", prompt=False)
+    ensure_import("claude-agent-sdk")
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,

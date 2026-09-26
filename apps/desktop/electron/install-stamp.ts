@@ -1,184 +1,135 @@
-import { execFileSync } from 'node:child_process'
-import fs from 'node:fs'
-import path from 'node:path'
+// install-stamp.ts — the typed build-time install stamp.
+//
+// scripts/write-build-stamp.mjs writes build/install-stamp.json during
+// `npm run build`.
+// bundle-electron-main.mjs bakes that file into the
+// production bundle by defining the __HERMES_INSTALL_STAMP__ global as
+// the stamp.  The stamp is a constant of the artifact.
+// It cannot be missing, stale, or edited after signing.
+//
+// Dev bundles and test runs define nothing; the typeof guard makes the
+// stamp null there (a dev run has no artifact to be truthful about).
 
-export const INSTALL_STAMP_SCHEMA_VERSION = 1
+/**
+ * The desktop artifact kind — which runtime story this artifact tells:
+ *  - 'bootstrap': no runtime in the artifact; first launch bootstraps a
+ *    local install (the default; also what non-desktop stamps carry).
+ *  - 'bundled': the agent runtime ships inside the artifact resources.
+ *  - 'light': no runtime at all; remote connections only.
+ * Selected at build time by HERMES_DESKTOP_VARIANT (unset = bootstrap).
+ */
+export type ArtifactKind = 'bootstrap' | 'bundled' | 'light'
 
+/** Relative paths declared by the PM bundle builder, below agent-payload. */
+export interface PayloadRuntime {
+  repoDir: string
+  toolsDir: string
+  storePython: string
+  sitePackages: string
+  commands: Record<string, string>
+}
+
+/** Immutable admitted channel build. Native names come from R2, never the slug. */
+export interface ChannelBuildRequest {
+  schema: 1
+  buildId: string
+  channel: string
+  sequence: number
+  repository: string
+  commit: string
+  controllerCommit?: string
+  sourceVersion: string
+  /** Build-only official receiver rehearsal, admitted under a disposable authority. */
+  receiverCandidate?: true
+  releaseTag?: string
+  version: string
+  windowsVersion: string
+  identity: {
+    token: string
+    displayName: string
+    appId: string
+    appNamePascal: string
+    artifactNamePascal: string
+    cliName: string
+    windowsExecutableName: string
+    msixAppIdWithOrg: string
+  }
+  bundleEnv: Record<string, string | null>
+  publicBase: string
+}
+
+/** Mirrors the build stamp with the PM builder's completed launch contract. */
 export interface InstallStamp {
   schemaVersion: number
-  commit: string
-  branch?: string | null
-  builtAt?: string | null
-  dirty?: boolean
-  source?: string | null
-  path?: string | null
+  commit: string | null
+  commitDate: number | null
+  branch: string | null
+  builtAt: string | null
+  dirty: boolean
+  /** Build provenance: where the stamp's facts came from. */
+  source:
+    | 'build'
+    | 'commit-build'
+    | 'channel-build'
+    | 'ci'
+    | 'docker'
+    | 'fallback'
+    | 'git'
+    | 'local'
+    | 'nix'
+    | 'unknown'
+    | null
+  /** The steward of a sealed tree ('desktop-app' | 'docker' | 'nix'), when packaged. */
+  distribution: string | null
+  /** Who applies the next update. Required in every stamp. */
+  updateMechanism: 'self' | 'app-installer' | 'electron-updater' | 'external' | 'microsoft-store'
+  baseVersion: string | null
+  displayVersion: string | null
+  distance: number | null
+  payload: ArtifactKind
+  /** Present on bundled artifacts. Validated at build time, never discovered at boot. */
+  runtime?: PayloadRuntime
+  /** Complete channel inputs, absent on legacy releases and one-off builds. */
+  channelBuild?: Readonly<ChannelBuildRequest>
+  /** Cross-application receiver shipped in this artifact, absent on older builds. */
+  receiverProtocol?: 1
+  /** Pinned release tag; null for channel builds, one-offs and bootstrap. */
+  tag: string | null
 }
 
-export interface FsReader {
-  existsSync: (p: string) => boolean
-  readFileSync: (p: string, encoding: any) => string
+declare const __HERMES_INSTALL_STAMP__: InstallStamp
+
+/** The baked request is immutable as well as its containing artifact stamp. */
+function freezeStamp(stamp: InstallStamp): Readonly<InstallStamp> {
+  if (stamp.channelBuild) {
+    Object.freeze(stamp.channelBuild.identity)
+    Object.freeze(stamp.channelBuild.bundleEnv)
+    Object.freeze(stamp.channelBuild)
+  }
+
+  return Object.freeze(stamp)
 }
 
-export interface LoadInstallStampOptions {
-  /** Explicit dev mode flag. Defaults to checking HERMES_DESKTOP_DEV_SERVER. */
-  isDev?: boolean
-  /** Path to resources directory. Defaults to process.resourcesPath. */
-  resourcesPath?: string | null
-  /** App root directory. Defaults to process.cwd() or app root. */
-  appRoot?: string
-  /** Desktop repo root override (e.g. HERMES_DESKTOP_HERMES_ROOT). */
-  hermesRoot?: string
-  /** HERMES_HOME directory. */
-  hermesHome?: string
-  /** Fallback code sha from backend. */
-  backendCodeSha?: string | null
-  /** Injectable synchronous git runner for testing. */
-  runGitSync?: (args: string[], cwd: string) => string | null
-  /** Injectable filesystem reader. */
-  fsImpl?: FsReader | typeof fs
-}
+/** The baked stamp of this artifact, or null on dev bundles. */
+export const INSTALL_STAMP: Readonly<InstallStamp> | null =
+  typeof __HERMES_INSTALL_STAMP__ === 'undefined' ? null : freezeStamp(__HERMES_INSTALL_STAMP__)
 
-function defaultRunGitSync(args: string[], cwd: string): string | null {
-  try {
-    const gitBin = process.platform === 'win32' ? 'git.exe' : 'git'
-    return execFileSync(gitBin, args, {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      // Runs synchronously at startup: never let a wedged git (index lock, network fs) hang boot.
-      timeout: 2000,
-      windowsHide: true
-    }).trim()
-  } catch {
-    return null
-  }
-}
-
-function resolveBackendCodeSha(
-  options: LoadInstallStampOptions,
-  fsImpl: FsReader | typeof fs
-): string | null {
-  if (options.backendCodeSha && typeof options.backendCodeSha === 'string' && options.backendCodeSha.length >= 7) {
-    return options.backendCodeSha
-  }
-
-  const hermesHome =
-    options.hermesHome ||
-    process.env.HERMES_HOME ||
-    (process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA || '', 'hermes')
-      : path.join(process.env.HOME || '', '.hermes'))
-
-  if (hermesHome) {
-    const statePath = path.join(hermesHome, 'gateway_state.json')
-    try {
-      if (fsImpl.existsSync(statePath)) {
-        const raw = String(fsImpl.readFileSync(statePath, 'utf8'))
-        const parsed = JSON.parse(raw)
-        if (parsed && typeof parsed === 'object' && typeof parsed.code_sha === 'string' && parsed.code_sha.length >= 7) {
-          return parsed.code_sha
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  return null
-}
-
-export function loadInstallStamp(options: LoadInstallStampOptions = {}): InstallStamp | null {
-  const fsImpl = options.fsImpl || fs
-  const isDev =
-    options.isDev !== undefined
-      ? options.isDev
-      : Boolean(process.env.HERMES_DESKTOP_DEV_SERVER)
-
-  if (isDev) {
-    // In DEV mode, derive the sha from git rev-parse HEAD of the desktop's repo root
-    // (HERMES_DESKTOP_HERMES_ROOT or the app root), falling back to the backend-reported
-    // code_sha, and never show a stale build stamp.
-    const root =
-      options.hermesRoot ||
-      process.env.HERMES_DESKTOP_HERMES_ROOT ||
-      options.appRoot ||
-      (typeof process !== 'undefined' ? process.cwd() : '')
-
-    const runGit = options.runGitSync || defaultRunGitSync
-
-    const gitHead = runGit(['rev-parse', 'HEAD'], root)
-    if (gitHead && typeof gitHead === 'string' && gitHead.length >= 7) {
-      const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root)
-      const dirtyStr = runGit(['status', '--porcelain'], root)
-
-      return Object.freeze({
-        schemaVersion: INSTALL_STAMP_SCHEMA_VERSION,
-        commit: gitHead,
-        branch: branch && branch !== 'HEAD' ? branch : null,
-        builtAt: null,
-        dirty: Boolean(dirtyStr && dirtyStr.length > 0),
-        source: 'git',
-        path: null
-      })
-    }
-
-    const backendSha = resolveBackendCodeSha(options, fsImpl)
-    if (backendSha) {
-      return Object.freeze({
-        schemaVersion: INSTALL_STAMP_SCHEMA_VERSION,
-        commit: backendSha,
-        branch: null,
-        builtAt: null,
-        dirty: false,
-        source: 'backend',
-        path: null
-      })
-    }
-
-    // Never return a stale build stamp in dev mode
-    return null
-  }
-
-  const resourcesPath =
-    options.resourcesPath !== undefined
-      ? options.resourcesPath
-      : typeof process !== 'undefined'
-        ? process.resourcesPath
-        : null
-  const appRoot = options.appRoot || (typeof process !== 'undefined' ? process.cwd() : '')
-
-  const candidates = [
-    resourcesPath ? path.join(resourcesPath, 'install-stamp.json') : null,
-    appRoot ? path.join(appRoot, 'build', 'install-stamp.json') : null
-  ].filter(Boolean) as string[]
-
-  for (const p of candidates) {
-    try {
-      const raw = String(fsImpl.readFileSync(p, 'utf8'))
-      const parsed = JSON.parse(raw)
-
-      if (parsed && typeof parsed === 'object' && typeof parsed.commit === 'string' && parsed.commit.length >= 7) {
-        if (parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
-          console.warn(
-            `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
-          )
-          continue
-        }
-
-        return Object.freeze({
-          schemaVersion: parsed.schemaVersion,
-          commit: parsed.commit,
-          branch: parsed.branch || null,
-          builtAt: parsed.builtAt || null,
-          dirty: Boolean(parsed.dirty),
-          source: parsed.source || null,
-          path: p
-        })
-      }
-    } catch {
-      // Either ENOENT or malformed JSON; try the next candidate
-    }
-  }
-
-  return null
+/**
+ * The install shape this process runs as — THE single split every
+ * lifecycle decision gates on (mirror of Python's runtime_tree()):
+ *  - 'bundled': the runtime ships inside the artifact. Venv machinery,
+ *    installers, repair-reinstall escalation and update checkouts must
+ *    never run; drift means rebuild, updates mean the steward.
+ *  - 'checkout': a git tree with venv machinery, provisioner-on-demand
+ *    and `hermes update`.
+ *
+ * Derived from the stamp CONSTANT, never from filesystem probes: a
+ * payload/venv/marker probe answers "is this artifact intact?", not
+ * "which shape am I?". PM and the bundle builder own payload integrity.
+ * A backend launch failure must not quietly turn a bundle into a checkout. Dev runs
+ * (null stamp) and bootstrap artifacts are 'checkout': their runtime
+ * is a local install the app bootstraps and maintains.
+ */
+export function installShape(stamp: Readonly<InstallStamp> | null = INSTALL_STAMP): 'bundled' | 'checkout' {
+  return stamp?.payload === 'bundled' ? 'bundled' : 'checkout'
 }
