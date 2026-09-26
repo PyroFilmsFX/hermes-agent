@@ -132,6 +132,20 @@ def issue_scoped_capability(owner_session_id: str) -> str | None:
     return token
 
 
+def owner_capability_reissuable(owner_session_id: str, session_generation: str, profile_home: str) -> bool:
+    """Whether a fresh capability COULD be issued to this exact owner: it is still a live, unfinalized
+    session of the same generation whose effective profile home is unchanged. The same checks
+    ``issue_scoped_capability``/``authorize_scoped_capability`` apply; used to re-validate rows enqueued
+    through the queue-only route before they are delivered."""
+    owner = str(owner_session_id or "").strip()
+    if not owner or not session_generation or not profile_home:
+        return False
+    live = _live_owner(owner)
+    if live is None or live[1] != str(session_generation):
+        return False
+    return _effective_owner_home(live[0]) == str(profile_home)
+
+
 def rotate_scoped_capability(owner_session_id: str, previous_token: str | None = None,
                              *, grace_seconds: float = _ROTATION_GRACE_SECONDS) -> str | None:
     """Issue a fresh capability and retire ``previous_token`` after a grace window.
@@ -519,6 +533,7 @@ __all__ = [
     "issue_scoped_capability",
     "issue_scoped_transport_ticket",
     "revoke_scoped_capabilities_for_session",
+    "owner_capability_reissuable",
     "revoke_scoped_capability",
     "rotate_scoped_capability",
     "scoped_bridge_available",

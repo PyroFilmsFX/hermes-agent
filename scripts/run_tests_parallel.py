@@ -4,7 +4,7 @@
 The minimum-viable replacement for pytest-xdist + a subprocess-isolation
 plugin. Discovers test files under ``tests/`` (excluding integration/e2e
 unless explicitly requested), then runs one ``python -m pytest <file>``
-subprocess per file, with bounded parallelism (default: ``os.cpu_count()``).
+subprocess per file, with bounded parallelism (default: ``min(os.cpu_count(), 6)``).
 
 Why per-file rather than per-test?
     Per-test spawn overhead (~250ms × 17k tests = 70min CPU minimum)
@@ -34,7 +34,7 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
-    HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
+    HERMES_TEST_WORKERS  Override worker count (default: min(os.cpu_count(), 6))
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
                          default: 'tests')
@@ -977,6 +977,18 @@ def _pytest_flag_error(tokens: List[str]) -> Optional[str]:
     return f"unrecognized arguments: {' '.join(unknown)}" if unknown else None
 
 
+# A cpu_count*2 default (36 on an 18-core Mac) pinned the owner's machine at 100% CPU on
+# 2026-09-25; one suite at a time at <=6 workers leaves room for the desktop and other lanes.
+_DEFAULT_MAX_WORKERS = 6
+
+
+def _default_workers() -> int:
+    override = os.environ.get("HERMES_TEST_WORKERS", "").strip()
+    if override:
+        return max(1, int(override))
+    return max(1, min(os.cpu_count() or 4, _DEFAULT_MAX_WORKERS))
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
@@ -987,8 +999,8 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4)),
-        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count)",
+        default=_default_workers(),
+        help="Parallel worker count (default: $HERMES_TEST_WORKERS or min(cpu_count, 6))",
     )
     parser.add_argument(
         "--paths",

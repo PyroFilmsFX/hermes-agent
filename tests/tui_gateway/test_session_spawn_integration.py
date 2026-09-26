@@ -401,6 +401,49 @@ def test_expired_capability_401s_attach_but_queues_durably_with_owner_warning(mo
         db.close()
 
 
+def test_queue_route_pins_sender_to_the_capability_owner_and_marks_the_row(monkeypatch, tmp_path):
+    """b3-30 follow-up (a)+(b): body-supplied sender identity is ignored; the row records the capability
+    owner's generation/profile so delivery can re-validate it."""
+    import httpx
+    from fastapi import FastAPI
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    app = FastAPI()
+    server.register_session_spawn_routes(app)
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("target", "desktop")
+    db.create_session("victim", "desktop")
+    live = {"session_key": "owner-key", "session_generation": "generation", "profile_home": None}
+    monkeypatch.setattr(server, "_sessions", {"owner-runtime": live})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    token = bridge.issue_scoped_capability("owner-runtime")
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            return await client.post("/api/session-send-queue", json={
+                "target": "target", "body": "hello", "from_session_id": "victim", "from_label": "victim",
+                "from": "victim", "sender": "victim",
+            }, headers={"X-Hermes-Session-Spawn-Capability": token})
+
+    try:
+        response = asyncio.run(exercise())
+        assert response.json()["status"] == "queued"
+        [row] = db.peer_mailbox_pending("target")
+        assert row["from_session_id"] == "owner-key"
+        assert "victim" not in str(row.get("from_label") or "")
+        marker = json.loads(row["sender_auth"])
+        assert marker["owner_session_id"] == "owner-runtime"
+        assert marker["session_generation"] == "generation"
+        assert marker["profile_home"] == bridge._capabilities[token].profile_home
+    finally:
+        bridge.revoke_scoped_capability(token)
+        db.close()
+
+
 def test_sdk_turn_start_rotates_the_published_capability(monkeypatch, tmp_path):
     """An SDK session older than the TTL gets a fresh capability in its file at each turn start."""
     from agent.transports import claude_agent_sdk_session_config as config

@@ -28,6 +28,8 @@ Config (``config.yaml``, all optional)::
       max_concurrent_resumes: 2
       per_target_resume_interval_s: 120
       max_attempts: 5
+      max_queued_per_sender: 50   # still-queued rows per sending session; more → status "queue_full"
+      queued_ttl_s: 86400         # a row still queued after this long is failed as "expired"
       pinned_resident: true
       max_resident_sessions: 3
 """
@@ -36,6 +38,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import json
 import logging
 import os
 import threading
@@ -51,6 +54,11 @@ STATUS_DELIVERED_NATIVE = "delivered-native"
 STATUS_RESUMED = "resumed-and-delivered"
 STATUS_QUEUED = "queued"
 STATUS_FAILED = "failed"
+STATUS_QUEUE_FULL = "queue_full"  # refused before writing: the sender's queue is at its cap
+
+# ``last_error`` reasons for rows failed by the queue-bound / re-validation checks (b3-30 follow-up).
+REASON_SENDER_REVALIDATION_FAILED = "sender_revalidation_failed"
+REASON_EXPIRED = "expired"
 
 # Sources a peer message may wake. Messaging-platform rows belong to their adapters, and ``cli`` rows to an
 # interactive terminal that a gateway-side resume could race on the same transcript.
@@ -62,6 +70,8 @@ _DEFAULTS: dict[str, Any] = {
     "max_concurrent_resumes": 2,
     "per_target_resume_interval_s": 120.0,
     "max_attempts": 5,
+    "max_queued_per_sender": 50,
+    "queued_ttl_s": 24 * 3600.0,
     "max_body_chars": 16000,
     "startup_delay_s": 30.0,
     "retry_interval_s": 60.0,
@@ -392,7 +402,63 @@ def _submit_claimed(db, row: dict, sid: str, *, via: str, ok_status: str, pol: d
     return ok_status, "accepted as the session's next turn"
 
 
+def _settle_unfit(db, row: dict, reason: str, detail: str) -> tuple[str, str]:
+    """Fail a still-queued row before any delivery attempt, log it, and settle it as failed."""
+    sender = str(row.get("from_session_id") or "")
+    if db.peer_mailbox_cancel(row["id"], reason=reason):
+        logger.warning("peer mailbox: msg %s from sender=%s to target=%s failed: %s (%s)",
+                       row["id"], sender or "operator", row.get("target_session_id"), reason, detail)
+        emit_settled(row["id"], STATUS_FAILED, int(row.get("attempts") or 0), sender)
+        return STATUS_FAILED, reason
+    return STATUS_QUEUED, "another delivery of this message is in progress"
+
+
+def _sender_revalidates(row: dict) -> bool:
+    """Queue-only rows (``sender_auth`` set) deliver only while a fresh capability could still be issued to
+    their sender: the same live owner session, generation, and profile. Normal-path rows are unaffected."""
+    raw = row.get("sender_auth")
+    if not raw:
+        return True
+    try:
+        marker = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        from agent.transports.hermes_gateway_session_bridge import owner_capability_reissuable
+        return bool(owner_capability_reissuable(str(marker.get("owner_session_id") or ""),
+                                                str(marker.get("session_generation") or ""),
+                                                str(marker.get("profile_home") or "")))
+    except Exception:  # noqa: BLE001 - an unreadable marker fails closed
+        logger.debug("peer mailbox: unreadable sender_auth on msg %s", row.get("id"), exc_info=True)
+        return False
+
+
+def _unfit_for_delivery(db, row: dict, pol: dict) -> tuple[str, str] | None:
+    """TTL and sender re-validation gate, run before a row is claimed; ``None`` = deliverable."""
+    ttl = float(pol.get("queued_ttl_s") or 0)
+    created = float(row.get("created_at") or 0)
+    if ttl > 0 and created and created < time.time() - ttl:
+        return _settle_unfit(db, row, REASON_EXPIRED, f"queued longer than {int(ttl)}s")
+    if not _sender_revalidates(row):
+        return _settle_unfit(db, row, REASON_SENDER_REVALIDATION_FAILED,
+                             "the sender is no longer a live owner of the same generation/profile")
+    return None
+
+
+def _expire_stale(db, pol: dict) -> int:
+    """Pending-scan sweep: fail every still-queued row older than ``queued_ttl_s``."""
+    ttl = float(pol.get("queued_ttl_s") or 0)
+    if ttl <= 0:
+        return 0
+    expired = db.peer_mailbox_expire_queued(older_than=time.time() - ttl)
+    for row in expired:
+        sender = str(row.get("from_session_id") or "")
+        logger.warning("peer mailbox: msg %s from sender=%s to target=%s failed: %s (queued longer than %ds)",
+                       row["id"], sender or "operator", row.get("target_session_id"), REASON_EXPIRED, int(ttl))
+        emit_settled(row["id"], STATUS_FAILED, int(row.get("attempts") or 0), sender)
+    return len(expired)
+
+
 def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool, pol: dict) -> tuple[str, str]:
+    if (unfit := _unfit_for_delivery(db, row, pol)) is not None:
+        return unfit
     target = _tip(db, str(row["target_session_id"]))
     live = _find_live(target, profile_home)
     if live is not None:
@@ -445,9 +511,12 @@ def _status_of_existing(row: dict) -> str:
 
 def send_message(
     *, target: str, body: str, from_session_id: str = "", from_label: str = "", request_id: str = "",
-    profile_home: str | None = None, queue_only: bool = False,
+    profile_home: str | None = None, queue_only: bool = False, sender_auth: dict | None = None,
 ) -> dict:
-    """Queue durably, then try to deliver. Always returns ``{"status": ...}`` — never raises."""
+    """Queue durably, then try to deliver. Always returns ``{"status": ...}`` — never raises.
+
+    ``sender_auth`` (queue-only route) records the capability owner so delivery re-validates it. A sender
+    already at ``max_queued_per_sender`` still-queued rows gets ``queue_full`` and nothing is written."""
     pol = policy()
     if not pol["enabled"]:
         return {"status": STATUS_FAILED, "error": "peer mailbox is disabled by owner policy"}
@@ -469,9 +538,18 @@ def send_message(
             if from_session_id and tip in {from_session_id, _tip(db, from_session_id)}:
                 return {"status": STATUS_FAILED, "error": "a session cannot message itself"}
             dedupe_key = f"{from_session_id or 'operator'}:{request_id}" if request_id else None
-            row, created = db.peer_mailbox_enqueue(
-                target_session_id=tip, body=body, from_session_id=from_session_id, from_label=from_label,
-                dedupe_key=dedupe_key, target_hint=str(target))
+            from hermes_state_peer_mailbox import PeerMailboxQueueFull
+            try:
+                row, created = db.peer_mailbox_enqueue(
+                    target_session_id=tip, body=body, from_session_id=from_session_id, from_label=from_label,
+                    dedupe_key=dedupe_key, target_hint=str(target),
+                    sender_auth=json.dumps(sender_auth, sort_keys=True) if sender_auth else None,
+                    max_queued_per_sender=int(pol.get("max_queued_per_sender") or 0))
+            except PeerMailboxQueueFull as full:
+                logger.warning("peer mailbox: sender=%s to target=%s refused: queue_full (%d queued, limit %d)",
+                               from_session_id, tip, full.queued, full.limit)
+                return {"status": STATUS_QUEUE_FULL, "code": "queue_full", "target_session_id": tip,
+                        "error": f"sender already has {full.queued} queued peer messages (limit {full.limit})"}
             base = {"message_id": row["id"], "target_session_id": tip, "target_title": found.get("title") or ""}
             if not created:
                 return {**base, "status": _status_of_existing(row), "duplicate": True,
@@ -513,6 +591,7 @@ def drain_session(session_key: str, profile_home: str | None = None) -> int:
     with _open_db(profile_home) as db:
         if db is None:
             return 0
+        _expire_stale(db, pol)
         targets = [t for t in db.peer_mailbox_pending_targets(limit=200)
                    if t == session_key or _tip(db, t) == session_key]
         for target in targets:
@@ -520,6 +599,8 @@ def drain_session(session_key: str, profile_home: str | None = None) -> int:
                 live = _find_live(session_key, profile_home)
                 if live is None:
                     return delivered
+                if _unfit_for_delivery(db, row, pol) is not None:
+                    continue
                 native = _deliver_native_claimed(db, row, live, pol=pol)
                 if native is not None:
                     status, _ = native
@@ -573,6 +654,7 @@ def drain_pending(profile_home: str | None = None, limit: int = 20) -> int:
         if db is None:
             return 0
         recover_stale_claims(db)
+        _expire_stale(db, pol)
         for target in db.peer_mailbox_pending_targets(limit=limit):
             rows = db.peer_mailbox_pending(target, limit=1)
             if not rows:
@@ -840,6 +922,7 @@ def cancel_message(message_id: int, session_id: str, profile_home: str | None = 
 
 
 __all__ = [
+    "REASON_EXPIRED", "REASON_SENDER_REVALIDATION_FAILED", "STATUS_QUEUE_FULL",
     "STATUS_DELIVERED_LIVE", "STATUS_FAILED", "STATUS_QUEUED", "STATUS_RESUMED", "after_session_resume",
     "cancel_message", "drain_pending", "drain_session", "emit_settled", "list_messages", "policy",
     "recover_stale_claims", "resume_interrupted_sessions", "retry_message", "revive_resident_sessions",

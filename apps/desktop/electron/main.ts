@@ -212,6 +212,7 @@ import {
   type UninstallSummaryDetails
 } from './desktop-uninstall'
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
+import { loadDevRevisionStamp } from './dev-revision-stamp'
 import { installEmbedReferer } from './embed-referer'
 import { createAmbientClaimArbiter } from './event-dedupe'
 import { openExternalUrl as externalOpen, type ExternalOpenDeps } from './external-open'
@@ -805,6 +806,19 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding')
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
 // Runtime identity comes only from the baked artifact stamp. Dev runs have none.
+//
+// cntrl carry: a dev run still reports WHICH revision it is executing, for display only
+// (boot log, hermes:version, statusbar), never for lifecycle decisions. See dev-revision-stamp.ts.
+const DEV_REVISION_STAMP = DEV_SERVER
+  ? loadDevRevisionStamp({ appRoot: APP_ROOT, hermesRoot: process.env.HERMES_DESKTOP_HERMES_ROOT || SOURCE_REPO_ROOT })
+  : null
+
+if (DEV_REVISION_STAMP) {
+  console.log(
+    `[hermes] dev revision: ${DEV_REVISION_STAMP.commit.slice(0, 12)}${DEV_REVISION_STAMP.branch ? ` (${DEV_REVISION_STAMP.branch})` : ''}${DEV_REVISION_STAMP.dirty ? ' [DIRTY]' : ''} from ${DEV_REVISION_STAMP.source}`
+  )
+}
+
 if (INSTALL_STAMP) {
   console.log(
     `[hermes] install stamp: ${INSTALL_STAMP.commit ? INSTALL_STAMP.commit.slice(0, 12) : 'no-commit'}${INSTALL_STAMP.branch ? ` (${INSTALL_STAMP.branch})` : ''}${INSTALL_STAMP.dirty ? ' [DIRTY]' : ''} from ${INSTALL_STAMP.source || 'unknown'}`
@@ -17489,6 +17503,9 @@ ipcMain.handle('hermes:version', async (_event, scope?: { connectionId?: string;
     platform: process.platform,
     hermesRoot: resolveUpdateRoot(),
     hermesHome: HERMES_HOME,
+    // cntrl carry: dev runs have no artifact stamp; report the revision they execute.
+    commit: INSTALL_STAMP?.commit ?? DEV_REVISION_STAMP?.commit ?? null,
+    currentSha: INSTALL_STAMP?.commit ?? DEV_REVISION_STAMP?.commit ?? null,
     bundleOutOfSync: skew.outOfSync,
     bundleCommitsBehind: skew.desktopCommitsBehind,
     // The install id: sha16 of the canonical install-root path — the key of

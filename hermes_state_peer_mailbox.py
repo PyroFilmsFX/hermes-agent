@@ -34,12 +34,28 @@ CREATE TABLE IF NOT EXISTS peer_mailbox (
     delivered_at REAL,
     delivered_via TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    sender_auth TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_peer_mailbox_status_target ON peer_mailbox(status, target_session_id, id);
 """
 
+# Columns added after the table first shipped: ``ensure_peer_mailbox`` adds them to an existing table
+# (additive only; old rows read NULL). ``sender_auth`` marks rows enqueued through the queue-only
+# (idle-expired-capable) route with the capability owner's identity, re-validated at delivery.
+_PEER_MAILBOX_ADDED_COLUMNS = (("sender_auth", "TEXT"),)
+
 PEER_MAILBOX_STATUSES = ("queued", "claimed", "delivered", "failed")
+
+
+class PeerMailboxQueueFull(Exception):
+    """The sender already has ``limit`` messages still queued; nothing was written."""
+
+    def __init__(self, from_session_id: str, queued: int, limit: int):
+        super().__init__(f"sender {from_session_id!r} already has {queued} queued peer messages (limit {limit})")
+        self.from_session_id = from_session_id
+        self.queued = queued
+        self.limit = limit
 
 
 def _row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -60,6 +76,10 @@ class SessionPeerMailboxMixin:
             for statement in PEER_MAILBOX_DDL.split(";"):
                 if statement.strip():
                     conn.execute(statement)
+            existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(peer_mailbox)").fetchall()}
+            for column, decl in _PEER_MAILBOX_ADDED_COLUMNS:
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE peer_mailbox ADD COLUMN {column} {decl}")
         self._execute_write(_do)
         self._peer_mailbox_ready = True
 
@@ -77,10 +97,13 @@ class SessionPeerMailboxMixin:
 
     def peer_mailbox_enqueue(
         self, *, target_session_id: str, body: str, from_session_id: str = "", from_label: str = "",
-        dedupe_key: Optional[str] = None, target_hint: str = "",
+        dedupe_key: Optional[str] = None, target_hint: str = "", sender_auth: Optional[str] = None,
+        max_queued_per_sender: int = 0,
     ) -> Tuple[Dict[str, Any], bool]:
         """Queue one message → ``(row, created)``. A repeated ``dedupe_key`` returns the original row
-        with ``created=False`` and never queues a second copy."""
+        with ``created=False`` and never queues a second copy. With ``max_queued_per_sender`` > 0, a
+        sender that already has that many still-queued rows raises :class:`PeerMailboxQueueFull` and
+        nothing is written (checked in the same write transaction)."""
         self.ensure_peer_mailbox()
         now = time.time()
 
@@ -89,11 +112,17 @@ class SessionPeerMailboxMixin:
                 existing = conn.execute("SELECT * FROM peer_mailbox WHERE dedupe_key = ?", (dedupe_key,)).fetchone()
                 if existing is not None:
                     return dict(existing), False
+            if max_queued_per_sender > 0 and from_session_id:
+                queued = int(conn.execute(
+                    "SELECT COUNT(*) FROM peer_mailbox WHERE status = 'queued' AND from_session_id = ?",
+                    (from_session_id,)).fetchone()[0])
+                if queued >= max_queued_per_sender:
+                    raise PeerMailboxQueueFull(from_session_id, queued, max_queued_per_sender)
             cursor = conn.execute(
                 "INSERT INTO peer_mailbox (target_session_id, target_hint, from_session_id, from_label, body, "
-                "dedupe_key, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
+                "dedupe_key, status, created_at, sender_auth) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
                 (target_session_id, target_hint or None, from_session_id or None, from_label or None, body,
-                 dedupe_key or None, now))
+                 dedupe_key or None, now, sender_auth or None))
             row = conn.execute("SELECT * FROM peer_mailbox WHERE id = ?", (cursor.lastrowid,)).fetchone()
             return dict(row), True
         return self._execute_write(_do)
@@ -168,6 +197,23 @@ class SessionPeerMailboxMixin:
         rows = self._mailbox_read_all("SELECT * FROM peer_mailbox WHERE id = ?", (int(message_id),))
         return rows[0] if rows else None
 
+    def peer_mailbox_expire_queued(self, *, older_than: float, limit: int = 500) -> List[Dict[str, Any]]:
+        """Fail still-queued rows created before ``older_than`` with ``last_error='expired'``; returns the
+        rows this call settled (claimed rows are left to their claimant)."""
+        self.ensure_peer_mailbox()
+
+        def _do(conn):
+            rows = [dict(row) for row in conn.execute(
+                "SELECT * FROM peer_mailbox WHERE status = 'queued' AND created_at < ? ORDER BY id LIMIT ?",
+                (float(older_than), int(limit))).fetchall()]
+            settled = []
+            for row in rows:
+                if conn.execute("UPDATE peer_mailbox SET status = 'failed', last_error = 'expired' "
+                                "WHERE id = ? AND status = 'queued'", (row["id"],)).rowcount == 1:
+                    settled.append({**row, "status": "failed", "last_error": "expired"})
+            return settled
+        return self._execute_write(_do)
+
     def peer_mailbox_cancel(self, message_id: int, reason: str = "cancelled by user") -> bool:
         self.ensure_peer_mailbox()
         return self._write_rowcount(
@@ -196,4 +242,4 @@ class SessionPeerMailboxMixin:
         return [str(row["id"]) for row in rows]
 
 
-__all__ = ["PEER_MAILBOX_DDL", "PEER_MAILBOX_STATUSES", "SessionPeerMailboxMixin"]
+__all__ = ["PEER_MAILBOX_DDL", "PEER_MAILBOX_STATUSES", "PeerMailboxQueueFull", "SessionPeerMailboxMixin"]

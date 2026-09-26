@@ -34,7 +34,8 @@ SESSION_SEND_SCHEMA = {
         "The message is stored durably and delivered through the target's native Claude peer channel "
         "when available, otherwise as its next turn. Dead targets are resumed on demand or queued until "
         "they next start. A live Claude sender may receive a native_peer name for direct SendMessage. "
-        "Returns delivered-native, delivered-live, resumed-and-delivered, queued, or failed."
+        "Returns delivered-native, delivered-live, resumed-and-delivered, queued, queue_full (too many of "
+        "your messages are still queued; nothing was written), or failed."
     ),
     "parameters": {
         "type": "object",
