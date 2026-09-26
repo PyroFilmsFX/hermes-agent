@@ -158,6 +158,110 @@ def test_dead_target_is_resumed_on_send_and_delivered(gw):
     assert gw.drains == ["target"], "other mail queued for the woken session rides along"
 
 
+def test_dead_claude_cli_first_send_rebuilds_through_live_submit(gw, monkeypatch):
+    from agent.claude_sdk_runtime_session import _run_sdk_attempts
+    from agent.claude_sdk_runtime_state import _SdkTurnState
+
+    class DeadAdapter:
+        _stream_ended = object()
+        _closed = False
+        _retiring = False
+        _cwd = "/tmp"
+
+        def __init__(self):
+            self.closed = False
+
+        def send_peer_message(self, _body, _origin):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class ReplacementAdapter:
+        _cwd = "/tmp"
+
+        def __init__(self):
+            self.inputs = []
+
+        def run_turn(self, *, user_input):
+            self.inputs.append(user_input)
+            return SimpleNamespace(
+                interrupted=False, error=None, thread_id="stored-sdk-id", turn_id="turn-1",
+                projected_messages=[], tool_iterations=1, final_text="handled", should_retire=False,
+            )
+
+        def close(self):
+            pass
+
+    import agent.claude_sdk_runtime_session as runtime
+
+    old = DeadAdapter()
+    agent = SimpleNamespace(
+        api_mode="claude_agent_sdk", model=None, session_id="target", _interrupt_requested=False,
+        _persist_disabled=False, _claude_sdk_session=old,
+    )
+    new = ReplacementAdapter()
+    created = []
+    monkeypatch.setattr(runtime, "_persisted_sdk_session_id", lambda _agent: "stored-sdk-id")
+
+    def create_session(agent_, **kwargs):
+        created.append(kwargs["resume_id"])
+        agent_._claude_sdk_session = new
+        return new
+
+    monkeypatch.setattr(runtime, "_create_session", create_session)
+    driven = []
+
+    def submit(rid, params):
+        gw.submits.append(params)
+        state = _SdkTurnState(
+            user_input=params["text"], original_user_message=params["text"],
+            messages=[{"role": "user", "content": params["text"]}],
+            messages_before_attempt=[],
+        )
+        driven.append(_run_sdk_attempts(agent, state))
+        return {"result": {"status": "streaming"}}
+
+    monkeypatch.setitem(gw.server._methods, "prompt.submit", submit)
+    gw.sessions["live-dead-cli"] = {"session_key": "target", "profile_home": None, "agent": agent}
+
+    result = _send(gw, request_id="first")
+
+    assert result["status"] == "delivered-live"
+    assert gw.resumes == []
+    assert created == ["stored-sdk-id"]
+    assert old.closed is True
+    assert len(new.inputs) == 1 and "ping" in new.inputs[0]
+    assert driven == [None]
+
+
+def test_starting_claude_cli_uses_live_submit_without_peer_wake(gw):
+    class StartingAdapter:
+        _client = object()
+        _sdk_child_pid = None
+
+        def is_live(self):
+            return False
+
+        def send_peer_message(self, _body, _origin):
+            return False
+
+    gw.sessions["starting-cli"] = _claude_live_session(lambda _body, _origin: False)
+    gw.sessions["starting-cli"]["agent"]._claude_sdk_session = StartingAdapter()
+
+    result = _send(gw)
+
+    assert result["status"] == "delivered-live"
+    assert gw.resumes == []
+    assert gw.submits[0]["session_id"] == "starting-cli"
+    assert not gw.sessions["starting-cli"].get("_peer_mailbox_woken")
+    assert not any(
+        row.get("display_kind") == "session_lifecycle"
+        and "woken by peer message" in row.get("content", "")
+        for row in gw.db.get_messages("target")
+    )
+
+
 @pytest.mark.parametrize("path", ["live", "native", "resume"])
 def test_delivered_mailbox_rows_are_not_replayed_by_restart_drain(gw, monkeypatch, path):
     native_inputs = []
