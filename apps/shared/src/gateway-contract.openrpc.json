@@ -493,6 +493,42 @@
       }
     },
     {
+      "name": "conductor_artifacts.list",
+      "summary": "List local conductor worker log sources for the calling session's workspace.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ArtifactListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ArtifactListResult"
+        }
+      }
+    },
+    {
+      "name": "conductor_artifacts.read",
+      "summary": "Read a bounded local conductor worker log window for the calling session.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ArtifactReadParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ArtifactReadResult"
+        }
+      }
+    },
+    {
       "name": "conductor_build.get",
       "summary": "Read the armed conductor build status for the calling session's workspace.",
       "params": [
@@ -5105,6 +5141,332 @@
         ],
         "title": "ArgumentMode",
         "type": "string"
+      },
+      "ArtifactListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Job Id"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Run Id"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "ArtifactListParams",
+        "type": "object"
+      },
+      "ArtifactListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "durable": {
+            "$ref": "#/components/schemas/DurableArtifacts"
+          },
+          "local": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LocalSource"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local"
+          },
+          "local_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "no_record",
+                  "path_mismatch",
+                  "unreadable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Reason"
+          }
+        },
+        "required": [
+          "durable",
+          "local",
+          "local_reason"
+        ],
+        "title": "ArtifactListResult",
+        "type": "object"
+      },
+      "ArtifactReadParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "durable",
+              "local"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Job Id"
+          },
+          "variant": {
+            "anyOf": [
+              {
+                "enum": [
+                  "log",
+                  "agy_log"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Variant"
+          },
+          "mode": {
+            "enum": [
+              "text",
+              "image",
+              "bytes"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Offset"
+          },
+          "length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Length"
+          },
+          "from_end": {
+            "default": false,
+            "title": "From End",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "source",
+          "mode"
+        ],
+        "title": "ArtifactReadParams",
+        "type": "object"
+      },
+      "ArtifactReadResult": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "text",
+              "image",
+              "bytes"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          },
+          "data_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Data Url"
+          },
+          "base64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base64"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Offset"
+          },
+          "length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Length"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Bytes"
+          },
+          "eof": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Eof"
+          },
+          "bof": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bof"
+          },
+          "redacted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Redacted"
+          },
+          "elided": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Elided"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "ArtifactReadResult",
+        "type": "object"
       },
       "AttachedImageResult": {
         "additionalProperties": false,
@@ -13330,6 +13692,25 @@
         "title": "DisplayThumbnailResult",
         "type": "object"
       },
+      "DurableArtifacts": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "const": "unavailable",
+            "default": "unavailable",
+            "title": "State",
+            "type": "string"
+          },
+          "reason": {
+            "const": "not_configured",
+            "default": "not_configured",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "DurableArtifacts",
+        "type": "object"
+      },
       "EmptyRequestParams": {
         "additionalProperties": false,
         "properties": {
@@ -16743,6 +17124,93 @@
           "text"
         ],
         "title": "LlmOneshotResult",
+        "type": "object"
+      },
+      "LocalSource": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "variant": {
+            "enum": [
+              "log",
+              "agy_log"
+            ],
+            "title": "Variant",
+            "type": "string"
+          },
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "lines": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lines"
+          },
+          "mtime": {
+            "title": "Mtime",
+            "type": "string"
+          },
+          "data_class": {
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "unknown"
+            ],
+            "title": "Data Class",
+            "type": "string"
+          },
+          "viewable": {
+            "enum": [
+              "text",
+              "metadata"
+            ],
+            "title": "Viewable",
+            "type": "string"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "worker": {
+            "title": "Worker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "variant",
+          "bytes",
+          "lines",
+          "mtime",
+          "data_class",
+          "viewable",
+          "sha256",
+          "status",
+          "worker"
+        ],
+        "title": "LocalSource",
         "type": "object"
       },
       "LoopSnapshot": {
