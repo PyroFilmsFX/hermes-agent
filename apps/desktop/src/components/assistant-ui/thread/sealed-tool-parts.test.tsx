@@ -87,7 +87,8 @@ describe('tool parts sealed without a result', () => {
   it('renders a call the user interrupted as Interrupted, not as a lost result', async () => {
     render(<Harness message={sealedMessage('terminal', { command: 'ls' }, { interrupted: true })} />)
 
-    expect(await screen.findByText('Interrupted')).toBeTruthy()
-    expect(screen.queryByText('Result unavailable')).toBeNull()
+    // The sealed notice names the tool beside it ("Interrupted · <tool>"), like "Result unavailable".
+    expect(await screen.findByText(/^Interrupted · /)).toBeTruthy()
+    expect(screen.queryByText(/Result unavailable/)).toBeNull()
   })
 })

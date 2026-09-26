@@ -610,7 +610,10 @@ export type TimelineDisplayMetadata =
       direction?: 'in' | 'out'
       peer?: string
       peer_session?: string
+      from_name?: string
+      from_session_id?: string
       msg_id?: string
+      delivery_id?: string
       completed_at?: number | string
     }
   | {
@@ -618,6 +621,7 @@ export type TimelineDisplayMetadata =
       source?: string
       by?: string
       uuid?: string
+      delivery_id?: string
       exit_code?: number | null
       reason?: string
       digest_messages?: number
