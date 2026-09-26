@@ -1,6 +1,6 @@
 """Tests for claude-agent-sdk session.create and model resolution contracts."""
 
-import yaml
+import json  # JSON is valid YAML; upstream dropped PyYAML for ruamel
 from hermes_state import SessionDB
 from tui_gateway import server
 
@@ -19,7 +19,7 @@ def test_session_create_preserves_configured_provider_when_catalog_serves_model(
     hermes_home = tmp_path / "home"
     hermes_home.mkdir()
     cfg_file = hermes_home / "config.yaml"
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk"}}))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
@@ -56,17 +56,17 @@ def test_resolve_model_reads_model_and_falls_back_to_provider_default(monkeypatc
     # Case A: provider only (no model.model) -> resolves the provider's catalog default
     from hermes_cli.models import get_default_model_for_provider
 
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == get_default_model_for_provider("claude-agent-sdk")
 
     # Case B: model key specified
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "model": "claude-3-5-haiku-20241022"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk", "model": "claude-3-5-haiku-20241022"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == "claude-3-5-haiku-20241022"
 
     # Case C: legacy default key fallback
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-legacy-default"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk", "default": "claude-legacy-default"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._resolve_model() == "claude-legacy-default"
 
@@ -77,7 +77,7 @@ def test_session_create_info_always_includes_provider(monkeypatch, tmp_path):
     hermes_home = tmp_path / "home"
     hermes_home.mkdir()
     cfg_file = hermes_home / "config.yaml"
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk"}}))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
@@ -128,16 +128,16 @@ def test_config_model_target_sdk_default_only_keeps_default(monkeypatch, tmp_pat
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(server, "_hermes_home", hermes_home)
 
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._config_model_target() == ("claude-opus-5", "claude-agent-sdk")
 
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5", "model": "claude-fable-5-1"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "claude-agent-sdk", "default": "claude-opus-5", "model": "claude-fable-5-1"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     # Upstream canonicalization: default > model (hermes_cli/config.py _normalize_root_model_keys).
     assert server._config_model_target() == ("claude-opus-5", "claude-agent-sdk")
 
-    cfg_file.write_text(yaml.safe_dump({"model": {"provider": "anthropic", "default": "claude-opus-4-6", "model": "ignored-for-non-sdk"}}))
+    cfg_file.write_text(json.dumps({"model": {"provider": "anthropic", "default": "claude-opus-4-6", "model": "ignored-for-non-sdk"}}))
     server._cfg_cache = server._cfg_mtime = server._cfg_sig = server._cfg_path = None
     assert server._config_model_target() == ("claude-opus-4-6", "anthropic")
 

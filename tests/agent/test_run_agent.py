@@ -1523,13 +1523,23 @@ class TestExecuteToolCalls:
         tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
+        # ``agent.tool_executor.time`` is the global module: a background thread sleeping on the
+        # patched no-op would spin and be counted. Only the executing thread's sleeps matter here.
+        executor_thread, executor_sleeps, real_sleep = threading.get_ident(), [], time.sleep
+
+        def _sleep(seconds):
+            if threading.get_ident() == executor_thread:
+                executor_sleeps.append(seconds)
+            else:
+                real_sleep(seconds)
+
         with (
             patch("model_tools.handle_function_call", return_value="ok") as mock_hfc,
-            patch("agent.tool_executor.time.sleep") as mock_sleep,
+            patch("agent.tool_executor.time.sleep", side_effect=_sleep),
         ):
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
         assert mock_hfc.call_count == 2
-        mock_sleep.assert_not_called()
+        assert executor_sleeps == []
         tool_results = [m for m in messages if m["role"] == "tool"]
         assert [m["tool_call_id"] for m in tool_results] == ["c1", "c2"]
 

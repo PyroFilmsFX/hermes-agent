@@ -480,7 +480,7 @@ def _extract_title_text(content: str) -> str:
     return candidate
 
 
-_SCAFFOLDING_PREFIXES = ("```", "{", "[", "</", "<think")
+_SCAFFOLDING_PREFIXES = ("```", "</", "<think")
 
 
 def _is_scaffolding(candidate: str) -> bool:
@@ -493,6 +493,10 @@ def _is_scaffolding(candidate: str) -> bool:
     if not text:
         return True
     if text.startswith(_SCAFFOLDING_PREFIXES):
+        return True
+    # A brace/bracket opener is machinery ("[", "{title") unless prose follows its closing
+    # bracket: "[WIP] Fix login flow" and "{draft} Parser" are titles (#83903).
+    if text.startswith(("{", "[")) and not re.search(r"[\]}]\s*\w", text):
         return True
     # A bare JSON key with no value survived a truncated reply.
     return bool(re.fullmatch(r'"?title"?\s*:?', text, re.IGNORECASE))
