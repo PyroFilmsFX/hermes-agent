@@ -7,8 +7,8 @@ orphan sent a duplicate report.
 
 The Claude CLI's peer registry (``$CLAUDE_CONFIG_DIR/sessions/<pid>.json``,
 one file per process, ``name`` is just a field) does not enforce uniqueness,
-so Hermes does it before each spawn: a per-profile lease file per name under
-``<HERMES_HOME>/runtime/claude-peer-names/`` records the owning backend
+so Hermes does it before each spawn: a lease file per name under
+``<hermes root>/runtime/claude-peer-names/`` (shared by every profile) records the owning backend
 (pid + start time), Hermes session id, session-object generation, and the CLI
 child it spawned. All reads/writes share one file lock, so a rename (claim the
 new name, drop the old one) is a single atomic step.
@@ -71,10 +71,14 @@ def _process_start(pid: int) -> Optional[float]:
 
 
 def _root(home: Any = None) -> Path:
+    # Profiles share one Claude peer registry (~/.claude unless CLAUDE_CONFIG_DIR
+    # moves it) and the default ``hermes:{title}`` name carries no profile, so the
+    # lease namespace is the Hermes root, not the profile home: a "manager" session
+    # in two profiles must not both register ``hermes:manager``.
     if home is None:
-        from hermes_constants import get_hermes_home
+        from hermes_constants import get_default_hermes_root
 
-        home = get_hermes_home()
+        home = get_default_hermes_root()
     return Path(home) / "runtime" / _LEASE_DIR
 
 

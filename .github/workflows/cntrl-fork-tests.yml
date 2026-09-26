@@ -6,7 +6,7 @@ name: cntrl fork tests
 
 on:
   push:
-    branches: [cntrl-hermes, cntrl-hermes-worker, "sync/**"]
+    branches: [cntrl-hermes-worker, "sync/**"]
   workflow_dispatch:
 
 permissions:

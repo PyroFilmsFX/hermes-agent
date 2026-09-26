@@ -5,7 +5,7 @@ registered the SAME ``--name`` as the live session's CLI, so peers' native
 ListAgents/SendMessage saw two processes under one name and the orphan sent a
 duplicate report. The Claude CLI's own peer registry (``~/.claude/sessions/
 <pid>.json``) is keyed by pid and does not enforce name uniqueness, so Hermes
-holds a per-profile name lease and fences stale holders before a new spawn.
+holds a name lease shared by every profile and fences stale holders before a new spawn.
 
 Fakes only: liveness, the fence, and processes are injected; no real CLI.
 """
@@ -355,3 +355,24 @@ def test_unnamed_spawn_may_still_rename_onto_a_free_name(monkeypatch):
         second.close()
         first.close()
     assert L.holder("hermes:free") is None and L.holder("hermes:dup") is None
+
+
+# ---------- one namespace across profiles ----------
+
+
+def test_two_profiles_of_one_root_share_the_name_lease(tmp_path, monkeypatch):
+    """Profiles share ~/.claude and ``hermes:{title}`` carries no profile, so a
+    live holder in one profile must refuse the same name in another."""
+    world = _World()
+    root = tmp_path / "root"
+    for profile in ("work", "thinkbot"):
+        (root / "profiles" / profile).mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "work"))
+    assert L.claim("hermes:manager", _owner(pid=100, session="work-s"),
+                   liveness=world.liveness, fence=world.fence) is True
+
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "thinkbot"))
+    assert L.claim("hermes:manager", _owner(pid=200, session="tb-s"),
+                   liveness=world.liveness, fence=world.fence) is False
+    assert L.holder("hermes:manager")["session_id"] == "work-s"
