@@ -1,10 +1,27 @@
 import { atom } from 'nanostores'
 
+/** Display-only hints from the row that opened the pane, so the header paints before the
+ *  first list call. Never used to pick what is read. */
+export interface ArtifactViewerHints {
+  durationSeconds?: number
+  effort?: string
+  exitCode?: number
+  label?: string
+  lane?: string
+  model?: string
+  place?: string
+  purpose?: string
+  spawnedAt?: number
+  status?: string
+  worker?: string
+}
+
 export interface ArtifactViewerTarget {
   sessionId: string
   jobId?: string
   runId?: string
   artifactId?: string
+  hints?: ArtifactViewerHints
 }
 
 export interface LocalArtifactSource {
@@ -30,8 +47,12 @@ export const $artifactViewerOpen = atom(false)
 export const $artifactViewerTarget = atom<ArtifactViewerTarget | null>(null)
 export const $artifactListByTarget = atom<Record<string, ArtifactListSnapshot>>({})
 
+/** Identity of what is read: display hints are excluded, so a status change on the opening
+ *  row never resets the tail. */
 export function artifactViewerKey(target: ArtifactViewerTarget): string {
-  return JSON.stringify(target)
+  const { artifactId, jobId, runId, sessionId } = target
+
+  return JSON.stringify({ sessionId, jobId, runId, artifactId })
 }
 
 export function cacheArtifactList(target: ArtifactViewerTarget, snapshot: ArtifactListSnapshot) {

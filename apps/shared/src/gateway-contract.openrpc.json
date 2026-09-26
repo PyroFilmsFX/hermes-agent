@@ -2947,7 +2947,7 @@
         {
           "name": "params",
           "schema": {
-            "$ref": "#/components/schemas/SessionParams"
+            "$ref": "#/components/schemas/RelayJobsListParams"
           }
         }
       ],
@@ -8728,7 +8728,8 @@
               "active",
               "waiting",
               "blocked",
-              "lease_expired"
+              "lease_expired",
+              "idle"
             ],
             "title": "State",
             "type": "string"
@@ -8856,6 +8857,30 @@
           "unit_id": {
             "title": "Unit Id",
             "type": "null"
+          },
+          "idle_since": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idle Since"
+          },
+          "marker_stale_since": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Marker Stale Since"
           }
         },
         "required": [
@@ -27059,6 +27084,43 @@
             ],
             "default": null,
             "title": "Duration Sec"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "purpose": {
+            "default": "",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "place": {
+            "default": "",
+            "title": "Place",
+            "type": "string"
+          },
+          "effort": {
+            "default": "",
+            "title": "Effort",
+            "type": "string"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Exit Code"
+          },
+          "build_match": {
+            "default": false,
+            "title": "Build Match",
+            "type": "boolean"
           }
         },
         "required": [
@@ -27068,6 +27130,41 @@
           "spawned_at"
         ],
         "title": "RelayJobRow",
+        "type": "object"
+      },
+      "RelayJobsListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "scope": {
+            "default": "recent",
+            "enum": [
+              "recent",
+              "build"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "RelayJobsListParams",
         "type": "object"
       },
       "RelayJobsListResult": {

@@ -104,7 +104,7 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
   }
 
   if (group.type === 'relay') {
-    return `${group.items.length} Relay job${group.items.length === 1 ? '' : 's'}`
+    return 'Workers'
   }
 
   return s.background(group.items.length)

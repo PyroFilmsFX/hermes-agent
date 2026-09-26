@@ -702,7 +702,7 @@ const syncArtifactViewerPane = (open: boolean) => {
     unregisterArtifactViewerPane ??= registry.register({
       id: 'artifact',
       area: 'panes',
-      title: 'Artifact',
+      title: 'Worker output',
       data: {
         placement: 'bottom',
         dock: { pane: 'terminal', pos: 'right' },

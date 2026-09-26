@@ -62,6 +62,8 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
   const [error, setError] = useState<string | null>(null)
   const [failures, setFailures] = useState(0)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [variant, setVariant] = useState<LocalArtifactSource['variant']>('log')
+  const variantRef = useRef(variant)
   const owner = JSON.stringify(knownOwnerForSession(target.sessionId))
   const key = artifactViewerKey(target)
   const targetRef = useRef(target)
@@ -76,6 +78,7 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
   ownerRef.current = owner
   sourceRef.current = source
   paneVisibleRef.current = paneVisible
+  variantRef.current = variant
 
   const window = useMemo<TextWindow | null>(() => {
     if (!pages.length) return null
@@ -102,6 +105,7 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
     sourceRef.current = null
     setPages([])
     setError(null)
+    setVariant('log')
   }, [key])
 
   useEffect(() => {
@@ -122,7 +126,7 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
       if (!isCurrent()) return
       setSnapshot(list)
       cacheArtifactList(currentTarget, list)
-      const picked = list.local?.find(row => row.variant === (sourceRef.current?.variant ?? 'log')) ?? list.local?.[0] ?? null
+      const picked = list.local?.find(row => row.variant === variantRef.current) ?? list.local?.[0] ?? null
       sourceRef.current = picked
       setSource(picked)
       if (!picked || picked.viewable === 'metadata') {
@@ -149,7 +153,7 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
         if (isCurrent()) {
           failureCountRef.current++
           setFailures(failureCountRef.current)
-          setError('Local artifact could not be read.')
+          setError('read')
         }
       } finally {
         pending = false
@@ -164,7 +168,16 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
       cancelled = true
       globalThis.window.clearInterval(timer)
     }
-  }, [gatewayState, key, owner])
+  }, [gatewayState, key, owner, variant])
+
+  /** Switch between the worker's transcript (`log`) and agy's language-server `agy_log`. */
+  const selectVariant = (next: LocalArtifactSource['variant']) => {
+    if (next === variantRef.current) return
+    variantRef.current = next
+    sourceRef.current = null
+    setPages([])
+    setVariant(next)
+  }
 
   const loadEarlier = async () => {
     const currentSource = sourceRef.current
@@ -184,7 +197,7 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
       if (keyRef.current !== requestKey || page.mode !== 'text') return
       setPages(current => keepWithinLimit([page, ...current]))
     } catch {
-      if (keyRef.current === requestKey) setError('Earlier log text could not be read.')
+      if (keyRef.current === requestKey) setError('earlier')
     } finally {
       setLoadingEarlier(false)
     }
@@ -225,9 +238,9 @@ export function useArtifactSource(target: ArtifactViewerTarget) {
       anchor.click()
       URL.revokeObjectURL(url)
     } catch {
-      if (keyRef.current === requestKey) setError('Artifact download failed.')
+      if (keyRef.current === requestKey) setError('download')
     }
   }
 
-  return { snapshot, source, window, error, failures, loadEarlier, loadingEarlier, download }
+  return { snapshot, source, window, error, failures, loadEarlier, loadingEarlier, download, variant, selectVariant }
 }

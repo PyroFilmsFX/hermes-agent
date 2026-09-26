@@ -1,26 +1,34 @@
 import { useStore } from '@nanostores/react'
 import { atom } from 'nanostores'
+import { type ReactNode, useState } from 'react'
 
-import { StatusRow } from '@/components/chat/status-row'
-import { ActivityTimerText } from '@/components/chat/activity-timer-text'
-import { Codicon } from '@/components/ui/codicon'
+import { DisclosureRow } from '@/components/chat/disclosure-row'
+import { StatusChip } from '@/components/chat/status-chip'
+import { WaveTrack, hasWaveTrack } from '@/components/chat/wave-track'
+import { WorkerRow } from '@/components/chat/worker-row'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
-import { $relayJobsBySession } from '@/store/composer-status'
+import { Codicon } from '@/components/ui/codicon'
+import { CopyButton } from '@/components/ui/copy-button'
+import { DisclosureCaret } from '@/components/ui/disclosure-caret'
+import { OverflowTip, Tip } from '@/components/ui/tooltip'
+import { useViewedInterval } from '@/hooks/use-viewed-interval'
+import { statusTone } from '@/lib/conductor-seat'
+import { formatStamp, idleSentence, leaseExpiredSentence, markerStaleSentence, parseBuildTime, relativeAge } from '@/lib/conductor-time'
+import { planTitle } from '@/lib/plan-title'
+import { cn } from '@/lib/utils'
+import { $relayJobsBySession, type RelayJob } from '@/store/composer-status'
+import { $conductorBuildBySession, type ConductorBuild } from '@/store/conductor-build'
 import { $activeSessionId } from '@/store/session'
-import { $conductorBuildBySession } from '@/store/conductor-build'
-import { openArtifactViewer } from '@/store/artifact-viewer'
+
+import { buildChipTip } from './composer/status-stack/conductor-build-strip'
+import { openWorkerOutput, orderWorkers, workerSummary } from './composer/status-stack/relay-jobs-section'
+import { useBuildWorkers } from './use-build-workers'
 
 interface ConductorPaneProps {
   sessionId?: string | null
 }
 
-const formatBuildTime = (value: number | string | null): string | null => {
-  if (value === null || value === '' || value === 0 || value === '0') {
-    return null
-  }
-  const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString()
-}
+const EMPTY_JOBS: RelayJob[] = []
 
 export const $conductorPaneOpen = atom(false)
 
@@ -32,74 +40,233 @@ export function openConductorPane() {
   }
 }
 
+const groupSummary = (jobs: readonly RelayJob[]) => {
+  const counts = workerSummary(jobs)
+
+  return `${jobs.length} worker${jobs.length === 1 ? '' : 's'}${counts ? `, ${counts}` : ''}`
+}
+
+const stateLine = (build: ConductorBuild): string | null =>
+  build.state === 'waiting' && build.waiting_on
+    ? `Waiting on ${build.waiting_on}`
+    : build.state === 'blocked'
+      ? 'Needs your input in the conductor session.'
+      : build.state === 'lease_expired'
+        ? leaseExpiredSentence(build.lease_expires_at)
+        : build.state === 'idle'
+          ? idleSentence(build.idle_since)
+          : null
+
+/** `484496…c677d27`: enough to recognise, never the whole hash on first read. */
+const shortId = (id: string) => (id.length > 16 ? `${id.slice(0, 6)}…${id.slice(-7)}` : id)
+
+function WorkerGroup({
+  children,
+  first,
+  label,
+  onToggle,
+  open,
+  slot,
+  summary
+}: {
+  children: ReactNode
+  first: boolean
+  label: string
+  onToggle: () => void
+  open: boolean
+  slot: string
+  summary?: string
+}) {
+  return (
+    <section className={cn(!first && 'border-t border-(--ui-stroke-tertiary)')} data-slot={slot}>
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-1.5 py-1 text-left text-[0.68rem] text-(--ui-text-tertiary) hover:text-(--ui-text-secondary)"
+        onClick={onToggle}
+        type="button"
+      >
+        <DisclosureCaret open={open} size="0.7rem" />
+        <span className="shrink-0">{label}</span>
+        {summary && <span className="ml-auto min-w-0 truncate">{summary}</span>}
+      </button>
+      {open && children}
+    </section>
+  )
+}
+
+function DetailRow({ children, label }: { children: ReactNode; label: string }) {
+  return (
+    <>
+      <dt className="text-(--ui-text-tertiary)">{label}</dt>
+      <dd className="flex min-w-0 items-center gap-1 text-(--ui-text-secondary)">{children}</dd>
+    </>
+  )
+}
+
+function BuildDetails({ build }: { build: ConductorBuild }) {
+  const [open, setOpen] = useState(false)
+  const armed = parseBuildTime(build.armed_at)
+  const lease = parseBuildTime(build.lease_expires_at)
+
+  return (
+    <div className="border-t border-(--ui-stroke-tertiary) px-1.5 py-1 text-[0.68rem]">
+      <DisclosureRow onToggle={() => setOpen(value => !value)} open={open}>
+        <span className="text-[0.68rem]">Build details</span>
+      </DisclosureRow>
+      {open && (
+        <dl
+          className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1"
+          data-slot="conductor-build-details"
+        >
+          {build.run_id && (
+            <DetailRow label="Run">
+              <span className="truncate font-mono">{shortId(build.run_id)}</span>
+              <CopyButton appearance="icon" label="Copy run id" text={build.run_id} />
+            </DetailRow>
+          )}
+          {build.session_id && (
+            <DetailRow label="Session">
+              <span className="truncate font-mono">{build.session_id}</span>
+              <CopyButton appearance="icon" label="Copy session id" text={build.session_id} />
+            </DetailRow>
+          )}
+          {armed && (
+            <DetailRow label="Armed">
+              <Tip label={relativeAge(armed)}>
+                <span>{formatStamp(armed)}</span>
+              </Tip>
+            </DetailRow>
+          )}
+          {lease && (
+            <DetailRow label="Lease">
+              <Tip label={relativeAge(lease)}>
+                <span>{`${build.state === 'lease_expired' ? 'Expired' : 'Renews by'} ${formatStamp(lease)}`}</span>
+              </Tip>
+            </DetailRow>
+          )}
+          <DetailRow label="Plan file">
+            <span className="truncate">{build.plan}</span>
+          </DetailRow>
+        </dl>
+      )}
+    </div>
+  )
+}
+
+function PaneHeader({ build }: { build: ConductorBuild }) {
+  const line = stateLine(build)
+  const markerHint = build.state === 'idle' ? null : markerStaleSentence(build.marker_stale_since)
+  const showWave = hasWaveTrack(build.waves_total, build.wave_current)
+
+  return (
+    <header className="flex shrink-0 flex-col gap-0.5 border-b border-(--ui-stroke-tertiary) px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <Codicon className="text-(--ui-text-tertiary)" name="layers" size="0.85rem" />
+        <Tip label={build.plan}>
+          <span className="min-w-0 truncate text-sm font-medium text-(--ui-text-primary)">{planTitle(build.plan)}</span>
+        </Tip>
+        <StatusChip status={build.state} tip={buildChipTip(build)} />
+        {showWave && (
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            <WaveTrack
+              current={build.wave_current}
+              done={build.waves_done}
+              tone={statusTone(build.state)}
+              total={build.waves_total}
+            />
+            <span className="whitespace-nowrap text-(--ui-text-secondary)">
+              {`Wave ${build.wave_current} of ${build.waves_total}`}
+            </span>
+          </span>
+        )}
+      </div>
+      {line && (
+        <OverflowTip label={line}>
+          <span className="truncate pl-[1.35rem] text-(--ui-text-tertiary)">{line}</span>
+        </OverflowTip>
+      )}
+      {markerHint && (
+        <span className="truncate pl-[1.35rem] text-(--ui-text-tertiary)" data-slot="conductor-marker-hint">
+          {markerHint}
+        </span>
+      )}
+    </header>
+  )
+}
+
 export function ConductorPane({ sessionId: sessionIdProp }: ConductorPaneProps = {}) {
   const activeSessionId = useStore($activeSessionId)
   const sessionId = sessionIdProp ?? activeSessionId
   const build = useStore($conductorBuildBySession)[sessionId ?? ''] ?? null
-  const jobs = useStore($relayJobsBySession)[sessionId ?? ''] ?? []
-  const waitSince = build ? formatBuildTime(build.wait_since) : null
-  const armedAt = build ? formatBuildTime(build.armed_at) : null
-  const leaseExpiresAt = build ? formatBuildTime(build.lease_expires_at) : null
+  const recentJobs = useStore($relayJobsBySession)[sessionId ?? ''] ?? EMPTY_JOBS
+  const buildJobs = useBuildWorkers(sessionId ?? null, build?.run_id || null)
+  const [otherOpen, setOtherOpen] = useState<boolean | null>(null)
+  const [buildOpen, setBuildOpen] = useState(true)
+  const [nowMs, setNowMs] = useState(Date.now)
+
+  const thisBuild = orderWorkers(buildJobs ?? EMPTY_JOBS)
+  const other = orderWorkers(recentJobs.filter(job => !job.buildMatch))
+  const anyRunning = thisBuild.some(job => job.status === 'running') || other.some(job => job.status === 'running')
+
+  useViewedInterval(() => setNowMs(Date.now()), 1000, anyRunning)
+
+  const row = (job: RelayJob) => (
+    <WorkerRow
+      job={job}
+      key={job.jobId}
+      nowMs={nowMs}
+      onActivate={() => sessionId && openWorkerOutput(sessionId, job)}
+    />
+  )
+
+  const otherExpanded = otherOpen ?? (!build || (buildJobs !== null && thisBuild.length === 0))
+
+  const otherGroup = other.length > 0 && (
+    <WorkerGroup
+      first={!build}
+      label="Other recent work"
+      onToggle={() => setOtherOpen(!otherExpanded)}
+      open={otherExpanded}
+      slot="conductor-group-other"
+      summary={groupSummary(other)}
+    >
+      {other.map(row)}
+    </WorkerGroup>
+  )
 
   if (!build) {
-    return <div className="p-3 text-sm text-(--ui-text-secondary)">No build armed in this workspace.</div>
+    return (
+      <div className="@container flex h-full min-h-0 flex-col text-xs" data-slot="conductor-pane">
+        <div className="min-h-0 flex-1 overflow-auto px-1.5 py-2">
+          <p className="px-1.5 pb-2 text-(--ui-text-secondary)">
+            No build is armed in this workspace. Start one with /tb-build in a conductor session.
+          </p>
+          {otherGroup}
+        </div>
+      </div>
+    )
   }
 
-  const waveLabel = build.wave_current !== null
-    && build.waves_total !== null
-    && Number.isInteger(build.wave_current)
-    && Number.isInteger(build.waves_total)
-    && build.waves_total > 0
-    ? `Wave ${build.wave_current}/${build.waves_total}`
-    : null
-
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 overflow-auto p-3 text-sm" data-slot="conductor-pane">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <dt>Plan</dt><dd>{build.plan}</dd>
-        <dt>Run</dt><dd>{build.run_id}</dd>
-        {waveLabel && <><dt>Wave</dt><dd>{waveLabel}</dd></>}
-        <dt>Done</dt><dd>Done {build.waves_done}</dd>
-        <dt>State</dt><dd>{build.state === 'lease_expired' ? 'lease expired' : build.state}</dd>
-        {build.waiting_on && <><dt>Waiting on</dt><dd>{build.waiting_on}</dd></>}
-        {waitSince && <><dt>Wait since</dt><dd>{waitSince}</dd></>}
-        {armedAt && <><dt>Armed</dt><dd>{armedAt}</dd></>}
-        {leaseExpiresAt && <><dt>Lease expires</dt><dd>{leaseExpiresAt}</dd></>}
-      </dl>
-      <div>Cost: not metered</div>
-      <div>Stage/unit: needs conductor T1</div>
-      <button
-        className="self-start rounded px-2 py-1 text-xs text-(--ui-text-secondary) hover:bg-(--ui-row-hover-background)"
-        disabled={!sessionId}
-        onClick={() => sessionId && openArtifactViewer({ sessionId, runId: build.run_id })}
-        type="button"
-      >
-        Run artifacts
-      </button>
-      {build.lanes_build_matched > 0 && (
-        <div className="flex items-center gap-1.5 text-xs" data-slot="conductor-build-lane-summary">
-          <span className="rounded bg-(--ui-purple)/12 px-1 text-[0.58rem] text-(--ui-purple)">build</span>
-          <span>{build.lanes_build_matched} build-matched lanes</span>
-        </div>
-      )}
-      <div className="flex flex-col">
-        {jobs.filter(job => job.status === 'running' || job.status === 'stale').map(job => (
-          <StatusRow
-            key={job.jobId}
-            onActivate={() => sessionId && openArtifactViewer({ sessionId, jobId: job.jobId })}
-            leading={<Codicon className="text-(--ui-text-tertiary)" name="server-process" size="0.75rem" />}
-            trailing={job.durationSeconds === undefined ? undefined : <ActivityTimerText className="text-[0.65rem]" seconds={job.durationSeconds} />}
-            trailingVisible={job.durationSeconds !== undefined}
-          >
-            <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5">
-                <span className="truncate">{job.worker}</span>
-                <span className="text-(--ui-text-tertiary)">{job.status}</span>
-              </span>
-              {(job.lane || job.role) && <span className="block text-[0.68rem] text-(--ui-text-tertiary)">{[job.lane, job.role].filter(Boolean).join(' · ')}</span>}
-            </span>
-          </StatusRow>
-        ))}
+    <div className="@container flex h-full min-h-0 flex-col text-xs" data-slot="conductor-pane">
+      <PaneHeader build={build} />
+      <div className="min-h-0 flex-1 overflow-auto px-1.5 py-1">
+        <WorkerGroup
+          first
+          label="This build"
+          onToggle={() => setBuildOpen(open => !open)}
+          open={buildOpen}
+          slot="conductor-group-build"
+          summary={thisBuild.length ? groupSummary(thisBuild) : undefined}
+        >
+          {thisBuild.length
+            ? thisBuild.map(row)
+            : buildJobs !== null && (
+                <p className="px-1.5 py-1 text-(--ui-text-tertiary)">No workers have run for this build yet.</p>
+              )}
+        </WorkerGroup>
+        {otherGroup}
+        <BuildDetails build={build} />
       </div>
     </div>
   )

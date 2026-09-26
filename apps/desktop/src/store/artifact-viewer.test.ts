@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { $artifactViewerOpen, $artifactViewerTarget, closeArtifactViewer, openArtifactViewer } from './artifact-viewer'
+import {
+  $artifactViewerOpen,
+  $artifactViewerTarget,
+  artifactViewerKey,
+  closeArtifactViewer,
+  openArtifactViewer
+} from './artifact-viewer'
 
 afterEach(() => {
   closeArtifactViewer()
@@ -20,5 +26,14 @@ describe('artifact viewer target', () => {
     closeArtifactViewer()
     expect($artifactViewerOpen.get()).toBe(false)
     expect($artifactViewerTarget.get()).toBeNull()
+  })
+
+  it('keys reads on what is read, not on the display hints', () => {
+    const base = { jobId: 'w_one', sessionId: 'session-1' }
+
+    expect(artifactViewerKey({ ...base, hints: { status: 'running' } })).toBe(
+      artifactViewerKey({ ...base, hints: { label: 'fix-g9', status: 'succeeded' } })
+    )
+    expect(artifactViewerKey(base)).not.toBe(artifactViewerKey({ ...base, jobId: 'w_two' }))
   })
 })
