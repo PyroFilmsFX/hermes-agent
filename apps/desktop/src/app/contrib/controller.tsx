@@ -92,6 +92,8 @@ import { isBrowserWindow, isHudWindow } from '@/store/windows'
 
 import { BrowserPopoutShell } from '../chat/browser-popout-shell'
 import { ConductorPane, $conductorPaneOpen, openConductorPane } from '../chat/conductor-pane'
+import { ArtifactViewerPane } from '../chat/artifact-viewer-pane'
+import { $artifactViewerOpen, closeArtifactViewer } from '@/store/artifact-viewer'
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
 import { watchPreviewTiles } from '../chat/preview-tile'
 import { watchRouteTiles } from '../chat/route-tile'
@@ -692,6 +694,37 @@ registerPaneCloser('conductor', () => $conductorPaneOpen.set(false))
 registerPaneOpener('conductor', () => $conductorPaneOpen.set(true))
 syncConductorPane($conductorPaneOpen.get())
 $conductorPaneOpen.listen(syncConductorPane)
+
+let unregisterArtifactViewerPane: (() => void) | null = null
+
+const syncArtifactViewerPane = (open: boolean) => {
+  if (open) {
+    unregisterArtifactViewerPane ??= registry.register({
+      id: 'artifact',
+      area: 'panes',
+      title: 'Artifact',
+      data: {
+        placement: 'bottom',
+        dock: { pane: 'terminal', pos: 'right' },
+        height: '20vh',
+        maxHeight: '80vh'
+      },
+      render: () => idle(<ArtifactViewerPane />)
+    })
+    revealTreePane('artifact')
+  } else {
+    unregisterArtifactViewerPane?.()
+    unregisterArtifactViewerPane = null
+    const tree = $layoutTree.get()
+    if (tree && allPaneIds(tree).includes('artifact')) removeTreePane('artifact')
+  }
+}
+
+markCollapsePane('artifact')
+registerPaneCloser('artifact', closeArtifactViewer)
+registerPaneOpener('artifact', () => $artifactViewerOpen.set(true))
+syncArtifactViewerPane($artifactViewerOpen.get())
+$artifactViewerOpen.listen(syncArtifactViewerPane)
 
 registry.register(
   paletteToggle({

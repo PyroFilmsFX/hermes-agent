@@ -1130,6 +1130,56 @@ export interface ConnectorPolicySetResult {
   revision: string
   effective: ConnectorPolicyEffectiveUnrestricted | ConnectorPolicyEffectiveDenyAll | ConnectorPolicyEffectiveAllow | ConnectorPolicyEffectiveDeny
 }
+export interface ArtifactListParams {
+  session_id: string
+  job_id?: string | null
+  run_id?: string | null
+}
+export interface ArtifactListResult {
+  durable: DurableArtifacts
+  local: LocalSource[] | null
+  local_reason: 'none' | 'no_record' | 'path_mismatch' | 'unreadable' | null
+}
+export interface DurableArtifacts {
+  state?: 'unavailable'
+  reason?: 'not_configured'
+}
+export interface LocalSource {
+  job_id: string
+  variant: 'log' | 'agy_log'
+  bytes: number
+  lines: number | null
+  mtime: string
+  data_class: 'A' | 'B' | 'C' | 'unknown'
+  viewable: 'text' | 'metadata'
+  sha256: string | null
+  status: string
+  worker: string
+}
+export interface ArtifactReadParams {
+  session_id: string
+  source: 'durable' | 'local'
+  artifact_id?: string | null
+  job_id?: string | null
+  variant?: 'log' | 'agy_log' | null
+  mode: 'text' | 'image' | 'bytes'
+  offset?: number | null
+  length?: number | null
+  from_end?: boolean
+}
+export interface ArtifactReadResult {
+  mode: 'text' | 'image' | 'bytes'
+  text?: string | null
+  data_url?: string | null
+  base64?: string | null
+  offset?: number | null
+  length?: number | null
+  total_bytes?: number | null
+  eof?: boolean | null
+  bof?: boolean | null
+  redacted?: boolean | null
+  elided?: boolean | null
+}
 export interface ConductorBuildResult {
   build: ConductorBuild | null
   unreadable?: boolean
@@ -4886,6 +4936,10 @@ export interface RpcMethods {
   'complete.path': { params: CompletePathParams; result: CompletionItemsResult }
   /** Ranked slash-command / skill completions for a ``/`` token. */
   'complete.slash': { params: CompleteSlashParams; result: CompleteSlashResult }
+  /** List local conductor worker log sources for the calling session's workspace. */
+  'conductor_artifacts.list': { params: ArtifactListParams; result: ArtifactListResult }
+  /** Read a bounded local conductor worker log window for the calling session. */
+  'conductor_artifacts.read': { params: ArtifactReadParams; result: ArtifactReadResult }
   /** Read the armed conductor build status for the calling session's workspace. */
   'conductor_build.get': { params: SessionParams; result: ConductorBuildResult }
   /** Read one normalised config value (or the whole effective config) the way the UIs render it. */
@@ -5352,6 +5406,8 @@ export const RPC_METHODS = [
   'commands.catalog',
   'complete.path',
   'complete.slash',
+  'conductor_artifacts.list',
+  'conductor_artifacts.read',
   'conductor_build.get',
   'config.get',
   'config.set',

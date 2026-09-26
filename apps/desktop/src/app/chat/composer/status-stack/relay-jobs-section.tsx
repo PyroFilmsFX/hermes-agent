@@ -9,6 +9,7 @@ import { useViewedInterval } from '@/hooks/use-viewed-interval'
 import { useSessionSlice, useStoreSelector } from '@/lib/use-session-slice'
 import { $sessionStates } from '@/store/session-states'
 import { $relayJobsBySession, type RelayJob } from '@/store/composer-status'
+import { openArtifactViewer } from '@/store/artifact-viewer'
 
 interface RelayJobsSectionProps {
   sessionId: string
@@ -70,9 +71,22 @@ export function RelayJobsSection({ sessionId }: RelayJobsSectionProps) {
                   )
                 }
                 trailing={
-                  <span className="shrink-0 text-[0.65rem] text-(--ui-text-tertiary)">
-                    <ActivityTimerText className="text-[0.65rem]" seconds={elapsed} />
-                  </span>
+                  <>
+                    <span className="shrink-0 text-[0.65rem] text-(--ui-text-tertiary)">
+                      <ActivityTimerText className="text-[0.65rem]" seconds={elapsed} />
+                    </span>
+                    <button
+                      aria-label={`Open transcript for ${job.worker}`}
+                      className="rounded px-1.5 py-0.5 text-[0.65rem] text-(--ui-text-secondary) hover:bg-(--ui-row-hover-background)"
+                      onClick={event => {
+                        event.stopPropagation()
+                        openArtifactViewer({ sessionId, jobId: job.jobId })
+                      }}
+                      type="button"
+                    >
+                      Open transcript
+                    </button>
+                  </>
                 }
                 trailingVisible
               >
