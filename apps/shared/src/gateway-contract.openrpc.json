@@ -2887,6 +2887,24 @@
       }
     },
     {
+      "name": "relay_jobs.list",
+      "summary": "Read recent conductor relay worker jobs for the calling session's workspace.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RelayJobsListResult"
+        }
+      }
+    },
+    {
       "name": "reload.env",
       "summary": "Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new.",
       "params": [
@@ -26314,6 +26332,86 @@
           "message"
         ],
         "title": "RelayEnvelope",
+        "type": "object"
+      },
+      "RelayJobRow": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "worker": {
+            "title": "Worker",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "model_resolved": {
+            "default": "",
+            "title": "Model Resolved",
+            "type": "string"
+          },
+          "lane": {
+            "default": "",
+            "title": "Lane",
+            "type": "string"
+          },
+          "role": {
+            "default": "",
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "spawned_at": {
+            "title": "Spawned At",
+            "type": "string"
+          },
+          "heartbeat_at": {
+            "default": "",
+            "title": "Heartbeat At",
+            "type": "string"
+          },
+          "duration_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duration Sec"
+          }
+        },
+        "required": [
+          "job_id",
+          "worker",
+          "status",
+          "spawned_at"
+        ],
+        "title": "RelayJobRow",
+        "type": "object"
+      },
+      "RelayJobsListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/RelayJobRow"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "title": "RelayJobsListResult",
         "type": "object"
       },
       "ReloadEnvParams": {

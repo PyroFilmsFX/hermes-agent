@@ -46,6 +46,7 @@ import { SessionControlSections } from './session-control'
 import { useSessionValue } from './session-control-utils'
 import { StatusItemRow } from './status-row'
 import { SubagentSection } from './subagent-section'
+import { RelayJobsSection } from './relay-jobs-section'
 import { useSubagentSnapshot } from './use-subagent-snapshot'
 
 // Slow safety-net poll for silent exits (processes without notify_on_complete
@@ -63,6 +64,7 @@ const GROUP_ICON: Record<StatusGroup['type'], string> = {
   goal: 'target',
   todo: 'checklist',
   subagent: 'agent',
+  relay: 'server-process',
   background: 'server-process'
 }
 
@@ -72,6 +74,7 @@ const GROUP_TIER: Record<StatusGroup['type'], Tiered> = {
   goal: {},
   todo: {},
   subagent: { tier: 'advanced' },
+  relay: { tier: 'advanced' },
   background: { tier: 'advanced' }
 }
 
@@ -92,7 +95,15 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
     return s.todos(group.items.filter(i => i.todoStatus === 'completed').length, group.items.length)
   }
 
-  return group.type === 'subagent' ? s.subagents(group.items.length) : s.background(group.items.length)
+  if (group.type === 'subagent') {
+    return s.subagents(group.items.length)
+  }
+
+  if (group.type === 'relay') {
+    return `${group.items.length} Relay job${group.items.length === 1 ? '' : 's'}`
+  }
+
+  return s.background(group.items.length)
 }
 
 const hasRunningTodo = (group: StatusGroup) =>
@@ -248,6 +259,12 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   for (const group of groups) {
     if (group.type === 'subagent' && sessionId) {
       sections.push({ key: group.type, node: <SubagentSection key={sessionId} sessionId={sessionId} /> })
+
+      continue
+    }
+
+    if (group.type === 'relay' && sessionId) {
+      sections.push({ key: group.type, node: <RelayJobsSection key={sessionId} sessionId={sessionId} /> })
 
       continue
     }

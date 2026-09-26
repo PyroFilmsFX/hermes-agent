@@ -6,6 +6,7 @@ import { I18nProvider } from '@/i18n'
 import * as gateway from '@/store/gateway'
 import { _resetSessionOwnerHintsForTests, setSessionOwnerHint } from '@/store/session'
 import { $subagentsBySession } from '@/store/subagents'
+import { $relayJobsBySession } from '@/store/composer-status'
 
 import { SubagentTranscript } from './subagent-transcript'
 import { useSubagentSnapshot } from './use-subagent-snapshot'
@@ -53,6 +54,7 @@ describe('hidden-pane subagent polls', () => {
   })
 
   const listCalls = () => request.mock.calls.filter(([, , method]) => method === 'subagent.list').length
+  const relayCalls = () => request.mock.calls.filter(([, , method]) => method === 'relay_jobs.list').length
   const tailCalls = () => request.mock.calls.filter(([, , method]) => method === 'subagent.tail').length
 
   beforeEach(() => {
@@ -68,6 +70,7 @@ describe('hidden-pane subagent polls', () => {
     vi.useRealTimers()
     vi.restoreAllMocks()
     $subagentsBySession.set({})
+    $relayJobsBySession.set({})
     _resetSessionOwnerHintsForTests()
   })
 
@@ -75,16 +78,20 @@ describe('hidden-pane subagent polls', () => {
     const view = render(snapshotTree(false))
     await vi.advanceTimersByTimeAsync(15_000)
     expect(listCalls()).toBe(0)
+    expect(relayCalls()).toBe(0)
 
     view.rerender(snapshotTree(true))
     await vi.advanceTimersByTimeAsync(0)
     expect(listCalls()).toBe(1)
+    expect(relayCalls()).toBe(1)
     await vi.advanceTimersByTimeAsync(15_100)
     expect(listCalls()).toBe(1 + 3)
+    expect(relayCalls()).toBe(1 + 3)
 
     view.rerender(snapshotTree(false))
     await vi.advanceTimersByTimeAsync(15_000)
     expect(listCalls()).toBe(1 + 3)
+    expect(relayCalls()).toBe(1 + 3)
   })
 
   it('hidden transcript tile issues no subagent.tail; reveal seeds once and polls every 2s; hiding again stops it', async () => {
@@ -109,5 +116,6 @@ describe('hidden-pane subagent polls', () => {
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(15_000)
     expect(listCalls()).toBe(1)
+    expect(relayCalls()).toBe(1)
   })
 })

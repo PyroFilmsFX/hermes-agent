@@ -24,7 +24,18 @@ export {
 
 /** Composer status stack feed — merged todos, subagents, background per session. */
 export type StatusItemState = 'done' | 'failed' | 'running'
-export type StatusItemType = 'background' | 'goal' | 'subagent' | 'todo'
+export type StatusItemType = 'background' | 'goal' | 'relay' | 'subagent' | 'todo'
+
+export interface RelayJob {
+  durationSeconds?: number
+  jobId: string
+  lane: string
+  model: string
+  role: string
+  spawnedAt: number
+  status: string
+  worker: string
+}
 
 export interface ComposerStatusItem {
   /** background: non-zero exit shown inline when failed. */
@@ -45,12 +56,25 @@ export interface ComposerStatusItem {
   title: string
   /** todo: the full four-state status driving the row's checkmark glyph. */
   todoStatus?: TodoStatus
+  /** relay: source status from the conductor job record. */
+  relayStatus?: string
+  /** relay: seconds between spawn and finish, when the job has settled. */
+  relayDurationSeconds?: number
+  /** relay: unix milliseconds when the worker was spawned. */
+  relaySpawnedAt?: number
+  /** relay: worker and model shown in the row badge and label. */
+  relayWorker?: string
+  relayModel?: string
+  /** relay: implementation lane and role. */
+  relayLane?: string
+  relayRole?: string
   type: StatusItemType
 }
 
 // Writable source for background work, synced from the gateway's process
 // registry (`terminal(background=true)` spawns) via `process.list`.
 export const $backgroundStatusBySession = atom<Record<string, ComposerStatusItem[]>>({})
+export const $relayJobsBySession = atom<Record<string, RelayJob[]>>({})
 
 // Stored session ids that have at least one RUNNING background process. The
 // sidebar row reads this for a hollow dot — distinct from the filled dot of an
@@ -174,6 +198,24 @@ const goalToItem = (goal: { detail?: string; status: GoalStatus; title: string }
   type: 'goal'
 })
 
+const relayToItem = (job: RelayJob): ComposerStatusItem => ({
+  id: `relay:${job.jobId}`,
+  relayDurationSeconds: job.durationSeconds,
+  relayLane: job.lane,
+  relayModel: job.model,
+  relayRole: job.role,
+  relaySpawnedAt: job.spawnedAt,
+  relayStatus: job.status,
+  relayWorker: job.worker,
+  state: job.status === 'running'
+    ? 'running'
+    : ['failed', 'error', 'cancelled', 'canceled'].includes(job.status)
+      ? 'failed'
+      : 'done',
+  title: job.jobId,
+  type: 'relay'
+})
+
 // The single thing the stack reads: a typed, merged item list per session.
 //
 // Identity contract: this computed's inputs churn constantly during a turn (a
@@ -195,7 +237,14 @@ const sameStatusItem = (a: ComposerStatusItem, b: ComposerStatusItem) =>
   a.goalStatus === b.goalStatus &&
   a.todoStatus === b.todoStatus &&
   a.depth === b.depth &&
-  a.sessionId === b.sessionId
+  a.sessionId === b.sessionId &&
+  a.relayStatus === b.relayStatus &&
+  a.relayDurationSeconds === b.relayDurationSeconds &&
+  a.relaySpawnedAt === b.relaySpawnedAt &&
+  a.relayWorker === b.relayWorker &&
+  a.relayModel === b.relayModel &&
+  a.relayLane === b.relayLane &&
+  a.relayRole === b.relayRole
 
 const stabilizeItems = (prev: ComposerStatusItem[] | undefined, next: ComposerStatusItem[]): ComposerStatusItem[] => {
   if (!prev) {
@@ -210,8 +259,8 @@ const stabilizeItems = (prev: ComposerStatusItem[] | undefined, next: ComposerSt
 let prevStatusItems: Record<string, ComposerStatusItem[]> = {}
 
 export const $statusItemsBySession = computed(
-  [$goalsBySession, $subagentsBySession, $backgroundStatusBySession, $todosBySession, $sessionStates],
-  (goals, subs, background, todos, sessionStates) => {
+  [$goalsBySession, $subagentsBySession, $backgroundStatusBySession, $todosBySession, $sessionStates, $relayJobsBySession],
+  (goals, subs, background, todos, sessionStates, relayJobs) => {
     const out: Record<string, ComposerStatusItem[]> = {}
 
     const push = (sid: string, items: ComposerStatusItem[]) => {
@@ -253,6 +302,14 @@ export const $statusItemsBySession = computed(
       push(sid, list)
     }
 
+    for (const [sid, list] of Object.entries(relayJobs)) {
+      const turnLive = Boolean(
+        sessionStates[sid] &&
+          (sessionStates[sid].busy || sessionStates[sid].awaitingResponse || sessionStates[sid].turnLive)
+      )
+      push(sid, list.filter(job => job.status === 'running' || turnLive).map(relayToItem))
+    }
+
     let unchanged = Object.keys(prevStatusItems).length === Object.keys(out).length
 
     for (const sid of Object.keys(out)) {
@@ -265,7 +322,7 @@ export const $statusItemsBySession = computed(
 )
 
 // Fixed render order for the groups in the stack (top → bottom, above queue).
-const TYPE_ORDER: readonly StatusItemType[] = ['goal', 'todo', 'subagent', 'background']
+const TYPE_ORDER: readonly StatusItemType[] = ['goal', 'todo', 'subagent', 'relay', 'background']
 
 export interface StatusGroup {
   items: ComposerStatusItem[]
@@ -405,6 +462,51 @@ export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessE
   }
 
   writeBackground(sid, next)
+}
+
+/** Replace one session's relay roster from the gateway's read-only job snapshot. */
+export function reconcileRelayJobsSnapshot(sid: string, payload: Array<Record<string, unknown>>) {
+  const next = payload.flatMap((row): RelayJob[] => {
+    if (typeof row.job_id !== 'string' || typeof row.status !== 'string' || typeof row.spawned_at !== 'string') {
+      return []
+    }
+    const spawnedAt = Date.parse(row.spawned_at)
+    if (!Number.isFinite(spawnedAt)) {
+      return []
+    }
+    const duration = typeof row.duration_sec === 'number' && Number.isFinite(row.duration_sec) ? row.duration_sec : undefined
+
+    return [{
+      durationSeconds: duration,
+      jobId: row.job_id,
+      lane: typeof row.lane === 'string' ? row.lane : '',
+      model: [row.model_resolved, row.model, row.model_requested].find(
+        (value): value is string =>
+          typeof value === 'string' && value !== '' && value !== 'unverified' && value !== 'backend-does-not-attest'
+      ) ?? '',
+      role: typeof row.role === 'string' ? row.role : '',
+      spawnedAt,
+      status: row.status,
+      worker: typeof row.worker === 'string' ? row.worker : ''
+    }]
+  })
+  const current = $relayJobsBySession.get()[sid] ?? []
+  const unchanged = current.length === next.length && current.every((job, index) => {
+    const item = next[index]
+    return item && job.jobId === item.jobId && job.worker === item.worker && job.model === item.model &&
+      job.lane === item.lane && job.role === item.role && job.status === item.status &&
+      job.spawnedAt === item.spawnedAt && job.durationSeconds === item.durationSeconds
+  })
+  if (unchanged) {
+    return
+  }
+  const bySession = { ...$relayJobsBySession.get() }
+  if (next.length) {
+    bySession[sid] = next
+  } else {
+    delete bySession[sid]
+  }
+  $relayJobsBySession.set(bySession)
 }
 
 /** Pull the session's live process snapshot from the gateway. */

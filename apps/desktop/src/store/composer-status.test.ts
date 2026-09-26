@@ -7,10 +7,12 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 
 import {
   $backgroundStatusBySession,
+  $relayJobsBySession,
   $statusItemsBySession,
   dismissBackgroundProcess,
   isSessionGoneForBackgroundPolling,
   reconcileBackgroundProcesses,
+  reconcileRelayJobsSnapshot,
   refreshBackgroundProcesses,
   resetBackgroundPollingGuard,
   stopBackgroundProcess
@@ -66,6 +68,59 @@ describe('composer status subagent terminal rows', () => {
     expect($statusItemsBySession.get()[SID] ?? []).toEqual([])
     const { result } = renderHook(() => useSessionStatusPresence(SID))
     expect(result.current).toBe(false)
+  })
+})
+
+describe('composer status relay job terminal rows', () => {
+  afterEach(() => {
+    $sessionStates.set({})
+    $relayJobsBySession.set({})
+  })
+
+  it('keeps finished relay jobs only while the parent turn is live', () => {
+    $relayJobsBySession.set({
+      [SID]: [
+        {
+          durationSeconds: 12,
+          jobId: 'w_done',
+          lane: 'impl',
+          model: 'gpt-6-sol',
+          role: 'worker',
+          spawnedAt: 1,
+          status: 'succeeded',
+          worker: 'codex'
+        }
+      ]
+    })
+    $sessionStates.set({ [SID]: createClientSessionState(null) })
+
+    expect($statusItemsBySession.get()[SID] ?? []).toEqual([])
+
+    $sessionStates.set({
+      [SID]: { ...createClientSessionState(null), awaitingResponse: true }
+    })
+
+    expect($statusItemsBySession.get()[SID]).toMatchObject([
+      { id: 'relay:w_done', relayStatus: 'succeeded', state: 'done', type: 'relay' }
+    ])
+  })
+})
+
+describe('reconcileRelayJobsSnapshot model resolution', () => {
+  afterEach(() => {
+    $relayJobsBySession.set({})
+  })
+
+  it.each(['unverified', 'backend-does-not-attest', ''])('falls back from model_resolved=%s', modelResolved => {
+    reconcileRelayJobsSnapshot(SID, [{
+      job_id: 'w_model',
+      model: 'gpt-6-sol',
+      model_resolved: modelResolved,
+      spawned_at: new Date(0).toISOString(),
+      status: 'running'
+    }])
+
+    expect($relayJobsBySession.get()[SID]?.[0]?.model).toBe('gpt-6-sol')
   })
 })
 
