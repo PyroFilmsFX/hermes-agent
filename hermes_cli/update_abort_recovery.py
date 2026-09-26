@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shutil
 import subprocess
 import sys
@@ -95,7 +96,7 @@ def _run_fresh_recovery_process(
     """Spawn ``hermes_cli.update_restart_recovery --stdin`` detached from this process; None when it
     could not run (no systemd-run in gateway mode, OSError, timeout) — the caller fails closed."""
     command = [sys.executable, "-m", "hermes_cli.update_restart_recovery", "--stdin"]
-    env = os.environ.copy()
+    env = scrub_desktop_control_plane_env(os.environ.copy())
     env["HERMES_UPDATE_RESTART_RECOVERY"] = "1"
     for marker in ("_HERMES_GATEWAY", "HERMES_GATEWAY", "HERMES_GATEWAY_MODE"):
         env.pop(marker, None)

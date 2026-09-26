@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import subprocess
 import sys
 from contextlib import suppress
@@ -46,7 +47,7 @@ def _child_env() -> Dict[str, str]:
         from tools.computer_use.cua_backend import sanitized_cua_driver_env
         return sanitized_cua_driver_env()
     except Exception:
-        return dict(os.environ)
+        return scrub_desktop_control_plane_env(dict(os.environ))
 
 def _run(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
     return subprocess.run([binary, *args], capture_output=True, text=True, encoding='utf-8', errors='replace',

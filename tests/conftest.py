@@ -1447,3 +1447,13 @@ def real_bash() -> str:
             if candidate.exists():
                 return str(candidate)
     return found or "bash"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_desktop_control_plane_env(monkeypatch):
+    """Tests run inside live Hermes shells that carry the desktop control-plane
+    variables; clear them so child-env assertions don't depend on the host."""
+    from hermes_cli.control_plane_env import is_desktop_control_plane_env
+
+    for name in [n for n in os.environ if is_desktop_control_plane_env(n)]:
+        monkeypatch.delenv(name, raising=False)

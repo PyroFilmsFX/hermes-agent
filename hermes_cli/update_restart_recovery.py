@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import shutil
 import subprocess
@@ -110,7 +111,7 @@ def _child_environment(profile: str | None = None) -> dict[str, str]:
     and enforce them as its own — its ``.env`` only overwrites the keys it defines (#113270). Gates are
     dropped when *profile* is not the launch profile; a same-profile child keeps an operator export.
     """
-    env = os.environ.copy()
+    env = scrub_desktop_control_plane_env(os.environ.copy())
     for marker in _GATEWAY_MARKERS:
         env.pop(marker, None)
     env[_RECOVERY_ENV] = "1"

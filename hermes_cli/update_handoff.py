@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import subprocess
 import sys
 import time
@@ -83,7 +84,7 @@ def post_swap_child_env() -> dict[str, str]:
     nobody upstream (Tauri/Electron updater) already named theirs."""
     from hermes_cli.update_lock import HANDOFF_PID_ENV
 
-    env = {**os.environ, POST_SWAP_ENV: "1", "HERMES_UPDATE_REEXEC": "1"}
+    env = scrub_desktop_control_plane_env({**os.environ, POST_SWAP_ENV: "1", "HERMES_UPDATE_REEXEC": "1"})
     env.setdefault(HANDOFF_PID_ENV, str(os.getpid()))
     return env
 

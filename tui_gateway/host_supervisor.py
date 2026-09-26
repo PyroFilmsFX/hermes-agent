@@ -135,6 +135,15 @@ def is_compute_host_identity(pid: int) -> bool:
     return "tui_gateway.compute_host" in _pid_command(pid)
 
 
+def compute_host_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Env for the compute-host child. It overlays the full process env on the scrubbed base
+    (the host is Hermes itself and keeps its historical inheritance), so the desktop control
+    plane (``DESKTOP_CONTROL_PLANE_ENV_KEYS``) is scrubbed LAST — agents run inside the host."""
+    from tools.environments.local_env_policy import scrub_desktop_control_plane_env
+    env = {**hermes_subprocess_env(inherit_credentials=True), **os.environ, **(extra or {})}
+    return scrub_desktop_control_plane_env(env)
+
+
 class HostSupervisor:
     """Own one persistent compute-host child and relay its frames."""
 
@@ -327,7 +336,7 @@ class HostSupervisor:
             raise RuntimeError("compute host respawn disabled after crash loop")
         self._hello_event.clear()
         self._hello = {}
-        env = {**hermes_subprocess_env(inherit_credentials=True), **os.environ, **(self.env or {})}
+        env = compute_host_child_env(self.env)
         env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
         root = str(_repo_root())
         env.setdefault("PYTHONPATH", root)

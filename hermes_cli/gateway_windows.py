@@ -12,6 +12,7 @@ import json
 import locale
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import shlex
 import shutil
@@ -717,7 +718,7 @@ def _spawn_detached(script_path: Path | None = None, home: Path | None = None) -
     """
     _assert_windows()
     argv, working_dir, env_overlay = _build_gateway_argv(home)
-    env = {**os.environ, **env_overlay}
+    env = scrub_desktop_control_plane_env({**os.environ, **env_overlay})
 
     # Stray print()/native stderr goes to a sidecar log; real gateway logs still land in gateway.log
     # via the logging FileHandler.

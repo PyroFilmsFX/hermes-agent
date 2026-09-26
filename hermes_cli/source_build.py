@@ -1,6 +1,7 @@
 """Source launch/update composition over the shared JavaScript builders."""
 
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,8 +38,8 @@ def source_build_env(base_env: dict | None = None, *, explicit: bool = False) ->
     # the selected venv executable rather than the store interpreter.
     root = repo_root()
     python = str(project_python(root)) if running_from_selected_environment(root) else sys.executable
-    env = {**os.environ, **(base_env or {}), "CI": "1", "HERMES_PYTHON": python,
-           "PYTHON": python}
+    env = scrub_desktop_control_plane_env({**os.environ, **(base_env or {}), "CI": "1", "HERMES_PYTHON": python,
+           "PYTHON": python})
     env.pop("ESBUILD_BINARY_PATH", None)
     npmrc = get_hermes_home() / "npmrc"
     if npmrc.is_file():

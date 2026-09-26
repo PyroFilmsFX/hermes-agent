@@ -38,7 +38,7 @@ def _failed_result(request: dict, result_path: Path, code: int) -> int:
 def run_completion(request: dict) -> dict:
     """Wait for new code; zero exit without a correlated terminal result fails closed."""
     root = Path(request["source"])
-    env = dict(os.environ, HERMES_HOME=request["home"], PYTHONUNBUFFERED="1")
+    env = dict(os.environ, HERMES_HOME=request["home"], PYTHONUNBUFFERED="1")  # control-plane-env: path-run in a fresh checkout that cannot import hermes_cli; an updater child, not agent-reachable
     for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
         env.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="hermes-completion-") as directory:

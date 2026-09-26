@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import subprocess
 import sys
@@ -324,7 +325,7 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
     success, and *error* is a human-readable failure description otherwise.
     """
     with tempfile.TemporaryDirectory(prefix="hermes-validate-") as scratch:
-        env = dict(os.environ)
+        env = scrub_desktop_control_plane_env(dict(os.environ))
         env["HERMES_HOME"] = scratch
         try:
             result = subprocess.run(

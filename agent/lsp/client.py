@@ -111,6 +111,15 @@ def _end_position(text: str) -> Dict[str, int]:
     return {"line": len(lines) - 1, "character": len(lines[-1].encode("utf-16-le")) // 2}
 
 
+def lsp_child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Env for a language-server child: the process env plus the server's configured env, with
+    the delegate/Kanban fence and, LAST, the desktop control-plane scrub (the server runs on the
+    agent's behalf, so it never gets the dashboard credential or the renderer debug port)."""
+    from agent.delegation_context import delegated_child_subprocess_env
+    from tools.environments.local_env_policy import scrub_desktop_control_plane_env
+    return scrub_desktop_control_plane_env(delegated_child_subprocess_env({**os.environ, **(extra or {})}))
+
+
 @dataclass
 class _DocState:
     """Per-document state.  ``version`` is the LSP document version last sent (didOpen=0, +1 per
@@ -247,7 +256,6 @@ class LSPClient:
             raise
 
     async def _spawn(self) -> None:
-        from agent.delegation_context import delegated_child_subprocess_env
         cmd = self._command
         if sys.platform == "win32" and cmd[0].lower().endswith((".cmd", ".bat")):
             cmd = ["cmd.exe", "/c", *cmd]  # CreateProcess can't run .cmd/.bat shims directly
@@ -259,7 +267,7 @@ class LSPClient:
             self._proc = await asyncio.create_subprocess_exec(
                 cmd[0], *cmd[1:], limit=_STREAM_LIMIT,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=delegated_child_subprocess_env({**os.environ, **(self._env or {})}), cwd=self._cwd,
+                env=lsp_child_env(self._env), cwd=self._cwd,
                 start_new_session=True, creationflags=windows_hide_flags(),
             )
         except FileNotFoundError as e:

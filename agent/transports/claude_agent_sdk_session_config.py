@@ -119,7 +119,14 @@ def _sdk_env_overrides(
         dict(task_env) if task_env is not None
         else _effective_sdk_task_env(task_list_id=task_list_id)
     )
+    from tools.environments.local_env_policy import (
+        desktop_control_plane_env_blanks, is_desktop_control_plane_env)
     for key, value in _configured_sdk_env().items():
+        if is_desktop_control_plane_env(key):
+            logger.warning(
+                "agent.claude_agent_sdk.env[%s] is a desktop control-plane variable — ignoring "
+                "(no agent may hold the dashboard credential or the renderer debug port)", key)
+            continue
         if not metered_allowed and _is_metered_sdk_env_value(key, value):
             logger.warning(
                 "agent.claude_agent_sdk.env[%s] is a metered billing vector — "
@@ -128,6 +135,12 @@ def _sdk_env_overrides(
             )
             continue
         overrides[key] = value
+    # Desktop control plane (tools.environments.local_env_policy.DESKTOP_CONTROL_PLANE_ENV_KEYS):
+    # the SDK spawns {**os.environ, **options.env}, so every present key is overridden to "" —
+    # the CLI, its Bash tool and every plugin MCP/hook it launches inherit no dashboard token
+    # and no CDP port. Unconditional: allow_metered_key does not re-arm it. (The desktop
+    # backend also pops the sealed subset from os.environ at startup, so there it is absent.)
+    overrides.update(desktop_control_plane_env_blanks())
 
     # Explicit session identity for the spawned CLI. The SDK spawns the CLI with
     # the inherited parent process env ({**os.environ, ..., **options.env}), so an

@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import shlex
 import shutil
@@ -1445,7 +1446,7 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
             [sys.executable, "-c",
              "import json; from tools.skills_sync import sync_skills; "
              "r = sync_skills(quiet=True); print(json.dumps(r))"],
-            env={**os.environ, "HERMES_HOME": str(profile_dir)},
+            env=scrub_desktop_control_plane_env({**os.environ, "HERMES_HOME": str(profile_dir)}),
             cwd=str(project_root),
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60,
         )

@@ -130,7 +130,9 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
     if user_env:
         env.update(user_env)
     from agent.delegation_context import delegated_child_subprocess_env
-    return delegated_child_subprocess_env(env)
+    from tools.environments.local_env_policy import scrub_desktop_control_plane_env
+    # Last, over the server's own config env too: no MCP server needs the desktop control plane.
+    return scrub_desktop_control_plane_env(delegated_child_subprocess_env(env))
 
 
 def _which_with_config_pathext(command: str, path_arg, env: dict):

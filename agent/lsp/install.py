@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shutil
 import subprocess
 import threading
@@ -273,7 +274,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
         return None
     staging = hermes_lsp_bin_dir()
     logger.info("[install] go install %s (GOBIN=%s)", pkg, staging)
-    if not _run_installer("go", pkg, [go, "install", pkg], timeout=600, env={**os.environ, "GOBIN": str(staging)}):
+    if not _run_installer("go", pkg, [go, "install", pkg], timeout=600, env=scrub_desktop_control_plane_env({**os.environ, "GOBIN": str(staging)})):
         return None
     bin_path = (staging / bin_name).with_suffix(".exe") if _is_windows() else staging / bin_name
     if bin_path.exists():

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +66,7 @@ print(json.dumps({
 def isolated_interpreter_env() -> dict[str, str]:
     """Copy of ``os.environ`` with conda/uv/venv/PYTHON* overrides stripped, so a child interpreter
     reports its *own* runtime rather than the caller's."""
-    env = dict(os.environ)
+    env = scrub_desktop_control_plane_env(dict(os.environ))
     for key in ("CONDA_DEFAULT_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT",
                 "UV_PYTHON", "VIRTUAL_ENV"):
         env.pop(key, None)

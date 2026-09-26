@@ -289,7 +289,7 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
     with _DOTENV_LOCK:
         if load_pass is None:
             load_pass = next(_DOTENV_PASSES)
-        lookup_env: dict[str, str | None] = dict(os.environ)
+        lookup_env: dict[str, str | None] = dict(os.environ)  # control-plane-env: dotenv lookup table, never a child env
         for name, (baseline, published, published_pass) in _DOTENV_PUBLISHED.items():
             if published_pass != load_pass and lookup_env.get(name) == published:
                 if baseline is None:
