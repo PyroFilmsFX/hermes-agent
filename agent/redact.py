@@ -161,6 +161,15 @@ _PREFIX_PATTERNS = [
     r"bb_live_[A-Za-z0-9_-]{10,}",      # BrowserBase
     r"gAAAA[A-Za-z0-9_=-]{20,}",        # Codex encrypted tokens
     r"AKIA[A-Z0-9]{16}",                # AWS Access Key ID
+    r"ASIA[A-Z0-9]{16}",                # AWS STS temporary access key ID
+    # Fly.io: ``FlyV1 fm2_…`` macaroon chains (comma-joined, standard base64 with padding) as
+    # sent in the Authorization header / FLY_API_TOKEN, the bare ``fm2_`` macaroon, and the
+    # ``fo1_`` org token. The chain tail is bounded so the structural ReDoS gate holds; the
+    # literal prefix runs through ``fm2_`` so the pre-screen and corpus synthesis stay exact.
+    r"FlyV1 fm2_[A-Za-z0-9+/=_-]{20,}(?:,fm[12]_[A-Za-z0-9+/=_-]{20,4096}){0,32}",
+    r"fm2_[A-Za-z0-9+/=_-]{20,}",       # Fly.io macaroon (bare)
+    r"fo1_[A-Za-z0-9_-]{20,}",          # Fly.io org token
+    r"npg_[A-Za-z0-9]{12,}",            # Neon Postgres password
     r"sk_live_[A-Za-z0-9]{10,}",        # Stripe secret key (live)
     r"sk_test_[A-Za-z0-9]{10,}",        # Stripe secret key (test)
     r"rk_live_[A-Za-z0-9]{10,}",        # Stripe restricted key
@@ -362,9 +371,28 @@ def _is_word_end(s: str, j: int, *, allow_plural: bool = True) -> bool:
     return allow_plural and cur in "sS" and _is_word_end(s, j + 1, allow_plural=False)
 
 
+# ALL-CAPS keys keep the legacy embedded match promised at _KEY_KEYWORD_RE (``MYTOKEN=``,
+# ``PGPASSWORD=``): an all-caps key is almost never prose. Only keywords of 5+ chars embed
+# (``token``, ``secret``, ``password``, ``apikey``…), and the keyword must still END the word,
+# so ``KEYBOARD``/``PASSAGE``/``PASSWORDLESS``/``SECRETARY`` stay unmatched.
+_EMBEDDED_KEYWORD_MIN_LEN = 5
+
+
+def _is_all_caps_key(key: str) -> bool:
+    return any(c.isalpha() for c in key) and key == key.upper()
+
+
 def _has_word_bounded_keyword(key: str, keyword_re: "re.Pattern[str]") -> bool:
     """True if ``keyword_re`` matches ``key`` at a word boundary (see _KEY_KEYWORD_RE)."""
-    return any(_is_word_start(key, m.start()) and _is_word_end(key, m.end()) for m in keyword_re.finditer(key))
+    all_caps = _is_all_caps_key(key)
+    for m in keyword_re.finditer(key):
+        if not _is_word_end(key, m.end()):
+            continue
+        if _is_word_start(key, m.start()):
+            return True
+        if all_caps and m.end() - m.start() >= _EMBEDDED_KEYWORD_MIN_LEN:
+            return True
+    return False
 
 
 def _key_has_secret_keyword(key: str) -> bool:
@@ -516,8 +544,10 @@ _PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END
 # greedy [^@]+ would scan past the end of a code line to the next stray "@" (e.g. a Python decorator),
 # swallowing intervening lines and corrupting tool OUTPUT for any source containing a postgresql:// f-string
 # template. See issue #33801.
+# Driver-qualified schemes (``postgresql+asyncpg://``, ``mysql+pymysql://``, ``mongodb+srv://``) and
+# an empty user (``postgres://:pw@host``) carry the same password slot.
 _DB_CONNSTR_RE = re.compile(
-    r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]+:)([^@\s]+)(@)",
+    r"((?:postgres(?:ql)?|mysql|mariadb|mongodb|rediss?|amqps?)(?:\+[A-Za-z0-9]{1,20})?://[^:\s]*:)([^@\s]+)(@)",
     re.IGNORECASE,
 )
 
@@ -601,11 +631,23 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
     contiguous _PREFIX_RE cannot match it and the secret leaks verbatim (issue #77484). ``EXA_API_KEY=*** is
     rejected).
     """
+    matches = [(start, end, mask_fn(token)) for start, end, token in _control_split_token_spans(text)]
+    if not matches:
+        return text
+    out = list(text)
+    for start_orig, end_orig, replacement in reversed(matches):
+        out[start_orig:end_orig] = list(replacement)
+    return "".join(out)
+
+
+def _control_split_token_spans(text: str) -> list:
+    """``(start, end, token)`` in ``text`` for prefix tokens split by control chars (see
+    _mask_control_split_tokens); ``token`` is the control-stripped credential."""
     stripped = _CONTROL_CHARS_RE.sub("", text)
     if stripped == text:
-        return text
+        return []
     orig_idx = [i for i, c in enumerate(text) if not _CONTROL_CHARS_RE.match(c)]
-    out, matches = list(text), []
+    matches = []
     for m in _PREFIX_RE.finditer(stripped):
         start_orig = orig_idx[m.start(1)]
         end_orig = orig_idx[m.end(1) - 1] + 1
@@ -620,10 +662,8 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
         # matched across lines) and matches running into a ``KEY=`` name.
         if (all(c in _TOKEN_BODY_CHARS or _CONTROL_CHARS_RE.match(c) for c in span)
                 and (end_orig >= len(text) or text[end_orig] != "=")):
-            matches.append((start_orig, end_orig, mask_fn(m.group(1))))
-    for start_orig, end_orig, replacement in reversed(matches):
-        out[start_orig:end_orig] = list(replacement)
-    return "".join(out)
+            matches.append((start_orig, end_orig, m.group(1)))
+    return matches
 
 
 # mask_secret strips EVERY control char (incl. \n/\t, C1, DEL, zero-width) so a

@@ -1921,6 +1921,21 @@ DEFAULT_CONFIG = {
         # enabled (e.g. `elevenlabs`). False = require explicit pip install for everything beyond
         # the base set (restricted/audited/air-gapped environments).
         "allow_lazy_installs": True,
+        # Secret hygiene: mask secrets at ingest as ``[REDACTED:<kind>:<tag>]`` (HMAC tag under a
+        # per-install key kept outside HERMES_HOME) and sweep stored ones with `hermes security
+        # scrub`. Independent of redact_secrets (log redaction); only enabled: false turns it off.
+        "secret_hygiene": {
+            "enabled": True,
+            "mask_ingress": True,
+            "db_url_mask": "password",  # password | whole_url
+            "tag_hex_chars": 8,
+            "code_fence_mode": "known_only",  # known_only | full | off
+            "entropy": {"enabled": True, "min_length": 24, "min_bits_per_char": 4.0,
+                        "min_char_classes": 3, "bare_strings": False},
+            "allow_patterns": [],
+            "allow_value_sha256": [],
+            "sweep": {"backup_retention_days": 7, "live_window_hours": 24},
+        },
     },
 
     "cron": {
