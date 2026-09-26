@@ -70,6 +70,11 @@ def test_deferred_resume_preserves_model_history_and_db_ownership(tmp_path, monk
     monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *args: None)
     monkeypatch.setattr(server, "_start_agent_build", lambda *args: built.set())
     monkeypatch.setattr(server, "_emit", lambda kind, sid, payload: events.append((kind, payload)))
+    # The fake ``acquire`` hands every caller this one handle, so the peer-mailbox drain a resume
+    # schedules (0.5s timer, its own registry-refcounted handle in production) would write through
+    # it after hydration closed it and reopen the connection. Out of scope for this ownership test.
+    from tui_gateway import session_mailbox
+    monkeypatch.setattr(session_mailbox, "schedule_drain", lambda *args, **kwargs: None)
     sid = None
     try:
         response = server.handle_request({"id": "resume", "method": "session.resume", "params": {
