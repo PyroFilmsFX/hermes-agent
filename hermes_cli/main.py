@@ -2263,6 +2263,10 @@ def cmd_security(args):
         # Default subcommand is `audit` when no subcmd is given.
         code = cmd_security_audit(args)
         sys.exit(int(code or 0))
+    if sub == "scrub":
+        from hermes_cli.security_scrub import cmd_security_scrub
+
+        sys.exit(int(cmd_security_scrub(args) or 0))
     print(f"unknown security subcommand: {sub}", file=sys.stderr)
     sys.exit(2)
 
