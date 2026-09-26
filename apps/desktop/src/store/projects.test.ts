@@ -13,6 +13,7 @@ import {
   $projectScope,
   $projectsRpcAvailable,
   $projectTree,
+  $projectTreeLoaded,
   addProjectFolder,
   ALL_PROJECTS,
   createProject,
@@ -861,6 +862,8 @@ describe('project tree profile isolation', () => {
     $activeGatewayProfile.set('default')
     $projects.set([])
     $projectTree.set([])
+    $projectTreeLoaded.set(false)
+    $projectsRpcAvailable.set(null)
   })
 
   it('retries a dropped projects.tree request once on the active gateway', async () => {
@@ -881,6 +884,36 @@ describe('project tree profile isolation', () => {
 
     expect(request).toHaveBeenCalledTimes(2)
     expect($projectTree.get().map(project => project.id)).toEqual(['remote-tree'])
+  })
+
+  it('does not poll projects.tree after the backend is known not to support projects RPCs', async () => {
+    const request = vi.fn()
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    gatewayAtom.set(gateway as never)
+    $projectsRpcAvailable.set(false)
+
+    await refreshProjectTree()
+
+    expect(request).not.toHaveBeenCalled()
+    expect($projectTreeLoaded.get()).toBe(false)
+  })
+
+  it('marks even an empty projects tree loaded only after a successful backend response', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('backend not ready')).mockResolvedValueOnce({
+      active_id: null,
+      projects: [],
+      scoped_session_ids: []
+    })
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    gatewayAtom.set(gateway as never)
+
+    await refreshProjectTree()
+    expect($projectTreeLoaded.get()).toBe(false)
+
+    await refreshProjectTree()
+    expect($projectTreeLoaded.get()).toBe(true)
   })
 
   it('does not publish a late response from the previous gateway', async () => {

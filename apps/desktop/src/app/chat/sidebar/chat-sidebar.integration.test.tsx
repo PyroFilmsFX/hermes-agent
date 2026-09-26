@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { useSessionListActions } from '@/app/session/hooks/use-session-list-actions'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,14 +10,17 @@ import { SidebarProvider } from '@/components/ui/sidebar'
 import { registry } from '@/contrib/registry'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $sidebarMessagingOpenIds, setSidebarAgentsGrouped, setSidebarGrouping } from '@/store/layout'
+import { setPrimaryGateway } from '@/store/gateway'
 import { $activeGatewayProfile, $profiles, setShowAllProfiles } from '@/store/profile'
-import { $projectScope, $projectTree, ALL_PROJECTS } from '@/store/projects'
+import { $projectScope, $projectTree, $projectTreeLoaded, $projectsRpcAvailable, ALL_PROJECTS } from '@/store/projects'
 import {
   $currentCwd,
+  $gatewayState,
   $messagingSessions,
   $messagingTruncated,
   $selectedStoredSessionId,
   $sessions,
+  $sessionsInitialLoadPending,
   $sessionsLoadError,
   $sessionsLoading,
   $workspaceCwdOwner
@@ -34,6 +38,12 @@ import { ChatSidebar } from './index'
 const noop = () => {}
 
 const noopAsync = async () => {}
+const listSidebarSessions = vi.hoisted(() => vi.fn())
+
+vi.mock('@/hermes', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listSidebarSessions: (...args: unknown[]) => listSidebarSessions(...args)
+}))
 
 const sessionRows = [
   makeSessionInfo({ id: 'tile-one', last_active: 2, profile: 'default', started_at: 1, title: 'Tile one' }),
@@ -203,24 +213,61 @@ describe('ChatSidebar navigation activity', () => {
 describe('ChatSidebar cold-start load failure', () => {
   afterEach(() => {
     cleanup()
+    $gatewayState.set('idle')
+    vi.useRealTimers()
     $sessions.set([])
     $sessionsLoading.set(true)
+    $sessionsInitialLoadPending.set(true)
     $sessionsLoadError.set(false)
   })
 
-  it('offers retry in place of the empty state', () => {
+  it('offers retry in place of the empty state', async () => {
+    vi.useFakeTimers()
+    listSidebarSessions.mockReset()
+    listSidebarSessions.mockRejectedValue(new Error('ECONNREFUSED'))
+    $gatewayState.set('open')
     const retry = vi.fn(noopAsync)
     $sessions.set([])
     $sessionsLoading.set(false)
-    $sessionsLoadError.set(true)
 
-    renderSidebar('/', 'chat', retry)
+    function SidebarWithSessionActions() {
+      const actions = useSessionListActions({ profileScope: 'default' })
+      retry.mockImplementation(actions.refreshSessions)
+
+      return (
+        <MemoryRouter initialEntries={['/']}>
+          <SidebarProvider>
+            <ChatSidebar
+              currentView="chat"
+              onArchiveSession={noop}
+              onBranchSession={noop}
+              onDeleteSession={noop}
+              onLoadMoreSessions={noop}
+              onManageCronJob={noop}
+              onNavigate={noop}
+              onNewSessionInWorkspace={noop}
+              onNewSessionSplit={noop}
+              onResumeSession={noop}
+              onRetrySessions={retry}
+              onTriggerCronJob={noopAsync}
+            />
+          </SidebarProvider>
+        </MemoryRouter>
+      )
+    }
+
+    render(<SidebarWithSessionActions />)
+    await act(async () => vi.advanceTimersByTimeAsync(20_000))
 
     expect(screen.getByText('Could not load sessions')).toBeTruthy()
     expect(screen.queryByText('No sessions yet')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(retry).toHaveBeenCalledTimes(1)
+    await act(async () => Promise.resolve())
+    expect(listSidebarSessions).toHaveBeenCalledTimes(7)
+    cleanup()
+    vi.useRealTimers()
   })
 })
 
@@ -251,6 +298,21 @@ describe('ChatSidebar project entry', () => {
     $selectedStoredSessionId.set(null)
     $workspaceCwdOwner.set(null)
     $sessions.set([])
+    $projectTreeLoaded.set(false)
+    $projectsRpcAvailable.set(null)
+  })
+
+  it('drops the loaded project tree when the active profile changes', () => {
+    $projectTreeLoaded.set(true)
+    $projectTree.set([project])
+    $activeGatewayProfile.set('default')
+    renderSidebar('/', 'chat')
+
+    act(() => $activeGatewayProfile.set('coder'))
+
+    expect($projectTreeLoaded.get()).toBe(false)
+    expect($projectTree.get()).toEqual([])
+    $activeGatewayProfile.set('default')
   })
 
   it("leaves a stored conversation's workspace alone", () => {
@@ -271,6 +333,63 @@ describe('ChatSidebar project entry', () => {
     renderSidebar('/', 'chat')
 
     expect($currentCwd.get()).toBe(project.path)
+  })
+})
+
+describe('ChatSidebar projects compatibility', () => {
+  afterEach(() => {
+    cleanup()
+    setPrimaryGateway(null, 'default')
+    vi.useRealTimers()
+    $gatewayState.set('idle')
+    $sessions.set([])
+    $sessionsInitialLoadPending.set(false)
+    $sessionsLoadError.set(false)
+    $projectTree.set([])
+    $projectTreeLoaded.set(false)
+    $projectsRpcAvailable.set(null)
+    setSidebarAgentsGrouped(false)
+  })
+
+  it('falls back to flat recents when the backend has no projects RPC', () => {
+    $gatewayState.set('open')
+    $sessions.set([])
+    $sessionsInitialLoadPending.set(false)
+    $sessionsLoadError.set(false)
+    $projectsRpcAvailable.set(false)
+    $projectTreeLoaded.set(false)
+    setSidebarAgentsGrouped(true)
+
+    renderSidebar('/', 'chat')
+
+    expect(document.querySelector('[data-sessions-mode="flat"]')).toBeTruthy()
+    expect(screen.queryByText('Could not load sessions')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('caps project tree retries and lets Retry restart them', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
+    setPrimaryGateway({ connectionState: 'open', request } as never, 'default')
+    $gatewayState.set('open')
+    $sessionsInitialLoadPending.set(false)
+    $projectsRpcAvailable.set(null)
+    setSidebarAgentsGrouped(true)
+
+    renderSidebar('/', 'chat')
+    await act(async () => vi.advanceTimersByTimeAsync(16_000))
+
+    const treeCalls = () => request.mock.calls.filter(([method]) => method === 'projects.tree').length
+    expect(treeCalls()).toBe(6)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await act(async () => Promise.resolve())
+
+    expect(treeCalls()).toBe(7)
+    cleanup()
+    setPrimaryGateway(null, 'default')
+    vi.useRealTimers()
   })
 })
 

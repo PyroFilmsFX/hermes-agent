@@ -52,6 +52,8 @@ export const $activeProjectId = atom<null | string>(null)
 // source of project membership — the desktop no longer derives it.
 export const $projectTree = atom<SidebarProjectTree[]>([])
 export const $projectTreeLoading = atom(false)
+// Distinguishes an authoritative empty tree from a failed initial read.
+export const $projectTreeLoaded = atom(false)
 // Backend-resolved session -> project owner, the ONE authority the row
 // classifiers (filter, bucket, color, label) and the lane overlay share, so a
 // sibling worktree the git probe assigned to its repo project never re-files
@@ -429,6 +431,7 @@ let projectTreeRefreshGeneration = 0
 function applyProjectTreePayload(res: ProjectTreePayload): void {
   const scoped = new Set(res.scoped_session_ids ?? [])
   $projectTree.set(res.projects ?? [])
+  $projectTreeLoaded.set(true)
   $activeProjectId.set(res.active_id ?? null)
   const tombstones = $removedSessionIds.get()
 
@@ -499,6 +502,10 @@ async function refreshProjectTreeOn(context: ActiveProjectsContext): Promise<voi
 // sessions + the scoped-session-id set). Best-effort: a failure leaves the
 // cached tree intact so the sidebar doesn't flicker.
 export async function refreshProjectTree(): Promise<void> {
+  if ($projectsRpcAvailable.get() === false) {
+    return
+  }
+
   if ($profileScope.get() === ALL_PROFILES) {
     await refreshProjectTreeAcrossProfiles()
 
