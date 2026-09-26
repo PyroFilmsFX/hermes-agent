@@ -1032,7 +1032,12 @@ def register_session_spawn_routes(application) -> None:
         result = send_message(
             target=target.strip(), body=body, from_session_id=from_session_id, from_label=from_label,
             request_id=params.get("request_id", "") if isinstance(params.get("request_id", ""), str) else "",
-            profile_home=caller.get("profile_home") or None, queue_only=True)
+            profile_home=caller.get("profile_home") or None, queue_only=True,
+            # The sender identity above comes only from the capability owner (body fields are ignored).
+            # This marker makes delivery re-validate that owner, since the capability may be idle-expired.
+            sender_auth={"owner_session_id": capability.owner_session_id,
+                         "session_generation": capability.session_generation,
+                         "profile_home": capability.profile_home})
         logger.warning("session_send: attach refused for owner=%s; peer message to target=%s took the durable "
                        "queue fallback (status=%s)", from_session_id, target.strip(),
                        result.get("status") if isinstance(result, dict) else "?")

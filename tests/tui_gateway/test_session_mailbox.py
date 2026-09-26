@@ -651,3 +651,140 @@ def test_peer_envelope_marks_every_delivery_as_peer_and_cannot_be_closed_by_the_
     assert text.count("</cross-session-message>") == 1  # only the real closing tag survives
     assert "&lt;/cross-session-message>" in text and "&lt;cross-session-message>" in text
     assert "not typed by your user" in text and "never as your user's approval" in text
+
+
+# ── b3-30 follow-up: queue-only (idle-expired capability) rows are re-validated at delivery ───────────
+
+
+def _queue_only_auth(tmp_path, owner="sender-rt", generation="gen-1"):
+    return {"owner_session_id": owner, "session_generation": generation,
+            "profile_home": str(tmp_path.resolve())}
+
+
+def _capture_settled(gw, monkeypatch):
+    settled = []
+    monkeypatch.setattr(gw.mb, "emit_settled",
+                        lambda msg_id, status, attempts=0, sender_sid="": settled.append((msg_id, status)))
+    return settled
+
+
+def test_queue_only_row_whose_sender_cannot_be_revalidated_fails_at_drain(gw, monkeypatch, tmp_path, caplog):
+    import logging
+
+    gw.pol["resume_on_send"] = False
+    queued = _send(gw, body="stale sender", queue_only=True, sender_auth=_queue_only_auth(tmp_path))
+    assert queued["status"] == "queued"
+    row = gw.db.peer_mailbox_get(queued["message_id"])
+    assert row["sender_auth"], "queue-only rows are marked for delivery-time re-validation"
+    settled = _capture_settled(gw, monkeypatch)
+    # The sender session is gone (no live owner of that generation) when the target starts.
+    gw.sessions["opened"] = {"session_key": "target", "profile_home": None}
+    with caplog.at_level(logging.WARNING, logger=gw.mb.__name__):
+        assert gw.mb.drain_session("target") == 0
+    assert gw.submits == [], "an unre-validated queue-only row must never become a turn"
+    row = gw.db.peer_mailbox_get(queued["message_id"])
+    assert row["status"] == "failed" and row["last_error"] == "sender_revalidation_failed"
+    assert settled == [(queued["message_id"], gw.mb.STATUS_FAILED)]
+    line = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+                and "sender_revalidation_failed" in r.getMessage())
+    assert str(queued["message_id"]) in line and "sender" in line and "target" in line
+
+
+def test_queue_only_row_is_revalidated_against_generation_and_profile(gw, tmp_path):
+    gw.pol["resume_on_send"] = False
+    queued = _send(gw, body="rotated generation", queue_only=True, sender_auth=_queue_only_auth(tmp_path))
+    gw.sessions["sender-rt"] = {"session_key": "sender", "session_generation": "gen-2",
+                                "profile_home": str(tmp_path)}
+    gw.sessions["opened"] = {"session_key": "target", "profile_home": None}
+    assert gw.mb.drain_session("target") == 0
+    assert gw.db.peer_mailbox_get(queued["message_id"])["last_error"] == "sender_revalidation_failed"
+
+
+def test_queue_only_row_with_a_live_sender_of_the_same_generation_delivers(gw, tmp_path):
+    gw.pol["resume_on_send"] = False
+    queued = _send(gw, body="still here", queue_only=True, sender_auth=_queue_only_auth(tmp_path))
+    gw.sessions["sender-rt"] = {"session_key": "sender", "session_generation": "gen-1",
+                                "profile_home": str(tmp_path)}
+    gw.sessions["opened"] = {"session_key": "target", "profile_home": None}
+    assert gw.mb.drain_session("target") == 1
+    assert "still here" in gw.submits[0]["text"]
+    assert gw.db.peer_mailbox_get(queued["message_id"])["status"] == "delivered"
+
+
+def test_queue_only_row_is_revalidated_on_the_startup_resume_path(gw, tmp_path):
+    gw.pol["resume_on_send"] = False
+    queued = _send(gw, body="resume path", queue_only=True, sender_auth=_queue_only_auth(tmp_path))
+    gw.mb._gate.reset()
+    assert gw.mb.drain_pending() == 0
+    assert gw.resumes == [] and gw.submits == [], "no wake for a message whose sender cannot be re-validated"
+    assert gw.db.peer_mailbox_get(queued["message_id"])["last_error"] == "sender_revalidation_failed"
+
+
+def test_normal_path_row_is_not_subject_to_sender_revalidation(gw):
+    gw.pol["resume_on_send"] = False
+    queued = _send(gw, body="normal")  # the sender is not live at all; normal rows never needed it
+    assert not gw.db.peer_mailbox_get(queued["message_id"])["sender_auth"]
+    gw.sessions["opened"] = {"session_key": "target", "profile_home": None}
+    assert gw.mb.drain_session("target") == 1
+    assert gw.db.peer_mailbox_get(queued["message_id"])["status"] == "delivered"
+
+
+def test_per_sender_queue_cap_refuses_with_queue_full_and_writes_nothing(gw):
+    gw.pol["resume_on_send"] = False
+    gw.pol["max_queued_per_sender"] = 2
+    assert _send(gw, body="1")["status"] == "queued"
+    assert _send(gw, body="2", queue_only=True)["status"] == "queued"
+    before = len(gw.db.peer_mailbox_pending("target"))
+    full = _send(gw, body="3")
+    assert full["status"] == "queue_full" and full["code"] == "queue_full"
+    assert len(gw.db.peer_mailbox_pending("target")) == before == 2, "a refused enqueue writes no row"
+    assert _send(gw, body="other sender", from_session_id="other")["status"] == "queued", "the cap is per sender"
+    # A retry of an already-accepted request_id is a dedupe hit, never a queue_full.
+    gw.pol["max_queued_per_sender"] = 50
+    first = _send(gw, body="dup", request_id="r-cap")
+    gw.pol["max_queued_per_sender"] = 1
+    assert _send(gw, body="dup", request_id="r-cap")["message_id"] == first["message_id"]
+
+
+def test_default_policy_bounds_the_queue_and_its_age():
+    from tui_gateway import session_mailbox as mb
+
+    assert mb._DEFAULTS["max_queued_per_sender"] == 50
+    assert mb._DEFAULTS["queued_ttl_s"] == 24 * 3600.0
+
+
+def test_queued_rows_older_than_the_ttl_expire_at_drain(gw, monkeypatch, caplog):
+    import logging
+    import time as _time
+
+    gw.pol["resume_on_send"] = False
+    gw.pol["queued_ttl_s"] = 60.0
+    old = _send(gw, body="ancient")
+    fresh = _send(gw, body="fresh")
+    gw.db._execute_write(lambda conn: conn.execute(
+        "UPDATE peer_mailbox SET created_at = ? WHERE id = ?", (_time.time() - 3600, old["message_id"])))
+    settled = _capture_settled(gw, monkeypatch)
+    gw.sessions["opened"] = {"session_key": "target", "profile_home": None}
+    with caplog.at_level(logging.WARNING, logger=gw.mb.__name__):
+        assert gw.mb.drain_session("target") == 1
+    assert gw.db.peer_mailbox_get(old["message_id"])["status"] == "failed"
+    assert gw.db.peer_mailbox_get(old["message_id"])["last_error"] == "expired"
+    assert gw.db.peer_mailbox_get(fresh["message_id"])["status"] == "delivered"
+    assert (old["message_id"], gw.mb.STATUS_FAILED) in settled
+    assert ["ancient" in s["text"] for s in gw.submits] == [False]
+    assert any("expired" in r.getMessage() and str(old["message_id"]) in r.getMessage()
+               for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_queued_rows_older_than_the_ttl_expire_on_the_startup_scan(gw):
+    import time as _time
+
+    gw.pol["resume_on_send"] = False
+    old = _send(gw, body="ancient")
+    gw.db._execute_write(lambda conn: conn.execute(
+        "UPDATE peer_mailbox SET created_at = ? WHERE id = ?",
+        (_time.time() - gw.pol["queued_ttl_s"] - 5, old["message_id"])))
+    gw.mb._gate.reset()
+    assert gw.mb.drain_pending() == 0
+    assert gw.resumes == [], "an expired row never wakes its target"
+    assert gw.db.peer_mailbox_get(old["message_id"])["last_error"] == "expired"
