@@ -10,7 +10,6 @@ from agent.error_classifier import (
     _AUTH_PATTERNS,
     _BILLING_PATTERNS,
     _CONNECTION_MESSAGE_PATTERNS,
-    _CONTEXT_OVERFLOW_PATTERNS,
     _OVERLOADED_PATTERNS,
     _SSL_CERT_VERIFY_PATTERNS,
     _TIMEOUT_MESSAGE_PATTERNS,
@@ -23,6 +22,16 @@ _SDK_CONNECTION_NEEDLES = (
     "connection error", "unable to connect", "socket hang up",
     "network is unreachable",
 )
+
+_SDK_CONTEXT_OVERFLOW_NEEDLES = (
+    "prompt is too long",
+    "context length exceeded",
+    "context window",
+    "maximum context",
+    "context length",
+    "context size",
+)
+
 
 
 def _matches(text: str, patterns: tuple[str, ...]) -> bool:
@@ -90,15 +99,7 @@ def classify_sdk_api_failure(
     ):
         return "permanent", "billing", None
 
-    # 3. Validation
-    if (
-        kind == "invalid_request"
-        or (status is not None and 400 <= status <= 499 and status not in {408, 429})
-        or _matches(text, _CONTEXT_OVERFLOW_PATTERNS)
-    ):
-        return "permanent", "validation", None
-
-    # 4. Rate limit
+    # 3. Rate limit (checked before text-only overflow match to avoid treating TPM limits as overflow)
     if status == 429 or kind == "rate_limit" or rate_limit is not None:
         wait_hint = None
         if rate_limit is not None:
@@ -106,6 +107,15 @@ def classify_sdk_api_failure(
             if reset is not None:
                 wait_hint = max(0.0, reset - float(signals.get("now", time.time())))
         return "transient", "rate_limit", wait_hint
+
+    # 4. Validation
+    if (
+        kind == "invalid_request"
+        or (status is not None and 400 <= status <= 499 and status not in {408, 429})
+        or _matches(text, _SDK_CONTEXT_OVERFLOW_NEEDLES)
+    ):
+        return "permanent", "validation", None
+
 
     # 5. Overload
     if status == 529 or kind == "overloaded" or _matches(text, _OVERLOADED_PATTERNS):

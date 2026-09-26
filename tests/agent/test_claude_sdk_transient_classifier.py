@@ -80,6 +80,81 @@ def test_unsolicited_synthetic_api_error_is_delivered_as_error_record():
         session.close()
 
 
+def test_unsolicited_woken_turn_error_delivers_buffered_items_and_drops_synthetic_text():
+    from tests.agent.claude_sdk_fakes import (
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    delivered = []
+    session, _ = _make_session(
+        script=[],
+        on_unsolicited_result=lambda texts, items, *_: delivered.append((texts, items)),
+    )
+    # 1. Peer in
+    peer_msg = UserMessage("ignored envelope text")
+    peer_msg.uuid = "peer-in-1"
+    peer_msg.origin = {
+        "kind": "peer",
+        "from": "peer-id",
+        "name": "Peer Name",
+        "fromSession": "peer-session",
+        "body": "incoming task",
+    }
+    session._handle_unsolicited(peer_msg)
+    # 2. Real text + Bash tool call
+    session._handle_unsolicited(
+        AssistantMessage(
+            [
+                TextBlock("I am running the command"),
+                ToolUseBlock("tool-1", "Bash", {"command": "ls"}),
+            ]
+        )
+    )
+    # 3. Tool result
+    tool_res = UserMessage(
+        [ToolResultBlock("tool-1", [{"type": "text", "text": "file.txt"}])]
+    )
+    tool_res.uuid = "tool-result-1"
+    session._handle_unsolicited(tool_res)
+
+    # 4. Synthetic error AssistantMessage
+    error_text = "API Error: Can't reach the API server (ENOTFOUND)"
+    synthetic = AssistantMessage([TextBlock(error_text)], model="<synthetic>")
+    synthetic.error = "server_error"
+    session._handle_unsolicited(synthetic)
+    # 5. ResultMessage
+    session._handle_unsolicited(
+        ResultMessage(result=error_text, is_error=True, subtype="success", errors=[])
+    )
+    try:
+        assert len(delivered) == 1
+        texts, items = delivered[0]
+        # Real text delivered, synthetic error text dropped
+        assert texts == ["I am running the command"]
+        # Peer in, tool rows, and real text delivered
+        assert any(item.get("kind") == "peer_in" and item.get("text") == "incoming task" for item in items)
+        assert any(item.get("kind") == "text" and item.get("text") == "I am running the command" for item in items)
+        assert any(
+            item.get("kind") == "tool"
+            and item.get("name") == "Bash"
+            and item.get("result") == "file.txt"
+            for item in items
+        )
+        # api_error record appended
+        assert any(
+            item.get("kind") == "lifecycle"
+            and item.get("event") == "api_error"
+            and "Claude API error (connection)" in item.get("error", "")
+            for item in items
+        )
+        # Synthetic error text is NOT delivered in items
+        assert not any(error_text in item.get("text", "") for item in items)
+    finally:
+        session.close()
+
+
 @pytest.mark.parametrize(
     ("signals", "expected"),
     [
@@ -101,6 +176,23 @@ def test_unsolicited_synthetic_api_error_is_delivered_as_error_record():
             },
             ("transient", "rate_limit", 50),
         ),
+        (
+            {
+                "api_error_status": 429,
+                "api_error_kind": "rate_limit",
+                "result_text": "You have exceeded the rate limit ... of 450,000 input tokens per minute.",
+            },
+            ("transient", "rate_limit"),
+        ),
+        (
+            {
+                "api_error_status": 429,
+                "api_error_kind": "rate_limit",
+                "result_text": "You have exceeded the rate limit ... of 80,000 output tokens per minute.",
+            },
+            ("transient", "rate_limit"),
+        ),
+        ({"result_text": "prompt is too long"}, ("permanent", "validation")),
         ({"api_error_status": 401}, ("permanent", "auth")),
         ({"api_error_status": 403}, ("permanent", "auth")),
         *[

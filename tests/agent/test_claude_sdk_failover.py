@@ -119,6 +119,8 @@ class TestFatalReason:
         # A transient SDK timeout with no output or tool effects is a failed
         # provider attempt that the shared dispatcher may continue elsewhere.
         agent = _make_agent()
+        agent._fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-4-6"}]
+        agent._fallback_index = 0
         agent._claude_sdk_session.run_turn.return_value = _make_turn(
             should_retire=True,
             error="turn timed out after 600s",
@@ -149,6 +151,12 @@ class TestReplaySafeProviderFailureOutcome:
             **turn_overrides,
         }
         agent._claude_sdk_session.run_turn.return_value = _make_turn(**turn_kwargs)
+        from unittest.mock import MagicMock
+        if getattr(agent, "_fallback_chain", None) is None or isinstance(
+            getattr(agent, "_fallback_chain", None), MagicMock
+        ):
+            agent._fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-4-6"}]
+            agent._fallback_index = 0
         return run_claude_agent_sdk_turn(
             agent,
             user_message="hi",
@@ -156,6 +164,7 @@ class TestReplaySafeProviderFailureOutcome:
             messages=messages if messages is not None else [{"role": "user", "content": "hi"}],
             effective_task_id="task-failure",
         )
+
 
     @pytest.mark.parametrize(
         ("error", "expected"),
@@ -299,6 +308,8 @@ class TestReplaySafeProviderFailureOutcome:
         import agent.transports.claude_agent_sdk_session as sdk_session_mod
 
         agent = _make_agent()
+        agent._fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-4-6"}]
+        agent._fallback_index = 0
         agent._claude_sdk_session = None
         agent._sdk_issued_tool_effect = True
         agent._stream_callback = None
@@ -383,3 +394,36 @@ class TestReplaySafeProviderFailureOutcome:
         assert result["api_calls"] == 0
         assert result["failover_reason"] == "auth"
         assert "claude auth login" in result["error"]
+
+    def test_outage_error_without_fallback_target_keeps_session_and_adapter(self, monkeypatch):
+        cleared_ids = []
+        monkeypatch.setattr(
+            "agent.claude_sdk_runtime_fallback._store_sdk_session_id",
+            lambda ag, sid, **kw: cleared_ids.append(sid),
+        )
+        agent = _make_agent()
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        outage_error = (
+            "Claude API error (connection): API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
+        )
+        result = self._run_failure(agent, error=outage_error, should_retire=False)
+
+        assert result["failed"] is True
+        assert outage_error in result["error"]
+        assert "failover_reason" not in result
+        assert agent._claude_sdk_session is not None
+        assert None not in cleared_ids
+
+    def test_outage_error_with_fallback_target_retires_and_clears_session(self):
+        agent = _make_agent()
+        agent._fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-4-6"}]
+        agent._fallback_index = 0
+        outage_error = (
+            "Claude API error (connection): API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
+        )
+        result = self._run_failure(agent, error=outage_error, should_retire=False)
+
+        assert result["failed"] is True
+        assert result["failover_reason"] == "timeout"
+        assert agent._claude_sdk_session is None
