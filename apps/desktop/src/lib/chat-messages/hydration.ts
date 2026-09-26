@@ -829,9 +829,51 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       : message
   )
 
-  return withUniqueToolCallIds(
-    withoutGeneratedImageEchoes.filter(
-      m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text') || m.attachmentRefs?.length
+  return nameWokenDividers(
+    withUniqueToolCallIds(
+      withoutGeneratedImageEchoes.filter(
+        m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text') || m.attachmentRefs?.length
+      )
     )
   )
+}
+
+// A native Claude CLI peer fills the woken row's by-field with the sender's session ref
+// (hermes-session:<id>); the sender's display name travels only on the same delivery's peer card
+// (the envelope's from-name). Both the live stream and hydration name the divider from that card.
+const SESSION_REF_RE = /^(?:hermes-session:)?(\d{8}_\d{6}_[0-9a-f]+)\s*$/
+const WOKEN_LABEL_RE = /^(woken by [^:\n]+: )(.+)\s*$/
+
+/** Relabel woken dividers whose sender is a raw session ref with the display name from the peer
+ *  card of the same delivery. Returns the input array when nothing changes. */
+export function nameWokenDividers(messages: ChatMessage[]): ChatMessage[] {
+  let next: ChatMessage[] | null = null
+
+  messages.forEach((message, index) => {
+    const first = message.parts[0]
+
+    if (message.role !== 'system' || !message.deliveryId || message.peerMetadata || first?.type !== 'text') {
+      return
+    }
+
+    const label = first.text.match(WOKEN_LABEL_RE)
+    const ref = label ? label[2].trim().match(SESSION_REF_RE) : null
+
+    if (!label || !ref) {
+      return
+    }
+
+    const card = messages.find(m => m.deliveryId === message.deliveryId && m.peerMetadata?.direction === 'in')
+    const name = card?.peerMetadata?.peer?.trim()
+    const cardSid = card?.peerMetadata?.from_session_id?.replace(/^hermes-session:/, '')
+
+    if (!name || name === 'peer' || SESSION_REF_RE.test(name) || (cardSid && cardSid !== ref[1])) {
+      return
+    }
+
+    next ??= [...messages]
+    next[index] = { ...message, parts: [{ ...first, text: label[1] + name }, ...message.parts.slice(1)] }
+  })
+
+  return next ?? messages
 }
