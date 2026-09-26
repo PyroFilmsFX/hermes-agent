@@ -121,8 +121,10 @@ def test_live_tail_and_steer_share_exact_owner_and_end_with_child(runtime):
         assert not call("subagent.tail", subagent_id="child")["result"]["available"]
         server._sessions["ui-owner"] = owner
         _unregister_subagent("child")
-        assert call("subagent.tail", subagent_id="child")["result"] == {
-            "subagent_id": "child", "available": False, "text": "", "truncated": False}
+        gone = call("subagent.tail", subagent_id="child")["result"]
+        assert gone["subagent_id"] == "child"
+        assert not gone["available"] and gone["text"] == "" and not gone["truncated"]
+        assert gone["source"] == ""  # nothing left to read once the child is gone
     finally:
         _unregister_subagent("child")
 

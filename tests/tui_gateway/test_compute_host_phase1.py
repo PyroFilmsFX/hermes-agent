@@ -294,7 +294,15 @@ def test_shutdown_drain_sleep_never_overshoots_the_reserve(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(compute_host.time, "monotonic", lambda: clock[0])
 
+    real_sleep = time.sleep
+    drain_thread = threading.get_ident()
+
     def _recording_sleep(seconds: float) -> None:
+        # ``compute_host.time`` is the global module: other threads in this
+        # process must neither be counted nor advance the drain's fake clock.
+        if threading.get_ident() != drain_thread:
+            real_sleep(seconds)
+            return
         slept.append(seconds)
         clock[0] += seconds
 

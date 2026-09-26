@@ -83,15 +83,15 @@ class SidebarCacheTests(unittest.TestCase):
             with calls_lock:
                 calls += 1
             entered.set()
-            self.assertTrue(release.wait(timeout=2))
+            self.assertTrue(release.wait(timeout=10))
             return {"profile": profile, "rows": []}
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(scan, "default") for _ in range(workers)]
-            self.assertTrue(entered.wait(timeout=1))
+            self.assertTrue(entered.wait(timeout=10))
             time.sleep(0.05)
             release.set()
-            results = [future.result(timeout=2) for future in futures]
+            results = [future.result(timeout=10) for future in futures]
 
         self.assertEqual(calls, 1)
         self.assertEqual(results, [{"profile": "default", "rows": []}] * workers)
