@@ -24,6 +24,7 @@ beforeEach(() => {
 import type { GatewayEventName } from '@hermes/shared'
 
 import type { ChatMessage } from '@/lib/chat-messages'
+import { MAILBOX_ENVELOPE_FOOTER } from '@/lib/chat-messages/hydration'
 
 import { handleMessageStreamEvent } from './message-stream'
 import type { GatewayEventContext } from './types'
@@ -345,6 +346,29 @@ describe('handleMessageStreamEvent background delivery contracts', () => {
 
     expect(currentState.messages[0].parts[0]).toMatchObject({ text: expect.stringContaining('↘ from manager') })
     expect(currentState.messages[0].peerMetadata).toMatchObject({ peer: 'manager', from_session_id: 'sess-9' })
+  })
+
+  it('names a live mailbox card from the envelope when metadata only carries the session id', () => {
+    const ctx = context('message.complete')
+    // The shape the backend persists for mailbox deliveries: no from_name/title, raw session peer.
+    ctx.payload = {
+      background: true,
+      display_kind: 'peer_message',
+      text:
+        '<cross-session-message from="hermes-session:20260909_193713_ce3d96" from-name="manager" via="hermes-peer-mailbox" msg-id="7">\n' +
+        'status please\n</cross-session-message>\n\n' +
+        MAILBOX_ENVELOPE_FOOTER,
+      display_metadata: { direction: 'in', peer: 'hermes-session:20260909_193713_ce3d96', msg_id: 'm-7' }
+    } as unknown as GatewayEventContext['payload']
+    let currentState = { messages: [], streamId: null } as unknown as ReturnType<
+      GatewayEventContext['deps']['updateSessionState']
+    >
+    ctx.deps.updateSessionState = vi.fn((_sid, updater) => (currentState = updater(currentState)))
+
+    handleMessageStreamEvent(ctx)
+
+    expect(currentState.messages[0].peerMetadata?.peer).toBe('manager')
+    expect(JSON.stringify(currentState.messages[0].parts[0])).not.toContain('hermes-session:')
   })
 
   it('keeps live woken lifecycle metadata out of the body', () => {

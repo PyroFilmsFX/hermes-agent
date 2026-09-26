@@ -4,7 +4,12 @@ import { burstVibeHearts } from '@/components/chat/vibe-hearts'
 import { reportFirstBuildTurnComplete } from '@/components/onboarding-chat/first-build'
 import { translateNow } from '@/i18n'
 import { assistantTextPart, type ChatMessage, type PeerMetadata, textPart } from '@/lib/chat-messages'
-import { peerMessageLabel, sessionLifecycleBody, sessionLifecycleLabel } from '@/lib/chat-messages/hydration'
+import {
+  parsePeerMessageEnvelope,
+  peerMessageLabel,
+  sessionLifecycleBody,
+  sessionLifecycleLabel
+} from '@/lib/chat-messages/hydration'
 import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
 import { parseErrorSurface } from '@/lib/error-surface'
@@ -544,6 +549,9 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
               displayMetadata.peer.trim()) ||
             (typeof displayMetadata?.from === 'string' && displayMetadata.from.trim()) ||
             (typeof displayMetadata?.to === 'string' && displayMetadata.to.trim()) ||
+            // Mailbox rows carry only `peer: hermes-session:<id>`; the sender's name lives in the
+            // envelope's from-name attribute, which hydration also falls back to.
+            parsePeerMessageEnvelope(finalText)?.from ||
             'peer'
 
           const label = peerMessageLabel(direction, peer, finalText, occurredAt)
