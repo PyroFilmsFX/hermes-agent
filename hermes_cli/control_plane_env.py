@@ -34,6 +34,9 @@ DESKTOP_CONTROL_PLANE_ENV_KEYS: frozenset[str] = frozenset({
     "HERMES_DASHBOARD_DRAIN_SECRET", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
     "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH", "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
     "HERMES_DASHBOARD_OIDC_CLIENT_SECRET",
+    # Backend-only plugin credential (owner ruling 2026-09-26): the in-process pgvector memory
+    # plugin reads its billable embedding key from the backend env; agent shells never need it.
+    "HERMES_EMBED_API_KEY",
 })
 # Subset the backend itself never re-reads from ``os.environ`` once serving: popped from the
 # process env by the startup seal (the token's value is kept process-locally first). The

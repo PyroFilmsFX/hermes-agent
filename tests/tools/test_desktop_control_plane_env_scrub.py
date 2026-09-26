@@ -761,3 +761,17 @@ def test_real_serve_adopts_the_file_token_and_never_serves_it(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_backend_only_plugin_keys_stay_in_the_backend_but_never_reach_children():
+    """Owner ruling 2026-09-26: HERMES_EMBED_API_KEY (the pgvector memory plugin's billable
+    embedding key) is for the backend and its in-process plugins only; agent shells never get it."""
+    from hermes_cli.control_plane_env import (
+        is_process_sealed_control_plane_env, scrub_desktop_control_plane_env)
+
+    env = {"HERMES_EMBED_API_KEY": "fake-embed-key", "PATH": "/bin"}
+    scrub_desktop_control_plane_env(env)
+    assert "HERMES_EMBED_API_KEY" not in env
+    assert env["PATH"] == "/bin"
+    # The in-process plugin reads it from the backend's os.environ at runtime: not sealed.
+    assert not is_process_sealed_control_plane_env("HERMES_EMBED_API_KEY")
