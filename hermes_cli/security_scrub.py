@@ -76,6 +76,7 @@ _BINARY_SUFFIXES = frozenset({
 })
 _SDK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
 _WRITE_ACTIONS = ("would-mask", "masked")
+_TOTALS_PREFIX = "Totals ("  # the report's own ``<kind>=<count>`` line: detector kind names, no path
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -103,14 +104,59 @@ _REPORT_DBURL_RE = re.compile(
     r"|clickhouse)(?:\+[a-z0-9]+)?:/{0,2}[^:/\s@]*:(?P<pw>[^@\s/]+)@")
 _REPORT_TOKEN_RE = re.compile(r"[A-Za-z0-9_+=]{24,}")
 _REPORT_OPTS = DetectOptions()
+# A path component shaped ``<sensitive key><sep><value>[.ext]`` (``password=letmein.txt``,
+# ``API_KEY-abc123.json``, ``token:xyz``): the VALUE is masked whatever it looks like; the
+# key and the extension stay. A component is a maximal run without ``/`` or whitespace.
+_KV_COMPONENT_RE = re.compile(r"[^/\s]+")
+_KV_KEY_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth|credentials?"
+    r"|private[_-]?key|session|bearer)(?P<sep>[=:\-])")
+_KV_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+_REPORT_MASK_RE = re.compile(r"\[REDACTED:[a-z0-9-]{2,24}\]")
+# The scrub's own directory/lock names are key-value shaped but hold no secret.
+_KV_SAFE_COMPONENTS = frozenset({"secret-scrub", ".secret-scrub.lock"})
 
 
-def redact_report_text(text: Any, trusted: Sequence[Optional[str]] = ()) -> Any:
+def _kv_component_spans(text: str) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int]]]:
+    """``(spans, owned)``: value spans of key=value / key:value / key-value shaped path
+    components plus the detector, known-prefix and entropy rules applied to each component
+    on its own; ``owned`` = (value start, component end) ranges the key=value rule masks
+    whole, so a wider finding there cannot swallow the kept extension."""
+    spans: List[Tuple[int, int, str]] = []
+    owned: List[Tuple[int, int]] = []
+    for comp in _KV_COMPONENT_RE.finditer(text):
+        word, base = comp.group(0), comp.start()
+        if word in _KV_SAFE_COMPONENTS:
+            continue
+        found: List[Tuple[int, int, str]] = [(f.start, f.end, f.kind) for f in find_secrets(word, _REPORT_OPTS)]
+        found += [(p.start(), p.end(), "secret") for p in _REPORT_PREFIX_RE.finditer(word)]
+        found += [(t.start(), t.end(), "high-entropy") for t in _REPORT_TOKEN_RE.finditer(word)
+                  if passes_entropy_gate(t.group(0), _REPORT_OPTS) and not _is_allowlisted_value(t.group(0))]
+        m = _KV_KEY_RE.search(word)
+        if m:
+            value = word[m.end():].rstrip(":;,)")
+            ext = _KV_EXT_RE.search(value)
+            if ext and ext.start() > 0:
+                value = value[:ext.start()]
+            if value:
+                # the whole value is masked (or already is exactly one report mask); findings
+                # inside it would only swallow the kept extension
+                found = [s for s in found if s[0] < m.end()]
+                owned.append((base + m.end(), comp.end()))
+                if not _REPORT_MASK_RE.fullmatch(value):
+                    found.append((m.end(), m.end() + len(value), "secret"))
+        spans += [(base + a, base + b, kind) for a, b, kind in found]
+    return spans, owned
+
+
+def redact_report_text(text: Any, trusted: Sequence[Optional[str]] = (), *, components: bool = True) -> Any:
     """Mask anything secret-shaped in report text (no tag key: ``[REDACTED:<kind>]``).
 
     Besides the detector, known prefixes glued into a file name and bare high-entropy
-    name tokens are masked too. ``trusted`` paths (the Hermes root, the backup dir) are
-    exempt from the bare-token rule only: a random temp-dir component is not a secret."""
+    name tokens are masked too, and so is the value of every key=value / key:value /
+    key-value shaped path component (``components``; off only for the report's own
+    ``<kind>=<count>`` totals line). ``trusted`` paths (the Hermes root, the backup dir)
+    are exempt from the bare-token and component rules: a temp-dir name is not a secret."""
     if not isinstance(text, str) or not text:
         return text
     spans: List[Tuple[int, int, str]] = [(f.start, f.end, f.kind) for f in find_secrets(text, _REPORT_OPTS)]
@@ -123,12 +169,21 @@ def redact_report_text(text: Any, trusted: Sequence[Optional[str]] = ()) -> Any:
             while pos >= 0:
                 safe.append((pos, pos + len(t)))
                 pos = text.find(t, pos + 1)
+
+    def in_safe(start: int, end: int) -> bool:
+        return any(a <= start and end <= b for a, b in safe)
+
     for m in _REPORT_TOKEN_RE.finditer(text):
         value = m.group(0)
-        if any(a <= m.start() and m.end() <= b for a, b in safe):
+        if in_safe(m.start(), m.end()):
             continue
         if passes_entropy_gate(value, _REPORT_OPTS) and not _is_allowlisted_value(value):
             spans.append((m.start(), m.end(), "high-entropy"))
+    if components:
+        kv, owned = _kv_component_spans(text)
+        owned = [o for o in owned if not in_safe(*o)]
+        spans = [s for s in spans if not any(a <= s[0] and s[1] <= b for a, b in owned)]
+        spans += [s for s in kv if not in_safe(s[0], s[1])]
     if not spans:
         return text
     merged: List[List[Any]] = []
@@ -211,7 +266,8 @@ class ScrubReport:
         }
 
     def render_text(self) -> str:
-        return "\n".join(redact_report_text(line, self._trusted()) for line in self._render_lines())
+        return "\n".join(redact_report_text(line, self._trusted(), components=not line.startswith(_TOTALS_PREFIX))
+                         for line in self._render_lines())
 
     def _render_lines(self) -> List[str]:
         head = "APPLY" if self.mode == "apply" else "DRY RUN (nothing written)"
@@ -232,7 +288,8 @@ class ScrubReport:
             lines.append("No stored secrets found.")
         totals = self.totals()
         verb = "masked" if self.mode == "apply" else "would mask"
-        lines.append(f"Totals ({verb}): " + (", ".join(f"{k}={v}" for k, v in sorted(totals.items())) or "none"))
+        lines.append(f"{_TOTALS_PREFIX}{verb}): " + (", ".join(f"{k}={v}" for k, v in sorted(totals.items()))
+                                                    or "none"))
         deferred = {i.locator for i in self.items if i.action == "deferred-live"}
         if deferred:
             lines.append(f"Deferred live: {len(deferred)} row(s)/file(s) of open sessions; retried on the next "
@@ -773,45 +830,59 @@ def _mask_file_text(text: str, fmt: str, cfg: SecretHygieneConfig, key_provider:
 def _read_unit(unit: _FileUnit) -> Tuple[Optional[str], Optional[bytes], str, Optional[_Snap]]:
     """(text, raw, skip_action, snap), reading through directory fds with ``O_NOFOLLOW``.
     skip_action is '' when the file is scannable text."""
+    text, raw, skip, snap, fd = _read_unit_held(unit)
+    if fd is not None:
+        os.close(fd)
+    return text, raw, skip, snap
+
+
+def _read_unit_held(unit: _FileUnit) -> Tuple[Optional[str], Optional[bytes], str, Optional[_Snap], Optional[int]]:
+    """``_read_unit`` that also returns the ``O_RDONLY|O_NOFOLLOW`` fd of the inode it read
+    (``None`` unless the read produced scannable text); the caller closes it. Holding it
+    from the verified read through ``os.replace`` lets the scrub carry over bytes a writer
+    appends to that ORIGINAL inode in between."""
     if os.path.splitext(unit.path.name)[1].lower() in _BINARY_SUFFIXES:
-        return None, None, "skipped-binary", None
+        return None, None, "skipped-binary", None, None
     try:
         pfd = _open_chain(unit.anchor or unit.path.parent, unit.parts if unit.anchor else ())
     except OSError:
-        return None, None, "skipped-symlink", None
+        return None, None, "skipped-symlink", None, None
+    fd = -1
     try:
         try:
             fd = os.open(unit.path.name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=pfd)
         except OSError:
-            return None, None, "skipped-symlink" if _lstat_is_link(unit.path.name, pfd) else "skipped-unreadable", None
+            skip = "skipped-symlink" if _lstat_is_link(unit.path.name, pfd) else "skipped-unreadable"
+            return None, None, skip, None, None
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            return None, None, "skipped-unreadable", None, None
+        if st.st_size > MAX_FILE_BYTES:
+            return None, None, "skipped-large", None, None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        snap = _Snap.of(os.fstat(fd))
+        if snap.size != len(raw):
+            return None, None, "changed-during-apply", None, None
+        if b"\x00" in raw[:8192]:
+            return None, raw, "skipped-binary", snap, None
         try:
-            st = os.fstat(fd)
-            if not _stat.S_ISREG(st.st_mode):
-                return None, None, "skipped-unreadable", None
-            if st.st_size > MAX_FILE_BYTES:
-                return None, None, "skipped-large", None
-            chunks = []
-            while True:
-                chunk = os.read(fd, 1 << 20)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            raw = b"".join(chunks)
-            snap = _Snap.of(os.fstat(fd))
-        finally:
-            os.close(fd)
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, raw, "skipped-binary", snap, None
+        held, fd = fd, -1
+        return text, raw, "", snap, held
     except OSError:
-        return None, None, "skipped-unreadable", None
+        return None, None, "skipped-unreadable", None, None
     finally:
+        if fd >= 0:
+            os.close(fd)
         os.close(pfd)
-    if snap.size != len(raw):
-        return None, None, "changed-during-apply", None
-    if b"\x00" in raw[:8192]:
-        return None, raw, "skipped-binary", snap
-    try:
-        return raw.decode("utf-8"), raw, "", snap
-    except UnicodeDecodeError:
-        return None, raw, "skipped-binary", snap
 
 
 def _lstat_is_link(name: str, dir_fd: int) -> bool:
@@ -850,8 +921,69 @@ def _open_writer_pids(path: Path) -> List[int]:
     return sorted(pids)
 
 
+MAX_TAIL_ROUNDS = 8  # carry rounds for bytes appended to the original inode during the replace
+
+
+@dataclass
+class _TailCarry:
+    """Bytes a writer appended to the ORIGINAL inode between the verified read and the replace."""
+
+    carry: Callable[["_TailCarry", int, bytes], bytes]  # (tail, offset, raw) -> bytes to append
+    rounds: int = 0
+    carried: int = 0
+    pending: bool = False  # the file still needs a later run (never stable, or a tail left raw)
+    reason: str = ""
+
+
+def _pread_range(fd: int, start: int, end: int) -> bytes:
+    chunks, pos = [], start
+    while pos < end:
+        chunk = os.pread(fd, min(1 << 20, end - pos), pos)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        pos += len(chunk)
+    return b"".join(chunks)
+
+
+def _carry_appended_tail(held_fd: int, out_fd: int, done: int, tail: _TailCarry, path: Path) -> None:
+    """After ``os.replace``: while the held ORIGINAL inode is longer than what the new file
+    was built from, read the extra bytes from the held fd, hand them to ``tail.carry`` (raw
+    backup sidecar + mask) and append the result to the new file (``out_fd``, our own inode).
+    Loops until the held fd's size is stable, at most :data:`MAX_TAIL_ROUNDS` rounds; the
+    round that hits the cap still carries what it saw, then marks the file pending."""
+    while True:
+        size = os.fstat(held_fd).st_size
+        if size <= done:
+            return
+        capped = tail.rounds >= MAX_TAIL_ROUNDS
+        if capped:
+            tail.pending = True
+            tail.reason = "another process kept appending during the replace"
+        raw = _pread_range(held_fd, done, size)
+        if not raw:
+            return
+        out = tail.carry(tail, done, raw)
+        os.lseek(out_fd, 0, os.SEEK_END)
+        _write_all(out_fd, out)
+        os.fsync(out_fd)
+        done += len(raw)
+        tail.carried += len(raw)
+        tail.rounds += 1
+        if capped:
+            return
+        _after_tail_carried(path)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 def _atomic_rewrite_unit(unit: _FileUnit, data: bytes, planned: _Snap,
-                         open_writers_fn: Callable[[Path], List[int]]) -> Tuple[str, str]:
+                         open_writers_fn: Callable[[Path], List[int]], held_fd: Optional[int] = None,
+                         tail: Optional[_TailCarry] = None) -> Tuple[str, str]:
     """Replace ``unit``'s content atomically; returns ``(outcome, detail)``.
 
     ``outcome``: ``"masked"``, ``"changed-during-apply"`` (the original's size, mtime or inode
@@ -860,6 +992,10 @@ def _atomic_rewrite_unit(unit: _FileUnit, data: bytes, planned: _Snap,
     ``O_NOFOLLOW`` directory fd), gets the original's mode (and owner, when we own it), is
     fsynced and ``os.replace``-d over the original. The original is never unlinked or
     truncated; only the scrub's own temp file is removed when the replace does not happen.
+
+    ``held_fd`` is an ``O_RDONLY|O_NOFOLLOW`` fd on the ORIGINAL inode, open since the
+    verified read: after the replace, bytes appended to that inode past ``planned.size``
+    (a writer racing the last probe) are carried into the new file through ``tail``.
     """
     pfd = _open_chain(unit.anchor or unit.path.parent, unit.parts if unit.anchor else ())
     try:
@@ -867,26 +1003,32 @@ def _atomic_rewrite_unit(unit: _FileUnit, data: bytes, planned: _Snap,
         tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=pfd)
         replaced = False
         try:
-            with os.fdopen(tfd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                if hasattr(os, "fchown") and os.geteuid() in (0, planned.uid):
-                    try:
-                        os.fchown(fh.fileno(), planned.uid, planned.gid)
-                    except OSError:
-                        pass  # e.g. not a member of the original group: keep ours
-                os.fchmod(fh.fileno(), _stat.S_IMODE(planned.mode))
-                os.fsync(fh.fileno())
+            _write_all(tfd, data)
+            if hasattr(os, "fchown") and os.geteuid() in (0, planned.uid):
+                try:
+                    os.fchown(tfd, planned.uid, planned.gid)
+                except OSError:
+                    pass  # e.g. not a member of the original group: keep ours
+            os.fchmod(tfd, _stat.S_IMODE(planned.mode))
+            os.fsync(tfd)
             _before_replace(unit.path)
             current = _fstat_at(unit.path.name, pfd)
             if current is None or not current.same_file_state(planned):
                 return "changed-during-apply", "file changed between plan and replace; retried next run"
+            if held_fd is not None:
+                held = os.fstat(held_fd)
+                if (held.st_dev, held.st_ino) != (planned.dev, planned.ino):
+                    return "changed-during-apply", "file changed between plan and replace; retried next run"
             pids = open_writers_fn(unit.path)
             if pids:
                 return "deferred-live", "file open for writing by another process; retried next run"
+            _after_writer_probe(unit.path)
             os.replace(tmp, unit.path.name, src_dir_fd=pfd, dst_dir_fd=pfd)
             replaced = True
+            if held_fd is not None and tail is not None:
+                _carry_appended_tail(held_fd, tfd, planned.size, tail, unit.path)
         finally:
+            os.close(tfd)
             if not replaced:
                 try:
                     os.unlink(tmp, dir_fd=pfd)
@@ -944,6 +1086,14 @@ def _after_batch_commit(batch_no: int) -> None:
 
 
 def _before_replace(path: Path) -> None:
+    return None
+
+
+def _after_writer_probe(path: Path) -> None:
+    return None
+
+
+def _after_tail_carried(path: Path) -> None:
     return None
 
 
@@ -1584,6 +1734,30 @@ def _run_locked(report, root, profiles, dbs, targets_set, apply, include_optouts
                   holders_fn, open_writers_fn, backend_probe)
 
 
+def _tail_carrier(backup: Optional[bk.Backup], unit: _FileUnit, cfg: SecretHygieneConfig,
+                  key_provider: Optional[TagKeyProvider], counts: Counter
+                  ) -> Callable[[_TailCarry, int, bytes], bytes]:
+    """``carry(tail, offset, raw)`` for :func:`_carry_appended_tail`: back the RAW tail up first (a
+    verified ``.tail-<n>`` sidecar recorded in the manifest), then mask it (a partial trailing
+    line is masked as-is). A tail that cannot be backed up is appended RAW -- masking only
+    ever follows a verified backup, and no byte is dropped -- and leaves the file pending."""
+    def carry(tail: _TailCarry, offset: int, raw: bytes) -> bytes:
+        try:
+            if backup is None:
+                raise OSError("no backup")
+            bk.append_tail(backup, unit.locator, offset, raw)
+        except (OSError, ValueError, KeyError):
+            tail.pending = True
+            tail.reason = tail.reason or ("bytes appended during the replace could not be backed up, so they "
+                                          "were kept unmasked")
+            return raw
+        text = raw.decode("utf-8", "surrogateescape")
+        masked, found = _mask_file_text(text, unit.fmt, cfg, key_provider, dry_run=False)
+        counts.update(found)
+        return masked.encode("utf-8", "surrogateescape")
+    return carry
+
+
 def _apply(report, root, profiles, dbs, pending, plans, deferred_files, cfg, key_provider, vacuum, holders_fn,
            open_writers_fn, backend_probe) -> ScrubReport:
     row_dbs = [db for db in dbs if db.locator in plans and plans[db.locator].has_rows]
@@ -1597,7 +1771,9 @@ def _apply(report, root, profiles, dbs, pending, plans, deferred_files, cfg, key
                 backup = bk.write_backup(
                     root,
                     files=[(u.locator, u.path, u.backup_rel, raw, _reader_for(u)) for u, raw, _, _ in pending],
-                    dbs=[(db.locator, db.path, db.backup_rel, plans[db.locator].row_spec()) for db in row_dbs])
+                    dbs=[(db.locator, db.path, db.backup_rel, plans[db.locator].row_spec()) for db in row_dbs],
+                    private_exclude=[Path(home) for _, home in profiles]
+                    + [u.anchor for u, _, _, _ in pending if u.anchor is not None])
             except bk.SymlinkRefusal as exc:
                 report.refused, report.exit_code = f"{exc.strerror}; nothing was changed", 2
                 return report
@@ -1633,37 +1809,51 @@ def _apply(report, root, profiles, dbs, pending, plans, deferred_files, cfg, key
             report.exit_code = 1  # the ledger dir went bad after the pre-check: stop before any target write
             return report
         for unit, raw, _, snap in pending:
-            text, current, skip, now_snap = _read_unit(unit)
-            if skip or current is None or now_snap is None:
-                report.add(unit.target, unit.locator, Counter(), skip or "skipped-unreadable")
-                continue
-            want = expected.get(unit.locator)
-            # the plan, the verified backup and the file as it is now must be the same bytes
-            if not (want and bk.sha256_bytes(raw) == want == bk.sha256_bytes(current)) \
-                    or not now_snap.same_file_state(snap):
-                report.add(unit.target, unit.locator, Counter(), "changed-during-apply",
-                           "file changed since the backup; retried next run")
-                continue
-            masked, counts = _mask_file_text(text, unit.fmt, cfg, key_provider, dry_run=False)
-            if not counts:
-                pending_files.discard(unit.locator)
-                continue
+            # the fd of the inode this verified read saw stays open through ``os.replace``
+            text, current, skip, now_snap, held_fd = _read_unit_held(unit)
             try:
-                outcome, detail = _atomic_rewrite_unit(unit, masked.encode("utf-8"), snap, open_writers_fn)
-            except OSError as exc:
-                report.error(f"{unit.locator}: rewrite failed ({exc.__class__.__name__})")
-                continue
+                if skip or current is None or now_snap is None or held_fd is None:
+                    report.add(unit.target, unit.locator, Counter(), skip or "skipped-unreadable")
+                    continue
+                want = expected.get(unit.locator)
+                # the plan, the verified backup and the file as it is now must be the same bytes
+                if not (want and bk.sha256_bytes(raw) == want == bk.sha256_bytes(current)) \
+                        or not now_snap.same_file_state(snap):
+                    report.add(unit.target, unit.locator, Counter(), "changed-during-apply",
+                               "file changed since the backup; retried next run")
+                    continue
+                masked, counts = _mask_file_text(text, unit.fmt, cfg, key_provider, dry_run=False)
+                if not counts:
+                    pending_files.discard(unit.locator)
+                    continue
+                tail = _TailCarry(carry=_tail_carrier(backup, unit, cfg, key_provider, counts))
+                try:
+                    outcome, detail = _atomic_rewrite_unit(unit, masked.encode("utf-8"), snap, open_writers_fn,
+                                                           held_fd, tail)
+                except OSError as exc:
+                    report.error(f"{unit.locator}: rewrite failed ({exc.__class__.__name__})")
+                    continue
+            finally:
+                if held_fd is not None:
+                    os.close(held_fd)
             if outcome != "masked":
                 if outcome == "deferred-live":
                     deferred_files[unit.locator] = detail
                 report.add(unit.target, unit.locator, counts, outcome, detail)
                 continue
-            pending_files.discard(unit.locator)
+            if tail.pending:
+                report.error(f"{unit.locator}: {tail.reason}; {tail.carried} appended byte(s) were carried into "
+                             "the new file and backed up. Close the writer and rerun `hermes security scrub "
+                             "--apply`.")
+            else:
+                pending_files.discard(unit.locator)
             after, _, _, _ = _read_unit(unit)
             _, residue = _mask_file_text(after or "", unit.fmt, cfg, None, dry_run=True)
-            if residue:
+            if residue and not tail.pending:
                 report.error(f"{unit.locator}: re-scan still finds {sum(residue.values())} secret(s)")
-            report.add(unit.target, unit.locator, counts, "masked")
+            detail = (f"{tail.carried} byte(s) appended during the replace carried over (masked; raw copy in "
+                      "the backup)") if tail.carried else ""
+            report.add(unit.target, unit.locator, counts, "masked", detail)
 
         # ---- state.db
         for db in dbs:
