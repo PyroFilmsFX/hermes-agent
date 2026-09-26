@@ -52,6 +52,8 @@ class TestClaudeAgentSdkDefaults:
         # [] = full SDK settings isolation; deployments that keep tool
         # grants in ~/.claude/settings.json opt in with e.g. ["user"].
         assert block["setting_sources"] == []
+        # "" (= off): no auto-mode classifier rules reach the CLI's --settings layer.
+        assert block["auto_mode"] == ""
         # null = no per-query budget cap (current behavior).
         assert block["max_budget_usd"] is None
         # null = the transport's 10 MiB NDJSON message limit. The explicit

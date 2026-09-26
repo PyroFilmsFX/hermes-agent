@@ -1185,6 +1185,16 @@ agent:
   #   # — unattended cron turns can't answer permission prompts. Invalid
   #   # entries are dropped with a warning.
   #   setting_sources: []
+  #   # Claude Code auto-mode classifier rules (the `autoMode` object from
+  #   # Claude Code settings: allow / soft_deny / hard_deny / environment).
+  #   # "" or off (default) = none. inherit_user = ONLY the autoMode object from
+  #   # ~/.claude/settings.json. A mapping = that autoMode object, as-is.
+  #   # Passed through the CLI's --settings flag layer, so setting_sources
+  #   # stays [] and no permissions/hooks/plugins/env/model leak in.
+  #   # Resolved once per session (edits apply to the next session); a
+  #   # missing/malformed file or invalid value warns and falls back to off.
+  #   # Quote "off" — bare YAML off is a boolean (treated as off too).
+  #   auto_mode: "off"
   #   # Per-query USD budget forwarded to the SDK's max_budget_usd option:
   #   # the turn stops with error_max_budget_usd once exceeded. null
   #   # (default) = no budget. Non-numeric / non-positive values are ignored

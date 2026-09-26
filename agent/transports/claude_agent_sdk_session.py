@@ -69,6 +69,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_max_turns,
     _configured_permission_mode,
     _configured_setting_sources,
+    _configured_auto_mode_settings,
     _http_mcp_entries_from_config,
     _is_subscription_oauth_token,
     _mcp_registry_tool_specs,
@@ -258,6 +259,11 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._max_turns = _configured_max_turns()
         # Frozen with the client: turn payloads are budgeted against the reader this CLI actually has.
         self._max_buffer_size = _configured_max_buffer_size()
+        # Auto-mode classifier rules (agent.claude_agent_sdk.auto_mode),
+        # resolved and serialized ONCE: a later ~/.claude/settings.json or
+        # config.yaml edit must not change a live session's options
+        # (prompt-cache safe); it lands on the next session.
+        self._auto_mode_settings = _configured_auto_mode_settings()
         self._client_factory = client_factory  # test seam
         self._include_hermes_tools = include_hermes_tools
         # Hermes-side session id, exported to the CLI subprocess and hermes-tools MCP
@@ -1505,6 +1511,14 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             fields["hooks"] = _compaction_hooks
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
+        # Auto-mode classifier rules via the CLI's flag-settings layer
+        # (--settings), which the CLI keeps enabled even with
+        # setting_sources=[] — so ONLY {"autoMode": ...} crosses and the
+        # isolation above is unchanged. Absent when off (the default). See
+        # _configured_auto_mode_settings.
+        auto_mode_settings = getattr(self, "_auto_mode_settings", None)
+        if auto_mode_settings:
+            fields["settings"] = auto_mode_settings
         # Operator-pinned Claude Code binary (see _configured_cli_path).
         cli_path = _configured_cli_path()
         if cli_path:

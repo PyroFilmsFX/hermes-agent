@@ -256,6 +256,186 @@ def _configured_setting_sources() -> list:
     return sources
 
 
+# ---------- auto-mode classifier rules ----------
+# Claude Code's auto-mode classifier reads its rule config (``autoMode``:
+# allow / soft_deny / hard_deny / environment ...) from the user, FLAG and
+# policy settings layers only — never project/local (repo-controllable). The
+# flag layer is the CLI's ``--settings`` argument (the SDK's ``settings``
+# option), and the CLI always keeps flagSettings/policySettings enabled even
+# when ``--setting-sources=`` is empty. So Hermes can hand the classifier its
+# rules while ``setting_sources`` stays [] — verified against Claude Code
+# 2.1.283 and the SDK-bundled 2.1.259 via the get_settings control request.
+#
+# The value is serialized as INLINE JSON (the CLI treats a --settings value
+# that starts with "{" and ends with "}" as JSON, not a path), so no settings
+# file is written and nothing needs cleaning up at session close. It does
+# travel in the CLI argv, like the rest of the SDK's option flags.
+_AUTO_MODE_OFF = "off"
+_AUTO_MODE_INHERIT_USER = "inherit_user"
+
+
+def _user_claude_settings_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+
+
+# ~/.claude/settings.json is read at session start from a path Hermes does not
+# control. Bound the read: a FIFO would block open()/read() forever, a symlink
+# to /dev/zero (or a huge file) would exhaust memory, and deeply nested JSON
+# raises RecursionError from the scanner. Real settings files are a few KiB.
+_USER_SETTINGS_MAX_BYTES = 1024 * 1024
+
+
+class _UnusableSettingsFile(Exception):
+    """~/.claude/settings.json exists but is not a readable regular file
+    within the size cap; the message is the reason, for the warning."""
+
+
+def _read_user_settings_text(path: str) -> str:
+    """The file's text, read without ever blocking and never past the cap.
+
+    O_NONBLOCK makes open() return at once on a FIFO; fstat on the opened fd
+    then refuses anything that is not a regular file (FIFO, character or
+    block device, directory, socket). Following the owner's own symlink to a
+    regular file is fine — dotfile managers do exactly that — because the
+    type check is on what the fd actually refers to. The read loop stops at
+    cap + 1 bytes, so a file that grows after the fstat still cannot be
+    slurped whole."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _UnusableSettingsFile("not a regular file")
+        if st.st_size > _USER_SETTINGS_MAX_BYTES:
+            raise _UnusableSettingsFile(
+                f"larger than {_USER_SETTINGS_MAX_BYTES} bytes"
+            )
+        chunks = []
+        remaining = _USER_SETTINGS_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining <= 0:
+            raise _UnusableSettingsFile(
+                f"larger than {_USER_SETTINGS_MAX_BYTES} bytes"
+            )
+    finally:
+        os.close(fd)
+    return b"".join(chunks).decode("utf-8")
+
+
+def _read_user_auto_mode() -> Optional[dict]:
+    """The ``autoMode`` object from ~/.claude/settings.json, or None (warned).
+
+    Reads ONLY that key; the rest of the file (permissions, hooks, plugins,
+    env, model, statusLine ...) is parsed to reach it and then discarded.
+    Never blocks and never raises: a missing, non-regular, oversized,
+    undecodable, malformed or pathologically nested file is warned and off."""
+    import json
+
+    path = _user_claude_settings_path()
+    try:
+        data = json.loads(_read_user_settings_text(path))
+    except FileNotFoundError:
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode=inherit_user but %s does not "
+            "exist — auto-mode rules are off for this session.", path,
+        )
+        return None
+    except _UnusableSettingsFile as exc:
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode=inherit_user but %s is %s — "
+            "auto-mode rules are off for this session.", path, exc,
+        )
+        return None
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError,
+            MemoryError) as exc:
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode=inherit_user but %s could not "
+            "be read as JSON (%s) — auto-mode rules are off for this session.",
+            path, type(exc).__name__,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode=inherit_user but %s is not a "
+            "JSON object — auto-mode rules are off for this session.", path,
+        )
+        return None
+    auto_mode = data.get("autoMode")
+    if not isinstance(auto_mode, dict):
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode=inherit_user but %s has no "
+            "autoMode object (found %s) — auto-mode rules are off for this "
+            "session.",
+            path, "nothing" if auto_mode is None else type(auto_mode).__name__,
+        )
+        return None
+    return auto_mode
+
+
+def _configured_auto_mode_settings() -> Optional[str]:
+    """agent.claude_agent_sdk.auto_mode from config.yaml, resolved to the SDK
+    ``settings`` value: inline JSON holding ONLY ``{"autoMode": ...}``, or None.
+
+    Accepted values:
+
+    * ``off`` / absent / empty (default) — nothing is passed. An unquoted
+      YAML ``off`` parses as boolean False and means the same.
+    * ``inherit_user`` — ONLY the ``autoMode`` object from the operator's
+      ``~/.claude/settings.json``.
+    * a mapping — the autoMode object itself, passed through as-is.
+
+    Every failure — unknown value, missing/unreadable/malformed settings file,
+    a non-object ``autoMode``, an unserializable mapping — logs a warning and
+    resolves to off: session start never fails on this key, and a typo never
+    widens what reaches the CLI. The caller snapshots the result once per
+    session (``__init__``) so the options stay byte-identical for the whole
+    conversation; edits take effect on the next session."""
+    import json
+
+    raw = _provider_config().get("auto_mode")
+    if raw is None or raw is False:
+        return None
+    auto_mode: Optional[dict]
+    if isinstance(raw, dict):
+        auto_mode = raw
+    elif isinstance(raw, str):
+        name = raw.strip().lower()
+        if name in ("", _AUTO_MODE_OFF):
+            return None
+        if name != _AUTO_MODE_INHERIT_USER:
+            logger.warning(
+                "agent.claude_agent_sdk.auto_mode=%r is not valid (use %r, "
+                "%r or an autoMode mapping) — auto-mode rules are off.",
+                raw, _AUTO_MODE_OFF, _AUTO_MODE_INHERIT_USER,
+            )
+            return None
+        auto_mode = _read_user_auto_mode()
+    else:
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode must be %r, %r or an autoMode "
+            "mapping, not %s — auto-mode rules are off.",
+            _AUTO_MODE_OFF, _AUTO_MODE_INHERIT_USER, type(raw).__name__,
+        )
+        return None
+    if not auto_mode:
+        return None
+    try:
+        # Serialized now, so a later mutation of the source object (or an
+        # edit of the file) can never reach a live session's options.
+        return json.dumps({"autoMode": auto_mode}, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "agent.claude_agent_sdk.auto_mode mapping is not JSON-serializable "
+            "(%s) — auto-mode rules are off.", type(exc).__name__,
+        )
+        return None
+
+
 # ---------- stdout framing ----------
 # The SDK reads the CLI's NDJSON stdout through a line framer and kills the
 # whole message reader when one message exceeds max_buffer_size — a FATAL
