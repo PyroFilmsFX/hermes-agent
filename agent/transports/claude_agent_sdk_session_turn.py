@@ -127,6 +127,13 @@ def _clear_unsolicited_projection(session: Any) -> None:
     session._unsolicited_text.clear()
     session._unsolicited_items.clear()
     session._unsolicited_tool_items.clear()
+    session._unsolicited_api_signals = {
+        "api_error_kind": None,
+        "api_error_status": None,
+        "api_retries": None,
+        "rate_limit_rejected": None,
+        "result_text": "",
+    }
     session._unsolicited_start_notified = False
     session._unsolicited_seen.clear()
     session._unsolicited_delivery_id = None
@@ -776,6 +783,11 @@ class ClaudeSdkTurnMixin:
             "interrupt_observed": False,
             "terminal_result_accepted": False,
             "retired_before_query": False,
+            "api_error_kind": None,
+            "api_error_status": None,
+            "api_retries": None,
+            "rate_limit_rejected": None,
+            "result_text": "",
         }
 
         boundary_interrupt = False
@@ -974,6 +986,23 @@ class ClaudeSdkTurnMixin:
                 # concerns, not foreground-turn visibility. Observe before
                 # interrupt/billing gates so draining turns cannot orphan them.
                 self._observe_sdk_lifecycle(message)
+                if type(message).__name__ == "AssistantMessage":
+                    message_error = getattr(message, "error", None)
+                    if message_error:
+                        out["api_error_kind"] = str(message_error)
+                elif (
+                    type(message).__name__ == "SystemMessage"
+                    and getattr(message, "subtype", "") == "api_retry"
+                ):
+                    data = getattr(message, "data", None)
+                    out["api_retries"] = dict(data) if isinstance(data, dict) else {}
+                elif type(message).__name__ == "RateLimitEvent":
+                    info = getattr(message, "rate_limit_info", None)
+                    if str(getattr(info, "status", "")).lower() == "rejected":
+                        out["rate_limit_rejected"] = {
+                            "rate_limit_type": getattr(info, "rate_limit_type", None),
+                            "resets_at": getattr(info, "resets_at", None),
+                        }
                 if self._billing_guard_error is not None and not billing_guarded:
                     billing_guarded = True
                     out["error"] = self._billing_guard_error
@@ -1002,6 +1031,12 @@ class ClaudeSdkTurnMixin:
                         self._forward_stream_delta(message)
                     continue
                 if type(message).__name__ == "ResultMessage":
+                    out["api_error_status"] = getattr(
+                        message, "api_error_status", None
+                    )
+                    out["result_text"] = _safe_sdk_error_text(
+                        getattr(message, "result", None)
+                    )
                     # A steer is a second query on the same SDK stream. Its
                     # human-origin terminal result owns the live Hermes turn;
                     # the prior query's un-attributed terminal result must not
@@ -1045,9 +1080,13 @@ class ClaudeSdkTurnMixin:
                                 type(block).__name__ == "ToolUseBlock"
                                 for block in blocks
                             )
-                            if has_text and not has_tool_use:
+                            is_synthetic_error = bool(
+                                getattr(message, "error", None)
+                                and getattr(message, "model", None) == "<synthetic>"
+                            )
+                            if has_text and not has_tool_use and not is_synthetic_error:
                                 held_interim_assistant = message
-                            else:
+                            elif not is_synthetic_error:
                                 self._notify_interim_assistant(message)
                 projection, _result_is_error, _result_is_contradictory_success = (
                     self._project_message_step(projector, watch, message, out)
@@ -1109,7 +1148,31 @@ class ClaudeSdkTurnMixin:
                     if getattr(message, "is_error", False):
                         errors = getattr(message, "errors", None) or []
                         api_error_status = getattr(message, "api_error_status", None)
-                        if subtype == "success" and not errors and not api_error_status:
+                        if subtype == "success" and not errors:
+                            result_text = out["result_text"]
+                            api_error_shape = bool(
+                                api_error_status
+                                or out["api_error_kind"]
+                                or out["api_retries"] is not None
+                                or result_text.startswith("API Error:")
+                            )
+                            if api_error_shape:
+                                from agent.claude_sdk_transient import (
+                                    classify_sdk_api_failure,
+                                )
+
+                                _verdict, error_class, _wait_hint = (
+                                    classify_sdk_api_failure(out)
+                                )
+                                out["error"] = (
+                                    f"Claude API error ({error_class}): "
+                                    f"{result_text or subtype}"
+                                    + (
+                                        f" (HTTP {api_error_status})"
+                                        if api_error_status else ""
+                                    )
+                                )
+                                break
                             # Contradictory envelope: is_error=True yet
                             # subtype="success" with nothing in errors. The
                             # CLI emits this shape rarely (2026-08-11: it
@@ -1384,6 +1447,9 @@ class ClaudeSdkTurnMixin:
             and _result_subtype == "success"
             and not (getattr(message, "errors", None) or [])
             and not getattr(message, "api_error_status", None)
+            and not out.get("api_error_kind")
+            and out.get("api_retries") is None
+            and not str(out.get("result_text") or "").startswith("API Error:")
         )
         return projection, _result_is_error, _result_is_contradictory_success
 
@@ -1627,6 +1693,32 @@ class ClaudeSdkTurnMixin:
         if sid:
             self._session_id = sid
         name = type(message).__name__
+        signals = getattr(self, "_unsolicited_api_signals", None)
+        if not isinstance(signals, dict):
+            signals = self._unsolicited_api_signals = {
+                "api_error_kind": None,
+                "api_error_status": None,
+                "api_retries": None,
+                "rate_limit_rejected": None,
+                "result_text": "",
+            }
+        if name == "AssistantMessage" and getattr(message, "error", None):
+            signals["api_error_kind"] = str(message.error)
+        elif name == "SystemMessage" and getattr(message, "subtype", "") == "api_retry":
+            data = getattr(message, "data", None)
+            signals["api_retries"] = dict(data) if isinstance(data, dict) else {}
+        elif name == "RateLimitEvent":
+            info = getattr(message, "rate_limit_info", None)
+            if str(getattr(info, "status", "")).lower() == "rejected":
+                signals["rate_limit_rejected"] = {
+                    "rate_limit_type": getattr(info, "rate_limit_type", None),
+                    "resets_at": getattr(info, "resets_at", None),
+                }
+        is_synthetic_error = bool(
+            name == "AssistantMessage"
+            and getattr(message, "error", None)
+            and getattr(message, "model", None) == "<synthetic>"
+        )
         if name == "ResultMessage" and _is_human_origin(message):
             # Human-origin results answer a query submitted by this host (most
             # commonly a steer). If ownership was released before the result
@@ -1642,7 +1734,7 @@ class ClaudeSdkTurnMixin:
         if name == "StreamEvent":
             self._ensure_unsolicited_header_emitted()
             self._forward_stream_delta(message)
-        if name == "AssistantMessage":
+        if name == "AssistantMessage" and not is_synthetic_error:
             # CLI-initiated Agent work has no foreground turn, but its child
             # tool/text activity still belongs on the existing subagent feed.
             self._notify_tool_started(message)
@@ -1799,10 +1891,55 @@ class ClaudeSdkTurnMixin:
                 )
                 return
             result_text = getattr(message, "result", None)
+            safe_result_text = _safe_sdk_error_text(result_text)
+            signals["api_error_status"] = getattr(message, "api_error_status", None)
+            signals["result_text"] = safe_result_text
+            signals = dict(signals)
+            errors = getattr(message, "errors", None) or []
+            api_error_shape = bool(
+                getattr(message, "is_error", False)
+                and (getattr(message, "subtype", "") or "") == "success"
+                and not errors
+                and (
+                    signals["api_error_status"]
+                    or signals["api_error_kind"]
+                    or signals["api_retries"] is not None
+                    or safe_result_text.startswith("API Error:")
+                )
+            )
             texts = list(self._unsolicited_text)
             unsolicited_items = list(self._unsolicited_items)
             delivery_id = getattr(self, "_unsolicited_delivery_id", None)
             _clear_unsolicited_projection(self)
+            if api_error_shape:
+                from agent.claude_sdk_transient import classify_sdk_api_failure
+
+                _verdict, error_class, _wait_hint = classify_sdk_api_failure(signals)
+                error_record = (
+                    f"Claude API error ({error_class}): "
+                    f"{safe_result_text or getattr(message, 'subtype', 'success')}"
+                    + (
+                        f" (HTTP {signals['api_error_status']})"
+                        if signals["api_error_status"] else ""
+                    )
+                )
+                woken_items = [
+                    item for item in unsolicited_items
+                    if item.get("kind") == "lifecycle" and item.get("event") == "woken"
+                ]
+                woken_items.append({
+                    "kind": "lifecycle",
+                    "event": "api_error",
+                    "error": error_record,
+                    "source": "claude_agent_sdk",
+                    "uuid": str(getattr(message, "uuid", None) or ""),
+                })
+                if uuid:
+                    _remember_recent_id(
+                        self, "_unsolicited_delivered", "_unsolicited_delivered_order", uuid
+                    )
+                self._deliver_or_buffer_unsolicited([], woken_items, delivery_id)
+                return
             pending_rename = getattr(self, "_pending_rename_ack", None)
             if pending_rename and _is_rename_ack(result_text, texts, pending_rename):
                 # The CLI's own "/rename" acknowledgement — never a background result.
@@ -1849,7 +1986,7 @@ class ClaudeSdkTurnMixin:
                 sum(len(t) for t in texts), len(unsolicited_items),
             )
             self._deliver_or_buffer_unsolicited(texts, unsolicited_items, delivery_id)
-        elif name == "AssistantMessage":
+        elif name == "AssistantMessage" and not is_synthetic_error:
             # Buffer top-level text, one entry per message so the burst
             # delivers in message granularity; subagent streams
             # (parent_tool_use_id set) are noise — the same gate
@@ -1863,7 +2000,7 @@ class ClaudeSdkTurnMixin:
             for block in getattr(message, "content", None) or []:
                 if type(block).__name__ == "TextBlock":
                     text = getattr(block, "text", "") or ""
-                    if text:
+                    if text and not is_synthetic_error:
                         parts.append(text)
                         items.append({"kind": "text", "text": text})
                     continue

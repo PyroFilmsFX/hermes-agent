@@ -391,6 +391,9 @@ _CONNECTION_MESSAGE_PATTERNS = (
     "name or service not known", "temporary failure in name resolution", "nodename nor servname provided",
     "getaddrinfo failed", "getaddrinfo enotfound", "eai_again",
     "fetch failed", "failed to fetch",
+    "can't reach the api server", "enotfound", "econnreset", "etimedout",
+    "ehostunreach", "enetunreach", "connection error", "unable to connect",
+    "socket hang up",
     "upstream connect error",
 )
 
