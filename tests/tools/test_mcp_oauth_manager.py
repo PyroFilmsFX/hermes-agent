@@ -177,6 +177,7 @@ def _fake_response(status, url, body):
     resp = MagicMock()
     resp.status_code = status
     resp.request = SimpleNamespace(url=url)
+    resp.next_request = None  # not a redirect; mcp>=2.2 follows same-origin redirects in auth flows
 
     async def _aread():
         return body
