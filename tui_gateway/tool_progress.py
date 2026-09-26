@@ -388,6 +388,10 @@ def _cache_todo_state(session: dict, state: dict | None) -> None:
 def _session_todo_state(session: dict) -> dict | None:
     """Return the newest live/cached todo snapshot for a runtime session."""
     cached = _normalize_todo_state(session.get("todo_state"))
+    if cached is not None and "source" not in cached and _is_sdk_lane_session(session):
+        # Older SDK snapshots predate the source marker. Preserve their durable
+        # task semantics when a client reattaches to the still-live session.
+        cached = {**cached, "source": "sdk_tasks"}
     live = None
     snapshot = getattr(getattr(session.get("agent"), "_todo_store", None), "snapshot", None)
     if callable(snapshot):

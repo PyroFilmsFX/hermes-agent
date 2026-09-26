@@ -124,6 +124,23 @@ def test_normalize_todo_state_omits_source_for_native_todo():
     }
 
 
+def test_resume_marks_legacy_cached_sdk_tasks_source():
+    class Agent:
+        provider = "claude-agent-sdk"
+
+    session = {
+        "agent": Agent(),
+        "todo_state": {
+            "todos": [{"id": "1", "content": "T", "status": "in_progress"}],
+            "revision": 1,
+        },
+    }
+
+    payload = server._attach_todo_state({}, session)
+
+    assert payload["todo_state"]["source"] == "sdk_tasks"
+
+
 def test_subagent_lifecycle_bypasses_tool_progress_off(monkeypatch):
     """Subagent rows feed the Desktop status stack / TUI spawn tree — application state, not
     tool-progress chrome — so display.tool_progress=off must not swallow them."""
