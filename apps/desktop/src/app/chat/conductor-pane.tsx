@@ -8,6 +8,7 @@ import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { $relayJobsBySession } from '@/store/composer-status'
 import { $activeSessionId } from '@/store/session'
 import { $conductorBuildBySession } from '@/store/conductor-build'
+import { openArtifactViewer } from '@/store/artifact-viewer'
 
 interface ConductorPaneProps {
   sessionId?: string | null
@@ -67,6 +68,14 @@ export function ConductorPane({ sessionId: sessionIdProp }: ConductorPaneProps =
       </dl>
       <div>Cost: not metered</div>
       <div>Stage/unit: needs conductor T1</div>
+      <button
+        className="self-start rounded px-2 py-1 text-xs text-(--ui-text-secondary) hover:bg-(--ui-row-hover-background)"
+        disabled={!sessionId}
+        onClick={() => sessionId && openArtifactViewer({ sessionId, runId: build.run_id })}
+        type="button"
+      >
+        Run artifacts
+      </button>
       {build.lanes_build_matched > 0 && (
         <div className="flex items-center gap-1.5 text-xs" data-slot="conductor-build-lane-summary">
           <span className="rounded bg-(--ui-purple)/12 px-1 text-[0.58rem] text-(--ui-purple)">build</span>
@@ -77,6 +86,7 @@ export function ConductorPane({ sessionId: sessionIdProp }: ConductorPaneProps =
         {jobs.filter(job => job.status === 'running' || job.status === 'stale').map(job => (
           <StatusRow
             key={job.jobId}
+            onActivate={() => sessionId && openArtifactViewer({ sessionId, jobId: job.jobId })}
             leading={<Codicon className="text-(--ui-text-tertiary)" name="server-process" size="0.75rem" />}
             trailing={job.durationSeconds === undefined ? undefined : <ActivityTimerText className="text-[0.65rem]" seconds={job.durationSeconds} />}
             trailingVisible={job.durationSeconds !== undefined}
