@@ -45,9 +45,14 @@ def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
     scrub_parser.add_argument(
         "--targets", metavar="LIST",
         help="Comma list: pastes,attachments,transcripts,state-db,doc-cache,sdk-transcripts (default: all)")
-    scrub_parser.add_argument(
+    mode = scrub_parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--apply", action="store_true",
-        help="Mask in place after a verified backup (default is a dry run that writes nothing)")
+        help="Mask in place after a verified backup; refused while Hermes is running "
+             "(default is a dry run that writes nothing)")
+    mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be masked and write nothing (the default; allowed while Hermes runs)")
     add_json_flag(scrub_parser, "Emit the report as JSON (no secret values)")
     scrub_parser.add_argument("--report", metavar="PATH", help="Also write the JSON report to a NEW file at PATH (0600; refused if it exists, is a symlink, or is inside HERMES_HOME or the Claude projects dir)")
     scrub_parser.add_argument(

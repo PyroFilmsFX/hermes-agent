@@ -158,6 +158,7 @@ def run(h: Home, **kw):
     kw.setdefault("apply", False)
     kw.setdefault("recent_write_grace_s", 0)  # fixture files were written a moment ago
     kw.setdefault("open_writers_fn", lambda _p: [])  # the real lsof probe has its own test
+    kw.setdefault("backend_probe", lambda _root, _profiles: [])  # isolate from backends on this machine
     return scrub.run_scrub(
         root=h.root, profiles=[("thinkbot", h.profile)], config=SecretHygieneConfig(),
         key_provider=KEY, claude_config_dir=h.claude, holders_fn=lambda _p: [], **kw)
@@ -386,7 +387,8 @@ def test_resume_after_failure_at_batch_two(home, monkeypatch):
     progress = json.loads(conn.execute(
         "SELECT value FROM state_meta WHERE key = 'secret_scrub_progress'").fetchone()[0])
     conn.close()
-    assert progress["complete"] is True
+    # s_live is still deferred, so the run is not complete while it stays pending
+    assert progress["pending"] and progress["complete"] is False
     assert [p for p in progress["pending"] if "s_live" not in p and "#6." not in p] == []
 
 
@@ -840,3 +842,278 @@ def test_rewrite_preserves_original_mode_and_owner(home):
     assert home.paste.stat().st_mode & 0o7777 == 0o640
     assert home.transcript.stat().st_mode & 0o7777 == 0o600
     assert (home.paste.stat().st_uid, home.paste.stat().st_gid) == (st.st_uid, st.st_gid)
+
+
+# ---------------------------------------------------------------------------
+# Security review round 2
+# ---------------------------------------------------------------------------
+
+CLOSE_MSG = "Close Hermes (all windows) and rerun `hermes security scrub --apply`. Use `--dry-run` any time."
+
+
+def _support_dirs_untouched(h: Home) -> bool:
+    return not (h.root / "backups").exists() and not (h.root / "secret-scrub").exists()
+
+
+def _hold_open(path: Path, tmp_path: Path, how: str = "sqlite"):
+    """A child process holding ``path`` open until killed."""
+    import subprocess
+    import sys
+
+    ready = tmp_path / f"ready-{path.name}"
+    code = ("import sqlite3,sys,time,pathlib;c=sqlite3.connect(sys.argv[1]);"
+            "c.execute('SELECT count(*) FROM messages').fetchone();"
+            if how == "sqlite" else "import sys,time,pathlib;f=open(sys.argv[1],'ab');")
+    child = subprocess.Popen([sys.executable, "-c", code + "pathlib.Path(sys.argv[2]).write_text('1');time.sleep(60)",
+                              str(path), str(ready)])
+    deadline = time.time() + 10
+    while not ready.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert ready.exists()
+    return child
+
+
+# A: --apply refuses while any other process holds state.db / -wal / -shm, or a backend owns the home.
+
+@pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not installed")
+@pytest.mark.parametrize("which", ["state.db", "state.db-wal"])
+def test_apply_refuses_while_another_process_holds_state_db(home, tmp_path, which):
+    target = home.db.parent / which
+    child = _hold_open(target, tmp_path, "sqlite" if which == "state.db" else "file")
+    try:
+        before = _snapshot(home)
+        report = run(home, apply=True)
+        assert report.exit_code == 2, report.render_text()
+        assert report.refused == CLOSE_MSG
+        assert CLOSE_MSG in report.render_text()
+        assert _snapshot(home) == before
+        assert _support_dirs_untouched(home)
+        dry = run(home)  # the dry run stays allowed while the app is running
+        assert dry.exit_code == 0 and _items(dry, action="would-mask")
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "error"])
+def test_apply_refuses_when_lsof_cannot_prove_quiet(home, monkeypatch, failure):
+    import subprocess
+
+    real_which, real_run = shutil.which, subprocess.run
+    if failure == "missing":
+        monkeypatch.setattr(scrub.shutil, "which", lambda name, *a, **k: None if name == "lsof"
+                            else real_which(name, *a, **k))
+    else:
+        def fake_run(cmd, *a, **kw):
+            if cmd and "lsof" in os.path.basename(str(cmd[0])):
+                if failure == "timeout":
+                    raise subprocess.TimeoutExpired(cmd, 5)
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="lsof: status error\n")
+            return real_run(cmd, *a, **kw)
+        monkeypatch.setattr(scrub.subprocess, "run", fake_run)
+    before = _snapshot(home)
+    report = run(home, apply=True)
+    assert report.exit_code == 2, report.render_text()
+    assert report.refused == CLOSE_MSG
+    assert _snapshot(home) == before
+    assert _support_dirs_untouched(home)
+
+
+def test_apply_refuses_while_a_backend_owns_the_home(home):
+    before = _snapshot(home)
+    report = run(home, apply=True, backend_probe=lambda _root, _profiles: ["gateway running (profile thinkbot)"])
+    assert report.exit_code == 2 and report.refused == CLOSE_MSG
+    assert _snapshot(home) == before
+    assert _support_dirs_untouched(home)
+    assert run(home, backend_probe=lambda _r, _p: ["x"]).exit_code == 0  # dry run allowed
+
+
+def test_backend_probe_finds_nothing_for_an_idle_temp_home(tmp_path):
+    root = tmp_path / "idle-root"
+    (root / "profiles" / "zz-scrub-idle").mkdir(parents=True)
+    assert scrub._backend_owners(root, [("default", root),
+                                        ("zz-scrub-idle", root / "profiles" / "zz-scrub-idle")]) == []
+
+
+def test_row_changed_after_verification_is_skipped_and_pending(home, monkeypatch):
+    new_secret = "ghp_" + fake(36, 900)
+    conn = sqlite3.connect(home.db)
+    victim = conn.execute("SELECT min(id) FROM messages WHERE session_id = 's_closed'").fetchone()[0]
+    conn.close()
+    paste_new = home.paste.read_bytes().replace(b"thanks", b"THANKS")
+    stat = home.paste.stat()
+
+    def change(_backup_dir):
+        c = sqlite3.connect(home.db)
+        c.execute("UPDATE messages SET content = ? WHERE id = ?", (f"changed {new_secret}", victim))
+        c.commit()
+        c.close()
+        home.paste.write_bytes(paste_new)  # same size, same mtime: only the hash can tell
+        os.utime(home.paste, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    monkeypatch.setattr(scrub, "_after_backup_verified", change, raising=False)
+    report = run(home, apply=True)
+    conn = sqlite3.connect(home.db)
+    content = conn.execute("SELECT content FROM messages WHERE id = ?", (victim,)).fetchone()[0]
+    progress = json.loads(conn.execute(
+        "SELECT value FROM state_meta WHERE key = 'secret_scrub_progress'").fetchone()[0])
+    conn.close()
+    assert new_secret in content  # never masked without a verified backup of that value
+    assert _items(report, locator=f"profiles/thinkbot/state.db:messages#{victim}.content",
+                  action="changed-during-apply")
+    assert f"messages#{victim}.content" in progress["pending"]
+    assert progress["complete"] is False
+    assert home.paste.read_bytes() == paste_new
+    assert _items(report, locator="composer-pastes/pasted_content_1_ab12.txt", action="changed-during-apply")
+    assert NEON_PW not in home.attachment.read_text()  # untouched units still masked
+
+
+# B: every non-empty SDK transcript line must carry both a sessionId and an entrypoint.
+
+@pytest.mark.parametrize("second", [
+    {"type": "summary", "message": {"content": "{secret}"}},
+    {"type": "user", "sessionId": SDK_ID, "message": {"content": "{secret}"}},
+    {"type": "user", "entrypoint": "sdk-py", "message": {"content": "{secret}"}},
+])
+def test_sdk_transcript_with_an_unattributed_line_is_skipped(home, second):
+    secret = "ghp_" + fake(36, 950)
+    line2 = json.loads(json.dumps(second).replace("{secret}", secret))
+    _write(home.sdk_transcript, "\n".join([
+        json.dumps({"type": "user", "entrypoint": "sdk-py", "sessionId": SDK_ID,
+                    "message": {"content": f"org token {SDK_SECRET}"}}),
+        json.dumps(line2)]) + "\n")
+    before = _sha(home.sdk_transcript)
+    report = run(home, apply=True)
+    assert _sha(home.sdk_transcript) == before
+    (item,) = _items(report, target="sdk-transcripts", locator=f"claude:projects/-tmp-demo-project/{SDK_ID}.jsonl")
+    assert item.action == "ambiguous-skip"
+
+
+# C: symlinked support dirs and profile chains are refused.
+
+def test_symlinked_profiles_dir_refuses(home, tmp_path):
+    outside = tmp_path / "elsewhere"
+    shutil.move(str(home.root / "profiles"), str(outside))
+    (home.root / "profiles").symlink_to(outside, target_is_directory=True)
+    before = {p: _sha(p) for p in outside.rglob("*") if p.is_file()}
+    for apply in (True, False):
+        report = run(home, apply=apply)
+        assert report.exit_code == 2, report.render_text()
+        assert "symlink" in (report.refused or "")
+    assert {p: _sha(p) for p in outside.rglob("*") if p.is_file()} == before
+    assert _support_dirs_untouched(home)
+
+
+@pytest.mark.parametrize("link", ["backups", "backups/secret-scrub"])
+def test_symlinked_backup_dir_refuses_with_zero_writes(home, tmp_path, link):
+    outside = tmp_path / "backup-elsewhere"
+    outside.mkdir()
+    at = home.root / link
+    at.parent.mkdir(parents=True, exist_ok=True)
+    at.symlink_to(outside, target_is_directory=True)
+    before = _snapshot(home)
+    report = run(home, apply=True)
+    assert report.exit_code == 2, report.render_text()
+    assert "symlink" in (report.refused or "")
+    assert _snapshot(home) == before
+    assert list(outside.rglob("*")) == []
+    assert not (home.root / "secret-scrub").exists()
+
+
+def test_symlinked_ledger_dir_refuses(home, tmp_path):
+    outside = tmp_path / "ledger-elsewhere"
+    outside.mkdir()
+    (home.root / "secret-scrub").symlink_to(outside, target_is_directory=True)
+    before = _snapshot(home)
+    report = run(home, apply=True)
+    assert report.exit_code == 2, report.render_text()
+    assert "symlink" in (report.refused or "")
+    assert _snapshot(home) == before
+    assert list(outside.rglob("*")) == []
+    assert not (home.root / "backups").exists()
+
+
+def test_backup_root_inside_a_scrub_target_refuses(home, tmp_path):
+    # a Claude config dir whose projects/ IS the Hermes root puts the backup inside a scrub target
+    claude = tmp_path / "claude-wrap"
+    claude.mkdir()
+    (claude / "projects").symlink_to(home.root, target_is_directory=True)
+    before = _snapshot(home)
+    report = scrub.run_scrub(root=home.root, profiles=[("thinkbot", home.profile)], apply=True,
+                             config=SecretHygieneConfig(), key_provider=KEY, claude_config_dir=claude,
+                             holders_fn=lambda _p: [], recent_write_grace_s=0, open_writers_fn=lambda _p: [],
+                             backend_probe=lambda _r, _p: [])
+    assert report.exit_code == 2, report.render_text()
+    assert "backup" in (report.refused or "")
+    assert _snapshot(home) == before
+
+
+# D: known-prefix tokens are masked anywhere in report text, even glued to other characters.
+
+_PREFIXES = ["sk-", "sk-ant-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA", "ASIA", "FlyV1 ",
+             "fm2_", "fo1_", "npg_", "AIza", "glpat-"]
+
+
+@pytest.mark.parametrize("prefix", _PREFIXES)
+def test_report_text_masks_glued_known_prefixes(prefix):
+    body = fake(12, 990).upper() if prefix in ("AKIA", "ASIA") else fake(12, 990)
+    secret = prefix + body
+    for text in (f"composer-pastes/abc{secret}xyz.txt", f"doc{secret}.md", f"x/{secret}", f"note:{secret}"):
+        out = scrub.redact_report_text(text)
+        assert body not in out and body[:8] not in out, (prefix, out)
+
+
+def test_report_text_masks_pem_header_and_db_url_passwords():
+    pw = fake(14, 991)
+    for text in (f"composer-pastes/postgresql:/owner:{pw}@ep-x.neon.tech.txt",
+                 f"postgresql://owner:{pw}@ep-x.neon.tech/db", f"mysql:app:{pw}@db.internal.txt",
+                 f"leak-mongodb+srv:/u:{pw}@c0.example.net.md"):
+        assert pw not in scrub.redact_report_text(text), text
+    assert "PRIVATE KEY" not in scrub.redact_report_text("keys/-----BEGIN RSA PRIVATE KEY-----MIIEabc.pem")
+
+
+def test_report_masks_glued_prefix_file_names(home):
+    gh = "ghp_" + fake(14, 992)
+    ant = "sk-ant-" + fake(14, 993)
+    _write(home.root / "composer-pastes" / f"abc{gh}xyz.txt", f"token {'ghp_' + fake(36, 994)}\n")
+    _write(home.root / "composer-pastes" / f"doc{ant}.md", f"token {'ghp_' + fake(36, 995)}\n")
+    for apply in (False, True):
+        report = run(home, apply=apply)
+        blob = json.dumps(report.to_json()) + report.render_text()
+        for secret in (gh, ant):
+            assert secret not in blob and secret[-14:] not in blob
+    ledgers = "".join(p.read_text() for p in (home.root / "secret-scrub").glob("*.json"))
+    assert gh[-14:] not in ledgers and ant[-14:] not in ledgers
+
+
+# E: ``complete`` is False while anything is pending.
+
+def test_progress_is_incomplete_while_items_are_pending(home):
+    report = run(home, apply=True, open_writers_fn=lambda p: [4242] if Path(p).name == home.paste.name
+                 and Path(p).parent.name == "composer-pastes" else [])
+    assert report.exit_code == 0, report.render_text()
+    conn = sqlite3.connect(home.db)
+    progress = json.loads(conn.execute(
+        "SELECT value FROM state_meta WHERE key = 'secret_scrub_progress'").fetchone()[0])
+    conn.close()
+    assert progress["pending"] and progress["complete"] is False  # s_live is deferred
+    ledger = json.loads((home.root / "secret-scrub" / "progress.json").read_text())
+    assert ledger["pending_files"] and ledger["complete"] is False
+
+
+def test_cli_accepts_explicit_dry_run():
+    args = _cli_args("--dry-run")
+    assert args.apply is False and args.dry_run is True
+
+
+def test_ledger_dir_swapped_for_a_symlink_mid_run_stops_before_any_target_write(home, tmp_path, monkeypatch):
+    outside = tmp_path / "ledger-race"
+    outside.mkdir()
+    monkeypatch.setattr(scrub, "_after_backup_verified",
+                        lambda _b: (home.root / "secret-scrub").symlink_to(outside, target_is_directory=True))
+    before = _snapshot(home)
+    report = run(home, apply=True)
+    assert report.exit_code == 1, report.render_text()
+    assert any("symlink" in e for e in report.errors)
+    assert _snapshot(home) == before
+    assert list(outside.rglob("*")) == []
