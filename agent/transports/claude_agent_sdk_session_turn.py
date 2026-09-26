@@ -1923,22 +1923,32 @@ class ClaudeSdkTurnMixin:
                         if signals["api_error_status"] else ""
                     )
                 )
-                woken_items = [
+                delivered_items = [
                     item for item in unsolicited_items
-                    if item.get("kind") == "lifecycle" and item.get("event") == "woken"
+                    if not (
+                        item.get("kind") == "text"
+                        and (
+                            item.get("text") == safe_result_text
+                            or str(item.get("text", "")).startswith("API Error:")
+                        )
+                    )
                 ]
-                woken_items.append({
+                delivered_items.append({
                     "kind": "lifecycle",
                     "event": "api_error",
                     "error": error_record,
                     "source": "claude_agent_sdk",
                     "uuid": str(getattr(message, "uuid", None) or ""),
                 })
+                delivered_texts = [
+                    t for t in texts
+                    if t != safe_result_text and not str(t).startswith("API Error:")
+                ]
                 if uuid:
                     _remember_recent_id(
                         self, "_unsolicited_delivered", "_unsolicited_delivered_order", uuid
                     )
-                self._deliver_or_buffer_unsolicited([], woken_items, delivery_id)
+                self._deliver_or_buffer_unsolicited(delivered_texts, delivered_items, delivery_id)
                 return
             pending_rename = getattr(self, "_pending_rename_ack", None)
             if pending_rename and _is_rename_ack(result_text, texts, pending_rename):

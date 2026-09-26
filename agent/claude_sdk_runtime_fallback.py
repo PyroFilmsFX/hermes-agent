@@ -126,6 +126,18 @@ def _consume_agent_interrupt(agent) -> None:
         logger.debug("clear_interrupt failed on the SDK lane", exc_info=True)
 
 
+def _has_fallback_target(agent) -> bool:
+    """Return True if the agent has an unexhausted fallback target configured."""
+    chain = getattr(agent, "_fallback_chain", None)
+    if not isinstance(chain, (list, tuple)) or not chain:
+        return False
+    try:
+        index = int(getattr(agent, "_fallback_index", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return index < len(chain)
+
+
 def _reconcile_turn_outcome(agent, state: _SdkTurnState) -> None:
     """Settle the turn's terminal/stop state, then decide provider fallback.
 
@@ -184,7 +196,11 @@ def _reconcile_turn_outcome(agent, state: _SdkTurnState) -> None:
         mutated=state.messages != state.messages_before_attempt,
     )
     state.failover_reason = None
-    if getattr(turn, "error", None) and state.effects.replay_safe:
+    if (
+        getattr(turn, "error", None)
+        and state.effects.replay_safe
+        and _has_fallback_target(agent)
+    ):
         state.failover_reason = _sdk_provider_failover_reason(
             agent,
             str(turn.error),
@@ -192,9 +208,11 @@ def _reconcile_turn_outcome(agent, state: _SdkTurnState) -> None:
         )
         if state.failover_reason is not None and agent._claude_sdk_session is not None:
             # A provider switch must never retain transport/session state from
-            # the failed SDK backend.
+            # the failed SDK backend. Clear only when a real fallback target
+            # exists and is actually activated.
             _retire_live_sdk_session(agent)
             _store_sdk_session_id(agent, None)
+
 
     # FALLBACK ONLY. _on_compact_boundary above is the real terminal edge and
     # normally clears the flag mid-turn; reaching here means the CLI started a
