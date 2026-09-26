@@ -42,7 +42,7 @@ jobs:
 
       - name: Install dependencies
         # Same extras as upstream's tests.yml, plus the fork's Claude Agent SDK lane.
-        run: uv sync --locked --python 3.11 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra claude-agent-sdk
+        run: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra claude-agent-sdk
 
       - name: Run tests
         run: |
