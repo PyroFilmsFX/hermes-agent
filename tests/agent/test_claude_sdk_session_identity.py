@@ -675,6 +675,10 @@ class TestContinuity:
         agent, db = self._db_agent(
             persisted_sdk_id=self._bound_id("sdk-failed-8")
         )
+        # Handoff is only eligible when a real fallback target exists (U8.1 D0):
+        # without one the failed session id is kept rather than cleared.
+        agent._fallback_chain = [{"provider": "openrouter", "model": "fallback-model"}]
+        agent._fallback_index = 0
         self._spy_sessions(monkeypatch, [_make_turn(
             thread_id="sdk-failed-8",
             should_retire=False,
