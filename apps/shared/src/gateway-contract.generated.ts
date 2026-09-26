@@ -2762,6 +2762,21 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface RelayJobsListResult {
+  jobs?: RelayJobRow[]
+}
+export interface RelayJobRow {
+  job_id: string
+  worker: string
+  model?: string
+  model_resolved?: string
+  lane?: string
+  role?: string
+  status: string
+  spawned_at: string
+  heartbeat_at?: string
+  duration_sec?: number | null
+}
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -5113,6 +5128,8 @@ export interface RpcMethods {
   'prompt.btw': { params: SideAgentParams; result: TaskIdResult }
   /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. */
   'prompt.submit': { params: PromptSubmitParams; result: PromptSubmitResult }
+  /** Read recent conductor relay worker jobs for the calling session's workspace. */
+  'relay_jobs.list': { params: SessionParams; result: RelayJobsListResult }
   /** Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new. */
   'reload.env': { params: ReloadEnvParams; result: ReloadEnvResult }
   /** Tear down and rediscover MCP servers for every live session (prompt cache is invalidated). */
@@ -5442,6 +5459,7 @@ export const RPC_METHODS = [
   'prompt.background',
   'prompt.btw',
   'prompt.submit',
+  'relay_jobs.list',
   'reload.env',
   'reload.mcp',
   'request.answer',

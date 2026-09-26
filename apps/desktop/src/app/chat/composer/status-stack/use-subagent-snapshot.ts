@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { $gatewayState } from '@/store/session'
 import { knownOwnerForSession, requestForOwnedSession } from '@/store/session-states'
+import { $relayJobsBySession, reconcileRelayJobsSnapshot } from '@/store/composer-status'
 import { $subagentsBySession, reconcileSubagentSnapshot, type SubagentPayload } from '@/store/subagents'
 
 export const rejectUnownedSubagentRequest = async <T>(): Promise<T> => {
@@ -25,37 +26,67 @@ export function useSubagentSnapshot(sessionId: string | null, poll = true) {
     let cancelled = false
     let pending = false
     let failures = 0
+    let relayFailures = 0
 
     const refresh = async () => {
-      if (cancelled || pending || failures >= 3) {
+      if (cancelled || pending || (failures >= 3 && relayFailures >= 3)) {
         return
       }
 
       pending = true
       const before = $subagentsBySession.get()[sessionId]
+      const relayBefore = $relayJobsBySession.get()[sessionId]
       const owner = JSON.stringify(knownOwnerForSession(sessionId))
 
       try {
-        const snapshot = await requestForOwnedSession<{ subagents: SubagentPayload[] }>(
-          sessionId,
-          rejectUnownedSubagentRequest,
-          'subagent.list',
-          { session_id: sessionId }
-        )
+        if (failures < 3) {
+          try {
+            const snapshot = await requestForOwnedSession<{ subagents: SubagentPayload[] }>(
+              sessionId,
+              rejectUnownedSubagentRequest,
+              'subagent.list',
+              { session_id: sessionId }
+            )
 
-        if (
-          !cancelled &&
-          owner === JSON.stringify(knownOwnerForSession(sessionId)) &&
-          before === $subagentsBySession.get()[sessionId] &&
-          Array.isArray(snapshot.subagents)
-        ) {
-          reconcileSubagentSnapshot(sessionId, snapshot.subagents)
+            if (
+              !cancelled &&
+              owner === JSON.stringify(knownOwnerForSession(sessionId)) &&
+              before === $subagentsBySession.get()[sessionId] &&
+              Array.isArray(snapshot.subagents)
+            ) {
+              reconcileSubagentSnapshot(sessionId, snapshot.subagents)
+            }
+
+            failures = 0
+          } catch {
+            // Older backends retain their event-fed frame; don't hot-loop a missing RPC.
+            failures++
+          }
         }
 
-        failures = 0
-      } catch {
-        // Older backends retain their event-fed frame; don't hot-loop a missing RPC.
-        failures++
+        if (relayFailures < 3) {
+          try {
+            const relaySnapshot = await requestForOwnedSession<{ jobs: Array<Record<string, unknown>> }>(
+              sessionId,
+              rejectUnownedSubagentRequest,
+              'relay_jobs.list',
+              { session_id: sessionId }
+            )
+            if (
+              !cancelled &&
+              owner === JSON.stringify(knownOwnerForSession(sessionId)) &&
+              relayBefore === $relayJobsBySession.get()[sessionId] &&
+              Array.isArray(relaySnapshot.jobs)
+            ) {
+              reconcileRelayJobsSnapshot(sessionId, relaySnapshot.jobs)
+            }
+
+            relayFailures = 0
+          } catch {
+            // A desktop may reconnect to a backend predating relay_jobs.list.
+            relayFailures++
+          }
+        }
       } finally {
         pending = false
       }
@@ -77,6 +108,7 @@ export function useSubagentSnapshot(sessionId: string | null, poll = true) {
 
     const retry = () => {
       failures = 0
+      relayFailures = 0
       void refresh()
     }
 
