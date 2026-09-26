@@ -361,6 +361,13 @@ DEFAULT_CONFIG = {
             # turns with nobody to answer a prompt) opt back in, e.g. ["user"]. Invalid entries are
             # dropped with a warning.
             "setting_sources": [],
+            # Claude Code auto-mode classifier rules (the `autoMode` settings object:
+            # allow / soft_deny / hard_deny / environment). "" (default) or "off" passes none.
+            # "inherit_user" passes ONLY the autoMode object from ~/.claude/settings.json;
+            # a mapping is passed as-is. Delivered via the CLI's --settings flag layer, so
+            # setting_sources stays [] and nothing else from ~/.claude rides along.
+            # Resolved once per session; bad input warns and falls back to off.
+            "auto_mode": "",
             # Claude Code binary the SDK should spawn. "" (the default) uses
             # the CLI bundled inside claude-agent-sdk, which lags the CLI
             # releases — a just-shipped model id can be rejected with

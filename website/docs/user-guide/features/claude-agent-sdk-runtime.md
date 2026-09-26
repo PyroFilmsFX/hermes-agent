@@ -62,6 +62,7 @@ All keys live under `agent.claude_agent_sdk` in `config.yaml` (see `cli-config.y
 | `permission_mode` | `""` | An SDK permission mode literal (`default`, `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`, `auto`). Empty keeps the `HERMES_TERMINAL_SECURITY_MODE` mapping (`auto` maps to the fail-closed SDK `default` mode). |
 | `env` | `{}` | Extra environment for the spawned Claude CLI. Values are stringified; metered-billing vectors are rejected unless `allow_metered_key` is true. |
 | `setting_sources` | `[]` | Filesystem settings sources (`user`, `project`, `local`). Empty keeps the SDK isolated from ambient Claude settings and `CLAUDE.md`. |
+| `auto_mode` | `""` (off) | Claude Code auto-mode classifier rules (the `autoMode` settings object). `inherit_user` passes only the `autoMode` object from `~/.claude/settings.json`; a mapping is passed as-is. Delivered through the CLI's `--settings` layer, so `setting_sources` stays `[]`. Resolved once per session; invalid input warns and falls back to `off`. |
 | `permission_mode` | `auto` | Which layer screens tool calls. `auto` = Claude Code's own classifier inside the CLI; Hermes' approval callback (and its guardian one-shot) runs only for calls the classifier will not approve. `default` = every tool call routes through Hermes' approval flow, and on this lane the guardian is a full Claude CLI spawn per Bash call. `hermes doctor` reports the effective mode and its cost. |
 | `max_budget_usd` | `null` | Per-query USD cap forwarded to the SDK; the turn ends with `error_max_budget_usd` when exceeded. `null` = no budget. |
 | `max_buffer_size` | `null` | Maximum size of one CLI NDJSON message. `null` uses Hermes' 10 MiB limit rather than the SDK's 1 MiB default, which can terminate a turn on a large tool result. Positive integer overrides are accepted; invalid values warn and fall back. The pinned SDK currently measures Unicode code points despite documenting bytes. |
@@ -82,6 +83,18 @@ Ambient Claude settings are isolated: the runtime pins the SDK's `setting_source
 The SDK spawns the Claude Code CLI bundled inside the `claude-agent-sdk` package, not the `claude` on your PATH. That bundle lags CLI releases, so a just-shipped model id can fail with `Claude Code X does not support this model` while `claude update` on the same machine already has it. Pin the runtime to your own launcher with `agent.claude_agent_sdk.cli_path` (for example `~/.local/bin/claude`); it then tracks `claude update`. A path that is not an executable file is ignored with a warning and the bundled CLI is used.
 
 Hermes names the spawned session so other Claude sessions on the machine can find and message it with the CLI's own `ListAgents` / `SendMessage` tools. Without a name the CLI derives one from the working directory, so every Hermes session on a box collides. The template is `agent.claude_agent_sdk.session_name` (default `hermes:{title}`); placeholders are `{title}`, `{session}`, `{profile}`, `{model}`, and it falls back title -> short session id -> profile. Set it to `""` to restore the CLI's own naming.
+
+Auto-mode classifier rules are the one exception, and only when you opt in. `agent.claude_agent_sdk.auto_mode: inherit_user` reads just the `autoMode` object (`allow`, `soft_deny`, `hard_deny`, `environment`) from `~/.claude/settings.json`. Hermes hands it to the CLI as inline `--settings` JSON containing `{"autoMode": ...}` and nothing else. Claude Code keeps its flag-settings layer active even when `setting_sources` is empty, and it reads classifier rules from the user, flag and managed layers only. Permissions, hooks, plugins, env, model and statusLine never come along. You can also set `auto_mode` to the rules mapping itself. The value is resolved once when a session starts, so edits take effect on the next session. A missing or malformed file, or an `autoMode` value that is not an object, logs a warning and leaves the rules off.
+
+```yaml
+agent:
+  claude_agent_sdk:
+    auto_mode: inherit_user
+    # or inline:
+    # auto_mode:
+    #   environment: ["Trusted repos: github.com/example/*"]
+    #   soft_deny: ["Force-pushing to main"]
+```
 
 To bring a specific Claude Code plugin into Hermes turns without opening the whole `~/.claude` (which `setting_sources: ["user"]` would do — every enabled plugin, every session-tracker hook, every MCP server, the permission allowlist), list its root under `agent.claude_agent_sdk.plugins`. Each entry is loaded through the SDK's `--plugin-dir`, so that plugin's skills, agents, hooks and MCP servers are available while isolation stays on. Entries without a `.claude-plugin/plugin.json` are ignored with a warning.
 
