@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shutil
 import signal
 import subprocess
@@ -342,7 +343,7 @@ def desktop_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """``base_env`` (default ``os.environ``) with this profile's DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS
     merged in when its desktop is running. Unchanged otherwise, so hosts with a real seat keep it.
     Pure: never starts anything (it is called from env builders, status probes and tests)."""
-    env = dict(os.environ if base_env is None else base_env)
+    env = scrub_desktop_control_plane_env(dict(os.environ if base_env is None else base_env))
     published = published_env()
     if published:
         touch_activity()  # a browser / cua-driver spawn is the agent using its screen

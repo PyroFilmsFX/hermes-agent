@@ -23,7 +23,8 @@ import time
 import urllib.parse
 
 from hermes_cli.install_identity import get_install_id as _shared_get_install_id
-from hermes_cli.process_identity import is_desktop_owned_backend
+from hermes_cli.process_identity import (
+    desktop_session_token, is_desktop_owned_backend, seal_desktop_control_plane_env)
 from hermes_cli.pty_session import run_reaper
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -344,7 +345,7 @@ app.include_router(_memory_oauth_router)
 # HERMES_DASHBOARD_SESSION_TOKEN; otherwise fresh per server start. It dies with
 # the process and is injected into the SPA HTML so only the web UI can use it.
 def _resolve_session_token() -> str:
-    return os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
+    return desktop_session_token() or secrets.token_urlsafe(32)
 
 
 _SESSION_TOKEN = _resolve_session_token()
@@ -573,7 +574,7 @@ def _desktop_loopback_auth_exempt(
     return (
         host in _LOOPBACK_HOST_VALUES
         and os.environ.get("HERMES_DESKTOP") == "1"
-        and bool(os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or ssh_session_token or ssh_owner_nonce)
+        and bool(desktop_session_token() or ssh_session_token or ssh_owner_nonce)
     )
 
 
@@ -1540,6 +1541,10 @@ def start_server(
     until the ready sentinel is written so its SDK import can't hold the GIL
     against the pre-bind path.
     """
+    # FIRST, before anything can spawn: take the desktop control plane (session token, CDP
+    # port) out of os.environ so no child inherits it implicitly (P0 2026-09-26). The token was
+    # adopted at import (_SESSION_TOKEN) and stays readable via desktop_session_token().
+    seal_desktop_control_plane_env()
     _apply_ssh_session_token(ssh_session_token or "")
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 

@@ -8,6 +8,7 @@ main -> update_cmd -> update_cmd_*; ``_m()`` resolves ``hermes_cli.main`` at cal
 import logging
 from contextlib import suppress
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shlex
 import shutil  # noqa: F401  (tests patch update_cmd.shutil.*; split modules resolve it here)
 import subprocess
@@ -176,7 +177,7 @@ def _no_prompt_git_kwargs() -> dict:
     *prompt* is disabled — a configured credential helper / askpass still
     runs, so a private-fork origin keeps authenticating non-interactively.
     """
-    env = dict(os.environ)
+    env = scrub_desktop_control_plane_env(dict(os.environ))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "Never"
     return {"stdin": subprocess.DEVNULL, "env": env}
@@ -520,7 +521,7 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     import io
     from hermes_cli._subprocess_compat import kill_process_tree, windows_hide_flags
 
-    child_env = dict(os.environ if env is None else env)
+    child_env = scrub_desktop_control_plane_env(dict(os.environ if env is None else env))
     child_env.setdefault("PYTHONUNBUFFERED", "1")
     spawn = {"creationflags": windows_hide_flags()} if os.name == "nt" else {"process_group": 0}
     proc = subprocess.Popen(

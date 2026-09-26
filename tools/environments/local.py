@@ -23,7 +23,8 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.environments.local_env_policy import (  # noqa: F401 — _HERMES_PROVIDER_ENV_BLOCKLIST stays importable from here
     _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
     _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
-    _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys, strip_profile_gate_env)
+    _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys, scrub_desktop_control_plane_env,
+    strip_profile_gate_env)
 from tools.environments.local_pythonpath import (
     _build_hermes_repo_root_aliases, _strip_hermes_owned_pythonpath_and_runtime_markers)
 
@@ -273,13 +274,14 @@ def _filter_secret_env(
 def _finalize_child_env(env: dict) -> dict:
     """Guards shared by every spawn surface: profile-home propagation, session-context
     bridging, Hermes-owned PYTHONPATH + venv-marker strip, MSYS defaults, delegate_task
-    Kanban scrub. Returns the (possibly new) dict."""
+    Kanban scrub, and LAST the desktop control-plane scrub (nothing earlier — passthrough,
+    ``_HERMES_FORCE_`` unwrapping — may re-add it). Returns the (possibly new) dict."""
     _apply_profile_home(env)
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
     from agent.delegation_context import delegated_child_subprocess_env
-    return delegated_child_subprocess_env(env)
+    return scrub_desktop_control_plane_env(delegated_child_subprocess_env(env))
 
 
 def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
@@ -364,7 +366,8 @@ def build_subprocess_env(
     if extra:
         env.update(extra)
     from agent.delegation_context import delegated_child_subprocess_env
-    return delegated_child_subprocess_env(env)
+    # Unscrubbed keeps credentials (git/bws/op flows), never the desktop control plane.
+    return scrub_desktop_control_plane_env(delegated_child_subprocess_env(env))
 
 
 def served_profile_child_env(
@@ -408,7 +411,7 @@ def served_profile_child_env(
                     "no profile secret scope bound while multiplexing is on; the child would inherit the "
                     "launch profile's credentials. Bind the profile scope (or pass target_home) at the spawn site.")
         env.update((k, v) for k, v in (secrets or {}).items() if v is not None)
-    return env
+    return scrub_desktop_control_plane_env(env)
 
 
 def _is_routed_home(target_home: "str | Path") -> bool:
@@ -841,7 +844,7 @@ class LocalEnvironment(BaseEnvironment):
         names), so under a multiplexed gateway profile A's BUZZ_PRIVATE_KEY would land
         in the snapshot and be sourced by profile B. Prefix-only and monotonic on
         purpose: conservative even when the context-gated carve-out is inactive."""
-        merged = dict(os.environ | self.env)
+        merged = dict(os.environ | self.env)  # control-plane-env: name listing only, never a child env
         return tuple(sorted(
             name for name in merged
             if isinstance(name, str) and _matches_terminal_first_party_prefix(name)))

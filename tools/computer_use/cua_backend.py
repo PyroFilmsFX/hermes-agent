@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import subprocess
 import sys
 import uuid
@@ -139,7 +140,7 @@ def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
     unless the user opted in, plus the native-Wayland bridge (``computer_use.native_wayland`` config opt-in, only when
     the child has a Wayland display). Used by every spawn site (MCP, status, doctor, install) so CLI and gateway
     runtimes share one policy."""
-    env = dict(os.environ if base_env is None else base_env)
+    env = scrub_desktop_control_plane_env(dict(os.environ if base_env is None else base_env))
     # A running Bot Desktop for this profile owns the agent's screen: DISPLAY/XAUTHORITY/DBUS point there so
     # cua-driver never acts on a seat the human is sitting at (#90374 class) and headless hosts get a display.
     from tools.bot_desktop.runtime import desktop_env as _bot_desktop_env

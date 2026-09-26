@@ -8,6 +8,7 @@ server.py's globals (method_ctx.py) and reference ``_ok``/``_err`` bare."""
 
 import contextlib
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import subprocess
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None, *,
         # The relay pins UTF-8 on every platform (#93590): its child is the bootstrapped hermes_cli
         # and its answer is relayed verbatim, unlike the cron lane's locale-decoded tails.
         return run_reported_turn(
-            local_delivery_command(profile, tmp), env=os.environ if env is None else env,
+            local_delivery_command(profile, tmp), env=scrub_desktop_control_plane_env(dict(os.environ)) if env is None else env,
             report_path=report, timeout=timeout, exit_grace=None, encoding="utf-8")
     finally:
         with contextlib.suppress(OSError):

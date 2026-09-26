@@ -6,6 +6,7 @@ import contextlib
 import importlib
 import json
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import subprocess
 import sys
@@ -388,7 +389,7 @@ def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
         args.extend(["--profile", profile])
     args.extend(["serve", "--isolated", "--host", "127.0.0.1", "--port", "0",
                  "--ssh-session-token-file", token_path, "--ssh-owner-nonce", spawn_nonce])
-    env = dict(os.environ)
+    env = scrub_desktop_control_plane_env(dict(os.environ))
     env.pop("VIRTUAL_ENV", None)
     env.pop("PYTHONPATH", None)
     _ensure_scope(ownership_id)

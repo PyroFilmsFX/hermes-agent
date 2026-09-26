@@ -157,7 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         proc = subprocess.Popen(
             _prepare_child_command(args.command),
             stderr=subprocess.PIPE,
-            env={**os.environ, **_child_launchd_label_env()},
+            env={**os.environ, **_child_launchd_label_env()},  # control-plane-env: transparent service wrapper; its child is the supervised Hermes service itself
         )
     except OSError as exc:
         with _open_log(log_path) as log_file:

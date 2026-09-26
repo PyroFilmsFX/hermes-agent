@@ -110,7 +110,9 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         for key in (DELEGATED_CHILD_ENV_MARKER, "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD"):
             if key in scoped:
                 scrubbed[key] = scoped[key]
-    return delegated_child_subprocess_env(scrubbed)
+    # Last: a passthrough registration must never hand the sandbox the desktop control plane.
+    from tools.environments.local_env_policy import scrub_desktop_control_plane_env
+    return scrub_desktop_control_plane_env(delegated_child_subprocess_env(scrubbed))
 
 
 def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,

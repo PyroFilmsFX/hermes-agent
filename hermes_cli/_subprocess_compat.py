@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import shutil
 import subprocess
@@ -362,7 +363,7 @@ def selected_git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     Unsupported targets and failed acquisition must not disable a working system
     Git. Callers apply their own config/security isolation after selection.
     """
-    env = dict(base if base is not None else os.environ)
+    env = scrub_desktop_control_plane_env(dict(base if base is not None else os.environ))
     try:
         from pm import ensure
 
@@ -396,7 +397,7 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
     subprocesses from stdin"): a background tool invocation must fail fast with a readable error, not wait
     for input nobody can type.
     """
-    env = dict(base if base is not None else os.environ)
+    env = scrub_desktop_control_plane_env(dict(base if base is not None else os.environ))
     # Captured before the isolation below rewrites GIT_CONFIG_GLOBAL/SYSTEM to /dev/null --
     # reading after that point would resolve the user's config to an empty file.
     safe_directories = _user_safe_directories(base if base is not None else os.environ)

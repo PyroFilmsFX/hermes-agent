@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shutil
 import socket
 import subprocess
@@ -136,7 +137,7 @@ def _browser_env() -> dict:
         return _build_browser_env()
     except Exception as e:
         logger.debug("credential-scrubbed browser env unavailable: %s", e)
-        return os.environ.copy()
+        return scrub_desktop_control_plane_env(os.environ.copy())
 
 
 def _cdp_ready(url: str, timeout: float = 0.2) -> bool:

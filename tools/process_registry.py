@@ -9,6 +9,7 @@ from contextlib import suppress
 import json
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import platform
 import shlex
 import signal
@@ -211,7 +212,7 @@ def systemd_user_bus_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
     The returned copy is passed explicitly to the probe and every scoped spawn;
     ``os.environ`` is left unchanged.
     """
-    env = dict(os.environ if base_env is None else base_env)
+    env = scrub_desktop_control_plane_env(dict(os.environ if base_env is None else base_env))
     if not _IS_LINUX:
         return env
     configured = env.get("XDG_RUNTIME_DIR")

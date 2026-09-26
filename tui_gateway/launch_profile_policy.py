@@ -39,7 +39,7 @@ def capture_launch_env() -> Dict[str, str]:
     global _snapshot
     with _lock:
         if _snapshot is None:
-            _snapshot = dict(os.environ)
+            _snapshot = dict(os.environ)  # control-plane-env: launch snapshot; only TERMINAL_* is read back
         return dict(_snapshot)
 
 
@@ -114,7 +114,7 @@ def _launch_env() -> Dict[str, str]:
     (no secondary has run yet, so it is provably the launch profile's, and freezing it early would
     miss values the launch process still bridges at startup)."""
     from agent.secret_scope import is_multiplex_active
-    return capture_launch_env() if is_multiplex_active() else dict(os.environ)
+    return capture_launch_env() if is_multiplex_active() else dict(os.environ)  # control-plane-env: read for TERMINAL_* only
 
 
 def launch_terminal_env() -> Dict[str, str]:

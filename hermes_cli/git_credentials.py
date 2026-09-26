@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import re
 import shutil
 import subprocess
@@ -90,7 +91,7 @@ def _credential_fill(origin: str) -> Optional[tuple[str, str]]:
     git = shutil.which("git")
     if not git:
         return None
-    env = dict(os.environ)
+    env = scrub_desktop_control_plane_env(dict(os.environ))
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "Never"
     # A GUI askpass (VS Code, ssh-askpass) would block on a dialog nobody sees.

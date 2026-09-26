@@ -6,6 +6,13 @@ import functools
 import os
 from typing import Optional
 
+# The desktop control-plane deny list lives in a dependency-free leaf module so bootstrap-time
+# spawners (updater, sqlite runtime, git helpers) can apply it without importing this module's
+# provider registry; re-exported here as part of the child-env policy.
+from hermes_cli.control_plane_env import (  # noqa: F401 — re-exported policy surface
+    DESKTOP_CONTROL_PLANE_ENV_KEYS, PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS,
+    desktop_control_plane_env_blanks, is_desktop_control_plane_env, scrub_desktop_control_plane_env)
+
 # Prefix a caller uses in ``extra_env`` to force a blocklisted var through.
 _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 
@@ -296,4 +303,4 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HASS_TOKEN", "EMAIL_PASSWORD", "HERMES_DASHBOARD_SESSION_TOKEN",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
-})
+}) | DESKTOP_CONTROL_PLANE_ENV_KEYS

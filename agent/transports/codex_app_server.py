@@ -123,7 +123,10 @@ class CodexAppServerClient:
                 if key in os.environ:
                     cmd += ["-c", f"mcp_servers.{HERMES_TOOLS_MCP_SERVER_NAME}.env.{key}={json.dumps(os.environ[key])}"]
             cmd += ["-c", f'mcp_servers.{HERMES_TOOLS_MCP_SERVER_NAME}.env.{DELEGATED_CHILD_ENV_MARKER}=""']
-        spawn_env = delegated_child_subprocess_env(spawn_env)
+        # Last over the caller's env too: codex runs model-chosen shell commands, and must never
+        # hold the desktop control plane (DESKTOP_CONTROL_PLANE_ENV_KEYS).
+        from tools.environments.local_env_policy import scrub_desktop_control_plane_env
+        spawn_env = scrub_desktop_control_plane_env(delegated_child_subprocess_env(spawn_env))
         # Kanban workers must write handoff/status to the board DB outside the
         # workspace: keep the sandbox on, add the Kanban root as writable.
         if owned_task:

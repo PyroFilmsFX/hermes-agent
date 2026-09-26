@@ -633,7 +633,7 @@ def _create_session(
     else:
         task_list_id = None
     task_config_dir = configured_sdk_env.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
-    effective_child_env = dict(os.environ)
+    effective_child_env = dict(os.environ)  # control-plane-env: models the SDK child env to resolve its task root; not spawned
     effective_child_env.update(_sdk_env_overrides(task_list_id=task_list_id, task_env=task_env))
     task_store_root = _resolve_sdk_task_store_root(cwd, effective_child_env)
     try:

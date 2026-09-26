@@ -1297,7 +1297,7 @@ def _attach_built_agent(sid: str, current: dict, agent) -> None:
                     agent._claude_sdk_todo_snapshot_bootstrap = (
                         lambda **kwargs: bootstrap_sdk_todo_snapshot(str(sid), **kwargs)
                     )
-                    effective_env = dict(os.environ)
+                    effective_env = dict(os.environ)  # control-plane-env: models the SDK child env to resolve its task root; not spawned
                     effective_env.update(
                         _sdk_env_overrides(
                             task_list_id=task_list_id,

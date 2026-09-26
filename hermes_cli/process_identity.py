@@ -227,6 +227,35 @@ def register_self(purpose: str, *, project_root: Optional[Path] = None, detail: 
     return _append_entry(entry)
 
 
+# Process-local record of the control-plane values the startup seal popped from os.environ
+# (see seal_desktop_control_plane_env). Never exported, never logged.
+_SEALED_CONTROL_PLANE_ENV: dict[str, str] = {}
+
+
+def seal_desktop_control_plane_env() -> None:
+    """Pop the desktop control plane from THIS process's ``os.environ``, keeping values locally.
+
+    The desktop backend is handed HERMES_DASHBOARD_SESSION_TOKEN (and inherits the Electron
+    shell's HERMES_DESKTOP_CDP_PORT) through its environment; every child spawned without an
+    explicit ``env=`` — and the Claude SDK, which merges ``{**os.environ, ...}`` — would inherit
+    them. The token is kept here for the backend's own auth decisions
+    (:func:`desktop_session_token`). Idempotent. Called by ``web_server.start_server`` before
+    anything can spawn an agent; policy: ``PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS``.
+    """
+    from hermes_cli.control_plane_env import PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS
+
+    for key in [k for k in os.environ if k.upper() in PROCESS_SEALED_CONTROL_PLANE_ENV_KEYS]:
+        value = os.environ.pop(key, None)
+        if value:
+            _SEALED_CONTROL_PLANE_ENV[key.upper()] = value
+
+
+def desktop_session_token() -> Optional[str]:
+    """The Desktop-minted per-spawn session token: the sealed value, else the live env."""
+    return (_SEALED_CONTROL_PLANE_ENV.get("HERMES_DASHBOARD_SESSION_TOKEN")
+            or os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or None)
+
+
 def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
     """Whether this process is the backend Desktop spawned and owns.
 
@@ -239,7 +268,7 @@ def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
     """
     if os.environ.get("HERMES_DESKTOP") != "1":
         return False
-    if os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"):
+    if desktop_session_token():
         return True
     from hermes_cli._startup_fast import is_desktop_ssh_backend_argv
 

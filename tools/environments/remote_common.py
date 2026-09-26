@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
 import shlex
 import subprocess
 from typing import Callable, Iterable
@@ -71,7 +72,7 @@ def prepend_unset(cmd_string: str, names: Iterable[str]) -> str:
 def client_env_with(values: dict[str, str]) -> dict[str, str] | None:
     """Env for the docker/ssh CLIENT subprocess: forwarded values travel here (owner-readable
     /proc/*/environ) while the argv carries names only; ``None`` = inherit when nothing to add."""
-    return {**os.environ, **values} if values else None
+    return scrub_desktop_control_plane_env({**os.environ, **values}) if values else None
 
 
 def run_capture(cmd: list[str], *, timeout: float, check: bool = False, env: dict | None = None,
