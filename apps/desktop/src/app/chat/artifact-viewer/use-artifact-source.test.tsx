@@ -5,7 +5,8 @@ const state = vi.hoisted(() => ({ visible: true }))
 const requestForOwnedSession = vi.hoisted(() => vi.fn())
 
 vi.mock('@/components/pane-shell/pane-visibility', () => ({ usePaneVisible: () => state.visible }))
-vi.mock('@/store/session-states', () => ({
+vi.mock('@/store/session-states', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/store/session-states')>()),
   knownOwnerForSession: () => null,
   requestForOwnedSession: (...args: unknown[]) => requestForOwnedSession(...args)
 }))
@@ -57,7 +58,7 @@ describe('artifact source live tail', () => {
     })
     render(<ArtifactViewerPane target={target} />)
     await act(async () => {})
-    fireEvent.click(screen.getByRole('button', { name: 'Load earlier' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier output' }))
     await act(async () => {})
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
     expect(screen.getByText(/earlier page/)).toBeTruthy()

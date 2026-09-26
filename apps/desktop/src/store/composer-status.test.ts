@@ -77,14 +77,19 @@ describe('composer status relay job terminal rows', () => {
     $relayJobsBySession.set({})
   })
 
-  it('keeps finished relay jobs only while the parent turn is live', () => {
+  it('keeps finished relay jobs after the parent turn ends (the gateway window is the only lifetime)', () => {
     $relayJobsBySession.set({
       [SID]: [
         {
+          buildMatch: false,
           durationSeconds: 12,
+          effort: '',
           jobId: 'w_done',
+          label: '',
           lane: 'impl',
           model: 'gpt-6-sol',
+          place: '',
+          purpose: '',
           role: 'worker',
           spawnedAt: 1,
           status: 'succeeded',
@@ -93,12 +98,6 @@ describe('composer status relay job terminal rows', () => {
       ]
     })
     $sessionStates.set({ [SID]: createClientSessionState(null) })
-
-    expect($statusItemsBySession.get()[SID] ?? []).toEqual([])
-
-    $sessionStates.set({
-      [SID]: { ...createClientSessionState(null), awaitingResponse: true }
-    })
 
     expect($statusItemsBySession.get()[SID]).toMatchObject([
       { id: 'relay:w_done', relayStatus: 'succeeded', state: 'done', type: 'relay' }
@@ -121,6 +120,71 @@ describe('reconcileRelayJobsSnapshot model resolution', () => {
     }])
 
     expect($relayJobsBySession.get()[SID]?.[0]?.model).toBe('gpt-6-sol')
+  })
+})
+
+describe('reconcileRelayJobsSnapshot display fields', () => {
+  afterEach(() => {
+    $relayJobsBySession.set({})
+  })
+
+  it('maps label, purpose, place, effort, exit code, heartbeat and build membership', () => {
+    reconcileRelayJobsSnapshot(SID, [{
+      build_match: true,
+      duration_sec: 12,
+      effort: 'high',
+      exit_code: 1,
+      heartbeat_at: '2026-09-26T20:30:00Z',
+      job_id: 'w_20260926T202751Z_0e14',
+      label: 'fix-g9',
+      lane: 'fix',
+      model: 'gpt-6-luna',
+      place: 'lane-g9',
+      purpose: 'Fix exactly these review findings',
+      spawned_at: '2026-09-26T20:27:51Z',
+      status: 'failed',
+      worker: 'codex'
+    }])
+
+    expect($relayJobsBySession.get()[SID]?.[0]).toMatchObject({
+      buildMatch: true,
+      effort: 'high',
+      exitCode: 1,
+      heartbeatAt: Date.parse('2026-09-26T20:30:00Z'),
+      label: 'fix-g9',
+      place: 'lane-g9',
+      purpose: 'Fix exactly these review findings'
+    })
+  })
+
+  it('keeps missing fields absent instead of inventing zeros', () => {
+    reconcileRelayJobsSnapshot(SID, [{
+      exit_code: null,
+      job_id: 'w_old_backend',
+      spawned_at: new Date(0).toISOString(),
+      status: 'failed'
+    }])
+
+    const job = $relayJobsBySession.get()[SID]?.[0]
+
+    expect(job?.exitCode).toBeUndefined()
+    expect(job?.heartbeatAt).toBeUndefined()
+    expect(job?.durationSeconds).toBeUndefined()
+    expect(job?.label).toBe('')
+    expect(job?.purpose).toBe('')
+    expect(job?.place).toBe('')
+    expect(job?.buildMatch).toBe(false)
+  })
+
+  it('republishes when only a display field changes', () => {
+    const row = { job_id: 'w_x', label: 'a', spawned_at: new Date(0).toISOString(), status: 'running' }
+    reconcileRelayJobsSnapshot(SID, [row])
+    const before = $relayJobsBySession.get()[SID]
+
+    reconcileRelayJobsSnapshot(SID, [row])
+    expect($relayJobsBySession.get()[SID]).toBe(before)
+    reconcileRelayJobsSnapshot(SID, [{ ...row, purpose: 'Now with a purpose' }])
+    expect($relayJobsBySession.get()[SID]).not.toBe(before)
   })
 })
 

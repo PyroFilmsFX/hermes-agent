@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils'
 import { StatusDismissButton } from './status-dismiss-button'
 
 interface StatusRowProps {
+  /** Accessible name for an activatable row whose visible text is not a good label. */
+  'aria-label'?: string
   children: ReactNode
   className?: string
   depth?: number
@@ -34,6 +36,7 @@ interface StatusRowProps {
  * with the first text line; section nesting and row padding share one CSS grid.
  */
 export function StatusRow({
+  'aria-label': ariaLabel,
   children,
   className,
   depth = 0,
@@ -49,6 +52,7 @@ export function StatusRow({
   return (
     <div
       aria-expanded={expanded}
+      aria-label={ariaLabel}
       className={cn(
         'group/status-row status-row flex min-h-6 items-center gap-2 rounded-md px-1.5 py-1',
         // row-hover bundles cursor:pointer — only when the row actually activates.

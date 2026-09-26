@@ -10,7 +10,10 @@ from .registry import method
 
 
 class ConductorBuild(Result):
-    state: Literal["active", "waiting", "blocked", "lease_expired"]
+    # ``idle``: the owner is not a live Hermes session and the lease has run out (``idle_since`` is
+    # the lease expiry). ``lease_expired`` is no longer produced (a live owner shows normally, a
+    # gone owner reads ``idle``); it stays in the union for a newer client on an older gateway.
+    state: Literal["active", "waiting", "blocked", "lease_expired", "idle"]
     plan: str
     run_id: str
     session_id: str
@@ -28,6 +31,10 @@ class ConductorBuild(Result):
     usd_source: Literal["missing"] = "missing"
     stage: None
     unit_id: None
+    idle_since: float | None = None
+    # The marker file's mtime, set only when it is over 30 min old and the build is not idle: file
+    # age is the last successful marker write, not activity, so it is a quiet hint and never a state.
+    marker_stale_since: float | None = None
 
 
 class ConductorBuildResult(Result):

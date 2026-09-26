@@ -27,10 +27,23 @@ export type StatusItemState = 'done' | 'failed' | 'running'
 export type StatusItemType = 'background' | 'goal' | 'relay' | 'subagent' | 'todo'
 
 export interface RelayJob {
+  /** True when the job's run id belongs to the armed build marker. */
+  buildMatch: boolean
   durationSeconds?: number
+  effort: string
+  /** Absent when the record has none; never defaulted to 0. */
+  exitCode?: number
+  /** Unix milliseconds of the last heartbeat, when the record has one. */
+  heartbeatAt?: number
   jobId: string
+  /** Human name from the caller's run id (`fix-g9`); '' when it would be an id. */
+  label: string
   lane: string
   model: string
+  /** Lane directory basename or `main checkout`. */
+  place: string
+  /** First sentence of the brief, redacted by the gateway. */
+  purpose: string
   role: string
   spawnedAt: number
   status: string
@@ -302,12 +315,10 @@ export const $statusItemsBySession = computed(
       push(sid, list)
     }
 
+    // Relay rows are not tied to the turn: the gateway's linger window is their only lifetime,
+    // so a worker that finished (or hung) after the reply is still visible.
     for (const [sid, list] of Object.entries(relayJobs)) {
-      const turnLive = Boolean(
-        sessionStates[sid] &&
-          (sessionStates[sid].busy || sessionStates[sid].awaitingResponse || sessionStates[sid].turnLive)
-      )
-      push(sid, list.filter(job => job.status === 'running' || turnLive).map(relayToItem))
+      push(sid, list.map(relayToItem))
     }
 
     let unchanged = Object.keys(prevStatusItems).length === Object.keys(out).length
@@ -464,9 +475,9 @@ export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessE
   writeBackground(sid, next)
 }
 
-/** Replace one session's relay roster from the gateway's read-only job snapshot. */
-export function reconcileRelayJobsSnapshot(sid: string, payload: Array<Record<string, unknown>>) {
-  const next = payload.flatMap((row): RelayJob[] => {
+/** Map `relay_jobs.list` rows to renderer jobs. Missing fields stay absent, never 0. */
+export function relayJobsFromPayload(payload: Array<Record<string, unknown>>): RelayJob[] {
+  return payload.flatMap((row): RelayJob[] => {
     if (typeof row.job_id !== 'string' || typeof row.status !== 'string' || typeof row.spawned_at !== 'string') {
       return []
     }
@@ -475,28 +486,45 @@ export function reconcileRelayJobsSnapshot(sid: string, payload: Array<Record<st
       return []
     }
     const duration = typeof row.duration_sec === 'number' && Number.isFinite(row.duration_sec) ? row.duration_sec : undefined
+    const heartbeatAt = typeof row.heartbeat_at === 'string' && row.heartbeat_at ? Date.parse(row.heartbeat_at) : NaN
+    const text = (value: unknown) => (typeof value === 'string' ? value : '')
 
     return [{
+      buildMatch: row.build_match === true,
       durationSeconds: duration,
+      effort: text(row.effort),
+      exitCode: typeof row.exit_code === 'number' && Number.isInteger(row.exit_code) ? row.exit_code : undefined,
+      heartbeatAt: Number.isFinite(heartbeatAt) ? heartbeatAt : undefined,
       jobId: row.job_id,
+      label: text(row.label),
       lane: typeof row.lane === 'string' ? row.lane : '',
       model: [row.model_resolved, row.model, row.model_requested].find(
         (value): value is string =>
           typeof value === 'string' && value !== '' && value !== 'unverified' && value !== 'backend-does-not-attest'
       ) ?? '',
+      place: text(row.place),
+      purpose: text(row.purpose),
       role: typeof row.role === 'string' ? row.role : '',
       spawnedAt,
       status: row.status,
       worker: typeof row.worker === 'string' ? row.worker : ''
     }]
   })
+}
+
+export const sameRelayJob = (job: RelayJob, item: RelayJob | undefined): boolean =>
+  item !== undefined && job.jobId === item.jobId && job.worker === item.worker && job.model === item.model &&
+  job.lane === item.lane && job.role === item.role && job.status === item.status &&
+  job.spawnedAt === item.spawnedAt && job.durationSeconds === item.durationSeconds &&
+  job.label === item.label && job.purpose === item.purpose && job.place === item.place &&
+  job.effort === item.effort && job.exitCode === item.exitCode && job.heartbeatAt === item.heartbeatAt &&
+  job.buildMatch === item.buildMatch
+
+/** Replace one session's relay roster from the gateway's read-only job snapshot. */
+export function reconcileRelayJobsSnapshot(sid: string, payload: Array<Record<string, unknown>>) {
+  const next = relayJobsFromPayload(payload)
   const current = $relayJobsBySession.get()[sid] ?? []
-  const unchanged = current.length === next.length && current.every((job, index) => {
-    const item = next[index]
-    return item && job.jobId === item.jobId && job.worker === item.worker && job.model === item.model &&
-      job.lane === item.lane && job.role === item.role && job.status === item.status &&
-      job.spawnedAt === item.spawnedAt && job.durationSeconds === item.durationSeconds
-  })
+  const unchanged = current.length === next.length && current.every((job, index) => sameRelayJob(job, next[index]))
   if (unchanged) {
     return
   }

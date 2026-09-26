@@ -1185,7 +1185,7 @@ export interface ConductorBuildResult {
   unreadable?: boolean
 }
 export interface ConductorBuild {
-  state: 'active' | 'waiting' | 'blocked' | 'lease_expired'
+  state: 'active' | 'waiting' | 'blocked' | 'lease_expired' | 'idle'
   plan: string
   run_id: string
   session_id: string
@@ -1203,6 +1203,8 @@ export interface ConductorBuild {
   usd_source?: 'missing'
   stage: null
   unit_id: null
+  idle_since?: number | null
+  marker_stale_since?: number | null
 }
 /** ``tools/bot_desktop/runtime.py::DesktopStatus`` plus the lease and the profile it speaks for. */
 export interface DisplayStatus {
@@ -2836,6 +2838,11 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface RelayJobsListParams {
+  session_id: string
+  profile?: string | null
+  scope?: 'recent' | 'build'
+}
 export interface RelayJobsListResult {
   jobs?: RelayJobRow[]
 }
@@ -2850,6 +2857,12 @@ export interface RelayJobRow {
   spawned_at: string
   heartbeat_at?: string
   duration_sec?: number | null
+  label?: string
+  purpose?: string
+  place?: string
+  effort?: string
+  exit_code?: number | null
+  build_match?: boolean
 }
 export interface SessionCreateParams {
   profile?: string | null
@@ -5209,7 +5222,7 @@ export interface RpcMethods {
   /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. */
   'prompt.submit': { params: PromptSubmitParams; result: PromptSubmitResult }
   /** Read recent conductor relay worker jobs for the calling session's workspace. */
-  'relay_jobs.list': { params: SessionParams; result: RelayJobsListResult }
+  'relay_jobs.list': { params: RelayJobsListParams; result: RelayJobsListResult }
   /** Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new. */
   'reload.env': { params: ReloadEnvParams; result: ReloadEnvResult }
   /** Tear down and rediscover MCP servers for every live session (prompt cache is invalidated). */
