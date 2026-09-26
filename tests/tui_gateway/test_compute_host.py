@@ -20,10 +20,15 @@ def _stdout_queue(proc: subprocess.Popen) -> queue.Queue[dict]:
     return out
 
 
-def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:
+# get() returns as soon as a frame arrives, so a generous deadline only matters on a
+# cold, loaded CI runner where the child's first import can take several seconds.
+def _read_json_line(out: queue.Queue[dict], proc: subprocess.Popen, timeout: float = 30.0) -> dict:
     try:
         return out.get(timeout=timeout)
     except queue.Empty as exc:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(f"compute host exited {proc.returncode} before replying: {stderr[-2000:]}") from exc
         raise AssertionError("timed out waiting for compute host JSON") from exc
 
 
@@ -45,19 +50,19 @@ def test_compute_host_line_json_hello_and_shutdown():
     assert proc.stdin is not None
     out = _stdout_queue(proc)
     try:
-        hello = _read_json_line(out)
+        hello = _read_json_line(out, proc)
         assert hello["type"] == "hello"
         assert hello["host_pid"] == proc.pid
 
         proc.stdin.write(json.dumps({"type": "bogus", "request_id": "b"}) + "\n")
         proc.stdin.flush()
-        error = _read_json_line(out)
+        error = _read_json_line(out, proc)
         assert error["type"] == "error"
         assert error["message"] == "unknown frame type: bogus"
 
         proc.stdin.write(json.dumps({"type": "shutdown", "request_id": "stop"}) + "\n")
         proc.stdin.flush()
-        assert _read_json_line(out)["type"] == "shutdown.ack"
+        assert _read_json_line(out, proc)["type"] == "shutdown.ack"
         proc.wait(timeout=2)
     finally:
         if proc.poll() is None:
