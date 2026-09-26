@@ -521,11 +521,19 @@ export function useMessageStream({
       if (phase === 'complete' && stableToolId) {
         let settledSealedTool = false
         updateSessionState(sessionId, state => {
+          const hasCurrentResponse = Boolean(state.streamId || state.sawAssistantPayload || state.interimBoundaryPending)
+          const lastUserIndex = state.messages.findLastIndex(
+            message => message.role === 'user' && !(hasCurrentResponse && message.id === `user-queued-${sessionId}`)
+          )
+          // Keep late results within this turn; completed parts are not owners.
           const messageIndex = state.messages.findLastIndex(
-            message =>
+            (message, index) =>
+              index > lastUserIndex &&
               message.role === 'assistant' &&
               message.id !== state.streamId &&
-              message.parts.some(part => part.type === 'tool-call' && part.toolCallId === stableToolId)
+              message.parts.some(
+                part => part.type === 'tool-call' && part.toolCallId === stableToolId && part.result === undefined
+              )
           )
 
           if (messageIndex === -1) {
