@@ -18,8 +18,10 @@ import {
   $sessionProfilesTruncated,
   $sessionProfilesUsage,
   $sessions,
+  $sessionsInitialLoadPending,
   $sessionsLoadError,
   $sessionsLoading,
+  $gatewayState,
   setCronSessions,
   setMessagingPlatformTotals,
   setMessagingSessions,
@@ -121,6 +123,8 @@ beforeEach(() => {
   setSessionProfilesTruncated({})
   setSessionProfilesUsage({})
   setSessionsLoading(false)
+  $sessionsInitialLoadPending.set(true)
+  $gatewayState.set('idle')
   setSessionsLoadError(false)
 })
 
@@ -134,7 +138,84 @@ afterEach(() => {
   setSessionProfilesTruncated({})
   setSessionProfilesUsage({})
   setSessionsLoading(false)
+  $sessionsInitialLoadPending.set(true)
+  $gatewayState.set('idle')
   setSessionsLoadError(false)
+})
+
+describe('sidebar reload list readiness', () => {
+  it('keeps the empty sidebar in loading state when a request fails before ready', async () => {
+    listSidebarSessions.mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    $gatewayState.set('idle')
+    setSessionsLoading(true)
+
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions().catch(() => undefined)
+    })
+
+    expect($sessionsInitialLoadPending.get()).toBe(true)
+    expect($sessionsLoadError.get()).toBe(true)
+  })
+
+  it('retries with backoff and publishes rows after the retry succeeds', async () => {
+    vi.useFakeTimers()
+    listSidebarSessions.mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    listSidebarSessions.mockResolvedValueOnce(sidebar({ sessions: [row('reloaded')] }))
+
+    const { unmount } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    act(() => $gatewayState.set('open'))
+    await act(async () => Promise.resolve())
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+
+    expect($sessions.get().map(session => session.id)).toEqual(['reloaded'])
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+    unmount()
+    vi.useRealTimers()
+  })
+
+  it('stops after six failed initial attempts and releases the loading barrier', async () => {
+    vi.useFakeTimers()
+    listSidebarSessions.mockRejectedValue(new Error('ECONNREFUSED'))
+
+    const { unmount } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+    act(() => $gatewayState.set('open'))
+
+    await act(async () => vi.advanceTimersByTimeAsync(20_000))
+
+    expect(listSidebarSessions).toHaveBeenCalledTimes(6)
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+    expect($sessionsLoadError.get()).toBe(true)
+    unmount()
+    vi.useRealTimers()
+  })
+
+  it('clears initial pending when the first empty page arrives alongside an unsent draft', async () => {
+    setSessions([row('draft', { message_count: 0 })])
+    $sessionsInitialLoadPending.set(true)
+    listSidebarSessions.mockResolvedValueOnce(sidebar({ sessions: [] }))
+    $gatewayState.set('open')
+    renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => Promise.resolve())
+
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+  })
+
+  it('settles to the empty state only after a ready backend returns an empty list', async () => {
+    listSidebarSessions.mockResolvedValueOnce(sidebar({ sessions: [] }))
+    $gatewayState.set('open')
+    setSessionsLoading(true)
+
+    renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => Promise.resolve())
+
+    expect($sessions.get()).toEqual([])
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+  })
 })
 
 // #67600: a cold-start read that fails must not render as "No sessions yet".
@@ -178,13 +259,29 @@ describe('refreshSessions cold-start load error', () => {
 
   it('leaves a corrupt store to its own notice instead of offering retry', async () => {
     listSidebarSessions.mockResolvedValueOnce(failedScan({ default: 'corrupt' }))
-    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+    $gatewayState.set('open')
+    renderHook(() => useSessionListActions({ profileScope: 'default' }))
 
-    await act(async () => {
-      await result.current.refreshSessions()
-    })
+    await act(async () => Promise.resolve())
 
     expect($sessionsLoadError.get()).toBe(false)
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+    expect(listSidebarSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry a reported missing list method', async () => {
+    listSidebarSessions.mockResolvedValueOnce({
+      ...sidebar({ sessions: [] }),
+      errors: [{ error: 'unknown method: sessions.list', profile: 'default' }]
+    })
+    $gatewayState.set('open')
+    renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => Promise.resolve())
+
+    expect($sessionsInitialLoadPending.get()).toBe(false)
+    expect($sessionsLoadError.get()).toBe(false)
+    expect(listSidebarSessions).toHaveBeenCalledTimes(1)
   })
 
   it('never flags a failed refresh over rows already on screen', async () => {

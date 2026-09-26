@@ -863,6 +863,10 @@ export function touchSessionActivity(
 export const $connection = atom<HermesConnection | null>(null)
 export const $gatewayState = atom<ConnectionState>('idle')
 export const $sessions = atom<SessionInfo[]>([])
+// True until an open backend returns an authoritative initial session page.
+// Failed and pre-ready empty responses must not look like an empty account.
+export const $sessionsInitialLoadPending = atom(true)
+export const SESSIONS_INITIAL_LOAD_ATTEMPT_LIMIT = 6
 // Cron-job sessions (source === 'cron') are fetched as their own list so the
 // scheduler's always-newest sessions never crowd recents out of the page
 // budget. Powers the collapsed "Cron jobs" sidebar section.

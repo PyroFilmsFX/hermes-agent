@@ -93,7 +93,9 @@ import {
   $projects,
   $projectScope,
   $projectTree,
+  $projectTreeLoaded,
   $projectTreeLoading,
+  $projectsRpcAvailable,
   $reposScanning,
   ALL_PROJECTS,
   enterProject,
@@ -122,6 +124,7 @@ import {
   $messagingTruncated,
   $sessionProfilesTruncated,
   $sessions,
+  $sessionsInitialLoadPending,
   $sessionsLoadError,
   $sessionsLoading,
   $unreadFinishedSessionIds,
@@ -483,6 +486,7 @@ export function ChatSidebar({
   const messagingPlatformTotals = useStore($messagingPlatformTotals)
   const messagingTruncated = useStore($messagingTruncated)
   const sessionsLoading = useStore($sessionsLoading)
+  const sessionsInitialLoadPending = useStore($sessionsInitialLoadPending)
   const sessionsLoadError = useStore($sessionsLoadError)
   const sessionProfilesTruncated = useStore($sessionProfilesTruncated)
   const unreadCount = useStore($unreadFinishedSessionIds).length
@@ -518,6 +522,8 @@ export function ChatSidebar({
   const projectOrderIds = useStore($sidebarProjectOrderIds)
   const projects = useStore($projects)
   const projectTree = useStore($projectTree)
+  const projectTreeLoaded = useStore($projectTreeLoaded)
+  const projectsRpcAvailable = useStore($projectsRpcAvailable)
   const projectOwners = useStore($projectOwnerBySessionId)
 
   // The persisted project filter's storage is shared across profiles, so ids
@@ -544,6 +550,8 @@ export function ChatSidebar({
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
   const [recentsLoadMorePending, setRecentsLoadMorePending] = useState(false)
+  const [projectTreeLoadError, setProjectTreeLoadError] = useState(false)
+  const [projectTreeRetryKey, setProjectTreeRetryKey] = useState(0)
   const messagingOpenIds = useStore($sidebarMessagingOpenIds)
   // Per-platform count of rows currently revealed (starts at NON_SESSION_INITIAL_ROWS).
   const [messagingVisible, setMessagingVisible] = useState<Record<string, number>>({})
@@ -817,8 +825,9 @@ export function ChatSidebar({
   // Workspace grouping is a `project -> repo -> lane -> sessions` tree computed
   // authoritatively on the backend (projects.tree). Parents reorder via
   // workspaceParentOrderIds; worktrees within a parent via workspaceOrderIds.
-  const worktreeGroupingActive = agentsGrouped && !showArchived
+  const worktreeGroupingActive = agentsGrouped && !showArchived && projectsRpcAvailable !== false
   const gatewayReady = gatewayState === 'open'
+  const projectTreeContext = useRef(`${activeConnectionId}:${profileScope}`)
 
   // The backend project tree is a structural snapshot, NOT a per-message feed.
   // Refresh it on structural edges only — entering the grouped view, a profile
@@ -828,8 +837,45 @@ export function ChatSidebar({
   // completing does NOT re-run the heavy list_sessions_rich scan. Project
   // mutations refresh the tree from their own store actions.
   useEffect(() => {
+    const nextContext = `${activeConnectionId}:${profileScope}`
+
+    if (projectTreeContext.current !== nextContext) {
+      projectTreeContext.current = nextContext
+      $projectTree.set([])
+      $projectTreeLoaded.set(false)
+      setProjectTreeLoadError(false)
+    }
+
     if (!gatewayReady) {
       return
+    }
+
+    if (projectsRpcAvailable === false) {
+      setProjectTreeLoadError(false)
+      return
+    }
+
+    let cancelled = false
+    let retryTimer: number | null = null
+    let retryDelay = 500
+    let attempts = 0
+    setProjectTreeLoadError(false)
+
+    const loadTree = async () => {
+      attempts += 1
+      await refreshProjectTree()
+
+      if (cancelled || $projectsRpcAvailable.get() === false || $projectTreeLoaded.get()) {
+        return
+      }
+
+      if (attempts < 6) {
+        const delay = retryDelay
+        retryDelay = Math.min(retryDelay * 2, 8000)
+        retryTimer = window.setTimeout(() => void loadTree(), delay)
+      } else {
+        setProjectTreeLoadError(true)
+      }
     }
 
     if (worktreeGroupingActive) {
@@ -841,28 +887,46 @@ export function ChatSidebar({
       // by the profile count and write the result into profiles the user isn't
       // driving.
       if (showAllProfiles) {
-        void refreshProjectTree()
+        void loadTree()
 
-        return
+        return () => {
+          cancelled = true
+          if (retryTimer !== null) window.clearTimeout(retryTimer)
+        }
       }
 
       // Paint the list from the fast tree fetch (explicit projects + repos from
       // existing sessions / the backend cache) FIRST, then kick off the heavy
       // home-dir git crawl so newly-discovered repos fold in afterward — instead
       // of the crawl blocking the first render.
-      void refreshProjectTree().finally(() => void scanAndRecordRepos())
+      void loadTree().finally(() => void scanAndRecordRepos())
 
-      return
+      return () => {
+        cancelled = true
+        if (retryTimer !== null) window.clearTimeout(retryTimer)
+      }
     }
 
     // Flat view: warm the tree in the background anyway. Fetching it only on
     // the switch meant the first switch of every run paid for the whole round
     // trip behind a skeleton, and the menu's Project filter had nothing to
     // list until you'd visited the grouped view at least once.
-    const warm = window.setTimeout(() => void refreshProjectTree(), PROJECT_TREE_WARM_MS)
+    const warm = window.setTimeout(() => void loadTree(), PROJECT_TREE_WARM_MS)
 
-    return () => window.clearTimeout(warm)
-  }, [activeConnectionId, worktreeGroupingActive, showAllProfiles, profileScope, gatewayReady])
+    return () => {
+      cancelled = true
+      window.clearTimeout(warm)
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+    }
+  }, [
+    activeConnectionId,
+    worktreeGroupingActive,
+    showAllProfiles,
+    profileScope,
+    gatewayReady,
+    projectsRpcAvailable,
+    projectTreeRetryKey
+  ])
 
   // Widen the existing tree query when the user expands previews, without
   // repeating repo discovery. Initial load/scope changes use the effect above.
@@ -1278,7 +1342,7 @@ export function ChatSidebar({
   // while the skeleton is up there's no point also spinning the header count.
   const projectsSkeletonVisible =
     worktreeGroupingActive &&
-    projectTreeLoading &&
+    (projectTreeLoading || (!projectTreeLoaded && gatewayReady && !projectTreeLoadError)) &&
     !projectOverview?.length &&
     !(inProject && (enteredProject?.sessionCount ?? 0) > 0)
 
@@ -1512,12 +1576,18 @@ export function ChatSidebar({
   // Skeletons mean "still loading", so they key off the UNFILTERED set. Keyed
   // off the filtered one, a filter that matches nothing showed skeletons on
   // every background refresh instead of the empty state.
-  const showSessionSkeletons = sessionsLoading && scopedSessions.length === 0
+  const showSessionSkeletons = (sessionsLoading || sessionsInitialLoadPending) && scopedSessions.length === 0
 
   // Filtered down to nothing still renders the section: the empty state is what
   // tells you the filter — not an empty account — is why the list is bare.
   const showSessionSections =
-    showSessionSkeletons || sessionsLoadError || filtersActive || sortedSessions.length > 0 || projectModel.length > 0
+    showSessionSkeletons ||
+    projectsSkeletonVisible ||
+    projectTreeLoadError ||
+    sessionsLoadError ||
+    filtersActive ||
+    sortedSessions.length > 0 ||
+    projectModel.length > 0
 
   // The sidebar's session-area mode — exposed as data-attributes so custom
   // skins can target project mode (overview vs. entered), archived, or search
@@ -1780,6 +1850,15 @@ export function ChatSidebar({
             )}
 
             {!trimmedQuery && inProject && projectLoadFailed && <SidebarLoadErrorState onRetry={retryProject} />}
+            {!trimmedQuery && projectTreeLoadError && worktreeGroupingActive && !inProject && (
+              <SidebarLoadErrorState
+                onRetry={() => {
+                  setProjectTreeLoadError(false)
+                  $projectTreeLoaded.set(false)
+                  setProjectTreeRetryKey(key => key + 1)
+                }}
+              />
+            )}
             {!trimmedQuery && (
               <SidebarSessionsSection
                 activeProjectId={activeProjectId}
@@ -1805,10 +1884,12 @@ export function ChatSidebar({
                 )}
                 dndSensors={dndSensors}
                 emptyState={
-                  inProject && projectLoadFailed ? null : showSessionSkeletons || (inProject && projectLoading) ? (
-                    <SidebarSessionSkeletons />
-                  ) : !inProject && sessionsLoadError ? (
+                  inProject && projectLoadFailed ? null : projectTreeLoadError &&
+                    worktreeGroupingActive &&
+                    !inProject ? null : !inProject && sessionsLoadError ? (
                     <SidebarLoadErrorState onRetry={() => void onRetrySessions()} />
+                  ) : showSessionSkeletons || projectsSkeletonVisible || (inProject && projectLoading) ? (
+                    <SidebarSessionSkeletons />
                   ) : (
                     <div className="grid min-h-16 place-items-center rounded-lg px-2 text-center text-xs text-(--ui-text-tertiary)">
                       {inProject
@@ -1966,7 +2047,7 @@ export function ChatSidebar({
                 projectOverviewHidden={overviewHidden}
                 projectOverviewPreviews={overviewPreviews}
                 projectRepoWorktrees={inProject ? scopedRepoWorktrees : undefined}
-                projectsLoading={worktreeGroupingActive ? projectTreeLoading : false}
+                projectsLoading={worktreeGroupingActive && (projectTreeLoading || (!projectTreeLoaded && gatewayReady))}
                 removedSessionIds={inProject ? removedSessionIds : undefined}
                 rootClassName={cn(
                   'min-h-32 flex-1 overflow-hidden p-0',

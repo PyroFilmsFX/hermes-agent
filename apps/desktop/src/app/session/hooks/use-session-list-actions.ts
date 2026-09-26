@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useStore } from '@nanostores/react'
 
 import { getApiRequestConnection, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
+import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import {
   isMessagingSource,
   LOCAL_SESSION_SOURCE_IDS,
@@ -20,9 +22,13 @@ import {
 } from '@/store/layout'
 import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
+  $gatewayState,
   $messagingSessions,
   $selectedStoredSessionId,
   $sessions,
+  $sessionsInitialLoadPending,
+  $sessionsLoadError,
+  SESSIONS_INITIAL_LOAD_ATTEMPT_LIMIT,
   carryForwardFailedProfileSessions,
   CRON_SECTION_LIMIT,
   keepFailedProfileMeta,
@@ -125,10 +131,14 @@ interface UseSessionListActionsArgs {
  *  and the per-platform messaging slices. Returns the callbacks the controller
  *  wires into the sidebar and refresh effects. */
 export function useSessionListActions({ profileScope }: UseSessionListActionsArgs) {
+  const gatewayState = useStore($gatewayState)
+  const sessionsInitialLoadPending = useStore($sessionsInitialLoadPending)
   const profileScopeRef = useRef(profileScope)
   const loadMoreMessagingRequestRef = useRef<Record<string, number>>({})
   const refreshMessagingSessionsRequestRef = useRef(0)
   const refreshSessionsRequestRef = useRef(0)
+  const retryTimerRef = useRef<null | number>(null)
+  const retryDelayRef = useRef(500)
 
   useLayoutEffect(() => {
     profileScopeRef.current = profileScope
@@ -272,6 +282,15 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     async (shouldPublish: () => boolean = () => true) => {
       const sessionProfile = sidebarProfileForScope(profileScope)
 
+      // The sidebar's Retry affordance re-enters through this callback. Let the
+      // pending transition start a fresh bounded cycle instead of issuing one
+      // unbounded, one-off request from the button.
+      if (!$sessionsInitialLoadPending.get() && $sessionsLoadError.get() && $sessions.get().length === 0) {
+        setSessionsLoadError(false)
+        $sessionsInitialLoadPending.set(true)
+        return
+      }
+
       if (!shouldPublish() || sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
         return
       }
@@ -342,8 +361,17 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
 
           setCorruptSessionStores(result.storage)
           // A damaged store already has its own notice; Retry can't repair it.
-          const retryableErrors = recentsErrors?.filter(e => !result.storage?.[e.profile])
+          const retryableErrors = recentsErrors?.filter(
+            e => !result.storage?.[e.profile] && !isMissingRpcMethod(e.error)
+          )
           setSessionsLoadError(Boolean(showLoading && retryableErrors?.length && recents.sessions.length === 0))
+          if (showLoading && recents.sessions.length === 0) {
+            $sessionsInitialLoadPending.set(Boolean(retryableErrors?.length))
+          } else if (recents.sessions.length > 0) {
+            $sessionsInitialLoadPending.set(false)
+          } else if (!retryableErrors?.length) {
+            $sessionsInitialLoadPending.set(false)
+          }
 
           // Drop rows the user just deleted/archived: a refresh can race an
           // in-flight mutation and the backend page still carries the doomed row.
@@ -426,6 +454,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       } catch (error) {
         if (owns() && showLoading) {
           setSessionsLoadError(true)
+          $sessionsInitialLoadPending.set(!isMissingRpcMethod(error))
         }
 
         throw error
@@ -443,8 +472,78 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         void refreshCronJobs()
       }
     },
-    [profileScope, refreshCronJobs]
+    [gatewayState, profileScope, refreshCronJobs]
   )
+
+  // Renderer reloads can beat the backend's HTTP surface even after the socket
+  // opens. Keep the initial list unknown until a clean page arrives, then retry
+  // with capped backoff. The existing gateway state wakes the first read.
+  useEffect(() => {
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+
+    if (gatewayState !== 'open') {
+      if ($sessions.get().length === 0) {
+        $sessionsInitialLoadPending.set(true)
+      }
+
+      return
+    }
+
+    if (!sessionsInitialLoadPending) {
+      return
+    }
+
+    retryDelayRef.current = 500
+    let attempts = 0
+    let disposed = false
+
+    const scheduleRetry = () => {
+      if (disposed || !$sessionsInitialLoadPending.get()) {
+        return
+      }
+
+      const delay = retryDelayRef.current
+      retryDelayRef.current = Math.min(delay * 2, 4000)
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null
+        void attempt()
+      }, delay)
+    }
+
+    const attempt = async () => {
+      attempts += 1
+
+      try {
+        await refreshSessions()
+      } catch {
+        // The skeleton stays visible while the initial page is still unknown.
+      }
+
+      if (disposed) {
+        return
+      }
+
+      if ($sessionsInitialLoadPending.get() && attempts >= SESSIONS_INITIAL_LOAD_ATTEMPT_LIMIT) {
+        $sessionsInitialLoadPending.set(false)
+        setSessionsLoadError(true)
+      }
+
+      scheduleRetry()
+    }
+
+    void attempt()
+
+    return () => {
+      disposed = true
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+    }
+  }, [gatewayState, profileScope, refreshSessions, sessionsInitialLoadPending])
 
   const loadMoreSessions = useCallback(async () => {
     bumpSessionsLimit()
