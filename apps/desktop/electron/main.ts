@@ -94,6 +94,7 @@ import {
 } from './browser-windows'
 import { detectBundleSkew } from './bundle-skew'
 import { detectBundleSwap } from './bundle-swap'
+import { loadInstallStamp } from './install-stamp'
 import { registerChatOnboardingWindow } from './chat-onboarding-window'
 import { writeComposerPaste } from './composer-paste'
 import { applyConnectionChange, teardownSshState } from './connection-apply'
@@ -717,53 +718,12 @@ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 // build hasn't been invoked, or schema mismatch). Callers must handle null.
 //
 // Schema:
-//   { schemaVersion: 1, commit, branch, builtAt, dirty, source }
-const INSTALL_STAMP_SCHEMA_VERSION = 1
-
-function loadInstallStamp() {
-  // Try packaged location first (resources/install-stamp.json), then the
-  // dev/local build output (apps/desktop/build/install-stamp.json) so
-  // someone running `npm run start` after a local `npm run build` also
-  // sees a stamp without needing a packaged build.
-  const candidates = [
-    process.resourcesPath ? path.join(process.resourcesPath, 'install-stamp.json') : null,
-    path.join(APP_ROOT, 'build', 'install-stamp.json')
-  ].filter(Boolean)
-
-  for (const p of candidates) {
-    try {
-      const raw = fs.readFileSync(p, 'utf8')
-      const parsed = JSON.parse(raw)
-
-      if (parsed && typeof parsed === 'object' && typeof parsed.commit === 'string' && parsed.commit.length >= 7) {
-        if (parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
-          console.warn(
-            `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
-          )
-
-          continue
-        }
-
-        return Object.freeze({
-          schemaVersion: parsed.schemaVersion,
-          commit: parsed.commit,
-          branch: parsed.branch || null,
-          builtAt: parsed.builtAt || null,
-          dirty: Boolean(parsed.dirty),
-          source: parsed.source || null,
-          path: p
-        })
-      }
-    } catch (e) {
-      console.warn(`[hermes] install-stamp.json found at ${p} , but parsing failed with ${e}`)
-      // Either ENOENT or malformed JSON; try the next candidate
-    }
-  }
-
-  return null
-}
-
-const INSTALL_STAMP = loadInstallStamp()
+const INSTALL_STAMP = loadInstallStamp({
+  isDev: Boolean(DEV_SERVER),
+  resourcesPath: process.resourcesPath,
+  appRoot: APP_ROOT,
+  hermesRoot: process.env.HERMES_DESKTOP_HERMES_ROOT || SOURCE_REPO_ROOT
+})
 
 if (INSTALL_STAMP) {
   console.log(
@@ -3177,6 +3137,7 @@ async function checkUpdates({ force = false }: { force?: boolean } = {}) {
         "This copy of Hermes can't update itself from inside the app. Download the latest version from the Hermes website, " +
         `or reinstall Hermes to enable in-app updates. Details: ${updateRoot} has no version-control metadata.`,
       hermesRoot: updateRoot,
+      currentSha: INSTALL_STAMP?.commit ?? undefined,
       branch
     }
   }
@@ -3208,7 +3169,7 @@ async function checkUpdates({ force = false }: { force?: boolean } = {}) {
     supported: true,
     branch,
     currentBranch,
-    currentSha,
+    currentSha: currentSha || INSTALL_STAMP?.commit,
     dirty: dirtyStr.length > 0,
     hermesRoot: updateRoot,
     fetchedAt: now,
@@ -17722,6 +17683,8 @@ ipcMain.handle('hermes:version', async () => {
     nodeVersion: process.versions.node,
     platform: process.platform,
     hermesRoot: resolveUpdateRoot(),
+    commit: INSTALL_STAMP?.commit ?? null,
+    currentSha: INSTALL_STAMP?.commit ?? null,
     bundleOutOfSync: skew.outOfSync,
     bundleCommitsBehind: skew.desktopCommitsBehind,
     // True when the bundle on disk is not the one this process loaded — a

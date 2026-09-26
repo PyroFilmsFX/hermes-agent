@@ -353,7 +353,7 @@ export function useStatusbarItems({
       copy,
       remote: connection?.mode === 'remote',
       restarting: updateApply.stage === 'restart',
-      sha: updateStatus?.currentSha?.slice(0, 7) ?? null,
+      sha: (updateStatus?.currentSha || desktopVersion?.currentSha || desktopVersion?.commit)?.slice(0, 7) ?? null,
       target: 'client',
       updateAvailable: updateStatus?.updateAvailable,
       version: desktopVersion?.appVersion
@@ -376,6 +376,8 @@ export function useStatusbarItems({
     }
   }, [
     desktopVersion?.appVersion,
+    desktopVersion?.commit,
+    desktopVersion?.currentSha,
     connection?.mode,
     copy,
     updateApply.applying,
