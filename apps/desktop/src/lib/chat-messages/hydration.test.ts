@@ -85,6 +85,27 @@ describe('hydration peer_message support', () => {
     expect(msg.asyncResult).toBe(content)
   })
 
+  it('uses the sender name instead of the raw session id and keeps the id as metadata', () => {
+    const timestamp = 1_700_000_000
+    const messages = toChatMessages([
+      {
+        role: 'user',
+        content: 'Hello',
+        display_kind: 'peer_message',
+        display_metadata: {
+          direction: 'in',
+          peer: 'hermes-session:sess-9',
+          from_name: 'manager',
+          from_session_id: 'sess-9'
+        },
+        timestamp
+      } satisfies SessionMessage
+    ])
+
+    expect(getText(messages[0])).toBe(`↘ from manager · ${formatShortTime(timestamp)}`)
+    expect(messages[0]?.peerMetadata).toMatchObject({ peer: 'manager', from_session_id: 'sess-9' })
+  })
+
   it('hydrates outbound peer_message to system-role scaffold row with ellipsized first line and body', () => {
     const content = 'Deploying database migration\nRunning step 1 of 4\nDone.'
 
@@ -429,5 +450,19 @@ describe('hydration peer_message support', () => {
     })
 
     expect(labelFromFallback).toBe('woken by peer message: bob')
+  })
+
+  it('keeps lifecycle debug metadata out of the hydrated body', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'system',
+        content: '',
+        display_kind: 'session_lifecycle',
+        display_metadata: { event: 'woken', source: 'peer-mailbox', by: 'manager', uuid: 'abc', delivery_id: 'd-1' }
+      } satisfies SessionMessage
+    ])
+
+    expect(getText(message)).toBe('woken by peer message: manager')
+    expect(message?.asyncResult).toBeUndefined()
   })
 })

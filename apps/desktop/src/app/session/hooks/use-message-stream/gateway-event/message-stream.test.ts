@@ -322,4 +322,46 @@ describe('handleMessageStreamEvent background delivery contracts', () => {
       attempts: 2
     })
   })
+
+  it('uses from-name for the live peer card and keeps sender id as metadata', () => {
+    const ctx = context('message.complete')
+    ctx.payload = {
+      background: true,
+      display_kind: 'peer_message',
+      text: 'Inbound message',
+      display_metadata: {
+        direction: 'in',
+        peer: 'hermes-session:sess-9',
+        from_name: 'manager',
+        from_session_id: 'sess-9'
+      }
+    } as unknown as GatewayEventContext['payload']
+    let currentState = { messages: [], streamId: null } as unknown as ReturnType<
+      GatewayEventContext['deps']['updateSessionState']
+    >
+    ctx.deps.updateSessionState = vi.fn((_sid, updater) => (currentState = updater(currentState)))
+
+    handleMessageStreamEvent(ctx)
+
+    expect(currentState.messages[0].parts[0]).toMatchObject({ text: expect.stringContaining('↘ from manager') })
+    expect(currentState.messages[0].peerMetadata).toMatchObject({ peer: 'manager', from_session_id: 'sess-9' })
+  })
+
+  it('keeps live woken lifecycle metadata out of the body', () => {
+    const ctx = context('message.complete')
+    ctx.payload = {
+      background: true,
+      display_kind: 'session_lifecycle',
+      display_metadata: { event: 'woken', source: 'peer-mailbox', by: 'manager', uuid: 'abc', delivery_id: 'd-1' }
+    } as unknown as GatewayEventContext['payload']
+    let currentState = { messages: [], streamId: null } as unknown as ReturnType<
+      GatewayEventContext['deps']['updateSessionState']
+    >
+    ctx.deps.updateSessionState = vi.fn((_sid, updater) => (currentState = updater(currentState)))
+
+    handleMessageStreamEvent(ctx)
+
+    expect(currentState.messages[0].parts[0]).toMatchObject({ text: 'woken by peer message: manager' })
+    expect(currentState.messages[0].asyncResult).toBeUndefined()
+  })
 })

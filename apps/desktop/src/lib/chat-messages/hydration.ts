@@ -296,6 +296,12 @@ export function sessionLifecycleBody(
 ): string | undefined {
   const parsed = parseDisplayMetadata(metadata)
 
+  // Woken rows already have a concise lifecycle label. Rendering their full
+  // metadata as an async report leaks transport/debug fields into the thread.
+  if (parsed?.event === 'woken') {
+    return undefined
+  }
+
   return parsed
     ? Object.entries(parsed)
         .map(([key, value]) => `${key}: ${lifecycleValue(value)}`)
@@ -546,7 +552,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       metaRecord?.direction === 'out' || (!metaRecord?.direction && message.role === 'assistant') ? 'out' : 'in'
 
     const peer =
-      (typeof metaRecord?.peer === 'string' && metaRecord.peer.trim()) ||
+      (typeof metaRecord?.from_name === 'string' && metaRecord.from_name.trim()) ||
+      (typeof metaRecord?.title === 'string' && metaRecord.title.trim()) ||
+      (typeof metaRecord?.peer === 'string' &&
+        metaRecord.peer.trim() &&
+        !metaRecord.peer.startsWith('hermes-session:') &&
+        metaRecord.peer.trim()) ||
       (typeof metaRecord?.from === 'string' && metaRecord.from.trim()) ||
       (typeof metaRecord?.to === 'string' && metaRecord.to.trim()) ||
       parsedEnvelope?.from ||

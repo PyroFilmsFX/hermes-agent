@@ -520,12 +520,13 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         if (displayKind === 'session_lifecycle') {
           const metadata = displayMetadata ?? {}
           const label = sessionLifecycleLabel(metadata)
+          const lifecycleBody = sessionLifecycleBody(metadata)
 
           sealedMessage = {
             id: existing?.id ?? nextBackgroundMessageId('lifecycle'),
             role: 'system',
             parts: [{ type: 'text', text: label, timestamp: occurredAt }, ...existingToolParts],
-            asyncResult: sessionLifecycleBody(metadata),
+            ...(lifecycleBody ? { asyncResult: lifecycleBody } : {}),
             timestamp: existing?.timestamp ?? occurredAt,
             completedAt: occurredAt,
             pending: false,
@@ -535,7 +536,12 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           const direction = displayMetadata?.direction === 'out' ? 'out' : 'in'
 
           const peer =
-            (typeof displayMetadata?.peer === 'string' && displayMetadata.peer.trim()) ||
+            (typeof displayMetadata?.from_name === 'string' && displayMetadata.from_name.trim()) ||
+            (typeof displayMetadata?.title === 'string' && displayMetadata.title.trim()) ||
+            (typeof displayMetadata?.peer === 'string' &&
+              displayMetadata.peer.trim() &&
+              !displayMetadata.peer.startsWith('hermes-session:') &&
+              displayMetadata.peer.trim()) ||
             (typeof displayMetadata?.from === 'string' && displayMetadata.from.trim()) ||
             (typeof displayMetadata?.to === 'string' && displayMetadata.to.trim()) ||
             'peer'
