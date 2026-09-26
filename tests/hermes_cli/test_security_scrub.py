@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import sqlite3
 import string
@@ -1117,3 +1118,280 @@ def test_ledger_dir_swapped_for_a_symlink_mid_run_stops_before_any_target_write(
     assert any("symlink" in e for e in report.errors)
     assert _snapshot(home) == before
     assert list(outside.rglob("*")) == []
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (a): bytes appended to the ORIGINAL inode between the writer probe and
+# ``os.replace`` are carried into the new file (masked) and backed up raw.
+# ---------------------------------------------------------------------------
+
+from hermes_cli import security_scrub_backup as bk  # noqa: E402
+
+PASTE_LOC = "composer-pastes/pasted_content_1_ab12.txt"
+
+
+def _is_paste(path) -> bool:
+    return Path(path).name == "pasted_content_1_ab12.txt" and Path(path).parent.name == "composer-pastes"
+
+
+def _progress_ledger(h: Home) -> dict:
+    return json.loads((h.root / "secret-scrub" / "progress.json").read_text())
+
+
+def test_append_after_writer_probe_is_carried_masked_and_backed_up(home, monkeypatch):
+    late_secret = "ghp_" + fake(36, 1200)
+    partial_secret = "ghp_" + fake(36, 1201)
+    appended = f"late line {late_secret}\npartial {partial_secret}".encode()  # partial trailing line
+    original = home.paste.read_bytes()
+    hits = []
+
+    def append(path):
+        if _is_paste(path) and not hits:
+            hits.append(path)
+            with open(home.paste, "ab") as fh:  # the path still names the ORIGINAL inode here
+                fh.write(appended)
+
+    monkeypatch.setattr(scrub, "_after_writer_probe", append, raising=False)
+    report = run(home, apply=True)
+    assert hits, "the post-probe seam must run"
+    assert report.exit_code == 0, report.render_text()
+    body = home.paste.read_text()
+    for secret in (NEON_PW, late_secret, partial_secret):
+        assert secret not in body
+    assert "\nlate line [REDACTED:github-token:" in body
+    assert "\npartial [REDACTED:github-token:" in body and body.endswith("]")  # masked as-is, no newline added
+    assert _items(report, locator=PASTE_LOC, action="masked")
+    backup = Path(report.backup_path)
+    tails = sorted(backup.rglob("*.tail-*"))
+    assert len(tails) == 1 and tails[0].read_bytes() == appended
+    assert tails[0].stat().st_mode & 0o777 == 0o600
+    entry = next(f for f in json.loads((backup / "manifest.json").read_text())["files"] if f["locator"] == PASTE_LOC)
+    assert [t["offset"] for t in entry["tails"]] == [len(original)]
+    assert bk.restore_file_bytes(backup, PASTE_LOC) == original + appended
+    assert PASTE_LOC not in _progress_ledger(home)["pending_files"]
+    assert not [p for p in home.paste.parent.iterdir() if p.name.endswith(".scrub-tmp")]
+
+
+def test_append_during_tail_carry_loops_until_the_held_fd_is_stable(home, monkeypatch):
+    second_secret = "ghp_" + fake(36, 1202)
+    first = b"first late line\n"
+    second = f"second late line {second_secret}\n".encode()
+    original = home.paste.read_bytes()
+    writer: list = []  # a live writer's own append fd on the ORIGINAL inode
+    carry_hits = []
+
+    def after_probe(path):
+        if _is_paste(path) and not writer:
+            writer.append(open(home.paste, "ab", buffering=0))
+            writer[0].write(first)
+
+    def after_carry(path):
+        if _is_paste(path) and not carry_hits:
+            carry_hits.append(path)
+            writer[0].write(second)  # its name now points at the new file; the writer does not care
+
+    monkeypatch.setattr(scrub, "_after_writer_probe", after_probe, raising=False)
+    monkeypatch.setattr(scrub, "_after_tail_carried", after_carry, raising=False)
+    try:
+        report = run(home, apply=True)
+    finally:
+        for fh in writer:
+            fh.close()
+    assert writer and carry_hits
+    assert report.exit_code == 0, report.render_text()
+    body = home.paste.read_text()
+    assert second_secret not in body
+    assert "\nfirst late line\nsecond late line [REDACTED:github-token:" in body and body.endswith("]\n")
+    backup = Path(report.backup_path)
+    assert len(sorted(backup.rglob("*.tail-*"))) == 2
+    assert bk.restore_file_bytes(backup, PASTE_LOC) == original + first + second
+    assert PASTE_LOC not in _progress_ledger(home)["pending_files"]
+
+
+def test_endless_appender_exhausts_bounded_retries_and_marks_the_file_pending(home, monkeypatch):
+    original = home.paste.read_bytes()
+    writer: list = []
+    written: list = []
+
+    def tick(path):
+        if not _is_paste(path):
+            return
+        if not writer:
+            writer.append(open(home.paste, "ab", buffering=0))
+        line = f"tick {len(written)}\n".encode()
+        written.append(line)
+        writer[0].write(line)
+
+    monkeypatch.setattr(scrub, "_after_writer_probe", tick, raising=False)
+    monkeypatch.setattr(scrub, "_after_tail_carried", tick, raising=False)
+    try:
+        report = run(home, apply=True)
+    finally:
+        for fh in writer:
+            fh.close()
+    assert len(written) == 1 + getattr(scrub, "MAX_TAIL_ROUNDS", -1)
+    assert home.paste.read_bytes().endswith(b"".join(written))  # every appended byte carried, none lost
+    assert bk.restore_file_bytes(Path(report.backup_path), PASTE_LOC) == original + b"".join(written)
+    assert PASTE_LOC in _progress_ledger(home)["pending_files"]
+    assert report.exit_code == 1 and any("kept appending" in e for e in report.errors)
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (b): key=value / key:value / key-value shaped path components never leak.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("rel", "value", "kept"), [
+    ("password=letmein123.txt", "letmein123", "password=[REDACTED:secret].txt"),
+    ("API_KEY-abcdef123456.json", "abcdef123456", "API_KEY-[REDACTED:secret].json"),
+    ("dir/token:xyz789abc/file.md", "xyz789abc", "dir/token:[REDACTED:secret]/file.md"),
+])
+def test_report_masks_key_value_shaped_path_components(home, rel, value, kept):
+    _write(home.root / "composer-pastes" / rel, f"token {'ghp_' + fake(36, 1300)}\n")
+    for apply in (False, True):
+        report = run(home, apply=apply)
+        text = report.render_text()
+        blob = json.dumps(report.to_json()) + text
+        assert value not in blob, (apply, rel)
+        assert kept in blob
+        assert re.search(r"Totals \((?:would mask|masked)\): .*github-token=\d", text)  # kinds are not masked
+    ledgers = "".join(p.read_text() for p in (home.root / "secret-scrub").glob("*.json"))
+    assert value not in ledgers
+
+
+def test_report_text_key_value_components_unit():
+    r = scrub.redact_report_text
+    assert r("composer-pastes/password=letmein123.txt") == "composer-pastes/password=[REDACTED:secret].txt"
+    assert r("a/my_secret:hunter2/b.md") == "a/my_secret:[REDACTED:secret]/b.md"
+    assert r("x/Bearer-abc.def.log") == "x/Bearer-[REDACTED:secret].log"
+    assert "hunter22" not in r("profiles/p/private_key=hunter22.pem: rewrite failed (OSError)")
+    for plain in ("profiles/thinkbot/sessions/s_closed.jsonl", "oauth-callback.txt", "secret-scrub/progress.json",
+                  "tokens.txt", "authors.md"):
+        assert r(plain) == plain
+    rep = scrub.ScrubReport(mode="dry-run", root="/tmp/r")
+    rep.error("composer-pastes/session:abcd1234zz.txt: rewrite failed (OSError)")
+    assert "abcd1234zz" not in rep.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (c): the SQLite snapshot is made in a PRIVATE temp dir and streamed into the
+# backup through the walked backup dir fd; nothing writes into the backup tree by path.
+# ---------------------------------------------------------------------------
+
+def test_db_snapshot_is_private_then_streamed_byte_exact(home, monkeypatch):
+    import hermes_cli.backup_sqlite as bsql
+
+    real = bsql._safe_copy_db
+    seen = []
+
+    def spy(src, dst, **kw):
+        dst = Path(dst)
+        seen.append((dst, _stat_mode(dst.parent)))
+        ok = real(src, dst, **kw)
+        seen[-1] += (_stat_mode(dst),)
+        return ok
+
+    monkeypatch.setattr(bsql, "_safe_copy_db", spy)
+    report = run(home, apply=True)
+    assert report.exit_code == 0, report.render_text()
+    assert len(seen) == 1
+    dst, dir_mode, file_mode = seen[0]
+    for target_root in (home.root, home.claude):
+        assert not str(dst.resolve()).startswith(str(target_root.resolve()) + os.sep)
+    assert dir_mode == 0o700 and file_mode == 0o600
+    assert not dst.exists() and not dst.parent.exists()  # private snapshot + dir removed
+    backup = Path(report.backup_path)
+    copy = backup / "db" / "profiles" / "thinkbot" / "state.db"
+    entry = json.loads((backup / "manifest.json").read_text())["dbs"][0]
+    assert entry["sha256"] == _sha(copy) and entry["size"] == copy.stat().st_size
+    assert copy.stat().st_mode & 0o777 == 0o600
+    sidecars = [p for p in backup.rglob("*") if p.name.endswith(("-wal", "-shm", "-journal"))]
+    assert sidecars == []
+    conn = sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert NEON_PW in "".join(str(r[0]) for r in conn.execute("SELECT content FROM messages"))
+    finally:
+        conn.close()
+    assert [p for p in backup.rglob("*") if p.name.endswith(("-wal", "-shm", "-journal"))] == []
+
+
+def _stat_mode(p: Path) -> int:
+    return os.stat(p).st_mode & 0o777
+
+
+_AUDIT: dict = {"on": False, "events": []}
+
+
+def _audit_hook(event, args):
+    if _AUDIT["on"] and event in ("open", "sqlite3.connect"):
+        _AUDIT["events"].append((event, args))
+
+
+def test_no_pathname_write_into_the_backup_tree(home):
+    import sys
+
+    if not _AUDIT.get("installed"):
+        sys.addaudithook(_audit_hook)
+        _AUDIT["installed"] = True
+    tree = str((home.root / "backups").resolve())
+    _AUDIT["events"] = []
+    _AUDIT["on"] = True
+    try:
+        report = run(home, apply=True)
+    finally:
+        _AUDIT["on"] = False
+    assert report.exit_code == 0, report.render_text()
+    bad = []
+    for event, args in _AUDIT["events"]:
+        target = args[0]
+        if isinstance(target, int) or target is None:
+            continue
+        text = os.fsdecode(target) if isinstance(target, (bytes, os.PathLike)) else str(target)
+        if text.startswith("file:"):
+            from urllib.parse import unquote, urlparse
+            parsed = urlparse(text)
+            where, ro = unquote(parsed.path), "mode=ro" in parsed.query
+        else:
+            where, ro = text, False
+        if not os.path.isabs(where):
+            continue  # dir_fd-relative
+        try:
+            where = os.path.realpath(where)
+        except OSError:
+            pass
+        if not where.startswith(tree + os.sep):
+            continue
+        if event == "sqlite3.connect":
+            if not ro:
+                bad.append((event, text))
+        else:
+            mode, flags = args[1], args[2]
+            writes = (isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND)) \
+                or (isinstance(mode, str) and any(c in mode for c in "wax+"))
+            if writes:
+                bad.append((event, text))
+    assert bad == []
+    src = Path(bk.__file__).read_text()
+    assert "_path_is_entry_at(dst" not in src and "dir_path.joinpath" not in src
+
+
+def test_backup_parent_swapped_for_a_symlink_before_db_stream_fails_closed(home, tmp_path, monkeypatch):
+    outside = tmp_path / "db-backup-elsewhere"
+    outside.mkdir()
+    swapped = []
+
+    def swap(_dir_fd, rel):
+        (backup_dir,) = list((home.root / "backups" / "secret-scrub").iterdir())
+        parent = backup_dir.joinpath(*rel.split("/")[:-1])
+        parent.rename(parent.with_name(parent.name + "-moved"))
+        parent.symlink_to(outside, target_is_directory=True)
+        swapped.append(parent)
+
+    monkeypatch.setattr(bk, "_before_db_stream", swap, raising=False)
+    before = _snapshot(home)
+    report = run(home, apply=True)
+    assert swapped, "the pre-stream seam must run"
+    assert list(outside.rglob("*")) == []  # zero bytes outside the home
+    assert report.exit_code == 2, report.render_text()
+    assert "symlink" in (report.refused or "")
+    assert _snapshot(home) == before
