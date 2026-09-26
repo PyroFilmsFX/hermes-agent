@@ -121,7 +121,11 @@ export const SystemMessage: FC = () => {
 
   if (processResult || (typeof asyncResult === 'string' && asyncResult)) {
     return (
-      <MessagePrimitive.Root className="w-full min-w-0 self-start" data-role="system" data-slot="aui_system-message-root">
+      <MessagePrimitive.Root
+        className="w-full min-w-0 self-start"
+        data-role="system"
+        data-slot="aui_system-message-root"
+      >
         <BackgroundResult
           peerMetadata={peerMetadata}
           process={processResult}

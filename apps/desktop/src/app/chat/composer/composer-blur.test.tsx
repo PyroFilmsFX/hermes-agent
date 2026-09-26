@@ -58,7 +58,6 @@ function renderChatBar({
                 onAttachDroppedItems={vi.fn()}
                 onAttachImageBlob={vi.fn()}
                 onAttachPastedText={vi.fn()}
-                onAttachPrCommentUrl={vi.fn()}
                 onCancel={vi.fn()}
                 onPasteClipboardImage={vi.fn()}
                 onPickFiles={vi.fn()}
@@ -165,7 +164,6 @@ describe('Composer container backdrop blur styling across states (U1.5)', () => 
                   onAttachDroppedItems={vi.fn()}
                   onAttachImageBlob={vi.fn()}
                   onAttachPastedText={vi.fn()}
-                  onAttachPrCommentUrl={vi.fn()}
                   onCancel={vi.fn()}
                   onPasteClipboardImage={vi.fn()}
                   onPickFiles={vi.fn()}

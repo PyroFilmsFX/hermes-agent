@@ -39,7 +39,7 @@ def _check_claude_agent_sdk_auth(should_fix: bool, f: Finding) -> None:
         # The SDK python package is an opt-in extra that lazy-installs at first use — mirror the
         # codex-CLI availability hint.
         with warn_on_error(""):
-            from tools.lazy_deps import is_available
-            if not is_available("provider.claude_agent_sdk"):
+            from pm import available, install_hint
+            if not available("claude-agent-sdk"):
                 check_info("claude-agent-sdk package not installed (optional — installs at first use, or: "
-                           "pip install 'hermes-agent[claude-agent-sdk]')")
+                           f"{install_hint('claude-agent-sdk')})")

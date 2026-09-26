@@ -102,10 +102,9 @@ def check_claude_sdk_available() -> tuple[bool, str]:
     """Preflight: the optional SDK extra must be importable, and it bundles /
     locates the Claude Code CLI itself. Mirrors check_codex_binary()."""
     # Fast path FIRST: when the SDK already imports, never enter the lazy
-    # installer. ensure() can shell out to `uv pip install` and calls
-    # importlib.invalidate_caches(); doing either immediately before importing
-    # claude_agent_sdk -> mcp -> anyio rewrites site-packages and drops import
-    # caches under a live interpreter, which intermittently surfaces as
+    # installer. An install rewrites the dependency environment; doing that
+    # immediately before importing claude_agent_sdk -> mcp -> anyio under a
+    # live interpreter intermittently surfaced as
     #     KeyError: 'anyio'
     # from importlib._bootstrap._find_and_load — a hard, flaky session-start
     # failure on installs where the extra is ALREADY present.
@@ -117,23 +116,27 @@ def check_claude_sdk_available() -> tuple[bool, str]:
         pass
 
     # Lazy-install lane, mirroring agent/anthropic_adapter._get_anthropic_sdk:
-    # the extra is opt-in (excluded from [all]), so first use on a lean
-    # install goes through tools.lazy_deps.ensure. FeatureUnavailable falls
-    # through to the ImportError message below — same fail shape either way.
+    # the extra is a PM opt-in extra (outside [all]), so first use on a lean
+    # install goes through pm.ensure_import. A PM refusal (lazy installs
+    # disabled, another process installing, restart needed to activate)
+    # falls through to the message below with its reason — same fail shape.
+    reason = ""
     try:
-        from tools.lazy_deps import ensure as _lazy_ensure
-        _lazy_ensure("provider.claude_agent_sdk", prompt=False)
+        from pm import ensure_import
+        ensure_import("claude-agent-sdk")
     except ImportError:
         pass
-    except Exception:
-        # FeatureUnavailable — fall through to ImportError handling below
-        pass
+    except Exception as exc:
+        # InstallError — keep PM's reason for the message below
+        reason = f" ({exc})"
     try:
         import claude_agent_sdk  # noqa: F401
     except ImportError:
+        from pm import install_hint
+
         return (
             False,
-            "claude-agent-sdk is not installed. "
-            "Install with: pip install 'hermes-agent[claude-agent-sdk]'",
+            f"claude-agent-sdk is not available{reason}. "
+            f"Install with: {install_hint('claude-agent-sdk')}",
         )
     return True, "ok"

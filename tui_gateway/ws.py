@@ -17,6 +17,7 @@ from typing import Any
 from tui_gateway import server
 from agent.message_sanitization import _sanitize_surrogates
 from tui_gateway.event_replay import replay_epoch
+from tui_gateway.transport import serialize_frame
 
 _log = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class WSTransport:
     def write(self, obj: dict) -> bool:
         if self._closed:
             return False
-        line = json.dumps(obj, ensure_ascii=False)
+        line = serialize_frame(obj, self._peer, _log)
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
@@ -186,7 +187,7 @@ class WSTransport:
             return False
         with self._token_lock:
             batch, self._pending_tokens = self._pending_tokens, []
-            batch.append(json.dumps(obj, ensure_ascii=False))
+            batch.append(serialize_frame(obj, self._peer, _log))
         await self._safe_send_many(batch)
         return not self._closed
 
@@ -352,6 +353,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             # join this pool: the pool receives every detached session's event fan-out, which would
             # hand a scoped capability passive access to unrelated sessions (W8 review A8-25).
             server._ensure_skin_watcher()
+            server._ensure_lease_watcher()  # cross-process lease moves → display.lease
             server.register_live_transport(transport)
         # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
         # backend" from "truly orphaned". Idempotent and once-per-process, like the orphan sweep (the

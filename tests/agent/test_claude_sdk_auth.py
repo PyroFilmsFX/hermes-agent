@@ -104,100 +104,117 @@ class TestAuthClassifier:
 
 
 class TestSdkAvailabilityGate:
-    def test_check_routes_through_lazy_install_lane(self, monkeypatch):
-        # F1 (deps): the SDK is an opt-in extra excluded from [all], so the
-        # availability gate must offer the lazy-install lane first — the
-        # exact pattern anthropic_adapter._get_anthropic_sdk uses for
-        # provider.anthropic. A lean install otherwise dead-ends on
-        # ImportError with no self-serve path.
-        import tools.lazy_deps as lazy_deps
-        from agent.transports.claude_agent_sdk_session_availability import (
-            check_claude_sdk_available,
-        )
-
-        assert "provider.claude_agent_sdk" in lazy_deps.LAZY_DEPS
-        called = {}
-
-        def fake_ensure(feature, *, prompt=True):
-            called["feature"] = feature
-            called["prompt"] = prompt
-
-        monkeypatch.setattr(lazy_deps, "ensure", fake_ensure)
-        # Pin the LEAN install this lane exists for: a None entry in
-        # sys.modules makes `import claude_agent_sdk` raise ImportError.
+    @staticmethod
+    def _hide_sdk(monkeypatch, tmp_path):
+        # A lean install, crossing real PM admission (pm.extras.ensure_import):
+        # the SDK is absent from sys.modules and unfindable, and no runtime
+        # facts exist, so a successful sync needs no restart to activate.
+        import importlib.abc
         import sys as _sys
 
-        monkeypatch.setitem(_sys.modules, "claude_agent_sdk", None)
-        check_claude_sdk_available()
-        assert called == {"feature": "provider.claude_agent_sdk", "prompt": False}
+        from pm import paths
 
-    def test_check_skips_lazy_lane_when_sdk_already_imports(self, monkeypatch):
-        # ensure() can shell out to `uv pip install` and calls
-        # importlib.invalidate_caches(). Running it immediately before
-        # `import claude_agent_sdk -> mcp -> anyio` rewrites site-packages and
-        # drops import caches under a live interpreter, intermittently
-        # corrupting that very import ("KeyError: 'anyio'" out of
-        # importlib._bootstrap._find_and_load). When the extra is ALREADY
-        # importable the installer must not run at all.
+        class MissingSDK(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "claude_agent_sdk":
+                    raise ModuleNotFoundError("No module named 'claude_agent_sdk'")
+
+        monkeypatch.delitem(_sys.modules, "claude_agent_sdk", raising=False)
+        monkeypatch.setattr(_sys, "meta_path", [MissingSDK(), *_sys.meta_path])
+        monkeypatch.setattr(paths, "runtime_facts_path", lambda: tmp_path / "unselected-facts")
+
+    def test_check_routes_through_pm_lazy_install(self, monkeypatch, tmp_path):
+        # F1 (deps): the SDK is a PM opt-in extra outside [all], so the
+        # availability gate must offer PM's lazy-install lane first — the
+        # exact pattern anthropic_adapter._get_anthropic_sdk uses for the
+        # anthropic extra. A lean install otherwise dead-ends on
+        # ImportError with no self-serve path. Only the venv sync is faked.
+        import importlib.machinery
         import sys as _sys
         import types as _types
 
-        import tools.lazy_deps as lazy_deps
+        import pm.client
         from agent.transports.claude_agent_sdk_session_availability import (
             check_claude_sdk_available,
         )
 
-        called = {}
+        self._hide_sdk(monkeypatch, tmp_path)
+        sdk = _types.ModuleType("claude_agent_sdk")
+        sdk.__spec__ = importlib.machinery.ModuleSpec("claude_agent_sdk", loader=None)
+        synced = []
 
-        def fake_ensure(feature, *, prompt=True):
-            called["feature"] = feature
+        def sync(extras):
+            synced.append(extras)
+            monkeypatch.setitem(_sys.modules, "claude_agent_sdk", sdk)
 
-        monkeypatch.setattr(lazy_deps, "ensure", fake_ensure)
+        monkeypatch.setattr(pm.client, "sync_venv", sync)
+        assert check_claude_sdk_available() == (True, "ok")
+        assert synced == [["claude-agent-sdk"]]
+
+    def test_check_skips_lazy_lane_when_sdk_already_imports(self, monkeypatch):
+        # An install rewrites the dependency environment. Running one
+        # immediately before `import claude_agent_sdk -> mcp -> anyio` under a
+        # live interpreter intermittently corrupted that very import
+        # ("KeyError: 'anyio'" out of importlib._bootstrap._find_and_load).
+        # When the extra is ALREADY importable PM must not be entered at all.
+        import sys as _sys
+        import types as _types
+
+        from agent.transports.claude_agent_sdk_session_availability import (
+            check_claude_sdk_available,
+        )
+
+        called = []
+        monkeypatch.setattr("pm.ensure_import", lambda extra: called.append(extra))
         monkeypatch.setitem(
             _sys.modules, "claude_agent_sdk", _types.ModuleType("claude_agent_sdk")
         )
         assert check_claude_sdk_available() == (True, "ok")
-        assert called == {}
+        assert called == []
 
-    def test_lazy_lane_pin_matches_pyproject_extra(self):
-        # The LAZY_DEPS lane must mirror the pyproject extra in lockstep
-        # (same contract test_pyproject_and_lazy_deps_pins_agree enforces
-        # globally; pinned here so the SDK lane keeps a single exact spec).
-        from tools.lazy_deps import LAZY_DEPS
+    def test_pm_extra_is_declared_opt_in_and_anchored(self):
+        # The lane names the `claude-agent-sdk` pyproject extra. It keeps a
+        # single exact SDK pin, stays a PM opt-in extra (each wheel bundles the
+        # Claude Code CLI, so --all-extras bundles must never carry it), and PM
+        # proves it installed by importing the SDK itself.
+        import tomllib
+        from pathlib import Path
 
-        specs = LAZY_DEPS["provider.claude_agent_sdk"]
-        assert len(specs) == 1
-        assert specs[0].startswith("claude-agent-sdk==")
+        from packaging.requirements import Requirement
 
-    def test_check_reports_missing_sdk(self, monkeypatch):
-        # RED-first negative control: with the import broken, the gate must
-        # fail with the install hint — never silently pass. The lazy lane is
-        # stubbed to FeatureUnavailable (lazy installs disabled / offline) so
-        # the test never triggers a real multi-MB SDK download on CI.
-        import builtins
+        from pm.extras import _anchors
+        from pm.features import opt_in_extras
 
-        import tools.lazy_deps as lazy_deps
+        root = Path(__file__).resolve().parents[2]
+        extra = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"]["optional-dependencies"]["claude-agent-sdk"]
+        sdk = [Requirement(spec) for spec in extra if Requirement(spec).name == "claude-agent-sdk"]
+        assert len(sdk) == 1 and [s.operator for s in sdk[0].specifier] == ["=="]
+        assert "claude-agent-sdk" in opt_in_extras(root)
+        assert _anchors("claude-agent-sdk") == ("claude_agent_sdk",)
 
-        def _unavailable(feature, *, prompt=True):
-            raise lazy_deps.FeatureUnavailable(feature, (), "disabled in test")
-
-        monkeypatch.setattr(lazy_deps, "ensure", _unavailable)
-
-        real_import = builtins.__import__
-
-        def _broken(name, *args, **kwargs):
-            if name == "claude_agent_sdk":
-                raise ImportError("No module named 'claude_agent_sdk'")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _broken)
+    def test_check_reports_missing_sdk(self, monkeypatch, tmp_path):
+        # RED-first negative control: with the SDK absent and PM refusing the
+        # install (lazy installs disabled / offline), the gate must fail with
+        # PM's install hint and its refusal reason — never silently pass, and
+        # never trigger a real ~100 MB SDK download on CI.
+        import pm.client
+        from pm import install_hint
+        from pm.package import InstallError
         from agent.transports.claude_agent_sdk_session_availability import (
             check_claude_sdk_available,
         )
 
+        self._hide_sdk(monkeypatch, tmp_path)
+
+        def _refuse(extras):
+            raise InstallError("venv", "lazy installs are disabled in this test")
+
+        monkeypatch.setattr(pm.client, "sync_venv", _refuse)
         ok, msg = check_claude_sdk_available()
         assert ok is False
-        assert "hermes-agent[claude-agent-sdk]" in msg
+        assert install_hint("claude-agent-sdk") in msg
+        assert "lazy installs are disabled in this test" in msg
 
 
 class TestAnthropicTokenGuard:

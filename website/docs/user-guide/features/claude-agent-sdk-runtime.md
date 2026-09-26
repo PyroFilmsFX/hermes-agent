@@ -29,10 +29,10 @@ There is no Hermes login flow and no API key. The SDK-managed CLI subprocess aut
 The Python package is an opt-in extra that lazy-installs at first use, or explicitly:
 
 ```bash
-pip install 'hermes-agent[claude-agent-sdk]'
+hermes pm install --extra claude-agent-sdk
 ```
 
-The extra pins `claude-agent-sdk>=0.2.140` together with `mcp` 2.x, so it installs alongside `[mcp]`, `[dev]` and `[all]` on one `mcp` major. (Earlier SDK releases pinned `mcp<2` and could not share a venv with the `hermes-tools` stdio server.)
+Bundles never preinstall it: each SDK wheel carries the Claude Code CLI. The extra pins `claude-agent-sdk>=0.2.140` together with `mcp` 2.x, so it installs alongside `[mcp]`, `[all]` and the `dev` dependency group on one `mcp` major. (Earlier SDK releases pinned `mcp<2` and could not share a venv with the `hermes-tools` stdio server.)
 
 ### Authentication-policy boundary
 
