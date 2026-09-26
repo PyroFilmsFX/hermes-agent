@@ -164,9 +164,10 @@ export interface SessionTokenFileSupportDeps {
  * passing an unknown flag to an old runtime would crash its argparse.
  */
 export function createSessionTokenFileSupportResolver(deps: SessionTokenFileSupportDeps) {
-  const cache = new Map<string, Promise<boolean>>()
+  const cache = new Map<string, Promise<boolean | null>>()
 
-  return function backendSupportsSessionTokenFile(candidate: SessionTokenFileSupportCandidate): Promise<boolean> {
+  // true = accepts the flag, false = positively identified as predating it, null = could not tell.
+  return function backendSupportsSessionTokenFile(candidate: SessionTokenFileSupportCandidate): Promise<boolean | null> {
     if (!candidate?.command) {
       return Promise.resolve(false)
     }
@@ -208,11 +209,16 @@ export function createSessionTokenFileSupportResolver(deps: SessionTokenFileSupp
             cache.delete(key)
           }
 
-          supported = false
+          // Unknown is not "old": the caller still uses the private file.
+          supported = null
         }
       }
 
-      deps.log(`[backend] session token handoff: ${supported ? 'private file' : 'environment (legacy runtime)'}`)
+      deps.log(
+        `[backend] session token handoff: ${
+          supported === false ? 'environment (legacy runtime)' : supported ? 'private file' : 'private file (runtime support unknown)'
+        }`
+      )
 
       return supported
     })()
@@ -228,6 +234,31 @@ export function createSessionTokenFileSupportResolver(deps: SessionTokenFileSupp
  * the env has NO token at all (an inherited stale value is deleted too); the
  * env handoff is only for runtimes that predate the flag.
  */
+/**
+ * Pick the handoff for one spawn. Only a runtime positively identified as predating
+ * `--session-token-file` (support === false) gets the token in its environment; an
+ * unknown runtime still gets the private file, and a failed file write refuses the
+ * start rather than degrading to the environment (a planted `~/.hermes/desktop-local`
+ * must not turn a current backend back into an env-token one).
+ */
+export function chooseSessionTokenHandoff(
+  support: boolean | null,
+  write: () => SessionTokenHandoff
+): SessionTokenHandoff | null {
+  if (support === false) {
+    return null
+  }
+
+  try {
+    return write()
+  } catch (error) {
+    throw new Error(
+      `could not write the private session token file (${error instanceof Error ? error.message : String(error)}); ` +
+        'refusing to start the backend with the session token in its environment'
+    )
+  }
+}
+
 export function applySessionTokenHandoff(
   args: string[],
   env: NodeJS.ProcessEnv,

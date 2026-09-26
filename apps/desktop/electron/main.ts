@@ -201,6 +201,7 @@ import {
 import { resolveDesktopRemoteRoute, v1SshTerminalPoolKey } from './desktop-remote-route'
 import {
   applySessionTokenHandoff,
+  chooseSessionTokenHandoff,
   createSessionTokenFiles,
   createSessionTokenFileSupportResolver,
   type SessionTokenHandoff
@@ -2690,22 +2691,15 @@ const backendSupportsSessionTokenFile = createSessionTokenFileSupportResolver({
 })
 
 // Token handoff for one local spawn: a private file when the runtime's `serve`
-// accepts `--session-token-file`, else the legacy env var. The legacy
-// `dashboard --no-open` fallback never gets the flag.
+// accepts `--session-token-file` or can't be identified, the legacy env var only
+// for a runtime positively identified as older. A failed file write refuses the
+// start. The legacy `dashboard --no-open` fallback never gets the flag.
 async function prepareSessionTokenHandoff(backend, token: string): Promise<SessionTokenHandoff | null> {
-  if (!backend.args.includes('serve') || !(await backendSupportsSessionTokenFile(backend))) {
+  if (!backend.args.includes('serve')) {
     return null
   }
 
-  try {
-    return sessionTokenFiles.write(token)
-  } catch (error) {
-    rememberLog(
-      `[backend] could not write the private session token file (${error instanceof Error ? error.message : String(error)}); using the environment handoff`
-    )
-
-    return null
-  }
+  return chooseSessionTokenHandoff(await backendSupportsSessionTokenFile(backend), () => sessionTokenFiles.write(token))
 }
 
 // Given a resolved backend whose args target `serve`, return the args the

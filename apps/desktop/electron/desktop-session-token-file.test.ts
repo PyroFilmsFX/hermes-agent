@@ -8,6 +8,7 @@ import { afterEach, beforeEach, test } from 'vitest'
 
 import {
   applySessionTokenHandoff,
+  chooseSessionTokenHandoff,
   createSessionTokenFiles,
   createSessionTokenFileSupportResolver,
   helpDeclaresSessionTokenFile,
@@ -139,7 +140,7 @@ test('flag detection never confuses the SSH flag for the local one', () => {
   assert.equal(helpDeclaresSessionTokenFile('  --ssh-session-token-file PATH\n'), false)
 })
 
-test('support resolver: source first, `serve --help` only when the source is unreadable, false when unsure', async () => {
+test('support resolver: source first, `serve --help` only when the source is unreadable, null when unsure', async () => {
   const helpCalls: string[][] = []
   let helpText = '  --session-token-file PATH'
 
@@ -177,12 +178,40 @@ test('support resolver: source first, `serve --help` only when the source is unr
   assert.equal(helpCalls.length, 1)
 
   helpText = ''
-  assert.equal(await resolve({ command: 'py', args: ['-m', 'hermes_cli.main', 'serve'] }), false)
+  // An unreadable source plus a failed probe is NOT proof of an old runtime.
+  assert.equal(await resolve({ command: 'py', args: ['-m', 'hermes_cli.main', 'serve'] }), null)
   assert.deepEqual(helpCalls[1], ['-m', 'hermes_cli.main', 'serve', '--help'])
 
   // Shell shims re-split argv: always the env handoff.
   assert.equal(await resolve({ command: 'hermes.cmd', root: '/new', shell: true }), false)
   assert.equal(await resolve({ command: '' }), false)
+})
+
+test('handoff choice: only a positively identified old runtime gets the env token; a failed file write fails closed', () => {
+  const handoff = { dir: '/d', file: '/d/t.token' }
+  let writes = 0
+
+  const write = () => {
+    writes += 1
+
+    return handoff
+  }
+
+  assert.equal(chooseSessionTokenHandoff(false, write), null)
+  assert.equal(writes, 0)
+  assert.equal(chooseSessionTokenHandoff(true, write), handoff)
+  // Unknown support (probe timed out, source unreadable): still the private file.
+  assert.equal(chooseSessionTokenHandoff(null, write), handoff)
+  assert.equal(writes, 2)
+
+  // e.g. a regular file planted at ~/.hermes/desktop-local: never degrade to the env handoff.
+  assert.throws(
+    () =>
+      chooseSessionTokenHandoff(true, () => {
+        throw new Error('EEXIST')
+      }),
+    /refusing to start the backend with the session token in its environment/
+  )
 })
 
 test('the desktop renderer takes the session token from the IPC bridge, never from a served page', () => {
