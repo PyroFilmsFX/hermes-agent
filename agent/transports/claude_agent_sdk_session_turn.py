@@ -271,6 +271,12 @@ class ClaudeSdkTurnMixin:
             result.fatal_reason = "auth" if hint else "startup"
             return result
 
+        # b3-30: the hermes-tools capability was issued once at CLI spawn and expired an hour later;
+        # rotate it at every turn start so session_send/session_create keep authenticating.
+        refresh_capability = getattr(self, "refresh_session_spawn_capability", None)
+        if callable(refresh_capability):
+            refresh_capability()
+
         with self._interrupt_commit_lock:
             # Re-open interrupt admission for this turn.  A post-terminal
             # request that no outer runtime consumed belongs to this next

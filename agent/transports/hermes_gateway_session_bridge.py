@@ -8,8 +8,10 @@ cooperative-attach handshake and can call only the internal task-create RPC.
 
 from __future__ import annotations
 
+import dataclasses
 import hmac
 import json
+import logging
 import os
 import secrets
 import threading
@@ -28,19 +30,33 @@ except ImportError:  # pragma: no cover - websockets is a pinned dependency
 
 _CAPABILITY_ENV = "HERMES_SESSION_SPAWN_CAPABILITY"
 _SESSION_ENV = "HERMES_SESSION_ID"
+# Idle TTL: every successful full authorization slides it (a long turn that keeps using the
+# capability never expires mid-turn), and the SDK session rotates the published capability at each
+# turn start.  Before b3-30 this was a fixed TTL from issuance and nothing re-issued it, so every
+# SDK session older than an hour got HTTP 401 from the owner gateway on session_send.
 _CAPABILITY_TTL_SECONDS = 3600.0
+# A rotated-out capability keeps full authority this long so an in-flight attach/RPC is not cut.
+_ROTATION_GRACE_SECONDS = 120.0
 _TRANSPORT_TICKET_TTL_SECONDS = 30.0
 _MAX_TRANSPORT_TICKETS = 128
 _RPC_TIMEOUT_SECONDS = 15.0
+# Rotation-shaped refusals from the attach route itself (explicit JSON codes).
+_QUEUE_FALLBACK_CODES = frozenset({"session_identity_mismatch", "lease_live_session_mismatch", "lease_not_found"})
+# 4xx statuses that are NOT caller errors: auth refusals (an idle-expired capability is a 401 from
+# the dashboard auth middleware), timeouts, and throttling.  Every other 4xx is a caller error.
+_QUEUEABLE_4XX = frozenset({401, 403, 408, 425, 429})
+
+logger = logging.getLogger(__name__)
 
 
 class SessionSpawnBridgeError(RuntimeError):
     """A scoped bridge could not authenticate or reach its owner gateway."""
 
-    def __init__(self, message: str, *, code: str = "", endpoint: str = ""):
+    def __init__(self, message: str, *, code: str = "", endpoint: str = "", status_code: int = 0):
         super().__init__(message)
         self.code = code
         self.endpoint = endpoint
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -51,6 +67,8 @@ class ScopedSessionCapability:
     profile_home: str = ""
     session_generation: str = ""
     owner_session_key: str = ""
+    last_used: float = 0.0  # sliding idle-TTL anchor; 0 = unused since issuance
+    revoke_after: float = 0.0  # set when rotated out: hard end of the grace window
 
 
 _capability_lock = threading.RLock()
@@ -106,8 +124,35 @@ def issue_scoped_capability(owner_session_id: str) -> str | None:
     capability = ScopedSessionCapability(token, runtime_id, time.time(), profile_home, generation,
                                          str(record.get("session_key") or ""))
     with _capability_lock:
+        now = time.time()
+        for old_token, old in list(_capabilities.items()):
+            if old.revoke_after and now >= old.revoke_after:
+                _capabilities.pop(old_token, None)
         _capabilities[token] = capability
     return token
+
+
+def rotate_scoped_capability(owner_session_id: str, previous_token: str | None = None,
+                             *, grace_seconds: float = _ROTATION_GRACE_SECONDS) -> str | None:
+    """Issue a fresh capability and retire ``previous_token`` after a grace window.
+
+    The previous token keeps full authority for ``grace_seconds`` so a child call that already read
+    it is not cut mid-flight; after that it is revoked (queue-only authentication included).
+    """
+    token = issue_scoped_capability(owner_session_id)
+    if token and previous_token and previous_token != token:
+        retire_scoped_capability(previous_token, grace_seconds=grace_seconds)
+    return token
+
+
+def retire_scoped_capability(token: str | None, *, grace_seconds: float = _ROTATION_GRACE_SECONDS) -> None:
+    """Schedule revocation of a rotated-out capability after ``grace_seconds``."""
+    if not token:
+        return
+    with _capability_lock:
+        if (record := _capabilities.get(str(token))) is not None and not record.revoke_after:
+            _capabilities[str(token)] = dataclasses.replace(
+                record, revoke_after=time.time() + max(0.0, float(grace_seconds)))
 
 
 def revoke_scoped_capability(token: str | None) -> None:
@@ -145,19 +190,21 @@ def revoke_scoped_capabilities_for_session(session: dict | None) -> None:
                 _transport_ticket_by_owner.pop((record.owner_session_id, record.session_generation), None)
 
 
-def authorize_scoped_capability(token: str | None) -> ScopedSessionCapability | None:
-    """Resolve a capability in the owner gateway process, failing closed."""
+def _authorize(token: str | None, *, queue_only: bool) -> ScopedSessionCapability | None:
     presented = str(token or "")
     if not presented:
         return None
     with _capability_lock:
         record = _capabilities.get(presented)
         if record is None:
-            _capabilities.pop(presented, None)
             return None
         # Keep the comparison explicit: callers must never use a partially
         # matched token as identity.
         if not hmac.compare_digest(record.token, presented):
+            return None
+        now = time.time()
+        if record.revoke_after and now >= record.revoke_after:
+            _capabilities.pop(presented, None)
             return None
         live = _live_owner(record.owner_session_id)
         if live is None or live[1] != record.session_generation:
@@ -167,10 +214,30 @@ def authorize_scoped_capability(token: str | None) -> ScopedSessionCapability | 
         if _effective_owner_home(current) != record.profile_home:
             _capabilities.pop(presented, None)
             return None
-        if time.time() - record.issued_at >= _CAPABILITY_TTL_SECONDS:
-            _capabilities.pop(presented, None)
-            return None
-        return record
+        if queue_only:
+            # Idle expiry does not end sender authentication for a durable, non-delivering enqueue:
+            # the record is still bound to the live generation and profile and is still revocable.
+            return record
+        if now - max(record.issued_at, record.last_used) >= _CAPABILITY_TTL_SECONDS:
+            return None  # idle-expired: kept (not popped) so the queue-only route can authenticate
+        refreshed = dataclasses.replace(record, last_used=now)
+        _capabilities[presented] = refreshed
+        return refreshed
+
+
+def authorize_scoped_capability(token: str | None) -> ScopedSessionCapability | None:
+    """Resolve a capability in the owner gateway process, failing closed.
+
+    A successful authorization slides the idle TTL."""
+    return _authorize(token, queue_only=False)
+
+
+def authorize_scoped_capability_for_queue(token: str | None) -> ScopedSessionCapability | None:
+    """Queue-only sender authentication for ``/api/session-send-queue``.
+
+    Accepts an idle-expired capability, never a revoked, rotated-out (past grace), foreign-generation,
+    or foreign-profile one, and never extends the capability's full authority."""
+    return _authorize(token, queue_only=True)
 
 
 def capability_from_environment() -> tuple[str, str, Path] | None:
@@ -230,11 +297,12 @@ def _discover_url(owner_session_id: str, registry_home: Path, token: str = "") -
                 }:
                     code = body["code"]
             raise SessionSpawnBridgeError(f"owner gateway attach refused: {code}", code=code,
-                                          endpoint=endpoint) from exc
+                                          endpoint=endpoint, status_code=403) from exc
         if response is not None:
             status_code = int(getattr(response, "status_code", 0) or 0)
             raise SessionSpawnBridgeError(f"owner gateway returned HTTP {status_code} during attach",
-                                          code=f"attach_http_{status_code}") from exc
+                                          code=f"attach_http_{status_code}", endpoint=endpoint,
+                                          status_code=status_code) from exc
         raise SessionSpawnBridgeError("owner gateway transport failed during attach", code="attach_transport") from exc
     url = reply.get("websocket_url") if isinstance(reply, dict) else None
     ws_parts = urlsplit(url) if isinstance(url, str) else None
@@ -349,10 +417,11 @@ class HermesGatewaySessionBridge:
         try:
             return self._rpc("session.send", params)
         except SessionSpawnBridgeError as exc:
-            if not exc.endpoint or exc.code not in {
-                "session_identity_mismatch", "lease_live_session_mismatch", "lease_not_found",
-            }:
+            if not _attach_refusal_is_queueable(exc):
                 raise
+            logger.warning(
+                "session_send: owner gateway refused attach (HTTP %s, code=%s) for target=%s; queueing durably",
+                exc.status_code or "?", exc.code or "?", target)
             import httpx
 
             try:
@@ -367,10 +436,33 @@ class HermesGatewaySessionBridge:
                 response.raise_for_status()
                 result = response.json()
             except Exception as queue_exc:  # noqa: BLE001
-                raise SessionSpawnBridgeError("durable peer queue fallback failed", code="queue_fallback_failed") from queue_exc
+                queue_status = getattr(getattr(queue_exc, "response", None), "status_code", None) or "transport"
+                logger.warning("session_send: durable queue fallback failed (HTTP %s) for target=%s after attach HTTP %s",
+                               queue_status, target, exc.status_code or "?")
+                raise SessionSpawnBridgeError(
+                    f"durable peer queue fallback failed (attach HTTP {exc.status_code or '?'}, queue {queue_status})",
+                    code="queue_fallback_failed") from queue_exc
             if not isinstance(result, dict):
                 raise SessionSpawnBridgeError("durable peer queue returned an invalid result", code="queue_fallback_invalid")
             return result
+
+
+def _attach_refusal_is_queueable(exc: SessionSpawnBridgeError) -> bool:
+    """Whether an attach refusal falls back to the capability-authenticated durable queue route.
+
+    Queue on rotation-shaped refusal codes and on any non-2xx attach status that is not a caller
+    error: 401 (an idle-expired capability, refused by the dashboard auth middleware), a 403 without
+    a specific refusal code, 408/425/429, and 5xx.  Explicit misuse codes (``capability_invalid``,
+    ``profile_mismatch``, ``lease_registry_unavailable``), caller-error 4xx, transport failures, and
+    pre-HTTP discovery errors stay distinct non-queued outcomes."""
+    if not exc.endpoint:
+        return False
+    if exc.code in _QUEUE_FALLBACK_CODES:
+        return True
+    status = int(exc.status_code or 0)
+    if status and exc.code in {"attach_refused", f"attach_http_{status}"}:
+        return status >= 500 or status in _QUEUEABLE_4XX
+    return False
 
 
 def bridge_available_from_environment() -> bool:
@@ -419,6 +511,7 @@ __all__ = [
     "SessionSpawnBridgeError",
     "ScopedSessionCapability",
     "authorize_scoped_capability",
+    "authorize_scoped_capability_for_queue",
     "bridge_available_from_environment",
     "capability_from_environment",
     "capability_file_path",
@@ -427,5 +520,6 @@ __all__ = [
     "issue_scoped_transport_ticket",
     "revoke_scoped_capabilities_for_session",
     "revoke_scoped_capability",
+    "rotate_scoped_capability",
     "scoped_bridge_available",
 ]

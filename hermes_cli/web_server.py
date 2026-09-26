@@ -448,8 +448,19 @@ def _session_attach_capability_principal(request: Request) -> bool:
     if not presented:
         return False
     try:
-        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
-        capability = authorize_scoped_capability(presented)
+        from agent.transports import hermes_gateway_session_bridge as session_bridge
+        if request.url.path == "/api/session-send-queue":
+            # Queue-only: an idle-expired (but live, unrevoked) capability still authenticates the
+            # sender for a durable enqueue, so session_send reports ``queued`` instead of a 401.
+            capability = session_bridge.authorize_scoped_capability_for_queue(presented)
+        else:
+            capability = session_bridge.authorize_scoped_capability(presented)
+            if capability is None and getattr(request.state, "_bridge_refusal_logged", None) is None:
+                request.state._bridge_refusal_logged = True
+                stale = session_bridge.authorize_scoped_capability_for_queue(presented)
+                _log.warning("session bridge: %s refused HTTP 401 (capability %s) owner=%s",
+                             request.url.path, "idle-expired" if stale else "unknown or revoked",
+                             getattr(stale, "owner_session_key", "") or getattr(stale, "owner_session_id", "") or "?")
     except Exception:
         capability = None
     if capability is None:

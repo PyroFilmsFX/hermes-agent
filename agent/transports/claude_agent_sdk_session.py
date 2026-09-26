@@ -1162,6 +1162,24 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         )
         return True
 
+    def refresh_session_spawn_capability(self, *, min_interval: float = 60.0) -> bool:
+        """Rotate the published hermes-tools capability at a turn boundary (best-effort, b3-30)."""
+        published = getattr(self, "_session_spawn_capability", None)
+        if not published:
+            return False
+        last = getattr(self, "_session_spawn_capability_refreshed_at", 0.0)
+        if last and time.monotonic() - last < min_interval:
+            return False
+        try:
+            from agent.transports.claude_agent_sdk_session_config import refresh_session_spawn_capability
+            if not refresh_session_spawn_capability(*published):
+                return False
+        except Exception:
+            logger.warning("session-spawn capability rotation failed", exc_info=True)
+            return False
+        self._session_spawn_capability_refreshed_at = time.monotonic()
+        return True
+
     def send_peer_message(self, text: str, origin: dict[str, Any]) -> bool:
         """Inject peer-origin input; the SDK holds it until the current CLI turn reaches a boundary."""
         if not text or not text.strip():
@@ -1169,6 +1187,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         client, loop = self._client, self._loop
         if client is None or loop is None:
             return False
+        # A peer message starts a CLI turn without run_turn; its tool calls need a live capability too.
+        if callable(refresh_capability := getattr(self, "refresh_session_spawn_capability", None)):
+            refresh_capability()
         query = None
         try:
             query = client.query(_sdk_user_message_stream(text.strip(), origin=origin))
@@ -1280,6 +1301,15 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             mcp_servers["hermes-tools"] = _build_hermes_tools_mcp_config(
                 hermes_session_id=self._hermes_session_id
             )
+            # Remember where the scoped capability was published so each turn start can rotate
+            # it in place (b3-30: a once-issued capability expired an hour into the session).
+            tools_env = mcp_servers["hermes-tools"].get("env") or {}
+            if tools_env.get("HERMES_SESSION_SPAWN_CAPABILITY_FILE"):
+                self._session_spawn_capability = (
+                    tools_env.get("HERMES_SESSION_ID", ""),
+                    tools_env["HERMES_SESSION_SPAWN_CAPABILITY_FILE"],
+                )
+                self._session_spawn_capability_refreshed_at = time.monotonic()
 
         # Headerless third-party HTTP MCPs configured in Hermes (config.yaml
         # mcp_servers.<name>.url) can be exposed directly to the SDK because

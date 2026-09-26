@@ -343,3 +343,165 @@ def test_transport_ticket_is_single_outstanding_and_expires(monkeypatch):
     assert bridge.consume_scoped_transport_ticket(first) is None, "replaced transport tickets must be invalid"
     now[0] += bridge._TRANSPORT_TICKET_TTL_SECONDS + 1
     assert bridge.consume_scoped_transport_ticket(second) is None, "expired transport tickets must be invalid"
+
+
+# --- b3-30: HTTP 401 during attach must queue durably, not fail (cntrl carry) ---------------------
+
+
+def _attach_status_response(status_code, body=None):
+    import httpx
+
+    class _Response:
+        def __init__(self):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("refused", request=None, response=self)
+
+        def json(self):
+            if body is None:
+                raise ValueError("no json body")
+            return body
+
+    return _Response()
+
+
+def _single_owner_lease(monkeypatch):
+    from hermes_cli import active_sessions
+
+    monkeypatch.setattr(active_sessions, "active_session_registry_snapshot", lambda *_args, **_kwargs: [{
+        "session_id": "owner-key", "lease_id": "lease",
+        "metadata": {"live_session_id": "owner", "shared_runtime_url": "http://127.0.0.1:4311"},
+    }])
+
+
+@pytest.mark.parametrize(("status_code", "body"), [
+    (401, {"detail": "Unauthorized"}),
+    (403, None),
+    (403, {"error": "forbidden", "code": "something_new"}),
+    (429, None),
+    (500, None),
+    (503, None),
+])
+def test_session_send_queues_durably_after_non_caller_attach_refusal(
+        monkeypatch, tmp_path, caplog, status_code, body):
+    import logging
+
+    import httpx
+
+    _single_owner_lease(monkeypatch)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: _attach_status_response(status_code, body))
+
+    class _QueueResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "queued", "message_id": 7}
+
+    posted = []
+
+    def post(url, **kwargs):
+        posted.append((url, kwargs))
+        return _QueueResponse()
+
+    monkeypatch.setattr(httpx, "post", post)
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    with caplog.at_level(logging.WARNING, logger=bridge.__name__):
+        result = client.send_to_session(target="20260909_193713_ce3d96", body="hello", request_id="r1")
+    assert result == {"status": "queued", "message_id": 7}, (
+        f"an HTTP {status_code} attach refusal must fall back to the durable queue, never fail"
+    )
+    [(url, kwargs)] = posted
+    assert url == "http://127.0.0.1:4311/api/session-send-queue"
+    assert kwargs["headers"] == {"X-Hermes-Session-Spawn-Capability": "capability"}
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert any(str(status_code) in line and "20260909_193713_ce3d96" in line for line in warnings), warnings
+
+
+@pytest.mark.parametrize("status_code", [400, 404, 405, 422])
+def test_session_send_does_not_queue_after_caller_error_attach_status(monkeypatch, tmp_path, status_code):
+    import httpx
+
+    _single_owner_lease(monkeypatch)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: _attach_status_response(status_code))
+    posted = []
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: posted.append((args, kwargs)))
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    with pytest.raises(bridge.SessionSpawnBridgeError, match=f"HTTP {status_code} during attach"):
+        client.send_to_session(target="target", body="hello")
+    assert posted == []
+
+
+def test_session_send_reports_distinct_failure_when_queue_also_refuses(monkeypatch, tmp_path):
+    import httpx
+
+    _single_owner_lease(monkeypatch)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: _attach_status_response(401))
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: _attach_status_response(
+        403, {"code": "capability_invalid"}))
+    client = bridge.HermesGatewaySessionBridge("capability", "owner", tmp_path)
+    with pytest.raises(bridge.SessionSpawnBridgeError) as info:
+        client.send_to_session(target="target", body="hello")
+    assert info.value.code == "queue_fallback_failed"
+
+
+def _live_owner_sessions(monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(server, "_sessions", {"owner": {"session_generation": "g", "session_key": "owner"}})
+
+
+def test_capability_ttl_slides_on_successful_authorization(monkeypatch):
+    _live_owner_sessions(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    token = bridge.issue_scoped_capability("owner")
+    ttl = bridge._CAPABILITY_TTL_SECONDS
+    for _ in range(4):  # a turn far longer than one TTL that keeps using its capability
+        now[0] += ttl * 0.75
+        assert bridge.authorize_scoped_capability(token) is not None, "regular use must keep the capability alive"
+    now[0] += ttl + 1
+    assert bridge.authorize_scoped_capability(token) is None, "an idle capability still expires"
+
+
+def test_expired_capability_still_authenticates_queue_only(monkeypatch):
+    _live_owner_sessions(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    token = bridge.issue_scoped_capability("owner")
+    now[0] += bridge._CAPABILITY_TTL_SECONDS + 1
+    assert bridge.authorize_scoped_capability(token) is None
+    record = bridge.authorize_scoped_capability_for_queue(token)
+    assert record is not None and record.owner_session_id == "owner"
+    assert bridge.authorize_scoped_capability(token) is None, "queue-only auth must not revive full authority"
+    bridge.revoke_scoped_capability(token)
+    assert bridge.authorize_scoped_capability_for_queue(token) is None, "revocation stays fail-closed"
+
+
+def test_expired_capability_queue_auth_still_enforces_generation(monkeypatch):
+    from tui_gateway import server
+
+    _live_owner_sessions(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    token = bridge.issue_scoped_capability("owner")
+    now[0] += bridge._CAPABILITY_TTL_SECONDS + 1
+    server._sessions["owner"]["session_generation"] = "other"
+    assert bridge.authorize_scoped_capability_for_queue(token) is None
+
+
+def test_rotated_capability_keeps_old_token_for_grace_then_revokes(monkeypatch):
+    _live_owner_sessions(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    old = bridge.issue_scoped_capability("owner")
+    new = bridge.rotate_scoped_capability("owner", old)
+    assert new and new != old
+    assert bridge.authorize_scoped_capability(new) is not None
+    now[0] += bridge._ROTATION_GRACE_SECONDS - 1
+    assert bridge.authorize_scoped_capability(old) is not None, "an in-flight call keeps working in the grace"
+    now[0] += 2
+    assert bridge.authorize_scoped_capability(old) is None
+    assert bridge.authorize_scoped_capability_for_queue(old) is None
+    assert bridge.authorize_scoped_capability(new) is not None

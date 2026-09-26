@@ -997,10 +997,12 @@ def register_session_spawn_routes(application) -> None:
 
     async def session_send_queue(request: Request):
         """Authenticate the owner capability and durably queue a peer send when attach is refused."""
-        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability
+        from agent.transports.hermes_gateway_session_bridge import authorize_scoped_capability_for_queue
         from fastapi.responses import JSONResponse
 
-        capability = authorize_scoped_capability(
+        # Queue-only sender authentication: an idle-expired capability of the live owner generation
+        # still enqueues durably (b3-30: it 401'd attach and session_send reported ``failed``).
+        capability = authorize_scoped_capability_for_queue(
             request.headers.get("X-Hermes-Session-Spawn-Capability", ""))
         if capability is None:
             return JSONResponse({"error": "capability authentication failed", "code": "capability_invalid"}, status_code=403)
@@ -1031,6 +1033,9 @@ def register_session_spawn_routes(application) -> None:
             target=target.strip(), body=body, from_session_id=from_session_id, from_label=from_label,
             request_id=params.get("request_id", "") if isinstance(params.get("request_id", ""), str) else "",
             profile_home=caller.get("profile_home") or None, queue_only=True)
+        logger.warning("session_send: attach refused for owner=%s; peer message to target=%s took the durable "
+                       "queue fallback (status=%s)", from_session_id, target.strip(),
+                       result.get("status") if isinstance(result, dict) else "?")
         return JSONResponse(result)
 
     application.add_api_route("/api/session-send-queue", session_send_queue, methods=["POST"])

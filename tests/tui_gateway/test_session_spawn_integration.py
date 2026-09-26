@@ -145,6 +145,8 @@ def test_production_web_server_middleware_accepts_only_capability_principal_for_
 
     capability = bridge.ScopedSessionCapability("cap", "owner-runtime", 0, str(tmp_path))
     monkeypatch.setattr(bridge, "authorize_scoped_capability", lambda presented: capability if presented == "cap" else None)
+    monkeypatch.setattr(bridge, "authorize_scoped_capability_for_queue",
+                        lambda presented: capability if presented == "cap" else None)
     monkeypatch.setattr(web_server.app.state, "auth_required", auth_required, raising=False)
 
     async def exercise():
@@ -343,3 +345,98 @@ async def _post_queue(app, token):
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         return await client.post("/api/session-send-queue", json={"target": "target", "body": "forged"},
                                  headers={"X-Hermes-Session-Spawn-Capability": token})
+
+
+def _principal_request(path, token):
+    return SimpleNamespace(url=SimpleNamespace(path=path),
+                           headers={"X-Hermes-Session-Spawn-Capability": token}, state=SimpleNamespace())
+
+
+def test_expired_capability_401s_attach_but_queues_durably_with_owner_warning(monkeypatch, tmp_path, caplog):
+    """b3-30: a >1 h old SDK session's capability 401'd attach and session_send reported ``failed``.
+
+    The production middleware must still refuse the attach (full authority is expired) but admit the
+    queue-only route, which durably enqueues and logs the refusal in the owner's (backend) log."""
+    import logging
+
+    import httpx
+    from fastapi import FastAPI
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from hermes_cli import web_server
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    app = FastAPI()
+    server.register_session_spawn_routes(app)
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("target", "desktop")
+    live = {"session_key": "owner-key", "session_generation": "generation", "profile_home": None}
+    monkeypatch.setattr(server, "_sessions", {"owner-runtime": live})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    token = bridge.issue_scoped_capability("owner-runtime")
+    assert token
+    now[0] += bridge._CAPABILITY_TTL_SECONDS + 5
+    try:
+        assert web_server._session_attach_capability_principal(
+            _principal_request("/api/session-attach", token)) is False, "expired capability keeps attach closed"
+        assert web_server._session_attach_capability_principal(
+            _principal_request("/api/session-send-queue", token)) is True, "queue-only route admits it"
+        assert web_server._session_attach_capability_principal(
+            _principal_request("/api/session-send-queue", "forged")) is False
+        with caplog.at_level(logging.WARNING):
+            response = asyncio.run(_post_queue(app, token))
+        assert response.status_code == 200
+        assert response.json()["status"] == "queued"
+        [row] = db.peer_mailbox_pending("target")
+        assert row["from_session_id"] == "owner-key"
+        assert any(record.levelno == logging.WARNING and "target" in record.getMessage()
+                   and "owner-key" in record.getMessage() for record in caplog.records), caplog.text
+        bridge.revoke_scoped_capability(token)
+        assert asyncio.run(_post_queue(app, token)).status_code == 403
+        assert len(db.peer_mailbox_pending("target")) == 1
+    finally:
+        db.close()
+
+
+def test_sdk_turn_start_rotates_the_published_capability(monkeypatch, tmp_path):
+    """An SDK session older than the TTL gets a fresh capability in its file at each turn start."""
+    from agent.transports import claude_agent_sdk_session_config as config
+    from agent.transports import hermes_gateway_session_bridge as bridge
+    from tui_gateway import server
+
+    monkeypatch.setattr(server, "_sessions", {"owner": {"session_generation": "g", "session_key": "owner"}})
+    now = [1000.0]
+    monkeypatch.setattr(bridge.time, "time", lambda: now[0])
+    path = tmp_path / "runtime" / "session-spawn" / "owner.cap"
+    old = bridge.issue_scoped_capability("owner")
+    config._publish_session_spawn_capability(path, old)
+    now[0] += bridge._CAPABILITY_TTL_SECONDS + 60
+    assert bridge.authorize_scoped_capability(old) is None
+    fresh = config.refresh_session_spawn_capability("owner", path)
+    assert fresh and fresh != old
+    assert path.read_text(encoding="utf-8") == fresh
+    assert bridge.authorize_scoped_capability(fresh) is not None
+    assert config.refresh_session_spawn_capability("", path) is None
+    assert config.refresh_session_spawn_capability("owner", None) is None
+    now[0] += bridge._ROTATION_GRACE_SECONDS + 1
+    assert bridge.authorize_scoped_capability_for_queue(old) is None, "rotated-out token is revoked after grace"
+
+
+def test_sdk_session_rotates_capability_at_turn_boundaries(monkeypatch, tmp_path):
+    from agent.transports import claude_agent_sdk_session as sdk_session
+    from agent.transports import claude_agent_sdk_session_config as config
+
+    calls = []
+    monkeypatch.setattr(config, "refresh_session_spawn_capability",
+                        lambda owner, path: calls.append((owner, path)) or "fresh")
+    session = sdk_session.ClaudeAgentSdkSession.__new__(sdk_session.ClaudeAgentSdkSession)
+    assert session.refresh_session_spawn_capability() is False, "no published capability, nothing to rotate"
+    session._session_spawn_capability = ("owner", str(tmp_path / "owner.cap"))
+    session._session_spawn_capability_refreshed_at = time.monotonic()
+    assert session.refresh_session_spawn_capability() is False, "just published at spawn"
+    session._session_spawn_capability_refreshed_at = time.monotonic() - 3600
+    assert session.refresh_session_spawn_capability() is True
+    assert calls == [("owner", str(tmp_path / "owner.cap"))]

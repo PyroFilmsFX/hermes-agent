@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import stat
 import sys
 import contextlib
@@ -950,18 +951,51 @@ def _publish_session_spawn_capability(path: Path, value: str) -> None:
         path_st = os.lstat(path)
         if not stat.S_ISREG(path_st.st_mode) or (owner is not None and path_st.st_uid != owner):
             raise PermissionError("session-spawn capability path is not owner-controlled")
-    with contextlib.suppress(FileNotFoundError):
-        path.unlink()
+    # Write a private sibling and rename it over the path: the MCP child re-reads this file on every
+    # call, and turn-start rotation must never let it observe a missing or half-written capability.
+    staging = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    fd = os.open(staging, flags, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
+        os.replace(staging, path)
     except Exception:
         with contextlib.suppress(OSError):
-            path.unlink()
+            staging.unlink()
         raise
+
+
+def refresh_session_spawn_capability(hermes_session_id: Optional[str], path: Any) -> Optional[str]:
+    """Rotate the capability published at ``path`` for a live SDK session (b3-30).
+
+    The capability used to be issued once at CLI spawn and expired an hour later with nothing
+    re-issuing it, so every SDK session older than an hour got HTTP 401 on session_send.  Called at
+    each SDK turn start: publish a fresh token in place (the MCP child re-reads the file per call),
+    then retire the previous one after a short grace so an in-flight call is not cut."""
+    if not hermes_session_id or not path:
+        return None
+    from pathlib import Path as _Path
+
+    from agent.transports.hermes_gateway_session_bridge import issue_scoped_capability, retire_scoped_capability
+    target = _Path(path)
+    previous = ""
+    with contextlib.suppress(OSError):
+        previous = target.read_text(encoding="utf-8").strip()
+    token = issue_scoped_capability(str(hermes_session_id))
+    if not token:
+        return None
+    try:
+        _publish_session_spawn_capability(target, token)
+    except Exception as exc:  # noqa: BLE001 - keep the previous capability serving
+        # Never revoke_scoped_capability() here: it also unlinks the file that still holds `previous`.
+        retire_scoped_capability(token, grace_seconds=0)
+        logger.warning("session-spawn capability refresh failed for %s: %s", hermes_session_id, exc)
+        return None
+    if previous and previous != token:
+        retire_scoped_capability(previous)
+    return token
