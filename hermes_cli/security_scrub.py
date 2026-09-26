@@ -42,7 +42,6 @@ import shutil
 import sqlite3
 import stat as _stat
 import subprocess
-import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +80,7 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+CLOSE_HERMES_MSG = "Close Hermes (all windows) and rerun `hermes security scrub --apply`. Use `--dry-run` any time."
 WAL_INCOMPLETE_MSG = ("state.db changes are committed but old WAL frames may still hold secrets. Close Hermes "
                       "and rerun `hermes security scrub --apply` to finish.")
 
@@ -89,11 +89,18 @@ WAL_INCOMPLETE_MSG = ("state.db changes are committed but old WAL frames may sti
 # Report text masking: locators and details come from file names and stored fields
 # ---------------------------------------------------------------------------
 
-# Known prefixes glued to other name characters (``leak-ghp_...``), which the detector's
-# word-boundary guard skips.
+# Known prefixes ANYWHERE in report text -- including glued to other name characters
+# (``abcghp_...xyz.txt``, ``docsk-ant-....md``), which the detector's word-boundary guard
+# skips -- whenever at least 8 token characters follow. Over-masking a file name is fine.
 _REPORT_PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:sk-ant-|sk-|github_pat_|gh[pousr]_|fm2_|fo1_|npg_|xox[abposre]-|xapp-)"
-    r"[A-Za-z0-9_\-]{12,}|(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}|FlyV1 \S+")
+    r"(?:sk-|github_pat_|gh[pousr]_|fm2_|fo1_|npg_|xox[A-Za-z]-?|xapp-|AIza|glpat-)[A-Za-z0-9_\-]{8,}"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{8,}"
+    r"|FlyV1[ _\-]?[A-Za-z0-9_\-+/=,]{8,}"
+    r"|-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----\S*")
+# ``scheme:[//]user:PASSWORD@`` in a locator (a path collapses ``//`` and a file name may hold ``:``).
+_REPORT_DBURL_RE = re.compile(
+    r"(?i)(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|mssql|sqlserver|cockroachdb"
+    r"|clickhouse)(?:\+[a-z0-9]+)?:/{0,2}[^:/\s@]*:(?P<pw>[^@\s/]+)@")
 _REPORT_TOKEN_RE = re.compile(r"[A-Za-z0-9_+=]{24,}")
 _REPORT_OPTS = DetectOptions()
 
@@ -108,6 +115,7 @@ def redact_report_text(text: Any, trusted: Sequence[Optional[str]] = ()) -> Any:
         return text
     spans: List[Tuple[int, int, str]] = [(f.start, f.end, f.kind) for f in find_secrets(text, _REPORT_OPTS)]
     spans += [(m.start(), m.end(), "secret") for m in _REPORT_PREFIX_RE.finditer(text)]
+    spans += [(m.start("pw"), m.end("pw"), "password") for m in _REPORT_DBURL_RE.finditer(text)]
     safe: List[Tuple[int, int]] = []
     for t in trusted:
         if t:
@@ -291,6 +299,7 @@ class _DbUnit:
     locator: str
     backup_rel: str
     live: Dict[str, str] = field(default_factory=dict)
+    ident: Tuple[int, int] = (0, 0)  # (st_dev, st_ino) of state.db reached by the O_NOFOLLOW walk
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -471,11 +480,11 @@ def _sdk_session_map(dbs: Sequence[_DbUnit]) -> Dict[str, Tuple[str, str]]:
 
 def _classify_sdk_text(text: str, sdk_map: Dict[str, Tuple[str, str]]
                        ) -> Tuple[bool, str, Tuple[Tuple[str, str], ...]]:
-    """Hermes-created iff EVERY line's ``sessionId`` is a ``claude_sdk_session_id`` stored in
-    state.db and EVERY line's ``entrypoint`` is ``sdk-*`` (at least one of each recorded).
-    Anything else is ambiguous and left alone. Reasons never echo a field value."""
+    """Hermes-created iff EVERY non-empty line is a JSON object carrying BOTH a ``sessionId``
+    that is a ``claude_sdk_session_id`` stored in state.db AND an ``sdk-*`` ``entrypoint``.
+    A single line missing either makes the whole file ambiguous; it is left alone.
+    Reasons never echo a field value."""
     owners: Set[Tuple[str, str]] = set()
-    saw_entrypoint = saw_session = False
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -486,21 +495,19 @@ def _classify_sdk_text(text: str, sdk_map: Dict[str, Tuple[str, str]]
             return False, "non-JSON line", ()
         if not isinstance(obj, dict):
             return False, "non-object JSON line", ()
-        if "entrypoint" in obj:
-            entry = obj["entrypoint"]
-            if not isinstance(entry, str) or not entry.startswith("sdk-"):
-                return False, "entrypoint not sdk-*", ()
-            saw_entrypoint = True
-        if "sessionId" in obj:
-            sdk_id = obj["sessionId"]
-            if not isinstance(sdk_id, str) or sdk_id not in sdk_map:
-                return False, "sessionId not a Claude SDK session stored in state.db", ()
-            owners.add(sdk_map[sdk_id])
-            saw_session = True
-    if not saw_entrypoint:
-        return False, "no entrypoint recorded", ()
-    if not saw_session:
-        return False, "no sessionId recorded", ()
+        if "entrypoint" not in obj:
+            return False, "line without an entrypoint", ()
+        if "sessionId" not in obj:
+            return False, "line without a sessionId", ()
+        entry = obj["entrypoint"]
+        if not isinstance(entry, str) or not entry.startswith("sdk-"):
+            return False, "entrypoint not sdk-*", ()
+        sdk_id = obj["sessionId"]
+        if not isinstance(sdk_id, str) or sdk_id not in sdk_map:
+            return False, "sessionId not a Claude SDK session stored in state.db", ()
+        owners.add(sdk_map[sdk_id])
+    if not owners:
+        return False, "no attributed lines", ()
     return True, "", tuple(sorted(owners))
 
 
@@ -549,6 +556,114 @@ def _collect_sdk_files(claude_dir: Optional[Path], sdk_map: Dict[str, Tuple[str,
 # ---------------------------------------------------------------------------
 # Live sessions (§5.4)
 # ---------------------------------------------------------------------------
+
+def _db_family(db_path: Path) -> List[Path]:
+    return [db_path, db_path.with_name(db_path.name + "-wal"), db_path.with_name(db_path.name + "-shm")]
+
+
+def _lsof_open_pids(paths: Sequence[Path]) -> Tuple[Optional[List[int]], str]:
+    """``(pids, "")``: OTHER processes holding any of ``paths`` open (``lsof -t``). ``(None, why)``
+    when that cannot be proven -- ``lsof`` missing, failing, erroring or timing out. Callers
+    fail CLOSED on ``None``."""
+    exe = shutil.which("lsof")
+    if not exe:
+        return None, "lsof is not installed, so open state.db handles cannot be ruled out"
+    existing = [str(p) for p in paths if os.path.lexists(p)]
+    if not existing:
+        return [], ""
+    try:
+        result = subprocess.run([exe, "-w", "-t", "--", *existing], capture_output=True, text=True,
+                                timeout=10, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "lsof timed out"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"lsof failed ({exc.__class__.__name__})"
+    # 0 = every name open somewhere; 1 = some name open nowhere. Anything on stderr (a status
+    # error, a vanished sidecar) or another exit code means the scan is not a proof.
+    if result.returncode not in (0, 1) or (result.stderr or "").strip():
+        return None, f"lsof could not inspect state.db (exit {result.returncode})"
+    pids: Set[int] = set()
+    for token in (result.stdout or "").split():
+        if not token.isdigit():
+            return None, "lsof output unreadable"
+        pids.add(int(token))
+    pids.discard(os.getpid())
+    return sorted(pids), ""
+
+
+def _backend_pids(root: Path, profiles: Sequence[Tuple[str, Path]]) -> List[int]:
+    """Current-user Hermes backend processes (``serve``/``dashboard``/``gateway``) whose home is
+    ``root`` or one of ``profiles`` (by ``HERMES_HOME`` or ``--profile``). A backend whose
+    environment cannot be read counts (fail closed)."""
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a hard dependency
+        return []
+    from hermes_cli.profiles import _BACKEND_TOKENS, _argv_profile_selectors, _is_hermes_argv
+
+    def real(p: Path) -> str:
+        return os.path.realpath(os.fspath(p))
+
+    wanted = {real(root)} | {real(home) for _, home in profiles}
+    skip = {os.getpid()}
+    try:
+        me = psutil.Process(os.getpid())
+        skip |= {p.pid for p in me.parents()}
+        user = me.username()
+    except Exception:
+        user = None
+    out: List[int] = []
+    for proc in psutil.process_iter(["pid", "username", "cmdline"]):
+        try:
+            info = proc.info
+            pid, argv = info.get("pid"), info.get("cmdline") or []
+            if pid in skip or not argv or (user is not None and info.get("username") != user):
+                continue
+            if not _is_hermes_argv(argv) or not ({t.lower() for t in argv} & _BACKEND_TOKENS):
+                continue
+            try:
+                env_home = (proc.environ() or {}).get("HERMES_HOME", "")
+            except psutil.NoSuchProcess:
+                continue
+            except Exception:
+                out.append(pid)  # cannot tell which home it serves
+                continue
+            base = Path(env_home).expanduser() if env_home else Path.home() / ".hermes"
+            homes = {real(base)} | {real(base / "profiles" / sel) for sel in _argv_profile_selectors(argv)}
+            if homes & wanted:
+                out.append(pid)
+        except Exception:
+            continue
+    return sorted(set(out))
+
+
+def _backend_owners(root: Path, profiles: Sequence[Tuple[str, Path]]) -> List[str]:
+    """Why a Hermes backend owns this home: a running gateway (``gateway.pid`` + runtime lock,
+    the profiles module's canonical check) or a backend process bound to it."""
+    from hermes_cli.profiles import _check_gateway_running
+
+    owners = [f"the gateway of profile {name} is running" for name, home in profiles
+              if _check_gateway_running(Path(home))]
+    owners += [f"Hermes backend process {pid} serves this home" for pid in _backend_pids(root, profiles)]
+    return owners
+
+
+def _quiesce_problems(root: Path, profiles: Sequence[Tuple[str, Path]], dbs: Sequence["_DbUnit"],
+                      backend_probe: Callable[[Path, Sequence[Tuple[str, Path]]], List[str]]) -> List[str]:
+    """Everything that says Hermes is still running on this home; empty = provably quiet."""
+    problems: List[str] = []
+    for db in dbs:
+        pids, why = _lsof_open_pids(_db_family(db.path))
+        if pids is None:
+            problems.append(f"{db.locator}: {why}")
+        elif pids:
+            problems.append(f"{db.locator} is open in another process (pid {', '.join(map(str, pids))})")
+    try:
+        problems += backend_probe(root, profiles)
+    except Exception as exc:
+        problems.append(f"cannot tell whether a Hermes backend is running ({exc.__class__.__name__})")
+    return problems
+
 
 def _default_holders(db_path: Path) -> list:
     from hermes_state_holders import foreign_state_db_holders
@@ -797,20 +912,26 @@ def _fstat_at(name: str, dir_fd: int) -> Optional[_Snap]:
         os.close(fd)
 
 
-def _atomic_rewrite(path: Path, data: bytes) -> None:
-    """The scrub's OWN ledger files: 0600 temp in the same dir, fsync, ``os.replace``."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".scrub-tmp")
+def _atomic_write_at(dir_fd: int, name: str, data: bytes) -> None:
+    """The scrub's OWN ledger files: a 0600 ``O_CREAT|O_EXCL|O_NOFOLLOW`` temp inside the
+    ``O_NOFOLLOW``-walked ledger dir, fsync, then ``os.replace`` within that dir fd."""
+    tmp = f".{name}.{_secrets.token_hex(6)}.scrub-tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    replaced = False
     try:
         with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        replaced = True
+    finally:
+        if not replaced:
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
 
 
 # Test seams (monkeypatched in tests; no-ops in production).
@@ -823,6 +944,10 @@ def _after_batch_commit(batch_no: int) -> None:
 
 
 def _before_replace(path: Path) -> None:
+    return None
+
+
+def _after_backup_verified(backup_dir: Path) -> None:
     return None
 
 
@@ -914,8 +1039,9 @@ def _read_progress(conn: sqlite3.Connection) -> Optional[dict]:
 def _write_progress(conn: sqlite3.Connection, pending: Iterable[str], complete: bool, wal_pending: bool) -> None:
     """Per-item tracking: ``pending`` holds every ``messages#<id>.<col>`` / ``sessions#<id>.<col>``
     not yet masked -- including deferred-live rows, retried on every later run."""
-    value = json.dumps({"detector_version": DETECTOR_VERSION, "complete": bool(complete),
-                        "pending": sorted(set(pending)), "wal_pending": bool(wal_pending)})
+    pending = sorted(set(pending))
+    value = json.dumps({"detector_version": DETECTOR_VERSION, "complete": bool(complete) and not pending,
+                        "pending": pending, "wal_pending": bool(wal_pending)})
     conn.execute("INSERT INTO state_meta(key, value) VALUES (?, ?) "
                  "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (_PROGRESS_KEY, value))
 
@@ -944,7 +1070,7 @@ class _DbPlan:
         prev = self.previous
         if prev is None:
             return bool(self.deferred)
-        return (prev.get("complete") is not True or bool(prev.get("wal_pending"))
+        return (prev.get("complete") is not (not self.deferred) or bool(prev.get("wal_pending"))
                 or set(prev.get("pending") or []) != set(self.deferred))
 
     def row_spec(self) -> dict:
@@ -999,8 +1125,19 @@ def _scan_db(conn: sqlite3.Connection, db: _DbUnit, cfg: SecretHygieneConfig, in
 
 
 def _apply_db(db: _DbUnit, plan: _DbPlan, cfg: SecretHygieneConfig, key_provider: Optional[TagKeyProvider],
-              report: ScrubReport, vacuum: bool, holders_fn: Callable[[Path], list]) -> None:
+              report: ScrubReport, vacuum: bool, holders_fn: Callable[[Path], list],
+              verified: Optional[Dict[Tuple[str, str, str], str]] = None) -> None:
+    """Mask the planned cells in batches. ``verified`` maps every planned cell to the digest of
+    its value in the VERIFIED backup: a cell whose live value no longer hashes to that is never
+    rewritten (its old value has no backup); it is reported ``changed-during-apply`` and stays
+    pending for the next run."""
     from hermes_state_repair import _connect_repair_durable
+
+    verified = verified or {}
+
+    def backed_up(table: str, row_id: object, col: str, value: object) -> bool:
+        want = verified.get(bk.cell_key(table, row_id, col))
+        return want is not None and want == bk.cell_digest(value)
 
     conn = _connect_repair_durable(db.path)
     try:
@@ -1052,9 +1189,13 @@ def _apply_db(db: _DbUnit, plan: _DbPlan, cfg: SecretHygieneConfig, key_provider
                         if not counts or new == old[0]:
                             done.add(item)
                             continue
+                        locator = f"{db.locator}:messages#{msg_id}.{col}"
+                        if not backed_up("messages", msg_id, col, old[0]):
+                            report.add("state-db", locator, counts, "changed-during-apply",
+                                       "row changed since the verified backup; retried next run")
+                            continue
                         cur = conn.execute(f"UPDATE messages SET {col} = ? WHERE id = ? AND {col} IS ?",
                                            (new, msg_id, old[0]))
-                        locator = f"{db.locator}:messages#{msg_id}.{col}"
                         if cur.rowcount == 1:
                             report.add("state-db", locator, counts, "masked", f"session {sid}")
                             done.add(item)
@@ -1079,6 +1220,10 @@ def _apply_db(db: _DbUnit, plan: _DbPlan, cfg: SecretHygieneConfig, key_provider
                 new, counts = mask_stored_text(old[0], config=cfg, key_provider=key_provider)
                 if not counts or new == old[0]:
                     done.add(item)
+                    continue
+                if not backed_up("sessions", sid, col, old[0]):
+                    report.add("state-db", f"{db.locator}:sessions#{sid}.{col}", counts, "changed-during-apply",
+                               "row changed since the verified backup; retried next run")
                     continue
                 cur = conn.execute(f"UPDATE sessions SET {col} = ? WHERE id = ? AND {col} IS ?",
                                    (new, sid, old[0]))
@@ -1147,14 +1292,12 @@ def _finish_db(conn: sqlite3.Connection, db: _DbUnit, report: ScrubReport, vacuu
 # Ledgers (locators only, never values)
 # ---------------------------------------------------------------------------
 
-def _ledger_dir(root: Path) -> Path:
-    path = root / "secret-scrub"
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return path
-
-
-def _write_json_private(path: Path, payload: dict) -> None:
-    _atomic_rewrite(path, json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
+def _ledger_dir_fd(root: Path) -> int:
+    """``<root>/secret-scrub`` by an ``O_NOFOLLOW`` fd walk (mkdirat 0700); a symlinked
+    component raises :class:`bk.SymlinkRefusal`."""
+    fd = bk.open_dir_chain(root, bk.LEDGER_PARTS, create=True)
+    os.fchmod(fd, 0o700)
+    return fd
 
 
 def _write_ledgers(root: Path, report: ScrubReport, dbs: Sequence[_DbUnit], deferred_files: Dict[str, str],
@@ -1163,33 +1306,143 @@ def _write_ledgers(root: Path, report: ScrubReport, dbs: Sequence[_DbUnit], defe
     def r(value):
         return redact_report_text(value, report._trusted())
 
-    ledger = _ledger_dir(root)
+    def dump(payload: dict) -> bytes:
+        return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
     sessions = [{"db": r(db.locator), "session_id": r(sid), "reason": r(reason)}
                 for db in dbs for sid, reason in sorted(db.live.items())]
     now = bk.utc_now()
-    _write_json_private(ledger / "deferred.json", {
-        "updated_at": now, "sessions": sessions,
-        "files": [{"locator": r(loc), "reason": r(why)} for loc, why in sorted(deferred_files.items())]})
     masked = {i.locator for i in report.items if i.action == "masked"}
     pending = sorted({r(loc) for loc in pending_files} | {r(loc) for loc in deferred_files} - masked)
-    _write_json_private(ledger / "progress.json", {
-        "updated_at": now, "detector_version": DETECTOR_VERSION, "backup": r(report.backup_path),
-        "exit_code": report.exit_code, "complete": bool(complete), "pending_files": pending,
-        "masked": sorted(masked)})
+    ledger = _ledger_dir_fd(root)
+    try:
+        _atomic_write_at(ledger, "deferred.json", dump({
+            "updated_at": now, "sessions": sessions,
+            "files": [{"locator": r(loc), "reason": r(why)} for loc, why in sorted(deferred_files.items())]}))
+        _atomic_write_at(ledger, "progress.json", dump({
+            "updated_at": now, "detector_version": DETECTOR_VERSION, "backup": r(report.backup_path),
+            "exit_code": report.exit_code, "complete": bool(complete) and not pending, "pending_files": pending,
+            "masked": sorted(masked)}))
+    finally:
+        os.close(ledger)
+
+
+def _write_ledgers_or_report(root: Path, report: ScrubReport, *args, **kwargs) -> bool:
+    """``_write_ledgers`` that turns a ledger dir swapped for a symlink (or any I/O failure) after
+    the up-front check into a report error instead of an exception out of ``run_scrub``."""
+    try:
+        _write_ledgers(root, report, *args, **kwargs)
+    except OSError as exc:
+        why = exc.strerror if isinstance(exc, bk.SymlinkRefusal) else exc.__class__.__name__
+        report.error(f"could not write the scrub ledger ({why})")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
+def _db_chain(root: Path, home: Path) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+    """Walk ``root`` -> ``profiles/<name>`` -> ``state.db`` with ``O_NOFOLLOW|O_DIRECTORY`` dir fds.
+    ``(ident, None)`` for a regular state.db, ``(None, None)`` when there is none, and
+    ``(None, refusal)`` when any component (state.db included) is a symlink."""
+    anchor, parts = _anchor_for(root, home)
+    try:
+        fd = bk.open_dir_chain(anchor, parts, missing_ok=True)
+    except bk.SymlinkRefusal as exc:
+        return None, exc.strerror
+    except OSError:
+        return None, None
+    if fd is None:
+        return None, None
+    try:
+        st = _lstat_at("state.db", fd)
+    finally:
+        os.close(fd)
+    loc = _rel(root, Path(home) / "state.db")
+    if st is None or not (_stat.S_ISLNK(st.st_mode) or _stat.S_ISREG(st.st_mode)):
+        return None, None
+    if _stat.S_ISLNK(st.st_mode):
+        return None, f"{loc} is a symlink; refusing to follow it"
+    try:
+        by_path = os.stat(Path(home) / "state.db")
+    except OSError:
+        return None, None
+    if (by_path.st_dev, by_path.st_ino) != (st.st_dev, st.st_ino):
+        return None, f"{loc} resolves through a symlink; refusing to follow it"
+    return (st.st_dev, st.st_ino), None
+
+
+def _db_identity_problem(root: Path, db: _DbUnit) -> Optional[str]:
+    ident, refusal = _db_chain(root, db.home)
+    if refusal:
+        return refusal
+    if ident != db.ident:
+        return f"{db.locator} was replaced since the scan"
+    return None
+
+
+def _target_dirs(root: Path, profiles: Sequence[Tuple[str, Path]], targets: Set[str],
+                 claude_dir: Optional[Path]) -> List[Path]:
+    dirs: List[Path] = []
+    if "pastes" in targets:
+        dirs.append(root / "composer-pastes")
+    if "attachments" in targets:
+        dirs.append(root / "attachments")
+    for _, home in profiles:
+        home = Path(home)
+        if "attachments" in targets:
+            dirs.append(home / "attachments")
+        if "transcripts" in targets:
+            dirs += [home / "sessions", home / "pending_messages"]
+        if "doc-cache" in targets:
+            dirs.append(home / "cache" / "documents")
+    if "sdk-transcripts" in targets and claude_dir:
+        dirs.append(Path(claude_dir) / "projects")
+    return dirs
+
+
+def _support_dir_refusal(root: Path, profiles: Sequence[Tuple[str, Path]], targets: Set[str],
+                         claude_dir: Optional[Path]) -> Optional[str]:
+    """The backup root and the ledger dir are created by an ``O_NOFOLLOW`` fd walk; refuse up front
+    (zero writes) when a component is a symlink, or when either would sit inside a scrub target."""
+    for parts in (bk.BACKUP_PARTS, bk.LEDGER_PARTS):
+        why = bk.check_dir_chain(root, parts)
+        if why:
+            return why
+    real_root = Path(os.path.realpath(root))
+    own = (("backup", real_root.joinpath(*bk.BACKUP_PARTS)), ("ledger", real_root.joinpath(*bk.LEDGER_PARTS)))
+    for target in _target_dirs(root, profiles, targets, claude_dir):
+        real_target = Path(os.path.realpath(target))
+        for label, path in own:
+            if path == real_target or real_target in path.parents:
+                return (f"the scrub {label} directory would be inside the scrub target {target}; "
+                        "refusing (move the target or the Claude config dir)")
+    return None
+
+
+def _refuse_running(report: ScrubReport, problems: Sequence[str]) -> ScrubReport:
+    report.refused, report.exit_code = CLOSE_HERMES_MSG, 2
+    for problem in problems:
+        report.warn(problem)
+    return report
+
+
 def run_scrub(*, root: Path, profiles: Sequence[Tuple[str, Path]], apply: bool = False,
               targets: Optional[Iterable[str]] = None, include_optouts: bool = False, vacuum: bool = False,
               config: Optional[SecretHygieneConfig] = None, key_provider: Optional[TagKeyProvider] = None,
               claude_config_dir: Optional[Path] = None, holders_fn: Optional[Callable[[Path], list]] = None,
               now: Optional[float] = None, recent_write_grace_s: float = RECENT_WRITE_GRACE_S,
-              open_writers_fn: Optional[Callable[[Path], List[int]]] = None) -> ScrubReport:
+              open_writers_fn: Optional[Callable[[Path], List[int]]] = None,
+              backend_probe: Optional[Callable[[Path, Sequence[Tuple[str, Path]]], List[str]]] = None
+              ) -> ScrubReport:
     """Scan (and with ``apply``, mask) every target. Never raises for expected failures:
-    ``report.exit_code`` is 0 ok, 1 error (nothing or partially written; see errors), 2 refused."""
+    ``report.exit_code`` is 0 ok, 1 error (nothing or partially written; see errors), 2 refused.
+
+    ``--apply`` refuses (exit 2, :data:`CLOSE_HERMES_MSG`) while any other process holds a
+    scrubbed ``state.db``/``-wal``/``-shm`` open or a Hermes backend owns the home; an
+    ``lsof`` that is missing, errors or times out refuses too (fail closed)."""
     root = Path(root)
     cfg = config or load_secret_hygiene_config()
     targets_set = set(targets or TARGETS)
@@ -1201,16 +1454,28 @@ def run_scrub(*, root: Path, profiles: Sequence[Tuple[str, Path]], apply: bool =
     if warning:
         report.warn(warning)
 
-    dbs = []
+    backend_probe = backend_probe or _backend_owners
+    dbs: List[_DbUnit] = []
     for name, home in profiles:
         home = Path(home)
-        db_path = home / "state.db"
-        if db_path.is_file() and not db_path.is_symlink():
+        ident, refusal = _db_chain(root, home)
+        if refusal:
+            report.refused, report.exit_code = refusal, 2
+            return report
+        if ident is not None:
             rel = _rel(root, home)
+            db_path = home / "state.db"
             dbs.append(_DbUnit(name, home, db_path, _rel(root, db_path),
-                               "db/state.db" if rel == "." else f"db/{rel}/state.db"))
-        elif db_path.is_symlink():
-            report.add("state-db", _rel(root, db_path), Counter(), "skipped-symlink", "symlink not followed")
+                               "db/state.db" if rel == "." else f"db/{rel}/state.db", ident=ident))
+
+    if apply:
+        refusal = _support_dir_refusal(root, profiles, targets_set, claude_config_dir)
+        if refusal:
+            report.refused, report.exit_code = refusal, 2
+            return report
+        problems = _quiesce_problems(root, profiles, dbs, backend_probe)
+        if problems:
+            return _refuse_running(report, problems)
 
     lock = bk.ScrubLock(root)
     if apply:
@@ -1220,13 +1485,15 @@ def run_scrub(*, root: Path, profiles: Sequence[Tuple[str, Path]], apply: bool =
             return report
     try:
         return _run_locked(report, root, profiles, dbs, targets_set, apply, include_optouts, vacuum, cfg,
-                           key_provider, claude_config_dir, holders_fn, now, recent_write_grace_s, open_writers_fn)
+                           key_provider, claude_config_dir, holders_fn, now, recent_write_grace_s, open_writers_fn,
+                           backend_probe)
     finally:
         lock.release()
 
 
 def _run_locked(report, root, profiles, dbs, targets_set, apply, include_optouts, vacuum, cfg,
-                key_provider, claude_config_dir, holders_fn, now, grace_s, open_writers_fn) -> ScrubReport:
+                key_provider, claude_config_dir, holders_fn, now, grace_s, open_writers_fn,
+                backend_probe) -> ScrubReport:
     if apply and "state-db" in targets_set:
         for db in dbs:
             refusal = _db_preflight(db)
@@ -1309,85 +1576,113 @@ def _run_locked(report, root, profiles, dbs, targets_set, apply, include_optouts
         report.exit_code = 1 if report.errors else 0
         return report
     if not pending and not plans:
-        _write_ledgers(root, report, dbs, deferred_files)
-        report.exit_code = 1 if report.errors else 0
+        report.exit_code = 1 if report.errors else 0  # recorded in progress.json
+        if not _write_ledgers_or_report(root, report, dbs, deferred_files):
+            report.exit_code = 1
         return report
-    return _apply(report, root, dbs, pending, plans, deferred_files, cfg, key_provider, vacuum, holders_fn,
-                  open_writers_fn)
+    return _apply(report, root, profiles, dbs, pending, plans, deferred_files, cfg, key_provider, vacuum,
+                  holders_fn, open_writers_fn, backend_probe)
 
 
-def _apply(report, root, dbs, pending, plans, deferred_files, cfg, key_provider, vacuum, holders_fn,
-           open_writers_fn) -> ScrubReport:
+def _apply(report, root, profiles, dbs, pending, plans, deferred_files, cfg, key_provider, vacuum, holders_fn,
+           open_writers_fn, backend_probe) -> ScrubReport:
     row_dbs = [db for db in dbs if db.locator in plans and plans[db.locator].has_rows]
     expected: Dict[str, str] = {}
+    cells: Dict[str, Dict[Tuple[str, str, str], str]] = {}
     backup = None
-    if pending or row_dbs:
-        # ---- backup (of the exact bytes/rows planned against), then prove it restores, before ANY write
-        try:
-            backup = bk.write_backup(
-                root,
-                files=[(u.locator, u.path, u.backup_rel, raw, _reader_for(u)) for u, raw, _, _ in pending],
-                dbs=[(db.locator, db.path, db.backup_rel, plans[db.locator].row_spec()) for db in row_dbs])
-        except Exception as exc:
-            report.error(f"backup failed, nothing was changed: {exc.__class__.__name__}: {exc}")
-            report.exit_code = 1
-            return report
-        report.backup_path = str(backup.path)
-        _after_backup_written(backup.path)
-        problems = bk.verify_backup_restores(backup)
+    try:
+        if pending or row_dbs:
+            # ---- backup (of the exact bytes/rows planned against), then prove it restores, before ANY write
+            try:
+                backup = bk.write_backup(
+                    root,
+                    files=[(u.locator, u.path, u.backup_rel, raw, _reader_for(u)) for u, raw, _, _ in pending],
+                    dbs=[(db.locator, db.path, db.backup_rel, plans[db.locator].row_spec()) for db in row_dbs])
+            except bk.SymlinkRefusal as exc:
+                report.refused, report.exit_code = f"{exc.strerror}; nothing was changed", 2
+                return report
+            except Exception as exc:
+                report.error(f"backup failed, nothing was changed: {exc.__class__.__name__}: {exc}")
+                report.exit_code = 1
+                return report
+            report.backup_path = str(backup.path)
+            _after_backup_written(backup.path)
+            problems = bk.verify_backup_restores(backup)
+            if problems:
+                report.error("backup verification failed, nothing was changed: " + "; ".join(problems[:5]))
+                report.exit_code = 1
+                return report
+            expected = {f.locator: f.sha256 for f in backup.files}
+            _after_backup_verified(backup.path)
+            try:
+                cells = bk.verified_cell_digests(backup)
+            except (OSError, sqlite3.Error) as exc:
+                report.error(f"backup unreadable after verification, nothing was changed ({exc.__class__.__name__})")
+                report.exit_code = 1
+                return report
+
+        # ---- last gate before the first target write: still quiet, same state.db inodes
+        problems = _quiesce_problems(root, profiles, dbs, backend_probe)
+        problems += [p for db in dbs for p in [_db_identity_problem(root, db)] if p]
         if problems:
-            report.error("backup verification failed, nothing was changed: " + "; ".join(problems[:5]))
-            report.exit_code = 1
+            return _refuse_running(report, problems)
+
+        # ---- files
+        pending_files = {u.locator for u, _, _, _ in pending}
+        if not _write_ledgers_or_report(root, report, dbs, deferred_files, pending_files, complete=False):
+            report.exit_code = 1  # the ledger dir went bad after the pre-check: stop before any target write
             return report
-        expected = {f.locator: f.sha256 for f in backup.files}
-
-    # ---- files
-    pending_files = {u.locator for u, _, _, _ in pending}
-    _write_ledgers(root, report, dbs, deferred_files, pending_files, complete=False)
-    for unit, _, _, snap in pending:
-        text, current, skip, now_snap = _read_unit(unit)
-        if skip or current is None or now_snap is None:
-            report.add(unit.target, unit.locator, Counter(), skip or "skipped-unreadable")
-            continue
-        if bk.sha256_bytes(current) != expected.get(unit.locator) or not now_snap.same_file_state(snap):
-            report.add(unit.target, unit.locator, Counter(), "changed-during-apply",
-                       "file changed since the backup; retried next run")
-            continue
-        masked, counts = _mask_file_text(text, unit.fmt, cfg, key_provider, dry_run=False)
-        if not counts:
+        for unit, raw, _, snap in pending:
+            text, current, skip, now_snap = _read_unit(unit)
+            if skip or current is None or now_snap is None:
+                report.add(unit.target, unit.locator, Counter(), skip or "skipped-unreadable")
+                continue
+            want = expected.get(unit.locator)
+            # the plan, the verified backup and the file as it is now must be the same bytes
+            if not (want and bk.sha256_bytes(raw) == want == bk.sha256_bytes(current)) \
+                    or not now_snap.same_file_state(snap):
+                report.add(unit.target, unit.locator, Counter(), "changed-during-apply",
+                           "file changed since the backup; retried next run")
+                continue
+            masked, counts = _mask_file_text(text, unit.fmt, cfg, key_provider, dry_run=False)
+            if not counts:
+                pending_files.discard(unit.locator)
+                continue
+            try:
+                outcome, detail = _atomic_rewrite_unit(unit, masked.encode("utf-8"), snap, open_writers_fn)
+            except OSError as exc:
+                report.error(f"{unit.locator}: rewrite failed ({exc.__class__.__name__})")
+                continue
+            if outcome != "masked":
+                if outcome == "deferred-live":
+                    deferred_files[unit.locator] = detail
+                report.add(unit.target, unit.locator, counts, outcome, detail)
+                continue
             pending_files.discard(unit.locator)
-            continue
-        try:
-            outcome, detail = _atomic_rewrite_unit(unit, masked.encode("utf-8"), snap, open_writers_fn)
-        except OSError as exc:
-            report.error(f"{unit.locator}: rewrite failed ({exc.__class__.__name__})")
-            continue
-        if outcome != "masked":
-            if outcome == "deferred-live":
-                deferred_files[unit.locator] = detail
-            report.add(unit.target, unit.locator, counts, outcome, detail)
-            continue
-        pending_files.discard(unit.locator)
-        after, _, _, _ = _read_unit(unit)
-        _, residue = _mask_file_text(after or "", unit.fmt, cfg, None, dry_run=True)
-        if residue:
-            report.error(f"{unit.locator}: re-scan still finds {sum(residue.values())} secret(s)")
-        report.add(unit.target, unit.locator, counts, "masked")
+            after, _, _, _ = _read_unit(unit)
+            _, residue = _mask_file_text(after or "", unit.fmt, cfg, None, dry_run=True)
+            if residue:
+                report.error(f"{unit.locator}: re-scan still finds {sum(residue.values())} secret(s)")
+            report.add(unit.target, unit.locator, counts, "masked")
 
-    # ---- state.db
-    for db in dbs:
-        plan = plans.get(db.locator)
-        if plan is None:
-            continue
-        try:
-            _apply_db(db, plan, cfg, key_provider, report, vacuum, holders_fn)
-        except Exception as exc:
-            where = f" Backup: {backup.path}" if backup else ""
-            report.error(f"{db.locator}: stopped mid-scrub ({exc.__class__.__name__}: {exc}); committed batches "
-                         f"are kept, re-run to resume.{where}")
-    report.exit_code = 1 if report.errors else 0
-    _write_ledgers(root, report, dbs, deferred_files, pending_files)
-    return report
+        # ---- state.db
+        for db in dbs:
+            plan = plans.get(db.locator)
+            if plan is None:
+                continue
+            try:
+                _apply_db(db, plan, cfg, key_provider, report, vacuum, holders_fn, cells.get(db.locator, {}))
+            except Exception as exc:
+                where = f" Backup: {backup.path}" if backup else ""
+                report.error(f"{db.locator}: stopped mid-scrub ({exc.__class__.__name__}: {exc}); committed "
+                             f"batches are kept, re-run to resume.{where}")
+        report.exit_code = 1 if report.errors else 0  # recorded in progress.json
+        if not _write_ledgers_or_report(root, report, dbs, deferred_files, pending_files):
+            report.exit_code = 1
+        return report
+    finally:
+        if backup is not None:
+            backup.close()
 
 
 # ---------------------------------------------------------------------------
