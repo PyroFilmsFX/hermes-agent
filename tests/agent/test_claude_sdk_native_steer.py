@@ -125,6 +125,7 @@ def _transport(turn_inbox, client=True, loop=True):
         _interrupt_commit_lock=threading.Lock(),
         _pending_steer_results=0,
         _terminal_result_committed=False,
+        is_live=lambda: True,
     )
     return mod, stub, queried
 
@@ -260,6 +261,40 @@ def test_peer_message_declines_and_cancels_when_scheduled_query_times_out(monkey
         stub, "hello", {"kind": "peer", "msg_id": "row-2"}
     ) is False
     assert future.cancelled is True
+
+
+def test_peer_message_declines_when_cli_stream_has_ended(monkeypatch):
+    mod, stub, queried = _transport(turn_inbox=None)
+    stub._stream_ended = object()
+    stub.is_live = lambda: stub._stream_ended is None
+
+    class _Fut:
+        def add_done_callback(self, _cb):
+            pass
+        def result(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *_a, **_kw: _Fut())
+
+    assert mod.ClaudeAgentSdkSession.send_peer_message(
+        stub, "hello", {"kind": "peer", "msg_id": "dead-cli"}
+    ) is False
+    assert queried == []
+
+
+def test_session_liveness_rejects_a_dead_cli_child(monkeypatch):
+    import threading
+
+    mod, stub, _queried = _transport(turn_inbox=None)
+    stub._turn_callback_lock = threading.RLock()
+    stub._closed = False
+    stub._retiring = False
+    stub._stream_ended = None
+    stub._loop = types.SimpleNamespace(is_closed=lambda: False, is_running=lambda: True)
+    monkeypatch.setattr(mod, "_sdk_child_pid", lambda _client: 123)
+    monkeypatch.setattr(mod, "_own_sdk_child_process", lambda _pid: None)
+
+    assert mod.ClaudeAgentSdkSession.is_live(stub) is False
 
 
 def test_transport_declines_when_client_or_loop_missing(monkeypatch):

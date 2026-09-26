@@ -36,6 +36,46 @@ def _isolate_provider_config(monkeypatch):
 # ---------- runtime glue ----------
 
 class TestRuntimeGlue:
+    def test_stream_ended_pre_query_retries_once_but_post_query_never_retries(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import agent.claude_sdk_runtime_session as session_mod
+        from agent.claude_sdk_runtime_state import _SdkTurnState
+
+        def run_with_api_call(api_call_made):
+            agent = _make_agent()
+            agent._claude_sdk_session = None
+            created = []
+
+            def create_session(agent_, **_kwargs):
+                turn = SimpleNamespace(
+                    interrupted=False, error="SDK message stream ended before this turn",
+                    thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+                    tool_iterations=0, final_text="", should_retire=True, stream_ended=True,
+                    api_call_made=api_call_made,
+                )
+                session = SimpleNamespace(_cwd="/tmp", run_turn=lambda **_kw: turn, close=lambda: None)
+                created.append(session)
+                agent_._claude_sdk_session = session
+                return session
+
+            monkeypatch.setattr(session_mod, "_persisted_sdk_session_id", lambda _agent: None)
+            monkeypatch.setattr(session_mod, "_create_session", create_session)
+            state = _SdkTurnState(
+                user_input="hello", original_user_message="hello",
+                messages=[{"role": "user", "content": "hello"}], messages_before_attempt=[],
+            )
+            failure = session_mod._run_sdk_attempts(agent, state)
+            return created, failure
+
+        before_query, failure = run_with_api_call(False)
+        assert len(before_query) == 2
+        assert failure is None
+
+        after_query, failure = run_with_api_call(True)
+        assert len(after_query) == 1
+        assert failure is None
+
     def test_turn_result_carries_last_reasoning(self):
         agent = _make_agent()
         agent._claude_sdk_session.run_turn.return_value = _make_turn(

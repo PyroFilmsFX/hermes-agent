@@ -11,6 +11,7 @@ session-creation work. Extracted from ``claude_sdk_runtime.py``.
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import os
 import threading
@@ -19,7 +20,10 @@ from typing import Any, Dict, Optional
 
 from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
-from agent.claude_sdk_runtime_fallback import _consume_agent_interrupt
+from agent.claude_sdk_runtime_fallback import (
+    _consume_agent_interrupt,
+    _retire_live_sdk_session,
+)
 from agent.claude_sdk_runtime_continuity import (
     _continuity_digest_source,
     _claude_sdk_session_lock,
@@ -857,6 +861,40 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         # run_turn, or close().
         with _claude_sdk_session_lock(agent):
             live_session = getattr(agent, "_claude_sdk_session", None)
+        stream_ended = (
+            inspect.getattr_static(live_session, "_stream_ended", None)
+            if live_session is not None
+            else None
+        )
+        closed = (
+            inspect.getattr_static(live_session, "_closed", False) is True
+            if live_session is not None
+            else False
+        )
+        retiring = (
+            inspect.getattr_static(live_session, "_retiring", False) is True
+            if live_session is not None
+            else False
+        )
+        if attempt == 0 and live_session is not None and (
+            stream_ended is not None or closed or retiring
+        ):
+            # A gateway record can outlive the CLI stream. Retire only an
+            # explicitly dead adapter: a starting client can have no child pid yet.
+            _retire_live_sdk_session(agent)
+            if getattr(agent, "_interrupt_requested", False):
+                _consume_agent_interrupt(agent)
+                return {
+                    "final_response": "claude-agent-sdk turn interrupted",
+                    "messages": messages,
+                    "api_calls": 0,
+                    "completed": False,
+                    "partial": True,
+                    "interrupted": True,
+                    "failed": False,
+                    "error": None,
+                }
+            live_session = None
         if live_session is None:
             resume_id = (
                 _persisted_sdk_session_id(agent)
@@ -1017,6 +1055,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 resumed = False
                 continue
         elif getattr(turn, "should_retire", False):
+            stream_ended_before_query = bool(
+                getattr(turn, "stream_ended", False)
+                and getattr(turn, "api_call_made", None) is False
+            )
             _emit_child_exited(session, getattr(turn, "error", None), turn)
             recovering_dead_turn = True
             logger.warning(
@@ -1028,9 +1070,19 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
             _clear_claude_sdk_session_if_current(agent, session)
-            # Error/timeout retire always clears the persisted resume id —
-            # never resume a conversation that just failed.
-            _store_sdk_session_id(agent, None)
+            # A pre-query stream end did not touch the remote conversation, so
+            # its persisted id remains valid for the replacement adapter.
+            if not stream_ended_before_query:
+                _store_sdk_session_id(agent, None)
+            if (
+                stream_ended_before_query
+                and attempt == 0
+                and not getattr(turn, "interrupted", False)
+                and not getattr(agent, "_interrupt_requested", False)
+            ):
+                retry_retired_before_query = True
+                resumed = False
+                continue
             if (
                 resumed
                 and attempt == 0

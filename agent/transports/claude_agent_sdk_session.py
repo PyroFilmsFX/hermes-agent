@@ -1282,6 +1282,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         """Inject peer-origin input; the SDK holds it until the current CLI turn reaches a boundary."""
         if not text or not text.strip():
             return False
+        if not self.is_live():
+            return False
         client, loop = self._client, self._loop
         if client is None or loop is None:
             return False
@@ -1312,6 +1314,17 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             return False
         logger.info("claude-agent-sdk: injected native peer message (%d chars)", len(text.strip()))
         return True
+
+    def is_live(self) -> bool:
+        """Whether this cached adapter still owns a running CLI stream."""
+        with self._turn_callback_lock:
+            client, loop = self._client, self._loop
+            if self._closed or self._retiring or self._stream_ended is not None:
+                return False
+        if client is None or loop is None or loop.is_closed() or not loop.is_running():
+            return False
+        pid = _sdk_child_pid(client)
+        return bool(pid and _own_sdk_child_process(pid) is not None)
 
     def build_option_fields(self) -> dict[str, Any]:
         """The ClaudeAgentOptions field dict — plain data so tests can assert
