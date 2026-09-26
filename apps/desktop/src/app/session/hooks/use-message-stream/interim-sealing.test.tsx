@@ -180,6 +180,35 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(true)
   })
 
+  it('settles a tool result onto its original card when interim prose sealed that stream', async () => {
+    mountStream()
+    await start()
+    await delta('I will check the workspace.')
+
+    act(() =>
+      stream.handleEvent({
+        payload: { args: { command: 'ls' }, name: 'Bash', tool_id: 'tool-use-1' },
+        session_id: SID,
+        type: 'tool.start'
+      })
+    )
+    await interim('I will check the workspace.')
+    act(() =>
+      stream.handleEvent({
+        payload: { name: 'Bash', result: 'file.txt', tool_id: 'tool-use-1' },
+        session_id: SID,
+        type: 'tool.complete'
+      })
+    )
+
+    const toolParts = getState().messages.flatMap(message =>
+      message.parts.filter(part => part.type === 'tool-call' && part.toolCallId === 'tool-use-1')
+    )
+
+    expect(toolParts).toHaveLength(1)
+    expect(toolParts[0]).toMatchObject({ result: 'file.txt', completedAt: expect.any(Number) })
+  })
+
   it('settles an identical final onto a non-previewed interim (tool-call turn) instead of duplicating (#63679)', async () => {
     mountStream()
     await start()

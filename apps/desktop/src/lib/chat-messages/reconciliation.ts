@@ -56,7 +56,7 @@ const timelinePartMatch = (stored: ChatMessagePart, local: ChatMessagePart) => {
   return false
 }
 
-/** Keep richer live timing when durable hydration has only one timestamp per row. */
+/** Keep live tool results and timing when durable hydration has less detail. */
 function reconcileLocalAssistantTimeline(nextMessages: ChatMessage[], currentMessages: ChatMessage[]): ChatMessage[] {
   const localAssistants = currentMessages.filter(message => message.role === 'assistant' && !message.hidden)
   const matches = new Map<number, ChatMessage>()
@@ -101,9 +101,25 @@ function reconcileLocalAssistantTimeline(nextMessages: ChatMessage[], currentMes
 
       unusedLocalParts.delete(localIndex)
       const localPart = local.parts[localIndex]
+      const carryLiveToolResult =
+        part.type === 'tool-call' &&
+        localPart.type === 'tool-call' &&
+        !Object.hasOwn(part, 'result') &&
+        Object.hasOwn(localPart, 'result')
+      const liveResultMetadata =
+        carryLiveToolResult && localPart.type === 'tool-call'
+          ? { ...localPart.toolResultMetadata, ...part.toolResultMetadata }
+          : undefined
 
       return {
         ...part,
+        ...(carryLiveToolResult && localPart.type === 'tool-call'
+          ? {
+              result: localPart.result,
+              ...(Object.hasOwn(localPart, 'isError') ? { isError: localPart.isError } : {}),
+              ...(liveResultMetadata ? { toolResultMetadata: liveResultMetadata } : {})
+            }
+          : {}),
         completedAt: latestBoundary(part.completedAt, localPart.completedAt),
         timestamp: earliestBoundary(part.timestamp, localPart.timestamp)
       } as ChatMessagePart
