@@ -122,7 +122,13 @@ class TestStreamOwnership:
 
         assert session._sdk_task_records == {}
         assert [event for event, _kw in events].count("subagent.complete") == 1
-        assert "live-task" not in delegate_tool_registry._active_subagents
+        record = delegate_tool_registry._active_subagents["live-task"]
+        assert record["status"] == "interrupted"
+        assert record["accepting_steer"] is False
+        assert all(
+            row["subagent_id"] != "live-task"
+            for row in delegate_tool_registry.list_active_subagents()
+        )
 
     def test_preloaded_stale_burst_is_drained_before_foreground_claim(self):
         """A resumed client's already-buffered FIFO stays background-owned.
