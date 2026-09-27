@@ -461,7 +461,7 @@ def test_cli_parser_and_dry_run_json(home, monkeypatch, capsys):
 
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
-    build_security_parser(sub, cmd_security=lambda a: None)
+    build_security_parser(sub, cmd_security=lambda a: None, enable_scrub=True)
     args = parser.parse_args(["security", "scrub", "--json", "--targets", "pastes,state-db"])
     assert args.security_command == "scrub" and args.apply is False
     assert args.targets == "pastes,state-db"
@@ -479,6 +479,18 @@ def test_cli_parser_and_dry_run_json(home, monkeypatch, capsys):
     assert all(v not in out for v in ALL_FAKES)
 
 
+def test_scrub_cli_is_not_registered_by_default():
+    import argparse
+
+    from hermes_cli.subcommands.security import build_security_parser
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    build_security_parser(sub, cmd_security=lambda a: None)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["security", "scrub"])
+
+
 # ---------------------------------------------------------------------------
 # Security review round 1 (P1 1-8, P2 a-b)
 # ---------------------------------------------------------------------------
@@ -489,7 +501,8 @@ def _cli_args(*extra):
     from hermes_cli.subcommands.security import build_security_parser
 
     parser = argparse.ArgumentParser()
-    build_security_parser(parser.add_subparsers(dest="command"), cmd_security=lambda a: None)
+    build_security_parser(
+        parser.add_subparsers(dest="command"), cmd_security=lambda a: None, enable_scrub=True)
     return parser.parse_args(["security", "scrub", *extra])
 
 
