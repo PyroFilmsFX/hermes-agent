@@ -53,6 +53,7 @@ def test_historical_payload_maps_to_takeover_request_schema(tmp_path, desktop, r
     # The retired updater reaches the takeover through the NEW tree's hand-off module; this
     # checkout is the whole tree the child sees (CI has no editable finder for the source).
     shutil.copy2(source / "hermes_cli/update_handoff.py", package / "update_handoff.py")
+    shutil.copy2(source / "hermes_cli/control_plane_env.py", package / "control_plane_env.py")
     # write_handoff resolves the home through hermes_constants; the child tree is the whole
     # sys.path (CI has no editable finder), so give it the one name the hand-off reads.
     (root / "hermes_constants.py").write_text(
@@ -95,7 +96,8 @@ def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path):
         "import hermes_bootstrap\nraise AssertionError('current CLI parsed a legacy continuation')\n",
         encoding="utf-8",
     )
-    for relative in ("hermes_bootstrap.py", "hermes_cli/update_handoff.py", "hermes_cli/_old_updater.py"):
+    for relative in ("hermes_bootstrap.py", "hermes_cli/update_handoff.py", "hermes_cli/control_plane_env.py",
+                     "hermes_cli/_old_updater.py"):
         shutil.copy2(source / relative, root / relative)
     (package / "_update_takeover.py").write_text(
         "import json, sys\nfrom pathlib import Path\n"
