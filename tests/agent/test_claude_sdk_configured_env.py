@@ -15,6 +15,8 @@ and silently re-arm metered billing behind `allow_metered_key: false`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent.transports import claude_agent_sdk_session_config as M
@@ -62,6 +64,42 @@ def test_configured_env_reaches_the_overrides(env_config):
     env_config(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"})
 
     assert M._sdk_env_overrides()["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "300000"
+
+
+def test_sdk_state_root_is_profile_scoped_and_private(env_config, monkeypatch, tmp_path):
+    from hermes_cli.control_plane_env import scrub_desktop_control_plane_env
+
+    profile_home = tmp_path / "profile"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    env_config()
+
+    env = M._sdk_env_overrides(sdk_cwd=str(cwd), hermes_session_id="session-a")
+
+    state_dir = Path(env["TB_STATE_ROOT"])
+    assert state_dir.is_relative_to(profile_home / "sdk-state")
+    assert not state_dir.is_relative_to(cwd)
+    assert state_dir.is_dir()
+    assert state_dir.stat().st_mode & 0o777 == 0o700
+    assert scrub_desktop_control_plane_env({"TB_STATE_ROOT": str(state_dir)}) == {
+        "TB_STATE_ROOT": str(state_dir)
+    }
+
+
+def test_sdk_state_root_is_distinct_for_different_cwds(env_config, monkeypatch, tmp_path):
+    profile_home = tmp_path / "profile"
+    cwd_a = tmp_path / "repo-a"
+    cwd_b = tmp_path / "repo-b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    env_config()
+
+    state_a = M._sdk_env_overrides(sdk_cwd=str(cwd_a), hermes_session_id="session-a")["TB_STATE_ROOT"]
+    state_b = M._sdk_env_overrides(sdk_cwd=str(cwd_b), hermes_session_id="session-b")["TB_STATE_ROOT"]
+
+    assert state_a != state_b
 
 
 def test_native_task_tools_inject_defaults_and_keep_operator_overrides(env_config):

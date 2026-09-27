@@ -17,6 +17,8 @@ import stat
 import sys
 import sysconfig
 import contextlib
+import hashlib
+from pathlib import Path
 from typing import Any, Optional
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
@@ -91,6 +93,7 @@ def _sdk_env_overrides(
     task_list_id: Optional[str] = None,
     task_env: Optional[dict[str, str]] = None,
     hermes_session_id: Optional[str] = None,
+    sdk_cwd: Optional[str] = None,
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
@@ -161,6 +164,17 @@ def _sdk_env_overrides(
                 overrides["HERMES_SESSION_ID"] = ""
         except Exception:
             pass
+    # Conductor's worker-spawn hook honors TB_STATE_ROOT. Keep its artifacts
+    # out of the checked-out project and scope them to the active Hermes
+    # profile; a cwd hash gives each project a stable, filesystem-safe root.
+    from hermes_constants import get_hermes_home
+
+    project_cwd = Path(sdk_cwd or os.getcwd()).expanduser().resolve()
+    cwd_hash = hashlib.sha256(os.fsencode(project_cwd)).hexdigest()[:16]
+    state_dir = get_hermes_home() / "sdk-state" / cwd_hash
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.chmod(0o700)
+    overrides["TB_STATE_ROOT"] = str(state_dir)
     return overrides
 
 

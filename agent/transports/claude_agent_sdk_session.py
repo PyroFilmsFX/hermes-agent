@@ -1468,6 +1468,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             task_list_id=self._task_list_id,
             task_env=getattr(self, "_task_env", None),
             hermes_session_id=self._hermes_session_id,
+            sdk_cwd=self._cwd,
         )
 
         fields = {
