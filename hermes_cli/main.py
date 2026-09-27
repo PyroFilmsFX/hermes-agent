@@ -46,6 +46,13 @@ if _bootstrap_root not in sys.path:
     sys.path.insert(0, _bootstrap_root)
 from hermes_cli import _startup_fast  # noqa: E402
 
+# Keep the verifier convenience command ahead of the normal CLI import graph,
+# while leaving unrelated fast paths (notably --version) import-free.
+if len(sys.argv) > 1 and sys.argv[1] == "owner":
+    from hermes_cli.subcommands.owner import dispatch as _dispatch_owner
+
+    raise SystemExit(_dispatch_owner(sys.argv[2:]))
+
 # A literal ``~``/``$VAR`` in HERMES_HOME (fish, or any quoted value) must become absolute
 # before the first reader — otherwise it resolves against cwd and scaffolds <cwd>/~/.hermes.
 _startup_fast.normalize_hermes_home_env()
@@ -3453,6 +3460,8 @@ def _build_cli_parser():
     build_hooks_parser(subparsers, cmd_hooks=cmd_hooks)
     build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
     build_verify_parser(subparsers, cmd_verify=cmd_verify)
+    from hermes_cli.subcommands.owner import build_owner_parser
+    build_owner_parser(subparsers)
     build_security_parser(subparsers, cmd_security=cmd_security)
     build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
     build_dump_parser(subparsers, cmd_dump=cmd_dump)

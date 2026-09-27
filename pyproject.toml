@@ -826,6 +826,7 @@ include = [
   "hermes_platform.*",
   "pm",
   "pm.*",
+  "hermes_owner_grant",
   "tools",
   "tools.*",
 ]
@@ -836,6 +837,7 @@ hermes_cli = [
   "data/*.json",
   "local_runtime/*.json",
 ]
+hermes_owner_grant = ["scopes.json"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
 # screenshot. Without this, sealed venvs (uv2nix) silently lose both —
 # status phrases fall back to the tiny hardcoded set and the Telegram
