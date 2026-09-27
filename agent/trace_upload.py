@@ -47,15 +47,32 @@ def _now_iso() -> str:
 
 
 def _redact(text: Any, enabled: bool) -> Any:
-    """Redact a string body when enabled (``force=True``: an upload scrubs even if log redaction is off)."""
-    if not enabled or not isinstance(text, str) or not text:
+    """Mask a string body for upload.
+
+    The secret-hygiene masker always runs first (``[REDACTED:<kind>:<tag>]``, whole-value, the
+    same detector as ingest; ``security.secret_hygiene.enabled`` in config.yaml), so
+    ``--no-redact`` never uploads a detected secret. When ``enabled``, the log redactor
+    (``force=True``: vault values and its display masks) then runs around the placeholders.
+    Any failure refuses the upload.
+    """
+    if not isinstance(text, str) or not text:
         return text
     try:
-        from agent.redact import redact_sensitive_text
-        return redact_sensitive_text(text, force=True)
+        from agent.secret_egress import mask_egress_text
+        return mask_egress_text(text, surface="trace upload", legacy=enabled)
     except Exception as exc:
-        logger.warning("Trace upload redaction failed; refusing upload", exc_info=True)
-        raise TraceRedactionError(_REDACTION_BLOCKED_MESSAGE) from exc
+        logger.warning("Trace upload redaction failed (%s); refusing upload", type(exc).__name__)
+        raise TraceRedactionError(_REDACTION_BLOCKED_MESSAGE) from None
+
+
+def _mask_value(value: Any) -> Any:
+    """Mask the string leaves of a structured value (tool arguments, entry metadata)."""
+    try:
+        from agent.secret_egress import mask_egress_value
+        return mask_egress_value(value, surface="trace upload")
+    except Exception as exc:
+        logger.warning("Trace upload redaction failed (%s); refusing upload", type(exc).__name__)
+        raise TraceRedactionError(_REDACTION_BLOCKED_MESSAGE) from None
 
 
 def _text_block(text: Any, redact: bool) -> Dict[str, Any]:
@@ -95,7 +112,7 @@ def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function") or {}
-        parsed = _parse_tool_args(fn.get("arguments"))
+        parsed = _mask_value(_parse_tool_args(fn.get("arguments")))
         if redact:
             try:
                 parsed = json.loads(_redact(json.dumps(parsed), redact))
@@ -156,10 +173,11 @@ def build_trace_jsonl(messages: List[Dict[str, Any]], *, session_id: str, model:
         turn_uuid = str(uuid.uuid4())
         line_type, render = _ROLE_RENDERERS.get(role, ("user", _user_message))
         entry = {  # key order is the wire order
-            "parentUuid": parent, "isSidechain": False, "userType": "external", "cwd": cwd or os.getcwd(),
-            "sessionId": session_id, "version": _HERMES_VERSION, "gitBranch": git_branch, "uuid": turn_uuid,
+            "parentUuid": parent, "isSidechain": False, "userType": "external", "cwd": _redact(cwd or os.getcwd(), redact),
+            "sessionId": session_id, "version": _HERMES_VERSION, "gitBranch": _redact(git_branch, redact), "uuid": turn_uuid,
             "timestamp": base_ts, "type": line_type, "message": render(msg, model, redact),
         }
+        entry = _mask_value(entry)
         lines.append(json.dumps(entry, ensure_ascii=False))
         parent = turn_uuid
     return "\n".join(lines) + ("\n" if lines else "")

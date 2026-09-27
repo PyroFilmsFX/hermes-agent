@@ -1946,7 +1946,7 @@ DEFAULT_CONFIG = {
                         "min_char_classes": 3, "bare_strings": False},
             "allow_patterns": [],
             "allow_value_sha256": [],
-            "sweep": {"backup_retention_days": 7, "live_window_hours": 24},
+            "sweep": {"backup_retention_days": 7, "live_window_hours": 24, "on_backup": True},
             # Per-message opt-out: requires a native trusted-gesture confirm before enabling by default.
             "optout": {"allowed": False},
         },

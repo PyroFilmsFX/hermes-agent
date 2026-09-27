@@ -441,14 +441,14 @@ class TestRunDebugShareRedaction:
             run_debug_share(args)
 
         for content in captured:
-            assert "redacted at upload time" in content, (
+            assert "detected secrets masked before upload" in content, (
                 "redaction banner missing from upload-bound content"
             )
 
-    def test_no_redact_flag_disables_redaction_and_banner(
+    def test_no_redact_flag_keeps_secret_masking_and_disclosure(
         self, hermes_home_with_secret, capsys
     ):
-        """--no-redact preserves original log content and omits the banner."""
+        """--no-redact disables extra scrubbing but never uploads detected secrets."""
         from hermes_cli.debug import run_debug_share
 
         args = MagicMock()
@@ -469,15 +469,10 @@ class TestRunDebugShareRedaction:
              patch("hermes_cli.debug.upload_to_pastebin", side_effect=fake_upload):
             run_debug_share(args)
 
-        # The agent.log paste should now contain the raw token.
-        assert any(_REDACT_FIXTURE_TOKEN in c for c in captured), (
-            "expected raw token in --no-redact upload"
-        )
-        # No banner anywhere when redaction is disabled.
+        assert all(_REDACT_FIXTURE_TOKEN not in c for c in captured)
+        assert any("[REDACTED:" in c for c in captured)
         for content in captured:
-            assert "redacted at upload time" not in content, (
-                "banner present with --no-redact"
-            )
+            assert "detected secrets masked before upload" in content
 
 
 # ---------------------------------------------------------------------------
@@ -734,9 +729,9 @@ class TestCollectShareBundle:
             redacted = collect_share_bundle(log_lines=50, redact=True)
             unredacted = collect_share_bundle(log_lines=50, redact=False)
 
-        # Sanity: without redaction the secret is present in the bundle.
-        assert secret in "\n".join(unredacted.values())
-        # With redaction it must be scrubbed everywhere.
+        # Egress masking applies even when optional log scrubbing is disabled.
+        assert secret not in "\n".join(unredacted.values())
+        assert "[REDACTED:openai-key:" in "\n".join(unredacted.values())
         assert secret not in "\n".join(redacted.values())
 
 
@@ -922,4 +917,3 @@ class TestShareConsentGate:
 
         mock_upload.assert_not_called()
         assert "Aborted" not in capsys.readouterr().out
-

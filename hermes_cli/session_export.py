@@ -255,11 +255,13 @@ _SAVE_RENDERERS = {
 
 
 def render_session_for_save(session: Dict[str, Any], fmt: str) -> str:
-    """Render one exported session dict for /save."""
+    """Render one safely masked session dict for /save."""
     renderer = _SAVE_RENDERERS.get(fmt)
     if renderer is None:
         raise ValueError(f"Unknown save format: {fmt!r}")
-    return renderer(session)
+    from agent.secret_egress import mask_egress_value
+
+    return renderer(mask_egress_value(session, surface="/save"))
 
 
 def default_save_filename(session_id: str, fmt: str) -> str:
