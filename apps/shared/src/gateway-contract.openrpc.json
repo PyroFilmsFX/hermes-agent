@@ -3085,6 +3085,24 @@
       }
     },
     {
+      "name": "secrets.mask",
+      "summary": "Mask secrets in composer text as [REDACTED:<kind>:<tag>]; optionally mint an opt-out nonce.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SecretsMaskParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SecretsMaskResult"
+        }
+      }
+    },
+    {
       "name": "session.activate",
       "summary": "Attach the frontend to a live session without closing the previously focused one.",
       "params": [
@@ -26741,6 +26759,17 @@
             ],
             "default": null,
             "title": "Rebind Survivor Row Ids"
+          },
+          "secret_optout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretOptout"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -28601,6 +28630,34 @@
         "title": "RoomTombstone",
         "type": "object"
       },
+      "SecretOptout": {
+        "additionalProperties": false,
+        "description": "A confirmed per-message opt-out from secret masking (HE-SECRET-HYGIENE \u00a73.4): the tags to\nleave raw for THIS turn only, plus the single-use nonce ``secrets.mask`` minted for this exact\ntext. A missing, stale, reused or mismatched nonce leaves the message fully masked.",
+        "properties": {
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Tags",
+            "type": "array"
+          },
+          "confirm_nonce": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Nonce"
+          }
+        },
+        "title": "SecretOptout",
+        "type": "object"
+      },
       "SecretRequestParams": {
         "additionalProperties": false,
         "properties": {
@@ -28636,6 +28693,121 @@
           "prompt"
         ],
         "title": "SecretRequestParams",
+        "type": "object"
+      },
+      "SecretTagInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "tag"
+        ],
+        "title": "SecretTagInfo",
+        "type": "object"
+      },
+      "SecretsMaskParams": {
+        "additionalProperties": false,
+        "description": "Mask composer text before it is saved or sent. ``optout_tags`` (after the client's explicit\nconfirm) mints a single-use nonce for exactly this text and session.",
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "optout_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Optout Tags"
+          }
+        },
+        "title": "SecretsMaskParams",
+        "type": "object"
+      },
+      "SecretsMaskResult": {
+        "additionalProperties": false,
+        "description": "Never carries a secret value: masked text, per-kind counts and the placeholder tags.",
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "kinds": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Kinds",
+            "type": "object"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/SecretTagInfo"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "confirm_nonce": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Nonce"
+          }
+        },
+        "required": [
+          "text",
+          "kinds",
+          "tags"
+        ],
+        "title": "SecretsMaskResult",
         "type": "object"
       },
       "SeedMessage": {

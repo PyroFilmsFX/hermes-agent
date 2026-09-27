@@ -31,6 +31,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from agent.secret_hygiene import mask_tool_result_text
+
 _TOOL_RESULT_MAX_CHARS = 4000
 
 
@@ -196,8 +198,11 @@ class ClaudeSdkEventProjector:
             if _sdk_type_name(block) != "ToolResultBlock":
                 continue
             is_error = bool(getattr(block, "is_error", False))
+            # CLI-native tool output never passed Hermes tool-output redaction: mask it
+            # before it becomes a persisted ``role='tool'`` row (secret hygiene S2).
             text = _transcript_tool_result_text(
-                _flatten_tool_result_content(getattr(block, "content", None))
+                mask_tool_result_text(
+                    _flatten_tool_result_content(getattr(block, "content", None)))
             )
             if is_error:
                 text = f"[error] {text}" if text else "[error]"

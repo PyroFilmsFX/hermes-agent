@@ -183,7 +183,10 @@ def _stage_session_file_attachment(
         counter = 2
         while (target := root / f"{stem}-{counter}{suffix}").exists():
             counter += 1
-    target.write_bytes(payload)
+    # Secret hygiene (E3): a text payload (the composer paste file included) is masked before
+    # this first write; binary bytes are copied unchanged. Mode 0600 either way.
+    from agent.secret_hygiene import mask_ingress_bytes, write_private_bytes
+    write_private_bytes(target, mask_ingress_bytes(payload)[0])
     return target.resolve(), True
 
 

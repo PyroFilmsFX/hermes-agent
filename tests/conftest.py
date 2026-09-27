@@ -437,6 +437,18 @@ def _reset_claude_sdk_shutdown_fence():
 
 
 @pytest.fixture(autouse=True)
+def _fixed_secret_hygiene_tag_key():
+    """Ingest masking (agent/secret_hygiene.py) runs on every user turn; any test whose input
+    carries a fake secret would otherwise load the per-install tag key from the macOS
+    Keychain or a key file outside the test home. Pin a fixed in-memory key instead."""
+    from agent.secret_hygiene import StaticTagKeyProvider, set_tag_key_provider
+
+    set_tag_key_provider(StaticTagKeyProvider(b"\x11" * 32))
+    yield
+    set_tag_key_provider(None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_foreground_exit_fence():
     """A test that drives a hard-exit path raises the one-way foreground-spawn fence; lower it after."""
     yield

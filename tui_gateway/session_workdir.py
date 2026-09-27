@@ -390,6 +390,11 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     staged = session.pop("_submit_user_row", None)
     if not isinstance(staged, dict) or agent is None or staged.get("content") != text:
         return
+    # Secret hygiene: the rewritten prompt (@-expansion inlines file contents) is masked before
+    # it replaces the row; idempotent, so an already-masked prompt comes back byte-identical.
+    from agent.secret_hygiene import mask_ingress_content
+    persist_user_message = mask_ingress_content(
+        persist_user_message, optout_tags=getattr(agent, "_secret_optout_tags", None))[0]
     if staged["content"] != persist_user_message:
         from agent.session_persistence import _durable_content
         with _session_db(session) as db:

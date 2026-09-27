@@ -51,6 +51,14 @@ def _fence_cancel_before_commit(fence, *, when_in_flight: bool, failure_log: str
             logger.debug(failure_log, exc_info=True)
 
 
+def _ic_mask_user_text(text: str) -> str:
+    """Secret-hygiene ingest edge for mid-turn user text (steer / redirect): it becomes its own
+    user row and reaches the model (SDK live stream included) without passing the turn backstop."""
+    from agent.secret_hygiene import mask_ingress_text
+
+    return mask_ingress_text(text)[0]
+
+
 def _ic_lock(agent, attr: str):
     """``with`` the lock stored at ``attr`` when present; __init__-less test stubs run unlocked."""
     lock = getattr(agent, attr, None)
@@ -271,7 +279,7 @@ class InterruptControlMixin:
         interrupt); multiple calls concatenate with newlines. Returns False for empty text."""
         if not text or not text.strip():
             return False
-        cleaned = text.strip()
+        cleaned = _ic_mask_user_text(text.strip())
 
         # The SDK owns tool execution, so Hermes' post-tool-result drain is
         # never reached on this lane. Its live stream accepts the steer at the
@@ -299,7 +307,7 @@ class InterruptControlMixin:
         to ``steer()``; Codex app-server uses native ``turn/steer``. False when no live turn / empty text."""
         if not text or not text.strip():
             return False
-        cleaned = text.strip()
+        cleaned = _ic_mask_user_text(text.strip())
 
         _native_steer = _ic_codex_method(self, "request_steer")
         if _native_steer is not None:

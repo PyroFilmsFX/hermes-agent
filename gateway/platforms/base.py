@@ -1476,7 +1476,10 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
     # Final safety check: ensure path stays inside cache dir
     if not filepath.resolve().is_relative_to(cache_dir.resolve()):
         raise ValueError(f"Path traversal rejected: {filename!r}")
-    filepath.write_bytes(data)
+    # Secret hygiene (E3): text documents are masked before the first write; binary bytes
+    # (PDF, DOCX, images) pass through unchanged. Mode 0600 either way.
+    from agent.secret_hygiene import mask_ingress_bytes, write_private_bytes
+    write_private_bytes(filepath, mask_ingress_bytes(data)[0])
     return str(filepath)
 
 
@@ -3965,6 +3968,12 @@ class BasePlatformAdapter(ABC):
                 )
             return
 
+        # Secret hygiene (E4): mask before the active/busy split, so the queue, steer,
+        # interrupt and fresh-turn paths (and every transcript row they write) see masked text.
+        # Platforms get no per-message opt-out: the secret already transited the chat service.
+        if isinstance(event.text, str) and event.text:
+            from agent.secret_hygiene import mask_ingress_text
+            event.text = mask_ingress_text(event.text)[0]
         if event.allow_gateway_control:
             coerce_plaintext_gateway_command(event)
         # Identity FIRST: every key below (routing check, guard lookup, batch lane) derives from it.

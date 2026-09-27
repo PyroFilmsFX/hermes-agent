@@ -572,6 +572,8 @@ _PER_TURN_RESET_STATE: Tuple[Tuple[str, Any], ...] = (
     ("_iteration_budget_warning_injected", False),
     ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
     ("_pre_verify_nudges", 0),
+    # A confirmed per-message secret opt-out covers one turn only (secret hygiene §3.4).
+    ("_secret_optout_tags", frozenset()),
 )
 
 
@@ -615,6 +617,31 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
         scrubber = getattr(agent, name, None)
         if scrubber is not None:
             scrubber.reset()
+
+
+def _mask_turn_user_input(agent: Any, user_message: Any, persist_user_message: Any) -> Tuple[Any, Any]:
+    """Secret-hygiene backstop (HE-SECRET-HYGIENE §2.2): mask THIS turn's user text before the
+    log preview, the persist override, the append and every lane dispatch (SDK included).
+
+    Only the current turn's input is touched, never ``conversation_history``: past turns keep
+    the exact bytes they were sent with, so the provider prompt cache is never busted. The
+    mask is deterministic and idempotent, so text an ingest edge already masked comes back
+    byte-identical and the CLI / TUI staged-row handoffs (equality checks) still adopt.
+    A confirmed opt-out (``agent._secret_optout_tags``) is consumed here, for this turn only.
+    """
+    from agent.secret_hygiene import ingress_config, mask_ingress_content, take_optout_tags
+
+    optout = take_optout_tags(agent)
+    cfg = ingress_config()
+    # Owner decision (v1): the OpenAI-compatible API server stays unmasked. Its clients resend
+    # their own raw history every turn, so masking only this turn would neither keep the
+    # secret from the model nor keep the cached prefix stable.
+    if cfg is None or getattr(agent, "platform", None) == "api_server":
+        return user_message, persist_user_message
+    user_message, _ = mask_ingress_content(user_message, optout_tags=optout, config=cfg)
+    if persist_user_message is not None:
+        persist_user_message, _ = mask_ingress_content(persist_user_message, optout_tags=optout, config=cfg)
+    return user_message, persist_user_message
 
 
 def _stage_turn_user_message(
@@ -1027,6 +1054,8 @@ def build_turn_context(
         user_message = sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
+    user_message, persist_user_message = _mask_turn_user_input(
+        agent, user_message, persist_user_message)
 
     effective_task_id, turn_id = _bind_turn_identity(
         agent, task_id, stream_callback, persist_user_message,
