@@ -119,8 +119,17 @@ def world(monkeypatch, tmp_path):
     return state
 
 
-def payload_for(targets, *, text: str = TEXT, backend: str = "spawn-live", scope=(GATE,), now=None, **extra):
+def payload_for(targets, *, text: str = TEXT, backend: str = "spawn-live", scope=(GATE,), now=None,
+               preserve_null: bool = False, **extra):
     now = int(time.time() * 1000) if now is None else now
+    targets = [
+        (
+            {**target, "claude_session_id": "claude-a"}
+            if target.get("claude_session_id") is None and not preserve_null
+            else dict(target)
+        )
+        for target in targets
+    ]
     qualified = [f"default:{t['session_id']}" for t in targets]
     body = {
         "v": 1, "aud": ["hermes-owner-forward", "hermes-owner-verify"], "decision_id": "od_" + "b" * 26,
@@ -151,7 +160,10 @@ def run_cli(*argv: str, stdin: str = "") -> tuple[int, dict]:
     """The hook path: the same ``cli.main`` the root-owned launcher dispatches to, anchor loaded from
     the hard-coded path (no ``anchor=`` injection)."""
     out = io.StringIO()
-    code = cli_mod.main(list(argv), uid=UID, stdin=io.StringIO(stdin), stdout=out, stderr=io.StringIO())
+    args = list(argv)
+    if "--claude-session" not in args:
+        args.extend(("--claude-session", "claude-a"))
+    code = cli_mod.main(args, uid=UID, stdin=io.StringIO(stdin), stdout=out, stderr=io.StringIO())
     return code, json.loads(out.getvalue().strip().splitlines()[-1])
 
 
@@ -456,6 +468,25 @@ def test_t5_the_sdk_really_stamps_its_entrypoint():
     assert '"CLAUDE_CODE_ENTRYPOINT": "sdk-py",\n                **self._options.env' in source
 
 
+def test_conductor_grant_with_null_claude_binding_is_refused_on_hook_path(world):
+    """A trusted hook session id cannot compensate for an unbound conductor grant.
+
+    MUTATION: remove the conductor-scope null-binding check in ``verify._evaluate_signed``.
+    The hook then accepts this grant despite receiving a live Claude session id.
+    """
+    env = mint(
+        world,
+        payload_for(
+            [{"session_id": "worker-a", "claude_session_id": None}], preserve_null=True
+        ),
+    )
+    code, out = run_cli(
+        "verify", "--session", "worker-a", "--claude-session", "claude-a",
+        "--grant", env.grant_id, "--scope", GATE,
+    )
+    assert (code, out["ok"], out["reason"]) == (1, False, "claude_session_unbound")
+
+
 # ── T-6 (investigation): settings-env override of HERMES_SESSION_ID ────────────────────────
 
 
@@ -510,7 +541,8 @@ def test_t6_a_grant_main_signs_today_is_bound_to_the_target_cli(world, gw, monke
     row = asyncio.run(sessions_router.get_session_detail("worker-a", profile="default"))
     signed_as_main_does = row.get("claude_session_id") or None
     assert signed_as_main_does == "claude-a"
-    env = mint(world, payload_for([{"session_id": "worker-a", "claude_session_id": signed_as_main_does}]))
+    env = mint(world, payload_for([{"session_id": "worker-a", "claude_session_id": signed_as_main_does}],
+                                  preserve_null=True))
 
     code, out = run_cli("verify", "--session", "worker-a", "--claude-session", "claude-b",
                         "--grant", env.grant_id, "--scope", GATE)

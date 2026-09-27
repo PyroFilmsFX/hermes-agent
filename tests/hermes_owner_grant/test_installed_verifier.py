@@ -344,7 +344,7 @@ def _timing_fixture(tmp_path):
         "keys": [owner.anchor_key()],
         "verifier_sha256": "ab" * 32,
     }
-    return anchor_doc, tv.SESSION, tv.sha()
+    return anchor_doc, tv.SESSION, tv.CLAUDE, tv.sha()
 
 
 _TIMED_LAUNCHER = (
@@ -375,13 +375,13 @@ def _median_ms(argv, runs=9):
 def test_launcher_full_process_verify_is_under_100ms(tmp_path):
     """D13 / G-16: the whole ``/usr/bin/python3 -I -S <launcher> verify ...`` process, against
     a fixture anchor (the loader is patched in-process; the real /Library is never read)."""
-    anchor_doc, session, text_sha = _timing_fixture(tmp_path)
+    anchor_doc, session, claude_session, text_sha = _timing_fixture(tmp_path)
     tree = _tree(tmp_path, compile_python=str(SYSTEM_PYTHON))
     pycs = sorted(p.name for p in (tree / "pycache").rglob("*.pyc"))
     for module in ("cli", "verify", "argparse", "dataclasses", "inspect"):
         assert module + ".cpython-39.pyc" in pycs, module
     launcher = tree / "hermes_owner_verify.py"
-    args = ["verify", "--session", session, "--text-sha", text_sha]
+    args = ["verify", "--session", session, "--claude-session", claude_session, "--text-sha", text_sha]
 
     code = _TIMED_LAUNCHER % (str(launcher), json.dumps(anchor_doc))
     launcher_ms = _median_ms([str(SYSTEM_PYTHON), "-I", "-S", "-c", code, *args])

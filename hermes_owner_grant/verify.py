@@ -17,7 +17,9 @@ Checks, in order. Each one fails closed and names its reason code:
 4. Ed25519 signature over the domain prefix plus the exact payload bytes (``bad_signature``),
    then the signed payload's schema (``malformed``);
 5. audience (``wrong_audience``) and ``owner_uid`` equal to the verifying uid (``uid_mismatch``);
-6. session binding (``session_mismatch`` / ``claude_session_mismatch``);
+6. session binding (``session_mismatch`` / ``claude_session_mismatch`` /
+   ``claude_session_unbound``). Any requested or granted conductor scope requires the
+   matching target to carry a Claude session id;
 7. time: ``issued_at <= t <= expires_at`` with 5 s skew, plus optional max age (``expired``).
    Also ``expires_at - issued_at`` must be within the tightest max TTL among the grant's
    scope classes (``ttl_exceeded``). Without that cap, a leaked retired key could mint a
@@ -81,6 +83,7 @@ REASON_WRONG_AUDIENCE = "wrong_audience"
 REASON_UID_MISMATCH = "uid_mismatch"
 REASON_SESSION_MISMATCH = "session_mismatch"
 REASON_CLAUDE_SESSION_MISMATCH = "claude_session_mismatch"
+REASON_CLAUDE_SESSION_UNBOUND = "claude_session_unbound"
 REASON_EXPIRED = "expired"
 REASON_TTL_EXCEEDED = "ttl_exceeded"
 REASON_SCOPE_MISSING = "scope_missing"
@@ -380,13 +383,17 @@ def _validate_payload(p: Dict[str, Any]) -> None:
         raise _malformed("targets must list 1..%d sessions" % MAX_TARGETS)
     seen = set()
     for i, target in enumerate(targets):
-        if not isinstance(target, dict) or set(target) != _TARGET_FIELDS:
+        if (
+            not isinstance(target, dict)
+            or not set(target).issubset(_TARGET_FIELDS)
+            or "session_id" not in target
+        ):
             raise _malformed(
-                "targets[%d] must have exactly %s" % (i, sorted(_TARGET_FIELDS))
+                "targets[%d] must have session_id and optional claude_session_id" % i
             )
         if not _nonempty_str(target["session_id"]):
             raise _malformed("targets[%d].session_id must be a non-empty string" % i)
-        claude = target["claude_session_id"]
+        claude = target.get("claude_session_id")
         if claude is not None and not _nonempty_str(claude):
             raise _malformed(
                 "targets[%d].claude_session_id must be null or non-empty" % i
@@ -571,9 +578,16 @@ def _evaluate_signed(grant: _Grant, req: _Request) -> Dict[str, Any]:
     target = next((t for t in p["targets"] if t["session_id"] == req.session), None)
     if target is None:
         raise _Deny(REASON_SESSION_MISMATCH, "session is not a target of this grant")
-    if target["claude_session_id"] is not None and (
-        req.claude_session != target["claude_session_id"]
-    ):
+    claude_session_id = target.get("claude_session_id")
+    conductor_scope = any(
+        scope.startswith("conductor:") for scope in (*p["scope"], *req.scopes)
+    )
+    if conductor_scope and claude_session_id is None:
+        raise _Deny(
+            REASON_CLAUDE_SESSION_UNBOUND,
+            "conductor scopes require a bound Claude session id",
+        )
+    if claude_session_id is not None and req.claude_session != claude_session_id:
         raise _Deny(
             REASON_CLAUDE_SESSION_MISMATCH,
             "the grant binds a Claude session id the caller did not match",

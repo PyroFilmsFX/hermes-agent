@@ -102,7 +102,7 @@ def make_payload(**overrides):
         "gesture": "proposal",
         "confirm": "native_dialog",
         "source_session": {"session_id": "mgr", "message_id": "m1", "role": "user"},
-        "targets": [{"session_id": SESSION, "claude_session_id": None}],
+        "targets": [{"session_id": SESSION, "claude_session_id": CLAUDE}],
         "scope": [GATE],
         "single_use": [],
         "subject": {},
@@ -157,6 +157,7 @@ def anchor(grants, owner):
 def check(anchor, **kw):
     """Lookup-mode verify with trusted defaults for session, uid and now."""
     kw.setdefault("session", SESSION)
+    kw.setdefault("claude_session", CLAUDE)
     kw.setdefault("now", NOW)
     kw.setdefault("uid", UID)
     return verify_mod.verify(anchor=anchor, **kw)
@@ -164,6 +165,7 @@ def check(anchor, **kw):
 
 def check_env(anchor, envelope, **kw):
     kw.setdefault("session", SESSION)
+    kw.setdefault("claude_session", CLAUDE)
     kw.setdefault("now", NOW)
     kw.setdefault("uid", UID)
     return verify_mod.verify_envelope(envelope, anchor=anchor, **kw)
@@ -288,7 +290,7 @@ def test_g15_cli_json_schema_and_exit_codes(owner, grants, anchor, monkeypatch):
     write_grant(grants, env)
     output = io.StringIO()
     code = cli_mod.main(
-        ["verify", "--session", SESSION, "--grant", env.grant_id],
+        ["verify", "--session", SESSION, "--claude-session", CLAUDE, "--grant", env.grant_id],
         anchor=anchor,
         uid=UID,
         now_ms=NOW,
@@ -392,7 +394,7 @@ def test_g16_built_bundle_verifies_fixture_under_100ms(tmp_path, owner, grants):
         "a=pkg.anchor.parse_anchor((%r).encode()); "
         "start=time.perf_counter(); "
         "out=sys.modules['hermes_owner_grant.cli'].main("
-        "['verify','--session',%r,'--text-sha',%r],anchor=a,uid=%d,now_ms=%d); "
+        "['verify','--session',%r,'--claude-session',%r,'--text-sha',%r],anchor=a,uid=%d,now_ms=%d); "
         "elapsed=time.perf_counter()-start; "
         "sys.stderr.write(str(elapsed)); raise SystemExit(out)"
         % (
@@ -401,6 +403,7 @@ def test_g16_built_bundle_verifies_fixture_under_100ms(tmp_path, owner, grants):
             str(bundle),
             json.dumps(anchor_doc),
             SESSION,
+            CLAUDE,
             sha(),
             UID,
             NOW,
@@ -439,12 +442,12 @@ def test_g7_lookup_for_another_session_finds_no_grant(owner, grants, anchor):
 
 def test_g7_any_listed_target_binds(owner, anchor):
     targets = [
-        {"session_id": OTHER_SESSION, "claude_session_id": None},
-        {"session_id": SESSION, "claude_session_id": None},
+        {"session_id": OTHER_SESSION, "claude_session_id": "claude-other"},
+        {"session_id": SESSION, "claude_session_id": CLAUDE},
     ]
     env = seal(owner, make_payload(targets=targets))
-    assert check_env(anchor, env, session=SESSION).ok
-    assert check_env(anchor, env, session=OTHER_SESSION).ok
+    assert check_env(anchor, env, session=SESSION, claude_session=CLAUDE).ok
+    assert check_env(anchor, env, session=OTHER_SESSION, claude_session="claude-other").ok
     denied(check_env(anchor, env, session="20260926_000000_000000"), "session_mismatch")
 
 
@@ -463,12 +466,46 @@ def test_g7_claude_session_is_required_when_the_grant_carries_one(owner, anchor)
     # so a caller that omits it can't fall back to the Hermes id alone.
     targets = [{"session_id": SESSION, "claude_session_id": CLAUDE}]
     env = seal(owner, make_payload(targets=targets))
-    denied(check_env(anchor, env), "claude_session_mismatch")
+    denied(check_env(anchor, env, claude_session=None), "claude_session_mismatch")
 
 
-def test_g7_cold_target_binds_by_hermes_id_only(owner, anchor):
+def test_g7_bound_target_binds_by_hermes_and_claude_ids(owner, anchor):
     env = seal(owner, make_payload())
     assert check_env(anchor, env, claude_session=CLAUDE).ok
+
+
+@pytest.mark.parametrize("claude_binding", [None, "missing"])
+def test_g7_conductor_scope_requires_a_claude_session_binding(owner, anchor, claude_binding):
+    target = {"session_id": SESSION}
+    if claude_binding != "missing":
+        target["claude_session_id"] = claude_binding
+    env = seal(owner, make_payload(targets=[target]))
+    denied(
+        check_env(anchor, env, claude_session=CLAUDE),
+        "claude_session_unbound",
+    )
+
+
+def test_g7_quote_only_grant_can_have_a_null_claude_session_binding(owner, anchor):
+    env = seal(
+        owner,
+        make_payload(
+            scope=[], targets=[{"session_id": SESSION, "claude_session_id": None}]
+        ),
+    )
+    assert check_env(anchor, env, claude_session=CLAUDE).ok
+
+
+def test_g7_requested_conductor_scope_requires_binding_on_quote_only_grant(owner, anchor):
+    env = seal(
+        owner,
+        make_payload(
+            scope=[], targets=[{"session_id": SESSION, "claude_session_id": None}]
+        ),
+    )
+    result = check_env(anchor, env, claude_session=CLAUDE, scopes=[GATE])
+    denied(result, "claude_session_unbound")
+    assert result.exit_code == 1
 
 
 def test_g7_duplicate_target_sessions_are_malformed(owner, anchor):
@@ -1201,7 +1238,7 @@ def test_cli_evidence_only_results_exit_6(owner, grants, anchor):
     def run(argv, quote_text=None):
         output = io.StringIO()
         code = cli_mod.main(
-            ["verify", "--session", SESSION] + argv,
+            ["verify", "--session", SESSION, "--claude-session", CLAUDE] + argv,
             anchor=anchor,
             uid=UID,
             now_ms=NOW,
