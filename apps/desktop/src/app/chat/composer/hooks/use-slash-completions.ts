@@ -127,9 +127,12 @@ export function useSlashCompletions(options: {
         return {
           items: candidates.slice(0, SESSION_INLINE_LIMIT).map(candidate => {
             const title = candidate.title || candidate.session_id
-            const target = candidate.title
-              ? `hermes:${/\s/.test(candidate.title) ? `"${candidate.title}"` : candidate.title}`
-              : candidate.session_id
+            // Quote titles the /to grammar would split (whitespace, commas); a title with a
+            // quote character can't be quoted safely, so target it by id.
+            const target =
+              candidate.title && !candidate.title.includes('"')
+                ? `hermes:${/[\s,]/.test(candidate.title) ? `"${candidate.title}"` : candidate.title}`
+                : candidate.session_id
 
             return {
               text: `/to ${target} `,

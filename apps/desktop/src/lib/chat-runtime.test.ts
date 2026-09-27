@@ -226,3 +226,16 @@ describe('coalesceToolOnlyAssistants toolCallId uniqueness', () => {
     expect(ids).toEqual(['call-a', 'call-b'])
   })
 })
+
+describe('toRuntimeMessage system rows', () => {
+  it('carries the durable rowId so a peer forward can name its source row', () => {
+    const runtime = toRuntimeMessage({
+      id: 'peer-1',
+      parts: [{ text: 'hello', type: 'text' }],
+      role: 'system',
+      rowId: 42
+    } as ChatMessage)
+
+    expect((runtime.metadata?.custom as { rowId?: number }).rowId).toBe(42)
+  })
+})

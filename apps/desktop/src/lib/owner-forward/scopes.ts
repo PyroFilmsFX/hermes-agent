@@ -18,11 +18,19 @@ export const SCOPE_TTL_POLICY: Readonly<Record<ScopeClass, ScopeTtlPolicy>> = {
   prod: { defaultTtlMs: 900_000, maxTtlMs: 3_600_000 }
 }
 
-const TTL_PRESETS_MS = [900_000, 3_600_000, 14_400_000, 43_200_000, 86_400_000, 259_200_000]
+// Mirrors scopes.json's "quote-only" class: a forward with no conductor scope.
+const QUOTE_ONLY_TTL_POLICY: ScopeTtlPolicy = { defaultTtlMs: 604_800_000, maxTtlMs: 604_800_000 }
+
+const TTL_PRESETS_MS = [900_000, 3_600_000, 14_400_000, 43_200_000, 86_400_000, 259_200_000, 604_800_000]
 
 export function scopeTtlPolicy(scopes: readonly string[]): ScopeTtlPolicy {
   const classes = scopes.map(scopeClassOf).filter((value): value is ScopeClass => value !== null)
-  const selected = classes.length ? classes : ['allowlist' as const]
+
+  if (!classes.length) {
+    return QUOTE_ONLY_TTL_POLICY
+  }
+
+  const selected = classes
 
   return {
     defaultTtlMs: Math.min(...selected.map(scopeClass => SCOPE_TTL_POLICY[scopeClass].defaultTtlMs)),

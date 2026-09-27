@@ -415,7 +415,8 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
           ...timelineMeta,
           ...(message.asyncResult ? { asyncResult: message.asyncResult } : {}),
           ...(message.asyncResultKind ? { asyncResultKind: message.asyncResultKind } : {}),
-          ...(message.peerMetadata ? { peerMetadata: message.peerMetadata } : {})
+          ...(message.peerMetadata ? { peerMetadata: message.peerMetadata } : {}),
+          ...(message.rowId !== undefined ? { rowId: message.rowId } : {})
         }
       }
     } as ThreadMessage

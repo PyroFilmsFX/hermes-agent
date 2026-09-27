@@ -62,4 +62,26 @@ describe('/to completion', () => {
     )
     expect(confirm).not.toHaveBeenCalled()
   })
+
+  it('quotes a title the /to grammar would split, and targets a quoted title by id', async () => {
+    $sessions.set([session('source', 'manager'), session('w-c', 'ops,review'), session('w-q', 'say "hi"')])
+    const gateway = { request: vi.fn(async () => ({ pairs: [], categories: [] })) }
+    const { result } = renderHook(() => useSlashCompletions({ gateway: gateway as any }))
+    const search = (query: string) => result.current.adapter.search?.(query) ?? []
+
+    act(() => {
+      search('to ops')
+    })
+    await waitFor(() =>
+      expect(search('to ops').map(item => item.metadata)).toContainEqual(
+        expect.objectContaining({ rawText: '/to hermes:"ops,review" ' })
+      )
+    )
+    act(() => {
+      search('to say')
+    })
+    await waitFor(() =>
+      expect(search('to say').map(item => item.metadata)).toContainEqual(expect.objectContaining({ rawText: '/to w-q ' }))
+    )
+  })
 })
