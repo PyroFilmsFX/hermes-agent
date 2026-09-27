@@ -54,9 +54,11 @@ describe('/to completion', () => {
     act(() => {
       search('to herm')
     })
-    await waitFor(() => expect(search('to herm').length).toBeGreaterThan(0))
-    expect(search('to herm').map(item => item.metadata)).toContainEqual(
-      expect.objectContaining({ rawText: '/to hermes:worker-one ' })
+    // Session suggestions arrive after the bare "/to " entry; wait for them, not for any result.
+    await waitFor(() =>
+      expect(search('to herm').map(item => item.metadata)).toContainEqual(
+        expect.objectContaining({ rawText: '/to hermes:worker-one ' })
+      )
     )
     expect(confirm).not.toHaveBeenCalled()
   })
