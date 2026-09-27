@@ -10,11 +10,14 @@ is built in-process (the trusted-caller ``anchor=`` path) and points at a tmp gr
 import ast
 import base64
 import hashlib
+import io
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,7 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 
 from hermes_owner_grant import anchor as anchor_mod  # noqa: E402
 from hermes_owner_grant import envelope as env_mod  # noqa: E402
+from hermes_owner_grant import cli as cli_mod  # noqa: E402
 from hermes_owner_grant import verify as verify_mod  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -214,6 +218,205 @@ def test_e2e_verify_envelope_in_process(owner, anchor):
     assert result.ok, result.to_dict()
     # The same envelope as the dict form carried in display_metadata.
     assert check_env(anchor, env.to_dict(), scopes=[GATE]).ok
+
+
+def test_g13_revoked_list_denies_and_malformed_rows_fail_safe(owner, grants, anchor):
+    env = seal(owner, make_payload())
+    write_grant(grants, env)
+    revoked = grants / "revoked.jsonl"
+    revoked.write_text(
+        json.dumps({"grant_id": env.grant_id, "revoked_at": NOW, "by": "owner"}) + "\n",
+        encoding="utf-8",
+    )
+    denied(check(anchor, grant_id=env.grant_id), "revoked")
+    revoked_output = io.StringIO()
+    assert (
+        cli_mod.main(
+            ["verify", "--session", SESSION, "--grant", env.grant_id],
+            anchor=anchor,
+            uid=UID,
+            now_ms=NOW,
+            stdout=revoked_output,
+        )
+        == 1
+    )
+
+    revoked.write_text("not-json\n", encoding="utf-8")
+    denied(check(anchor, grant_id=env.grant_id), "revoked")
+
+
+def test_g14_consume_is_atomic_audited_and_only_single_use(owner, grants, anchor):
+    env = seal(
+        owner,
+        make_payload(
+            issued_at=NOW - MIN,
+            expires_at=NOW + 2 * HOUR,
+            scope=[MARKER, GATE],
+            single_use=[MARKER],
+        ),
+    )
+    write_grant(grants, env)
+
+    reusable = check(anchor, grant_id=env.grant_id, scopes=[GATE], consume=True)
+    assert reusable.ok and reusable.to_dict()["consumed"] is None
+    assert not (grants / "consumed").exists()
+
+    first = check(anchor, grant_id=env.grant_id, scopes=[MARKER], consume=True)
+    assert first.ok, first.to_dict()
+    consumed = first.to_dict()["consumed"]
+    assert consumed == [
+        {"scope": MARKER, "scope_hash": hashlib.sha256(MARKER.encode()).hexdigest()}
+    ]
+    marker = grants / "consumed" / (env.grant_id + "." + consumed[0]["scope_hash"])
+    assert marker.is_file()
+    rows = [
+        json.loads(line)
+        for line in (grants / "consumed.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["grant_id"] == env.grant_id
+    assert rows[0]["scope"] == MARKER
+
+    second = check(anchor, grant_id=env.grant_id, scopes=[MARKER], consume=True)
+    denied(second, "already_consumed")
+    with pytest.raises(verify_mod.VerifyUsageError):
+        check(anchor, grant_id=env.grant_id, consume=True, audit_at=NOW - 1)
+
+
+def test_g15_cli_json_schema_and_exit_codes(owner, grants, anchor, monkeypatch):
+    env = seal(owner, make_payload())
+    write_grant(grants, env)
+    output = io.StringIO()
+    code = cli_mod.main(
+        ["verify", "--session", SESSION, "--grant", env.grant_id],
+        anchor=anchor,
+        uid=UID,
+        now_ms=NOW,
+        stdout=output,
+    )
+    body = json.loads(output.getvalue())
+    assert code == 0 and body["ok"] is True
+    assert set(body) == set(cli_mod.JSON_SCHEMA["required"])
+    assert body["schema"] == "hermes-owner-verify/v1"
+
+    missing = io.StringIO()
+    assert (
+        cli_mod.main(
+            ["verify", "--session", SESSION, "--grant", "og_" + "a" * 26],
+            anchor=anchor,
+            uid=UID,
+            now_ms=NOW,
+            stdout=missing,
+        )
+        == 4
+    )
+    assert json.loads(missing.getvalue())["reason"] == "not_found"
+
+    monkeypatch.setattr(
+        cli_mod.anchor_mod,
+        "load_trusted_anchor",
+        lambda: (_ for _ in ()).throw(
+            anchor_mod.AnchorError("anchor_missing", "missing")
+        ),
+    )
+    absent = io.StringIO()
+    assert cli_mod.main(["anchor-status"], stdout=absent) == 3
+    assert json.loads(absent.getvalue())["reason"] == "anchor_missing"
+
+    monkeypatch.setattr(
+        cli_mod.verify_mod,
+        "verify",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    internal = io.StringIO()
+    assert (
+        cli_mod.main(
+            ["verify", "--session", SESSION, "--grant", env.grant_id],
+            anchor=anchor,
+            uid=UID,
+            now_ms=NOW,
+            stdout=internal,
+        )
+        == 5
+    )
+    assert json.loads(internal.getvalue())["reason"] == "internal_error"
+
+
+def test_g15_cli_usage_error_is_json_exit_two():
+    output = io.StringIO()
+    code = cli_mod.main(
+        ["verify", "--session", SESSION, "--anchor", "x"], stdout=output
+    )
+    assert code == 2
+    body = json.loads(output.getvalue())
+    assert body["reason"] == "usage_error"
+    assert body["schema"] == "hermes-owner-verify/v1"
+
+
+def test_g16_built_bundle_verifies_fixture_under_100ms(tmp_path, owner, grants):
+    python39 = Path("/usr/bin/python3")
+    if not python39.is_file():
+        pytest.skip("/usr/bin/python3 is unavailable")
+    env = seal(owner, make_payload())
+    write_grant(grants, env)
+    issued_at = NOW - MIN
+    wire = env.to_json()
+    for index in range(199):
+        suffix = base64.b32encode(index.to_bytes(4, "big")).decode("ascii").lower()
+        fake_id = "og_" + (suffix + "a" * 26)[:26]
+        (grants / (str(issued_at) + "-" + fake_id + ".json")).write_text(
+            wire, encoding="utf-8"
+        )
+
+    bundle = tmp_path / "hermes_owner_verify.py"
+    build_script = REPO_ROOT / "scripts" / "build_owner_verifier.py"
+    subprocess.run(
+        [str(python39), str(build_script), str(bundle)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    anchor_doc = {
+        "format": "hermes-owner-anchor/v1",
+        "owner_uid": UID,
+        "grants_dir": str(grants),
+        "keys": [owner.anchor_key()],
+        "verifier_sha256": "ab" * 32,
+    }
+    code = (
+        "import json,sys,time; "
+        "exec(compile(open(%r,'rb').read(),%r,'exec'),"
+        "{'__name__':'bundle_test','__file__':%r}); "
+        "pkg=sys.modules['hermes_owner_grant']; "
+        "a=pkg.anchor.parse_anchor((%r).encode()); "
+        "start=time.perf_counter(); "
+        "out=sys.modules['hermes_owner_grant.cli'].main("
+        "['verify','--session',%r,'--text-sha',%r],anchor=a,uid=%d,now_ms=%d); "
+        "elapsed=time.perf_counter()-start; "
+        "sys.stderr.write(str(elapsed)); raise SystemExit(out)"
+        % (
+            str(bundle),
+            str(bundle),
+            str(bundle),
+            json.dumps(anchor_doc),
+            SESSION,
+            sha(),
+            UID,
+            NOW,
+        )
+    )
+    proc = subprocess.run(
+        [str(python39), "-I", "-S", "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True
+    elapsed = float(proc.stderr)
+    sys.__stdout__.write("G-16 bundle %s: %.1f ms\n" % (bundle, elapsed * 1000))
+    assert elapsed < 0.1, "standalone verifier took %.1f ms" % (elapsed * 1000)
 
 
 # -- G-7: session binding ------------------------------------------------------------------

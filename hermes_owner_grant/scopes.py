@@ -25,6 +25,10 @@ _CLASS_POLICY_KEYS = frozenset((
     "subject_required",
     "touch_id",
 ))
+try:
+    _BUNDLED_CATALOG_JSON
+except NameError:
+    _BUNDLED_CATALOG_JSON = ""
 
 
 class ScopeError(ValueError):
@@ -43,10 +47,13 @@ class Scope:
 
 def _load_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     """Load and validate the bundled, environment-independent JSON catalog."""
-    path = Path(__file__).with_name("scopes.json")
     try:
-        with path.open("r", encoding="utf-8") as source:
-            catalog = json.load(source)
+        if _BUNDLED_CATALOG_JSON:
+            catalog = json.loads(_BUNDLED_CATALOG_JSON)
+        else:
+            path = Path(__file__).with_name("scopes.json")
+            with path.open("r", encoding="utf-8") as source:
+                catalog = json.load(source)
     except (OSError, ValueError) as exc:
         raise ScopeError("cannot load scope catalog: %s" % exc) from None
 

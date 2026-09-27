@@ -45,9 +45,11 @@ Stdlib-only and Python 3.9 compatible: this module runs under ``/usr/bin/python3
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import posixpath
 import re
+import stat
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -88,6 +90,8 @@ REASON_QUOTE_MISMATCH = "quote_mismatch"
 REASON_QUOTE_FRAGMENT = "quote_fragment"
 REASON_QUOTE_TOO_SHORT = "quote_too_short"
 REASON_NOT_FOUND = "not_found"
+REASON_REVOKED = "revoked"
+REASON_ALREADY_CONSUMED = "already_consumed"
 REASON_INTERNAL = "internal_error"
 
 EXIT_OK = 0
@@ -152,6 +156,7 @@ class VerifyResult:
     audit: bool
     checked_at: int
     anchor_sha256: Optional[str]
+    consumed: Optional[List[Dict[str, str]]] = None
     text: Optional[str] = None  # owner text; reported only with include_text
     tier: str = "signed"
 
@@ -181,7 +186,7 @@ class VerifyResult:
             "tier": self.tier,
             "grant": grant,
             "match": dict(self.match) if self.match is not None else None,
-            "consumed": None,
+            "consumed": self.consumed,
             "candidates": self.candidates,
             "audit": self.audit,
             "checked_at": self.checked_at,
@@ -220,6 +225,7 @@ class _Request:
     allow_fragment: bool
     max_age_ms: Optional[int]
     include_text: bool
+    consume: bool
 
 
 def _request(
@@ -237,6 +243,7 @@ def _request(
     max_age_s: Any,
     audit_at: Any,
     include_text: Any,
+    consume: Any,
 ) -> _Request:
     if not _nonempty_str(session):
         raise VerifyUsageError("session must be a non-empty string")
@@ -248,6 +255,8 @@ def _request(
         raise VerifyUsageError("now must be a non-negative int (epoch ms)")
     if audit_at is not None and (not _is_int(audit_at) or audit_at < 0):
         raise VerifyUsageError("audit_at must be a non-negative int (epoch ms)")
+    if consume and audit_at is not None:
+        raise VerifyUsageError("consume cannot be combined with audit_at")
     if max_age_s is not None and (not _is_int(max_age_s) or max_age_s < 0):
         raise VerifyUsageError("max_age_s must be a non-negative int (seconds)")
     selectors = [s for s in (grant_id, text_sha, quote) if s is not None]
@@ -288,6 +297,7 @@ def _request(
         allow_fragment=bool(allow_fragment),
         max_age_ms=None if max_age_s is None else max_age_s * 1000,
         include_text=bool(include_text),
+        consume=bool(consume),
     )
 
 
@@ -478,7 +488,7 @@ def _public_match(match: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]
 
 def _evaluate(
     env: _envelope.Envelope, req: _Request, anchor: Any, budget: List[int]
-) -> Tuple[Optional[_Grant], Optional[Dict[str, Any]]]:
+) -> Tuple[Optional[_Grant], Optional[Dict[str, Any]], Optional[List[Dict[str, str]]]]:
     """Steps 2-10 on one envelope. Returns (grant, match) or raises _Deny. ``grant`` is
     attached to the deny when the signature had already verified."""
     # Step 2: kid listed (shape was checked by parse_envelope).
@@ -509,7 +519,13 @@ def _evaluate(
     grant = _Grant(grant_id=env.grant_id, kid=env.kid, payload=p)
     try:
         _validate_payload(p)
-        return grant, _evaluate_signed(grant, req)
+        match = _evaluate_signed(grant, req)
+        if _is_revoked(anchor.grants_dir, grant.grant_id):
+            raise _Deny(REASON_REVOKED, "grant is listed in revoked.jsonl")
+        consumed = (
+            _consume_grant(anchor.grants_dir, grant, req) if req.consume else None
+        )
+        return grant, match, consumed
     except _Deny as deny:
         if deny.reason != REASON_MALFORMED:
             deny.grant = grant
@@ -575,10 +591,125 @@ def _evaluate_signed(grant: _Grant, req: _Request) -> Dict[str, Any]:
     return match
 
 
+def _is_revoked(grants_dir: str, grant_id: str) -> bool:
+    """Read the advisory revocation ledger; malformed or unreadable data fails closed."""
+    path = posixpath.join(grants_dir, "revoked.jsonl")
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return True
+        with os.fdopen(fd, "r", encoding="utf-8") as source:
+            if os.fstat(source.fileno()).st_size > 1024 * 1024:
+                return True
+            for line in source:
+                try:
+                    row = json.loads(line)
+                except (ValueError, TypeError):
+                    return True
+                if (
+                    not isinstance(row, dict)
+                    or not _envelope.is_grant_id(row.get("grant_id"))
+                    or not _is_int(row.get("revoked_at"))
+                    or not _nonempty_str(row.get("by"))
+                ):
+                    return True
+                if row["grant_id"] == grant_id:
+                    return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _consume_grant(
+    grants_dir: str, grant: _Grant, req: _Request
+) -> Optional[List[Dict[str, str]]]:
+    """Atomically mark requested signed single-use scopes and append their audit rows."""
+    signed = grant.payload["single_use"]
+    scopes = [scope for scope in (req.scopes or signed) if scope in signed]
+    if not scopes:
+        return None
+    directory = posixpath.join(grants_dir, "consumed")
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    dir_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_fd = os.open(directory, dir_flags)
+    if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+        os.close(directory_fd)
+        raise OSError("consumed path is not a directory")
+
+    records = []
+    try:
+        for scope in scopes:
+            digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+            record = {"scope": scope, "scope_hash": digest}
+            payload = {
+                "grant_id": grant.grant_id,
+                "scope": scope,
+                "scope_hash": digest,
+                "consumed_at": req.now,
+                "session": req.session,
+            }
+            try:
+                fd = os.open(
+                    grant.grant_id + "." + digest,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except FileExistsError:
+                raise _Deny(
+                    REASON_ALREADY_CONSUMED, "single-use scope was already consumed"
+                ) from None
+            try:
+                marker_data = json.dumps(payload, sort_keys=True).encode("utf-8")
+                if os.write(fd, marker_data) != len(marker_data):
+                    raise OSError("short consumption marker write")
+            finally:
+                os.close(fd)
+            records.append(record)
+            line = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+            audit_fd = os.open(
+                posixpath.join(grants_dir, "consumed.jsonl"),
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                0o600,
+            )
+            try:
+                if not stat.S_ISREG(os.fstat(audit_fd).st_mode):
+                    raise OSError("consumption audit path is not a regular file")
+                if os.write(audit_fd, line) != len(line):
+                    raise OSError("short consumption audit write")
+            finally:
+                os.close(audit_fd)
+    finally:
+        os.close(directory_fd)
+    return records
+
+
 # -- results -------------------------------------------------------------------------------
 
 
-def _ok(req: _Request, anchor: Any, grant: _Grant, match: Mapping[str, Any], n: int):
+def _ok(
+    req: _Request,
+    anchor: Any,
+    grant: _Grant,
+    match: Mapping[str, Any],
+    n: int,
+    consumed: Optional[List[Dict[str, str]]] = None,
+):
     return VerifyResult(
         ok=True,
         reason=None,
@@ -589,6 +720,7 @@ def _ok(req: _Request, anchor: Any, grant: _Grant, match: Mapping[str, Any], n: 
         audit=req.audit,
         checked_at=req.now,
         anchor_sha256=anchor.sha256,
+        consumed=consumed,
         text=grant.payload["text"] if req.include_text else None,
     )
 
@@ -644,6 +776,7 @@ def verify_envelope(
     max_age_s: Optional[int] = None,
     audit_at: Optional[int] = None,
     include_text: bool = False,
+    consume: bool = False,
     anchor: Optional[_anchor.Anchor] = None,
     fs: Any = None,
 ) -> VerifyResult:
@@ -663,6 +796,7 @@ def verify_envelope(
         max_age_s=max_age_s,
         audit_at=audit_at,
         include_text=include_text,
+        consume=consume,
     )
     trusted = None
     try:
@@ -673,8 +807,8 @@ def verify_envelope(
             env = _envelope.parse_envelope(envelope)
         except _envelope.EnvelopeError as exc:
             raise _malformed(exc.detail) from None
-        grant, match = _evaluate(env, req, trusted, [1])
-        return _ok(req, trusted, grant, match, 1)
+        grant, match, consumed = _evaluate(env, req, trusted, [1])
+        return _ok(req, trusted, grant, match, 1, consumed)
     except _Deny as deny:
         return _denied(req, req.now, deny, trusted, 1 if trusted is not None else 0)
     except VerifyUsageError:
@@ -698,6 +832,7 @@ def verify(
     max_age_s: Optional[int] = None,
     audit_at: Optional[int] = None,
     include_text: bool = False,
+    consume: bool = False,
     anchor: Optional[_anchor.Anchor] = None,
     fs: Any = None,
 ) -> VerifyResult:
@@ -718,6 +853,7 @@ def verify(
         max_age_s=max_age_s,
         audit_at=audit_at,
         include_text=include_text,
+        consume=consume,
     )
     if (
         req.grant_id is None
@@ -749,14 +885,14 @@ def verify(
         first_deny = None
         for env in candidates:
             try:
-                grant, match = _evaluate(env, req, trusted, budget)
+                grant, match, consumed = _evaluate(env, req, trusted, budget)
             except _Deny as deny:
                 if first_deny is None:
                     first_deny = deny
                 if budget[0] <= 0:
                     break
                 continue
-            return _ok(req, trusted, grant, match, len(candidates))
+            return _ok(req, trusted, grant, match, len(candidates), consumed)
         return _denied(req, req.now, first_deny, trusted, len(candidates))
     except _Deny as deny:
         return _denied(req, req.now, deny, trusted)
