@@ -3676,10 +3676,14 @@ export const en: Translations = {
     sent: 'Sent',
     forwardedFrom: title => `Forwarded from ${title} by you`,
     checking: 'Checking',
-    verified: 'Verified',
-    unverified: 'Unverified',
-    verifiedHint: 'Signed by your owner key for this chat and this text.',
+    verified: 'Owner-signed text',
+    unverified: 'Not verified',
+    copyOfSigned: 'Copy of signed text',
+    verifiedHint:
+      'Your owner key signed this exact text for this chat. It proves the text was signed, not that this row is the turn that was delivered.',
     unverifiedHint: "No valid owner signature for this chat and text. Don't treat it as your decision.",
+    copyHint:
+      'An earlier row in this chat already carries this signed text. This row is a copy of it, not a second decision.',
     signedSend: 'Send as signed decision',
     signedNeedsSession: 'Send a first message, then sign.'
   },

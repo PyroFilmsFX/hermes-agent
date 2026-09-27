@@ -419,6 +419,16 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
 
     # ---------- lifecycle ----------
 
+    def live_cli_session_id(self) -> Optional[str]:
+        """#60 T-6: the Claude session id of the CONNECTED CLI (the id it announced on its stream, which
+        is the ``session_id`` its hooks read from stdin), or None when no CLI is connected, it is
+        retiring/closed, or it has not announced an id yet. Never read from state.db."""
+        with self._turn_callback_lock:
+            if self._retiring or self._closed or self._client is None:
+                return None
+            sid = self._session_id
+        return sid if isinstance(sid, str) and sid and sid != "pending" else None
+
     def _admission_retired(self) -> bool:
         """Return whether this session must reject a new SDK turn."""
         with self._turn_callback_lock:

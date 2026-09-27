@@ -508,7 +508,7 @@ async def get_session_stats(profile: Optional[str] = None):
 
 
 @manage_router.get("/api/sessions/{session_id}")
-async def get_session_detail(session_id: str, profile: Optional[str] = None):
+async def get_session_detail(session_id: str, profile: Optional[str] = None, message_id: Optional[str] = None):
     def _detail(db):
         sid = _resolve_session_id(db, session_id)
         session = db.get_session(sid) if sid else None
@@ -518,9 +518,67 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         # clients resolve them to whichever gateway happened to be active.
         session["profile"] = _serving_profile(profile)
         session["is_default_profile"] = session["profile"] == "default"
+        # #60 T-6: the id main signs into owner grants. Always set here (never a row column).
+        session["claude_session_state"], session["claude_session_id"] = _live_claude_cli(
+            sid, session["profile"])
+        if message_id is not None:
+            # #60 (addendum 2.2): main signs source_session.role from THIS answer, never the renderer's.
+            session["message_role"] = _stored_message_role(db, sid, message_id)
         return session
 
     return await asyncio.to_thread(_with_db, profile, _detail, read_only=True)
+
+
+def _stored_message_role(db, session_id: str, message_id: str) -> Optional[str]:
+    """#60: the author class of stored row ``message_id`` in ``session_id``: ``user`` (the owner's
+    turn), ``peer`` (a cross-session message), ``assistant``; None for anything else (a tool row, a
+    row of another session, no such row, a malformed id)."""
+    raw = str(message_id or "")
+    if not raw.isdigit() or len(raw) > 18:
+        return None
+    try:
+        row = db._read_one(
+            "SELECT role, display_kind FROM messages WHERE id = ? AND session_id = ?", (int(raw), session_id))
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    role, kind = str(row["role"] or ""), str(row["display_kind"] or "")
+    if role == "assistant":
+        return "assistant"
+    if role == "user":
+        return "peer" if kind == "peer_message" else "user"
+    return None
+
+
+def _live_claude_cli(session_id: str, profile_name: str) -> tuple[str, Optional[str]]:
+    """#60 T-6: the Claude CLI session id of the runtime serving ``session_id`` in ``profile_name`` in
+    THIS process (the dashboard hosts the JSON-RPC gateway), as ``(state, id)``. Only a connected CLI's
+    own announced id counts (``live_claude_cli_session``); state.db is agent-writable (R1) and is never
+    read for it. A same-id runtime of another profile (#100029) is not this session's CLI. Fail-closed:
+    any error reads as ``("not_running", None)``, so main refuses conductor scopes."""
+    try:
+        from agent.claude_sdk_runtime_continuity import live_claude_cli_session
+        from hermes_constants import profile_name_for_home
+        from tui_gateway import server as gateway_server
+
+        best: tuple[str, Optional[str]] = ("not_running", None)
+        for rt_sid, session in list(gateway_server._sessions.items()):
+            if session.get("_finalized") or gateway_server._session_lookup_key(session, fallback=rt_sid) != session_id:
+                continue
+            owner = profile_name_for_home(session.get("profile_home")) or gateway_server._current_profile_name()
+            if owner != profile_name:
+                continue
+            state, cli_id = live_claude_cli_session(session.get("agent"))
+            if state == "live":
+                return state, cli_id
+            if state == "starting":
+                best = (state, None)
+        return best
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).debug("live Claude CLI lookup failed", exc_info=True)
+        return "not_running", None
 
 
 @manage_router.get("/api/sessions/{session_id}/latest-descendant")

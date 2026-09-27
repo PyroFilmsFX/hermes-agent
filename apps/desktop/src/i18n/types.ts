@@ -3112,8 +3112,10 @@ export interface Translations {
     checking: string
     verified: string
     unverified: string
+    copyOfSigned: string
     verifiedHint: string
     unverifiedHint: string
+    copyHint: string
     signedSend: string
     signedNeedsSession: string
   }

@@ -90,6 +90,7 @@ export type OwnerGrantSignErrorCode =
   | 'payload_too_large'
   | 'self_target'
   | 'subject_required'
+  | 'target_not_bound'
   | 'text_too_long'
   | 'too_many_targets'
 
@@ -459,6 +460,15 @@ function plan(req: SignRequest): Plan {
     if (s.subjectRequired && !(s.value in subject)) {
       fail('subject_required', `${s.value} needs a subject (the exact action digest)`)
     }
+  }
+
+  // T-6: a hook trusts its HERMES_SESSION_ID only as far as settings `env` can't move it, which is
+  // not far; the Claude session id from hook stdin is what binds. A grant carrying a conductor scope
+  // is therefore bound to each target's LIVE CLI or not signed at all. Quote-only may carry null.
+  const unbound = scopes.length ? targets.find(t => t.claude_session_id === null) : undefined
+
+  if (unbound) {
+    fail('target_not_bound', `session ${unbound.session_id} has no running Claude CLI to bind a scope to`)
   }
 
   const classes = scopes.length ? scopes.map(s => SCOPE_CLASS_POLICY[s.scopeClass]) : [SCOPE_CLASS_POLICY['quote-only']]

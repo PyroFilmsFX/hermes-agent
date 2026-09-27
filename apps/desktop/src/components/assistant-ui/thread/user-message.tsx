@@ -436,6 +436,7 @@ export const UserMessage: FC<{
           <div className="human-message-with-todos-wrapper flex w-full flex-col gap-0">
             {ownerForward ? (
               <OwnerForwardChip
+                copy={ownerForward.copy === true}
                 envelope={ownerForward.envelope}
                 fromTitle={ownerForward.fromTitle}
                 sessionId={viewStoredId}

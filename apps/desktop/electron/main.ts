@@ -364,7 +364,7 @@ import {
   type OwnerGrantConfirmRequest
 } from './owner-grant-anchor-install'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
-import { createOwnerForwardConfirmHandler, isAppChromeSender } from './owner-forward-confirm'
+import { createOwnerForwardConfirmHandler, createOwnerGrantActionHandler, isAppChromeSender } from './owner-forward-confirm'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
@@ -15389,37 +15389,71 @@ ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => appl
 // #60 U11: owner-grant anchor status and the enable / rotate / revoke actions. The renderer only
 // asks; main shows the native confirm (with the new kid) before the one macOS admin prompt.
 ipcMain.handle('hermes:owner-grant:status', async () => ownerGrantController.status())
-ipcMain.handle('hermes:owner-grant:action', async (_event: any, action: any) => ownerGrantController.runAction(action))
+// Same app-main-frame sender check and a rate gate as the confirm (#60 fix round, P2).
+const isOwnerAppChromeSender = (event: unknown) =>
+  isAppChromeSender(event, sender =>
+    BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.webContents === sender)
+  )
+
+const handleOwnerGrantAction = createOwnerGrantActionHandler({
+  isTrustedSender: isOwnerAppChromeSender,
+  runAction: action => ownerGrantController.runAction(action),
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+
+ipcMain.handle('hermes:owner-grant:action', async (event: any, action: any) => handleOwnerGrantAction(event, action))
+
+const OWNER_SOURCE_ROLES = new Set(['assistant', 'peer', 'user'])
+const CLAUDE_SESSION_STATES = new Set(['live', 'not_running', 'starting'])
 
 // #60 owner-forward: the ONLY path to an owner-signed forward. Main checks the sender is an app
 // window's main frame, resolves every target title itself (its own backend token, never renderer
-// labels), shows the native "Send as you?" confirm (Touch ID after Send for prod scopes), signs,
-// and writes the grant file before returning the envelope. Rate gates live in the handler.
+// labels) plus each target's LIVE Claude CLI session id (T-6) and the origin row's role, shows the
+// native "Send as you?" confirm (a long text needs View full text first; Touch ID after Send for prod
+// scopes), signs, and writes the grant file before returning the envelope. Rate gates live in the
+// handler.
 const handleOwnerForwardConfirm = createOwnerForwardConfirmHandler({
-  isTrustedSender: event =>
-    isAppChromeSender(event, sender =>
-      BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.webContents === sender)
-    ),
+  isTrustedSender: isOwnerAppChromeSender,
   backendIdForProfile: profile => ownerGrantBackendIds.get(profile) ?? null,
-  resolveSession: async (profile, sessionId, backendProfile) => {
+  resolveSession: async (profile, sessionId, backendProfile, opts) => {
     try {
+      const messageQuery =
+        opts?.messageId !== undefined && opts.messageId !== null ? `&message_id=${encodeURIComponent(opts.messageId)}` : ''
+
       const row: any = await fetchJsonForProfile(
         backendProfile,
-        `/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}`
+        `/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}${messageQuery}`
       )
 
       if (!row || typeof row !== 'object' || row.id !== sessionId) {
         return null
       }
 
+      const claudeId = typeof row.claude_session_id === 'string' && row.claude_session_id ? row.claude_session_id : null
+
       return {
         title: typeof row.title === 'string' && row.title.trim() ? row.title.trim() : null,
-        claude_session_id: typeof row.claude_session_id === 'string' && row.claude_session_id ? row.claude_session_id : null
+        claude_session_id: claudeId,
+        // An older backend sends no state: its id is unknown, never assumed live.
+        claude_session_state: claudeId
+          ? 'live'
+          : CLAUDE_SESSION_STATES.has(row.claude_session_state)
+            ? row.claude_session_state
+            : 'unknown',
+        message_role: OWNER_SOURCE_ROLES.has(row.message_role) ? row.message_role : null
       }
     } catch {
       return null
     }
   },
+  // "View full text": an app-owned 0700 dir under userData, opened by the OS default app (never a
+  // webContents).
+  // Read per confirm (a getter), so a later app.setPath('userData') is honoured.
+  get fullTextDir() {
+    return path.join(app.getPath('userData'), 'owner-forward-view')
+  },
+  openPath: file => shell.openPath(file),
   showMessageBox: async options => {
     const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
 

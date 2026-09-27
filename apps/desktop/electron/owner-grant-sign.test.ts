@@ -71,7 +71,7 @@ function request(overrides: Partial<SignRequest> = {}): SignRequest {
     text: 'Enable the review budget gate for this lane.',
     gesture: 'proposal',
     sourceSession: { session_id: 'mgr-1', message_id: 'm-9', role: 'user' },
-    targets: [{ profile: 'default', session_id: 'w-1', claude_session_id: null, backend: 'bk_a' }],
+    targets: [{ profile: 'default', session_id: 'w-1', claude_session_id: 'c-1', backend: 'bk_a' }],
     scope: ['conductor:gate:review-budget-enable'],
     ...overrides
   }
@@ -129,7 +129,7 @@ describe('E-7: the confirm model lists scopes, classes and expiry; prod needs To
       scope: ['conductor:marker:restore', 'conductor:gate:review-budget-enable'],
       targets: [
         { profile: 'default', session_id: 'w-2', claude_session_id: 'c-2', backend: 'bk_a', title: 'Worker two' },
-        { profile: 'default', session_id: 'w-1', claude_session_id: null, backend: 'bk_a', title: 'Worker one' }
+        { profile: 'default', session_id: 'w-1', claude_session_id: 'c-1', backend: 'bk_a', title: 'Worker one' }
       ]
     })
 
@@ -227,7 +227,7 @@ describe('E-7: the confirm model lists scopes, classes and expiry; prod needs To
 
   test('E-7g self-targets only for composer_signed, and composer_signed only targets its own session', async () => {
     const base = readyStore()
-    const self = [{ profile: 'default', session_id: 'mgr-1', claude_session_id: null, backend: 'bk_a' }]
+    const self = [{ profile: 'default', session_id: 'mgr-1', claude_session_id: 'c-mgr', backend: 'bk_a' }]
     await expect(confirmAndSignGrants(request({ targets: self }), ports(base))).rejects.toMatchObject({ code: 'self_target' })
     await expect(
       confirmAndSignGrants(request({ gesture: 'composer_signed' }), ports(base))
@@ -255,9 +255,9 @@ describe('E-8: one confirm makes one grant per backend, sharing decision_id, wri
     const req = request({
       text: 'Ship it 🚀 once CI is green.',
       targets: [
-        { profile: 'default', session_id: 'w-3', claude_session_id: null, backend: 'bk_b' },
+        { profile: 'default', session_id: 'w-3', claude_session_id: 'c-3', backend: 'bk_b' },
         { profile: 'work', session_id: 'w-2', claude_session_id: 'c-2', backend: 'bk_a' },
-        { profile: 'default', session_id: 'w-1', claude_session_id: null, backend: 'bk_a' }
+        { profile: 'default', session_id: 'w-1', claude_session_id: 'c-1', backend: 'bk_a' }
       ]
     })
 
@@ -278,11 +278,11 @@ describe('E-8: one confirm makes one grant per backend, sharing decision_id, wri
     expect(a.nonce).not.toBe(b.nonce)
     expect(a.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/)
     expect(a.targets).toEqual([
-      { session_id: 'w-1', claude_session_id: null },
+      { session_id: 'w-1', claude_session_id: 'c-1' },
       { session_id: 'w-2', claude_session_id: 'c-2' }
     ])
     expect(a.forward_targets).toEqual(['default:w-1', 'work:w-2'])
-    expect(b.targets).toEqual([{ session_id: 'w-3', claude_session_id: null }])
+    expect(b.targets).toEqual([{ session_id: 'w-3', claude_session_id: 'c-3' }])
     expect(b.forward_targets).toEqual(['default:w-3'])
     expect(a.backend).toBe('bk_a')
     expect(b.backend).toBe('bk_b')
@@ -352,5 +352,31 @@ describe('E-8: one confirm makes one grant per backend, sharing decision_id, wri
     expect(grantFileName(NOW, 'og_' + 'b'.repeat(26))).toBe(`${NOW}-og_${'b'.repeat(26)}.json`)
     // kid in the envelope is the same derivation the key store uses.
     expect(kidForPub(Buffer.alloc(32))).toMatch(/^ok_[0-9a-f]{16}$/)
+  })
+})
+
+describe('T-6: a conductor scope binds every target to a live Claude CLI session', () => {
+  // MUTATION: the `target_not_bound` refusal in plan() removed. A gate grant then signed with
+  // claude_session_id null (any hook with an overridden HERMES_SESSION_ID accepts it) and this failed.
+  test('a scope with any unbound target is refused before the dialog; nothing is written', async () => {
+    const base = readyStore()
+    const p = ports(base)
+    const targets = [
+      { profile: 'default', session_id: 'w-1', claude_session_id: 'c-1', backend: 'bk_a' },
+      { profile: 'default', session_id: 'w-2', claude_session_id: null, backend: 'bk_a' }
+    ]
+
+    await expect(confirmAndSignGrants(request({ targets }), p)).rejects.toMatchObject({ code: 'target_not_bound' })
+    expect(p.confirm).not.toHaveBeenCalled()
+    expect(listGrants(base.grantsDir)).toEqual([])
+  })
+
+  test('a quote-only decision may still sign null (nothing for a hook to accept)', async () => {
+    const base = readyStore()
+    const targets = [{ profile: 'default', session_id: 'w-2', claude_session_id: null, backend: 'bk_a' }]
+    const out = await confirmAndSignGrants(request({ targets, scope: [] }), ports(base))
+
+    expect(out.cancelled).toBe(false)
+    expect(payloadOf((out as SignedOutcome).grants[0].envelope).targets).toEqual([{ session_id: 'w-2', claude_session_id: null }])
   })
 })

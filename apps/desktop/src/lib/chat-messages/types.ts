@@ -80,6 +80,8 @@ export interface OwnerForwardMetadata {
   fromTitle: string
   envelope: unknown
   grantId: null | string
+  /** D24: an earlier row in this list carries the same signed payload; this row is a copy. */
+  copy: boolean
 }
 
 export interface PeerMetadata {

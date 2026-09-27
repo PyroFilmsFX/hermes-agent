@@ -158,6 +158,7 @@ function ownerMain(opts: { keyDir?: string; anchorFs?: (grantsDir: string) => Ow
   })
 
   const appWindows: Array<{ webContents: unknown }> = []
+  const viewed: string[] = []
   const showMessageBox = vi.fn(async (_options: any) => ({ response: 0, checkboxChecked: true }))
   const touchId = { canPrompt: vi.fn(() => true), prompt: vi.fn(async (_reason: string) => {}) }
 
@@ -165,8 +166,17 @@ function ownerMain(opts: { keyDir?: string; anchorFs?: (grantsDir: string) => Ow
     // main.ts: isAppChromeSender(event, sender => BrowserWindow.getAllWindows().some(win => win.webContents === sender))
     isTrustedSender: event => isAppChromeSender(event, sender => appWindows.some(w => w.webContents === sender)),
     backendIdForProfile: profile => (profile === 'default' ? 'spawn-live' : null),
-    resolveSession: vi.fn(async (profile: string, id: string) =>
-      id === 'missing' ? null : { title: `Main title ${profile}/${id}`, claude_session_id: null }
+    // Live CLIs (T-6): main's lookup answers each target's Claude session id and, for an origin
+    // message id, the stored row's role (the renderer's role claim is never read).
+    resolveSession: vi.fn(async (profile: string, id: string, _backend?: string, opts?: { messageId?: null | string }) =>
+      id === 'missing'
+        ? null
+        : {
+            title: `Main title ${profile}/${id}`,
+            claude_session_id: `claude-${id}`,
+            claude_session_state: 'live' as const,
+            message_role: opts?.messageId ? ('assistant' as const) : null
+          }
     ),
     showMessageBox,
     touchId,
@@ -174,13 +184,20 @@ function ownerMain(opts: { keyDir?: string; anchorFs?: (grantsDir: string) => Ow
     grantsDir,
     ownerUid: UID,
     now: () => Date.now(),
-    formatTime: ms => `T${ms}`
+    formatTime: ms => `T${ms}`,
+    fullTextDir: path.join(base, 'view'),
+    // shell.openPath stand-in: records what the owner's text editor would show.
+    openPath: vi.fn(async (p: string) => {
+      viewed.push(fs.readFileSync(p, 'utf8'))
+
+      return ''
+    })
   }
 
   const confirm = createOwnerForwardConfirmHandler(deps)
   const grantFiles = () => (fs.existsSync(grantsDir) ? fs.readdirSync(grantsDir).filter(n => n.endsWith('.json')) : [])
 
-  return { adminConfirm, adminRunner, appWindows, confirm, controller, deps, grantFiles, grantsDir, keyDir, showMessageBox, store, touchId }
+  return { adminConfirm, adminRunner, appWindows, confirm, controller, deps, grantFiles, grantsDir, keyDir, showMessageBox, store, touchId, viewed }
 }
 
 /** Electron-shaped objects: a BrowserWindow's webContents with its WebFrameMain tree, a `::preview`
@@ -443,9 +460,9 @@ describe('renderer compromise: nothing signs unless the native confirm showed ex
       forwardRequest({ backend: 'spawn-evil', envelope: { sig: 'x' }, decisionId: 'od_x', claude_session_id: 'c' })
     ]
 
-    const ownerSaw: Array<{ detail: string }> = []
+    const ownerSaw: Array<{ detail: string; buttons: string[] }> = []
     m.showMessageBox.mockImplementation(async (options: any) => {
-      ownerSaw.push({ detail: String(options.detail) })
+      ownerSaw.push({ detail: String(options.detail), buttons: [...options.buttons] })
 
       return { response: 0, checkboxChecked: true } // the owner rubber-stamps (R3): worst case
     })
@@ -470,9 +487,12 @@ describe('renderer compromise: nothing signs unless the native confirm showed ex
         continue
       }
 
-      // A signature needs exactly one native dialog in this call, showing exactly what was signed.
+      // A signature needs a native dialog in this call whose LAST showing offered Send and showed
+      // exactly what was signed (a long text adds one View step before Send is offered).
       signedCalls += 1
-      expect(ownerSaw.length - dialogsBefore).toBe(1)
+      const dialogs = ownerSaw.length - dialogsBefore
+      expect(dialogs === 1 || dialogs === 2).toBe(true)
+      expect(ownerSaw[ownerSaw.length - 1].buttons[0]).toBe('Send')
       const shown = ownerSaw[ownerSaw.length - 1].detail
 
       for (const [payloadBytes] of newSigns) {
@@ -489,9 +509,13 @@ describe('renderer compromise: nothing signs unless the native confirm showed ex
         if (claims.text.length <= DIALOG_TEXT_FULL_MAX) {
           expect(shown).toContain(claims.text)
         } else {
-          // Long texts: head + tail with the omitted count, never silently cut (see report, P2).
+          // Long texts: head + tail with the omitted count in the dialog, and Send only after the
+          // owner opened the whole text (outside any webContents) in this same confirm.
           expect(shown).toMatch(/characters omitted/)
           expect(shown).toContain(`${claims.text.length} characters`)
+          expect(dialogs).toBe(2)
+          expect(ownerSaw[ownerSaw.length - 2].buttons).not.toContain('Send')
+          expect(m.viewed[m.viewed.length - 1]).toContain(claims.text)
         }
 
         expect(shown).not.toContain('spoofed label')
@@ -526,12 +550,11 @@ describe('renderer compromise: nothing signs unless the native confirm showed ex
     expect(m.adminRunner.run).not.toHaveBeenCalled() // the owner declined every admin confirm
   })
 
-  // P2 finding (strict expected-failure, see the U17 report): the addendum §2.2 says
-  // `source_session.role` "is looked up by main itself, never taken from the renderer". The confirm
-  // handler takes it from the renderer (`parseRequest` reads `origin.role`) and the dialog does not show
-  // it, so a compromised renderer can sign role "user" (owner typed it) for a manager-drafted text.
-  // When main resolves the role itself this test passes and `test.fails` flips, forcing an update.
-  test.fails('source_session.role in a signed grant comes from main, not the renderer', async () => {
+  // Addendum §2.2: `source_session.role` "is looked up by main itself, never taken from the renderer"
+  // (was a strict expected-failure in U17, P2; fixed in the #60 fix round). MUTATION: the handler
+  // signing `req.origin.role` again. A compromised renderer then signed role "user" (owner typed it)
+  // for a manager-drafted text and this failed.
+  test('source_session.role in a signed grant comes from main, not the renderer', async () => {
     const { keyDir, owner } = enrolledOwner()
     const m = ownerMain({ keyDir, anchorFs: dir => fakeLibraryRoot(anchorJson([owner], dir)) })
     m.controller.launch()
@@ -574,5 +597,60 @@ describe('T-7: the chip verifies only for a session the owner signed', () => {
       state: 'unverified',
       reason: 'session_mismatch'
     })
+  })
+})
+
+// ── item 5 (fix round): can a plugin/hub iframe reach parent.hermesDesktop? ──────────────────
+
+describe('same-origin-sandboxed iframes stay cross-origin to the app, and no relay reaches the owner bridge', () => {
+  // FINDING: a call made through `parent.hermesDesktop.ownerForward.confirm(...)` runs in the MAIN
+  // frame's preload world, so its IPC arrives with senderFrame === the app main frame: the senderFrame
+  // check CANNOT tell it apart. What keeps such an iframe out is the same-origin policy: every
+  // `sandbox="allow-scripts allow-same-origin"` iframe loads a remote https origin, never the app's
+  // (file: / the dev server), so `parent.hermesDesktop` throws a cross-origin SecurityError; and none of
+  // the pages that host those iframes relays a postMessage to the owner bridge. This test pins both.
+  // MUTATION: CATALOG_PICKER_URL pointed at the app origin (`file://…` / `http://localhost:5173`), or an
+  // `onMessage` handler calling `openForwardSheet`: this test failed for each. Restored.
+  const SRC = path.resolve(__dirname, '../src')
+
+  function sourceFiles(dir: string): string[] {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+      const p = path.join(dir, entry.name)
+
+      return entry.isDirectory() ? sourceFiles(p) : /\.(tsx?|jsx?)$/.test(entry.name) && !/\.test\./.test(entry.name) ? [p] : []
+    })
+  }
+
+  test('every allow-same-origin iframe loads a constant https URL on a non-app origin; no relay to the bridge', () => {
+    const hosts = sourceFiles(SRC).filter(f => /sandbox="[^"]*allow-same-origin/.test(fs.readFileSync(f, 'utf8')))
+    expect(hosts.length).toBeGreaterThan(0)
+
+    for (const file of hosts) {
+      const code = fs.readFileSync(file, 'utf8')
+
+      for (const match of code.matchAll(/<iframe\b([^>]*?)>/gs)) {
+        const attrs = match[1]
+
+        if (!/allow-same-origin/.test(attrs)) {
+          continue
+        }
+
+        const ident = /src=\{([A-Z_][A-Z0-9_]*)\}/.exec(attrs)?.[1]
+        expect(ident, `${file}: a same-origin iframe must load a named constant URL`).toBeTruthy()
+
+        // Resolve the constant (possibly through an imported module and an ORIGIN constant).
+        const all = [code, ...sourceFiles(path.join(SRC, 'lib')).map(f => fs.readFileSync(f, 'utf8'))].join('\n')
+        const def = new RegExp(`const ${ident}\\s*=\\s*([^\\n]+)`).exec(all)?.[1] ?? ''
+        const originIdent = /\$\{([A-Z_]+)\}|^([A-Z_]+)\s*\+/.exec(def)
+        const originName = originIdent?.[1] ?? originIdent?.[2]
+        const originDef = originName ? new RegExp(`const ${originName}\\s*=\\s*'([^']+)'`).exec(all)?.[1] : /'([^']+)'/.exec(def)?.[1]
+
+        expect(originDef, `${file}: ${ident}`).toMatch(/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}$/)
+        expect(originDef).not.toMatch(/localhost|127\.0\.0\.1|^file:|^app:/)
+      }
+
+      // No message relay in a host page may reach the owner bridge or the Forward sheet.
+      expect(code, file).not.toMatch(/ownerForward|ownerGrant|openForwardSheet|owner-forward/)
+    }
   })
 })

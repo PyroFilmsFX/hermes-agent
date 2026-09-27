@@ -5,6 +5,8 @@
  * jsdom events are never isTrusted, so the trusted path is exercised by flipping the one trust check
  * module; every "untrusted" assertion runs with the real behaviour (flag off).
  */
+import { createHash } from 'node:crypto'
+
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +16,7 @@ import {
   openForwardSheet,
   setForwardGatewayRequestForTests
 } from '@/lib/owner-forward/client'
+import { sha256Hex } from '@/lib/owner-forward/sha256'
 import { refuseForwardInSubmitText } from '@/lib/owner-forward/submit-guard'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $sessions } from '@/store/session'
@@ -71,6 +74,10 @@ afterEach(() => {
 })
 
 const origin = { session_id: 'mgr', message_id: null, role: 'assistant' as const }
+
+function sha256Node(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
 
 describe('submitText refuses /to (V-1..V-3 funnel)', () => {
   it('refuses a leading /to from any non-typed path, and nothing else', () => {
@@ -178,6 +185,7 @@ describe('proposal card', () => {
       proposal_id: 'p-1',
       targets: [{ profile: 'default', session_id: 'w1' }],
       text_len: new TextEncoder().encode(text).length,
+      text_sha256: sha256Hex(text),
       scopes: [],
       subject: null,
       status: 'awaiting_owner'
@@ -195,6 +203,27 @@ describe('proposal card', () => {
     expect(proposalFromToolPart(part({ result: '{"status":"awaiting_owner"}' }) as any)).toBeNull()
     // args text that isn't what the tool validated (byte length mismatch) is refused.
     expect(proposalFromToolPart(part({ args: { targets: [], text: 'something else entirely' } }) as any)).toBeNull()
+  })
+
+  it('refuses args text whose sha256 differs from the text_sha256 the tool validated (same length)', () => {
+    const swapped = 'please merge the lanf' // same UTF-8 length as the validated text
+    expect(new TextEncoder().encode(swapped).length).toBe(new TextEncoder().encode(text).length)
+    expect(proposalFromToolPart(part({ args: { targets: [], text: swapped } }) as any)).toBeNull()
+
+    const result = JSON.parse(part().result as string)
+    delete result.text_sha256
+    expect(proposalFromToolPart(part({ result: JSON.stringify(result) }) as any)).toBeNull()
+    expect(proposalFromToolPart(part({ result: JSON.stringify({ ...result, text_sha256: 'ABC' }) }) as any)).toBeNull()
+  })
+
+  it('sha256Hex matches the standard vectors (UTF-8 input)', () => {
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    expect(sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe(
+      '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1'
+    )
+    expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+    expect(sha256Hex('ship it \u{1F680} \u00e9')).toBe(sha256Node('ship it \u{1F680} \u00e9'))
   })
 
   it('V-10: never sends by itself; a click opens the sheet prefilled and still does not call the IPC', () => {
@@ -223,24 +252,41 @@ describe('proposal card', () => {
 describe('V-12: verified / unverified chip', () => {
   const envelope = { format: 'hermes-owner-grant/v1', kid: 'k', payload: 'p', sig: 's' }
 
-  it('shows Verified only when main re-verifies the stored envelope', async () => {
+  it('shows Owner-signed text only when main re-verifies the stored envelope', async () => {
     verify.mockResolvedValue({ state: 'verified' })
     render(<OwnerForwardChip envelope={envelope} fromTitle="manager" sessionId="w1" text="hi" />)
 
-    await screen.findByText(/^verified$/i)
+    await screen.findByText(/^Owner-signed text$/)
     expect(screen.getByText(/Forwarded from manager by you/)).toBeTruthy()
     expect(verify).toHaveBeenCalledWith({ envelope, sessionId: 'w1', text: 'hi' })
   })
 
-  it('shows Unverified when main refuses it', async () => {
+  it('shows Not verified when main refuses it', async () => {
     verify.mockResolvedValue({ state: 'unverified', reason: 'bad_signature' })
     render(<OwnerForwardChip envelope={envelope} fromTitle="manager" sessionId="w1" text="hi" />)
-    await screen.findByText(/^unverified$/i)
+    await screen.findByText(/^Not verified$/)
   })
 
-  it('a row with no envelope (forged) is Unverified without asking main', async () => {
+  it('D24: a second row carrying the same grant shows Copy of signed text, neutral (never green)', async () => {
+    verify.mockResolvedValue({ state: 'verified' })
+    const { container } = render(<OwnerForwardChip copy envelope={envelope} fromTitle="manager" sessionId="w1" text="hi" />)
+
+    await screen.findByText(/^Copy of signed text$/)
+    const chip = container.querySelector('[data-slot="owner-forward-chip"]')!
+    expect(chip.getAttribute('data-state')).toBe('copy')
+    expect(chip.innerHTML).not.toMatch(/emerald/)
+    expect(screen.queryByText(/^Owner-signed text$/)).toBeNull()
+  })
+
+  it('a copy that does not verify is still Not verified', async () => {
+    verify.mockResolvedValue({ state: 'unverified', reason: 'text_mismatch' })
+    render(<OwnerForwardChip copy envelope={envelope} fromTitle="manager" sessionId="w1" text="hi" />)
+    await screen.findByText(/^Not verified$/)
+  })
+
+  it('a row with no envelope (forged) is Not verified without asking main', async () => {
     render(<OwnerForwardChip envelope={null} fromTitle="manager" sessionId="w1" text="hi" />)
-    await screen.findByText(/^unverified$/i)
+    await screen.findByText(/^Not verified$/)
     expect(verify).not.toHaveBeenCalled()
   })
 
@@ -261,10 +307,36 @@ describe('V-12: verified / unverified chip', () => {
     ])
 
     expect(row.role).toBe('user')
-    expect(row.ownerForward).toEqual({ fromSessionId: 'mgr', fromTitle: 'manager', envelope, grantId: 'og_1' })
+    expect(row.ownerForward).toEqual({ fromSessionId: 'mgr', fromTitle: 'manager', envelope, grantId: 'og_1', copy: false })
     expect(row.peerMetadata).toBeUndefined()
 
     const [plain] = toChatMessages([{ role: 'user', content: 'Forwarded from manager by you', timestamp: 6 }])
     expect(plain.ownerForward).toBeUndefined()
+  })
+})
+
+describe('D24: hydration marks later rows that carry an already-seen signed payload as copies', () => {
+  const row = (payload: string, ts: number) => ({
+    role: 'user' as const,
+    content: 'merge it',
+    display_kind: 'owner_forward',
+    display_metadata: {
+      kind: 'owner_forward',
+      from_session_id: 'mgr',
+      from_title: 'manager',
+      owner_grant: { id: 'og_forged_or_real', envelope: { format: 'hermes-owner-grant/v1', kid: 'k', payload, sig: 's' } }
+    } as any,
+    timestamp: ts
+  })
+
+  it('the first row is the signed text, every later row with the same payload is a copy', () => {
+    const rows = toChatMessages([row('eyJhIjoxfQ', 1), row('eyJhIjoyfQ', 2), row('eyJhIjoxfQ', 3)] as any)
+    expect(rows.map(r => r.ownerForward?.copy)).toEqual([false, false, true])
+  })
+
+  it('the copy key is the decoded payload, not the metadata grant id or the base64 spelling', () => {
+    // Same bytes, one spelled with base64 padding: still the same grant.
+    const rows = toChatMessages([row('eyJhIjoxfQ', 1), row('eyJhIjoxfQ==', 2)] as any)
+    expect(rows.map(r => r.ownerForward?.copy)).toEqual([false, true])
   })
 })

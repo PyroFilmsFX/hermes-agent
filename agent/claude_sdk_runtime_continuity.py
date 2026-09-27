@@ -193,6 +193,32 @@ def _persisted_sdk_session_id(agent) -> Optional[str]:
         return None
 
 
+def live_claude_cli_session(agent) -> tuple[str, Optional[str]]:
+    """#60 T-6: ``("live", id)`` when ``agent``'s claude-agent-sdk CLI is connected and has announced its
+    Claude session id; ``("starting", None)`` when a runtime session object exists but no id is known
+    yet; ``("not_running", None)`` otherwise (no SDK lane, no CLI, closed). The id is only ever the live
+    CLI's own: the persisted resume binding on the session row is agent-writable (R1) and is never used."""
+    if getattr(agent, "api_mode", "") != "claude_agent_sdk":
+        return "not_running", None
+    live = getattr(agent, "_claude_sdk_session", None)
+    probe = getattr(live, "live_cli_session_id", None)
+    if live is None or not callable(probe):
+        return "not_running", None
+    try:
+        sid = probe()
+    except Exception:
+        logger.debug("live CLI session id probe failed", exc_info=True)
+        return "not_running", None
+    if isinstance(sid, str) and sid:
+        return "live", sid
+    retired = False
+    try:
+        retired = bool(live._admission_retired())
+    except Exception:
+        retired = True
+    return ("not_running", None) if retired else ("starting", None)
+
+
 _SESSION_LOCK_INIT = threading.Lock()
 
 

@@ -177,7 +177,7 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
       sourceSession: { session_id: 'mgr-1', message_id: null, role: 'user' },
       targets: [
         { profile: 'default', session_id: 'w-1', claude_session_id: 'claude-1', backend: 'bk_a' },
-        { profile: 'work', session_id: 'w-2', claude_session_id: null, backend: 'bk_b' }
+        { profile: 'work', session_id: 'w-2', claude_session_id: 'claude-2', backend: 'bk_b' }
       ],
       scope: ['conductor:gate:review-budget-enable', 'conductor:prod:target'],
       subject: { 'conductor:prod:target': 'sha256:deadbeef' }
@@ -221,7 +221,7 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
       },
       cases: [
         { name: 'a', envelope: a.envelope, query: q1, lookup: true },
-        { name: 'b', envelope: b.envelope, query: { session: 'w-2', now: now + 1000, text_sha: textSha, scopes: ['conductor:gate:review-budget-enable'] }, lookup: true },
+        { name: 'b', envelope: b.envelope, query: { session: 'w-2', claude_session: 'claude-2', now: now + 1000, text_sha: textSha, scopes: ['conductor:gate:review-budget-enable'] }, lookup: true },
         { name: 'wrong-session', envelope: b.envelope, query: { ...q1, claude_session: undefined } },
         { name: 'wrong-subject', envelope: a.envelope, query: { ...q1, subject: 'sha256:other' } },
         { name: 'tampered-text', envelope: tamperPayload(a.envelope, 'green', 'greeN'), query: q1 },

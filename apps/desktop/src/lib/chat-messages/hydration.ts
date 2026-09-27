@@ -477,19 +477,51 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
   return content
 }
 
-function ownerForwardMetadata(meta: Record<string, unknown> | null | undefined): OwnerForwardMetadata {
+/** D24: the identity of a signed grant is its payload bytes (the grant id is their hash). The
+ *  metadata `grant.id` is display data a DB edit can change, so copies are keyed on the payload,
+ *  decoded and re-encoded so another base64 spelling of the same bytes is the same grant. */
+export function ownerGrantCopyKey(envelope: unknown): null | string {
+  const payload = envelope && typeof envelope === 'object' ? (envelope as { payload?: unknown }).payload : null
+
+  if (typeof payload !== 'string' || !payload || !/^[A-Za-z0-9_-]+={0,2}$/.test(payload)) {
+    return null
+  }
+
+  try {
+    const b64 = payload.replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/')
+
+    return btoa(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4)))
+  } catch {
+    return null
+  }
+}
+
+function ownerForwardMetadata(
+  meta: Record<string, unknown> | null | undefined,
+  seenGrants: Set<string>
+): OwnerForwardMetadata {
   const grant = meta?.owner_grant && typeof meta.owner_grant === 'object' ? (meta.owner_grant as Record<string, unknown>) : null
+  const envelope = grant?.envelope && typeof grant.envelope === 'object' ? grant.envelope : null
+  const key = ownerGrantCopyKey(envelope)
+  // The first row carrying a signed payload is the signed text; every later one is a copy.
+  const copy = key !== null && seenGrants.has(key)
+
+  if (key !== null) {
+    seenGrants.add(key)
+  }
 
   return {
     fromSessionId: typeof meta?.from_session_id === 'string' ? meta.from_session_id : null,
     fromTitle: typeof meta?.from_title === 'string' ? meta.from_title : '',
-    envelope: grant?.envelope && typeof grant.envelope === 'object' ? grant.envelope : null,
-    grantId: typeof grant?.id === 'string' ? grant.id : null
+    envelope,
+    grantId: typeof grant?.id === 'string' ? grant.id : null,
+    copy
   }
 }
 
 export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   const result: ChatMessage[] = []
+  const seenOwnerGrants = new Set<string>()
   let pendingToolParts: ChatMessagePart[] = []
   let pendingToolTimestamp: number | undefined
   // Backend rows the pending batch stands for. The fold merges a turn's tool
@@ -595,7 +627,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     const isPeerMessage = !isOwnerForwardRow && (message.display_kind === 'peer_message' || isPeerEnvelope)
 
     const metaRecord = parseDisplayMetadata(message.display_metadata)
-    const ownerForward = isOwnerForwardRow ? ownerForwardMetadata(metaRecord) : undefined
+    const ownerForward = isOwnerForwardRow ? ownerForwardMetadata(metaRecord, seenOwnerGrants) : undefined
 
     const direction: 'in' | 'out' =
       metaRecord?.direction === 'out' || (!metaRecord?.direction && message.role === 'assistant') ? 'out' : 'in'

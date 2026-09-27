@@ -481,31 +481,44 @@ def test_t6_with_a_bound_claude_session_an_env_override_cannot_borrow_a_sibling_
     assert out["reason"] == "claude_session_mismatch"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "P1 (U17 T-6): no backend exposes a Claude session id, so main signs claude_session_id=null for every "
-    "target and the T-6 closure never engages; a settings.local.json HERMES_SESSION_ID override lets "
-    "worker B's hooks accept worker A's grants"))
-def test_t6_a_grant_main_signs_today_is_bound_to_the_target_cli(world, gw):
-    """T-6 REAL HOLE (xfail strict; reported P1). Main fills ``targets[].claude_session_id`` from
-    ``GET /api/sessions/{id}`` (``main.ts`` ``resolveSession`` reads ``row.claude_session_id``). That route
-    returns ``db.get_session(sid)`` (``hermes_cli/web_routers/sessions.py`` ``get_session_detail``), and no
-    column, route or writer anywhere in the backend produces ``claude_session_id`` (grep: only
-    ``hermes_owner_grant/verify.py`` and tests mention it). So every grant is signed with
-    ``claude_session_id: null``, and with the T-6 env override above, worker B's hook passes
-    ``--session worker-a`` and accepts worker A's grant, for every scope class.
+def test_t6_a_grant_main_signs_today_is_bound_to_the_target_cli(world, gw, monkeypatch, tmp_path):
+    """T-6 closure, end to end (was a strict xfail, U17 P1). Main fills ``targets[].claude_session_id``
+    from ``GET /api/sessions/{id}`` (``main.ts`` ``resolveSession`` reads ``row.claude_session_id``). The
+    route now answers it from the in-process runtime's CONNECTED CLI (``live_cli_session_id``: the id
+    the CLI announced on its stream, the same id its hooks read from stdin), never from state.db. So a
+    grant main signs for live worker-a is bound to worker-a's CLI, and worker B's hook (its
+    ``HERMES_SESSION_ID`` overridden to worker-a by settings.local.json, its stdin carrying ``claude-b``)
+    is refused.
 
-    Fix direction (not done here, per the no-silent-fix rule): the gateway records the live CLI's Claude
-    session id on the session row (or answers it from memory for the detail route), main signs it, and
-    for cold targets the hook contract keeps requiring ``--claude-session`` (a grant with ``null`` then
-    binds only after first spawn). This test starts passing, and the strict xfail flips, once the row main
-    reads carries the id."""
-    row = gw.db.get_session("worker-a") or {}
+    MUTATION: the route's ``claude_session_id`` forced to None (``_live_claude_cli`` returning
+    ``("not_running", None)``). Main then signs null and B's hook accepts A's grant: this test fails."""
+    import asyncio
+
+    import hermes_cli.web_server_sessions as web_sessions
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from hermes_cli.web_routers import sessions as sessions_router
+
+    monkeypatch.setattr(web_sessions, "_open_session_db_for_profile",
+                        lambda profile, *, read_only: SessionDB(tmp_path / "state.db"))
+    monkeypatch.setattr(sessions_router, "_serving_profile", lambda profile: profile or "default")
+    monkeypatch.setattr(gw.server, "_current_profile_name", lambda: "default")
+    cli_a = ClaudeAgentSdkSession(cwd="/tmp", hermes_session_id="worker-a")
+    cli_a._client, cli_a._session_id = object(), "claude-a"  # connected; announced on its stream
+    gw.server._sessions["rt-a"] = {"session_key": "worker-a", "profile_home": None, "agent": SimpleNamespace(
+        session_id="worker-a", api_mode="claude_agent_sdk", _claude_sdk_session=cli_a)}
+
+    row = asyncio.run(sessions_router.get_session_detail("worker-a", profile="default"))
     signed_as_main_does = row.get("claude_session_id") or None
+    assert signed_as_main_does == "claude-a"
     env = mint(world, payload_for([{"session_id": "worker-a", "claude_session_id": signed_as_main_does}]))
 
-    code, _out = run_cli("verify", "--session", "worker-a", "--claude-session", "claude-b",
-                         "--grant", env.grant_id, "--scope", GATE)
+    code, out = run_cli("verify", "--session", "worker-a", "--claude-session", "claude-b",
+                        "--grant", env.grant_id, "--scope", GATE)
     assert code != 0, "worker B's hook (HERMES_SESSION_ID overridden to worker-a) accepted worker A's grant"
+    assert out["reason"] == "claude_session_mismatch"
+    # Control: worker A's own CLI verifies.
+    assert run_cli("verify", "--session", "worker-a", "--claude-session", "claude-a",
+                   "--grant", env.grant_id, "--scope", GATE)[0] == 0
 
 
 # ── T-7 (investigation): the session id across compression and a dead-CLI rebuild ──────────

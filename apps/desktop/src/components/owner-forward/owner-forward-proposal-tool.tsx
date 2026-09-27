@@ -14,6 +14,7 @@ import {
 } from '@/lib/owner-forward/client'
 import { MAX_FORWARD_TARGETS } from '@/lib/owner-forward/parse-to'
 import { SCOPE_RE, scopeLabel } from '@/lib/owner-forward/scopes'
+import { sha256Hex } from '@/lib/owner-forward/sha256'
 import { $sessions } from '@/store/session'
 
 /** Strict names only (F7): Hermes' own tool, directly or through the hermes-tools MCP server. A
@@ -42,10 +43,13 @@ interface ToolPartLike {
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
+
 /**
  * A card only for a completed, successful `owner_forward_propose` part whose result carries the
  * marker the tool itself writes, and whose args text is the text the tool validated (UTF-8 length
- * matches `text_len`). Anything else is null, and the caller renders the normal fallback.
+ * matches `text_len` AND its sha256 matches `text_sha256`). Anything else is null, and the caller
+ * renders the normal fallback.
  */
 export function proposalFromToolPart(part: ToolPartLike): OwnerForwardProposal | null {
   if (!isOwnerForwardProposeName(part.toolName) || part.isError === true || part.result === undefined) {
@@ -75,6 +79,12 @@ export function proposalFromToolPart(part: ToolPartLike): OwnerForwardProposal |
   const text = args.text
 
   if (typeof text !== 'string' || !text.trim() || new TextEncoder().encode(text).length !== result.text_len) {
+    return null
+  }
+
+  // Same length is not the same text: the card shows (and the sheet prefills) the args text, so it
+  // must hash to exactly what the tool validated.
+  if (typeof result.text_sha256 !== 'string' || !SHA256_HEX_RE.test(result.text_sha256) || sha256Hex(text) !== result.text_sha256) {
     return null
   }
 
