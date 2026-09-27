@@ -58,6 +58,7 @@ from agent.secret_hygiene import (
     scan_secrets,
 )
 from hermes_cli import security_scrub_backup as bk
+from hermes_platform.resolver import locate_command
 
 TARGETS = ("pastes", "attachments", "transcripts", "state-db", "doc-cache", "sdk-transcripts")
 BATCH_SIZE = 500
@@ -622,14 +623,14 @@ def _lsof_open_pids(paths: Sequence[Path]) -> Tuple[Optional[List[int]], str]:
     """``(pids, "")``: OTHER processes holding any of ``paths`` open (``lsof -t``). ``(None, why)``
     when that cannot be proven -- ``lsof`` missing, failing, erroring or timing out. Callers
     fail CLOSED on ``None``."""
-    exe = shutil.which("lsof")
+    exe = locate_command("lsof").command
     if not exe:
         return None, "lsof is not installed, so open state.db handles cannot be ruled out"
     existing = [str(p) for p in paths if os.path.lexists(p)]
     if not existing:
         return [], ""
     try:
-        result = subprocess.run([exe, "-w", "-t", "--", *existing], capture_output=True, text=True,
+        result = subprocess.run([*exe, "-w", "-t", "--", *existing], capture_output=True, text=True,
                                 timeout=10, check=False)
     except subprocess.TimeoutExpired:
         return None, "lsof timed out"
@@ -903,11 +904,11 @@ def _open_writer_pids(path: Path) -> List[int]:
     """Pids of OTHER processes holding ``path`` open for writing (``lsof``); ``[]`` when
     ``lsof`` is missing, slow or fails -- the live-session deferral and the quiet window
     remain the guard then."""
-    exe = shutil.which("lsof")
+    exe = locate_command("lsof").command
     if not exe:
         return []
     try:
-        result = subprocess.run([exe, "-w", "-F", "pa", "--", str(path)], capture_output=True, text=True,
+        result = subprocess.run([*exe, "-w", "-F", "pa", "--", str(path)], capture_output=True, text=True,
                                 timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return []

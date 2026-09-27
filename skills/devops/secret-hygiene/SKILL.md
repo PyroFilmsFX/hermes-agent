@@ -13,6 +13,8 @@ metadata:
 
 # Secret Hygiene Skill
 
+The `hermes security scrub` command is parked and disabled by default.
+
 Sweep secrets that already reached disk: composer pastes, attachments, transcripts, the gateway
 document cache, `state.db` and Hermes-created Claude SDK transcripts. The sweep replaces each secret
 with a `[REDACTED:<kind>:<tag>]` placeholder. It does not rotate credentials, and it never deletes a
