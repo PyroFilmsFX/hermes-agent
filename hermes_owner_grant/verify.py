@@ -426,6 +426,23 @@ def _validate_payload(p: Dict[str, Any]) -> None:
         raise _malformed("text_sha256 must be 64 lowercase hex")
     if hashlib.sha256(text.encode("utf-8")).hexdigest() != p["text_sha256"]:
         raise _malformed("text_sha256 does not match text")
+    if p["text_len"] != len(text.encode("utf-8")):
+        raise _malformed("text_len does not match UTF-8 byte length")
+
+
+def validate_payload(payload: Any) -> Dict[str, Any]:
+    """Public schema check for a payload whose envelope signature was verified by a caller.
+
+    This deliberately validates shape only; audience, time, session, uid and scope checks stay
+    with the caller's authorization flow.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    try:
+        _validate_payload(payload)
+    except _Deny as exc:
+        raise ValueError(exc.detail) from None
+    return payload
 
 
 # -- the pipeline --------------------------------------------------------------------------

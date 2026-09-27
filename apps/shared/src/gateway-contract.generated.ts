@@ -1748,12 +1748,17 @@ export interface ClientCapabilitiesParams {
 export interface ClientCapabilitiesResult {
   server_requests: string[]
 }
-/** ``grant``: base64url (unpadded) of the exact payload bytes main signed. ``signature``: base64url of the Ed25519 signature over the domain prefix plus those bytes. ``text`` is the owner's text exactly as confirmed; ``targets`` are profile-qualified ``<profile>:<session_id>`` strings equal as a set to the grant's. */
+/** ``envelope`` is the canonical signed owner-grant/v1 envelope. ``text`` is the owner's text exactly as confirmed; ``targets`` are profile-qualified ``<profile>:<session_id>`` strings bound by forward_targets. */
 export interface OwnerForwardParams {
-  grant: string
-  signature: string
+  envelope: OwnerGrantEnvelope
   text: string
   targets: string[]
+}
+export interface OwnerGrantEnvelope {
+  format: 'hermes-owner-grant/v1'
+  kid: string
+  payload: string
+  sig: string
 }
 export interface OwnerForwardResult {
   nonce: string

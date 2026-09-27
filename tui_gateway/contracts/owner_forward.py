@@ -4,17 +4,24 @@ see ``_ops/plans/HE-OWNER-FORWARD-DESIGN-2026-09-26.md`` §2-§5."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from .base import Params, Result
 from .registry import method
 
 
-class OwnerForwardParams(Params):
-    """``grant``: base64url (unpadded) of the exact payload bytes main signed. ``signature``: base64url of the
-    Ed25519 signature over the domain prefix plus those bytes. ``text`` is the owner's text exactly as
-    confirmed; ``targets`` are profile-qualified ``<profile>:<session_id>`` strings equal as a set to the grant's."""
+class OwnerGrantEnvelope(Params):
+    format: Literal["hermes-owner-grant/v1"]
+    kid: str
+    payload: str
+    sig: str
 
-    grant: str
-    signature: str
+
+class OwnerForwardParams(Params):
+    """``envelope`` is the canonical signed owner-grant/v1 envelope. ``text`` is the owner's text exactly as
+    confirmed; ``targets`` are profile-qualified ``<profile>:<session_id>`` strings bound by forward_targets."""
+
+    envelope: OwnerGrantEnvelope
     text: str
     targets: list[str]
 

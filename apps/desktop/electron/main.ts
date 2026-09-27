@@ -8007,6 +8007,14 @@ const ownerGrantKeyStore = createOwnerKeyStore({
     rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
 })
 
+function ownerGrantBackendSpawnEnv() {
+  return {
+    // These are public verification inputs. The backend's spawned agent shells may inherit them.
+    HERMES_OWNER_GRANT_KEYS: ownerGrantKeyStore.grantKeysEnvValue() ?? '',
+    HERMES_OWNER_GRANT_BACKEND: `spawn_${crypto.randomBytes(16).toString('hex')}`
+  }
+}
+
 function loadOwnerGrantKeyAtLaunch(): void {
   try {
     ownerGrantKeyStore.loadIfEnrolled()
@@ -11810,6 +11818,7 @@ async function spawnPoolBackend(
         ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile }),
         HERMES_HOME,
         ...backend.env,
+        ...ownerGrantBackendSpawnEnv(),
         // Pin the gateway's tool/terminal cwd to the same directory we chose for
         // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
         // can still point at the install dir even when spawn cwd is home.
@@ -12706,6 +12715,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
           // can't reliably do that, so we set it inline for every spawn.
           HERMES_HOME,
           ...backend.env,
+          ...ownerGrantBackendSpawnEnv(),
           TERMINAL_CWD: hermesCwd,
           // Marks this dashboard backend as desktop-spawned so it runs the cron
           // scheduler tick loop (the gateway isn't running under the app).

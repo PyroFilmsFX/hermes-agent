@@ -1,8 +1,6 @@
-"""owner.forward: a signed Owner Gesture Grant is the only way a turn becomes an owner-forward.
+"""owner.forward accepts canonical v1 owner-grant envelopes and stamps only verified turns.
 
-Design: ``_ops/plans/HE-OWNER-FORWARD-DESIGN-2026-09-26.md`` §3 (trust boundary) and §9 (test ids); the grant is
-verified over its exact payload bytes (VERIFY addendum §2.1, D-5). Every negative test asserts the refusal AND
-that nothing reached ``prompt.submit``: a refused forward must write nothing."""
+Every negative test asserts the refusal AND that nothing reached ``prompt.submit``."""
 
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from hermes_state import SessionDB
+from hermes_owner_grant import envelope as grant_envelope
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -69,7 +68,9 @@ def of(monkeypatch, tmp_path):
 
     key = Ed25519PrivateKey.generate()
     pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    verifier = ofm.PerSpawnKeyVerifier(pub)
+    backend_id = "spawn-test"
+    kid = grant_envelope.kid_for_pub(pub)
+    verifier = ofm.EnvelopeGrantVerifier({kid: pub}, backend_id=backend_id)
     monkeypatch.setattr(ofm, "_verifier", verifier)
     ofm._reset_for_tests()
 
@@ -100,15 +101,21 @@ def of(monkeypatch, tmp_path):
         current_profile = server._current_profile_name()
         qualified_targets = [target if ":" in target else f"{current_profile}:{target}" for target in targets]
         claims = {
-            "v": 1, "aud": "hermes-owner-forward", "backend": verifier.backend_id, "nonce": _b64u(os.urandom(16)),
-            "iat": now, "exp": now + 60_000, "gesture": "menu", "confirm": "native_dialog",
-            "origin": {"session_id": "origin", "message_id": "m-1"}, "targets": sorted(qualified_targets),
+            "v": 1, "aud": ["hermes-owner-forward", "hermes-owner-verify"],
+            "decision_id": "od_" + "a" * 26, "issued_at": now, "deliver_by": now + 60_000,
+            "expires_at": now + 12 * 60 * 60 * 1000, "owner_uid": os.getuid(), "backend": backend_id,
+            "nonce": _b64u(os.urandom(16)), "gesture": "menu", "confirm": "native_dialog",
+            "source_session": {"session_id": "origin", "message_id": "m-1", "role": "user"},
+            "targets": [{"session_id": target.split(":", 1)[-1], "claude_session_id": None}
+                        for target in qualified_targets],
+            "forward_targets": sorted(qualified_targets), "scope": ["conductor:gate:review-budget-enable"],
+            "single_use": [], "subject": {}, "text": text,
             "text_sha256": hashlib.sha256(text.encode()).hexdigest(), "text_len": len(text.encode()),
         }
         claims.update(overrides)
-        payload = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
-        sig = key.sign(ofm.SIGN_DOMAIN + payload)
-        return {"grant": _b64u(payload), "signature": _b64u(sig), "text": text, "targets": qualified_targets}
+        payload = grant_envelope.encode_payload(claims)
+        envelope = grant_envelope.seal(payload, kid, key.sign)
+        return {"envelope": envelope.to_dict(), "text": text, "targets": qualified_targets}
 
     def call(params, transport=None):
         from tui_gateway.transport import bind_transport, reset_transport
@@ -120,7 +127,7 @@ def of(monkeypatch, tmp_path):
             reset_transport(token)
 
     yield SimpleNamespace(server=server, ofm=ofm, mb=mb, db=db, sessions=sessions, key=key, pub=pub,
-                          verifier=verifier, submits=submits, resumes=resumes, grant=grant, call=call,
+                          verifier=verifier, backend_id=backend_id, kid=kid, submits=submits, resumes=resumes, grant=grant, call=call,
                           pol=pol, passthrough=passthrough)
     ofm._reset_for_tests()
     db.close()
@@ -134,7 +141,8 @@ def _code(resp) -> int | None:
 
 
 def test_valid_grant_delivers_a_stamped_queued_user_turn(of):
-    resp = of.call(of.grant("please merge PR 12", ["target"]))
+    signed = of.grant("please merge PR 12", ["target"])
+    resp = of.call(signed)
 
     assert "result" in resp, resp
     assert resp["result"]["results"] == [
@@ -146,6 +154,9 @@ def test_valid_grant_delivers_a_stamped_queued_user_turn(of):
     assert isinstance(stamp, of.ofm.OwnerForwardStamp)
     meta = stamp.display_metadata()
     assert meta["kind"] == "owner_forward" and meta["from_session_id"] == "origin"
+    assert meta["decision_id"] == "od_" + "a" * 26
+    assert meta["owner_grant"]["id"] == grant_envelope.parse_envelope(signed["envelope"]).grant_id
+    assert meta["owner_grant"]["envelope"] == signed["envelope"]
     assert meta["from_title"] == "manager" and meta["from_message_id"] == "m-1"
     assert meta["gesture"] == "menu" and meta["confirm"] == "native_dialog" and meta["fanout"] == [0, 1]
     assert len(of.resumes) == 1  # the cold target was woken, then submitted to
@@ -175,40 +186,42 @@ def _mutate(of, case):
     text, targets = "please merge PR 12", ["target"]
     if case == "no_signature":
         p = of.grant(text, targets)
-        p.pop("signature")
+        p["envelope"].pop("sig")
         return p
     if case == "bad_signature":
         p = of.grant(text, targets)
-        sig = bytearray(base64.urlsafe_b64decode(p["signature"] + "=="))
+        sig = bytearray(base64.urlsafe_b64decode(p["envelope"]["sig"] + "=="))
         sig[0] ^= 1
-        p["signature"] = _b64u(bytes(sig))
+        p["envelope"]["sig"] = _b64u(bytes(sig))
         return p
     if case == "other_key":
         other = Ed25519PrivateKey.generate()
         p = of.grant(text, targets)
-        payload = base64.urlsafe_b64decode(p["grant"] + "==")
-        p["signature"] = _b64u(other.sign(of.ofm.SIGN_DOMAIN + payload))
+        env = grant_envelope.parse_envelope(p["envelope"])
+        p["envelope"]["sig"] = _b64u(other.sign(env.sign_bytes()))
         return p
     if case == "no_domain_prefix":
         p = of.grant(text, targets)
-        payload = base64.urlsafe_b64decode(p["grant"] + "==")
-        p["signature"] = _b64u(of.key.sign(payload))
+        env = grant_envelope.parse_envelope(p["envelope"])
+        p["envelope"]["sig"] = _b64u(of.key.sign(env.payload))
         return p
     if case == "wrong_aud":
-        return of.grant(text, targets, aud="hermes-owner-verify")
+        return of.grant(text, targets, aud=["hermes-owner-verify"])
     if case == "wrong_version":
         return of.grant(text, targets, v=2)
     if case == "wrong_backend":
-        return of.grant(text, targets, backend="ofk_0000000000000000")
+        return of.grant(text, targets, backend="spawn-wrong")
+    if case == "wrong_owner_uid":
+        return of.grant(text, targets, owner_uid=os.getuid() + 1)
     if case == "expired":
         now = int(time.time() * 1000)
-        return of.grant(text, targets, iat=now - 120_000, exp=now - 60_000)
+        return of.grant(text, targets, issued_at=now - 120_000, deliver_by=now - 60_000)
     if case == "issued_in_future":
         now = int(time.time() * 1000)
-        return of.grant(text, targets, iat=now + 30_000, exp=now + 90_000)
+        return of.grant(text, targets, issued_at=now + 30_000, deliver_by=now + 90_000)
     if case == "overlong_lifetime":
         now = int(time.time() * 1000)
-        return of.grant(text, targets, iat=now, exp=now + 3_600_000)
+        return of.grant(text, targets, issued_at=now, deliver_by=now + 3_600_000)
     if case == "text_hash_mismatch":
         p = of.grant(text, targets)
         p["text"] = "please merge PR 13"
@@ -216,32 +229,31 @@ def _mutate(of, case):
     if case == "text_len_mismatch":
         return of.grant(text, targets, text_len=len(text) + 1)
     if case == "target_set_mismatch":
-        p = of.grant(text, targets)
-        p["targets"] = ["t2"]
-        return p
+        return of.grant(text, targets, forward_targets=["default:t2"])
     if case == "target_superset":
-        p = of.grant(text, targets)
-        p["targets"] = ["target", "t2"]
-        return p
+        return of.grant(text, targets, forward_targets=["default:target", "default:t2"])
+    if case == "unsigned_target_session":
+        return of.grant(text, targets, forward_targets=["default:other"])
     if case == "bad_gesture":
         return of.grant(text, targets, gesture="widget")
     if case == "bad_confirm":
         return of.grant(text, targets, confirm="renderer")
     if case == "grant_not_b64":
         p = of.grant(text, targets)
-        p["grant"] = "!!!not-base64!!!"
+        p["envelope"]["payload"] = "!!!not-base64!!!"
         return p
     if case == "grant_is_dict":
         p = of.grant(text, targets)
-        p["grant"] = json.loads(base64.urlsafe_b64decode(p["grant"] + "=="))
+        p["envelope"]["payload"] = json.loads(base64.urlsafe_b64decode(p["envelope"]["payload"] + "=="))
         return p
     raise AssertionError(case)
 
 
 P1_CASES = [
     "no_signature", "bad_signature", "other_key", "no_domain_prefix", "wrong_aud", "wrong_version",
-    "wrong_backend", "expired", "issued_in_future", "overlong_lifetime", "text_hash_mismatch",
-    "text_len_mismatch", "target_set_mismatch", "target_superset", "bad_gesture", "bad_confirm",
+    "wrong_backend", "wrong_owner_uid", "expired", "issued_in_future", "overlong_lifetime", "text_hash_mismatch",
+    "text_len_mismatch", "target_set_mismatch", "target_superset", "unsigned_target_session",
+    "bad_gesture", "bad_confirm",
     "grant_not_b64", "grant_is_dict",
 ]
 
@@ -278,13 +290,56 @@ def test_p1_no_configured_pubkey_disables_the_method(of, monkeypatch):
 
 
 def test_p1_verifier_from_env_fails_closed(of):
+    keys_env, backend_env = of.ofm.KEYS_ENV, of.ofm.BACKEND_ENV
     assert of.ofm.verifier_from_env({}) is None
-    assert of.ofm.verifier_from_env({of.ofm.PUBKEY_ENV: ""}) is None
-    assert of.ofm.verifier_from_env({of.ofm.PUBKEY_ENV: "not base64 !!"}) is None
-    assert of.ofm.verifier_from_env({of.ofm.PUBKEY_ENV: _b64u(b"\x01" * 31)}) is None
-    good = of.ofm.verifier_from_env({of.ofm.PUBKEY_ENV: base64.b64encode(of.pub).decode()})
-    assert good is not None and good.backend_id == of.verifier.backend_id
-    assert good.backend_id == "ofk_" + hashlib.sha256(of.pub).hexdigest()[:16]
+    assert of.ofm.verifier_from_env({keys_env: ""}) is None
+    assert of.ofm.verifier_from_env({keys_env: "not base64 !!", backend_env: of.backend_id}) is None
+    bad_key = f"{of.kid}:{_b64u(bytes([1]) * 31)}"
+    assert of.ofm.verifier_from_env({keys_env: bad_key, backend_env: of.backend_id}) is None
+    assert of.ofm.verifier_from_env({keys_env: f"ok_0000000000000000:{_b64u(of.pub)}", backend_env: of.backend_id}) is None
+    assert of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)},bad", backend_env: of.backend_id}) is None
+    assert of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)}"}) is None
+    good = of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)}", backend_env: of.backend_id})
+    assert good is not None and good.backend_id == of.backend_id
+
+
+def test_p1_backend_binding_is_required_and_signed(of):
+    wrong = of.call(of.grant("hi", ["target"], backend="another-spawn"))
+    assert _code(wrong) == 4127
+    assert of.submits == []
+
+
+def test_p1_forward_targets_bind_profile_and_session_ids(of):
+    params = of.grant("hi", ["target"], forward_targets=["other-profile:target"])
+    response = of.call(params)
+    assert _code(response) == 4129
+    assert of.submits == []
+
+
+def test_p1_composer_signed_can_forward_to_its_origin_once(of):
+    params = of.grant("approved", ["origin"], gesture="composer_signed")
+    response = of.call(params)
+    assert "result" in response, response
+    assert response["result"]["results"][0]["target_session_id"] == "origin"
+
+
+def test_p1_other_gestures_cannot_forward_to_their_origin(of):
+    response = of.call(of.grant("approved", ["origin"], gesture="menu"))
+    assert _code(response) == 4129
+    assert of.submits == []
+
+
+def test_p1_composer_signed_cannot_include_self_in_fanout(of):
+    response = of.call(of.grant("approved", ["origin", "target"], gesture="composer_signed"))
+    assert _code(response) == 4129
+    assert of.submits == []
+
+
+def test_p1_expired_envelope_ttl_does_not_expire_delivery_window(of):
+    now = int(time.time() * 1000)
+    params = of.grant("hi", ["target"], issued_at=now - 1000, deliver_by=now + 1000,
+                      expires_at=now - 500)
+    assert "result" in of.call(params)
 
 
 def test_p1_nonce_is_burned_before_delivery_starts(of):
@@ -439,7 +494,7 @@ def test_p0_stamped_submit_writes_the_owner_forward_row_at_submit(of, monkeypatc
         ("user", "approve the deploy", "owner_forward")]
     meta = rows[0]["display_metadata"]
     assert meta["kind"] == "owner_forward" and meta["from_session_id"] == "origin"
-    assert meta["grant_nonce"] == json.loads(base64.urlsafe_b64decode(params["grant"] + "=="))["nonce"]
+    assert meta["grant_nonce"] == json.loads(grant_envelope.parse_envelope(params["envelope"]).payload)["nonce"]
 
 
 # ── P-0c: a busy target queues the forward as the next user turn, kind intact ────────────────

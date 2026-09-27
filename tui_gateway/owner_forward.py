@@ -1,34 +1,17 @@
 """Owner-forward: the owner's confirmed text delivered into other sessions as a real user turn.
 
 Design: ``_ops/plans/HE-OWNER-FORWARD-DESIGN-2026-09-26.md`` §2, §3 and §5. The renderer composes; Electron
-main shows a native confirm and signs a single-use Owner Gesture Grant with a per-spawn Ed25519 key whose
-public half reaches this backend as ``HERMES_OWNER_FORWARD_PUBKEY``; ``owner.forward`` verifies the grant
-here and :func:`deliver` hands each target the text through its normal ``prompt.submit``, stamped with an
+main shows a native confirm and signs a single-use Owner Grant. ``owner.forward`` verifies the canonical v1
+envelope against the public key set and backend spawn id passed at process start, then :func:`deliver` hands
+each target the text through its normal ``prompt.submit``, stamped with an
 :class:`OwnerForwardStamp`. The stamp is the only thing that makes a turn ``display_kind="owner_forward"``:
 JSON cannot produce one (``prompt.submit`` answers 4125 to anything else in ``_owner_forward``), and its one
 constructor call is in :func:`deliver`, after verification (static test P-12).
 
-Grant wire format (per-spawn key, this module): ``grant`` is base64url (no padding) of the exact payload
-bytes Electron signed and ``signature`` is base64url of ``Ed25519(SIGN_DOMAIN + payload)``. The payload is
-never re-canonicalized: verification runs over the received bytes and only then parses them (the VERIFY
-addendum's D-5, which avoids byte-identical JS/Python serializers). Payload (JSON object)::
-
-    {"v":1, "aud":"hermes-owner-forward", "backend":<backend_id>, "nonce":<str>, "iat":<ms>, "exp":<ms>,
-     "gesture":"menu"|"selection"|"slash_to"|"proposal", "confirm":"native_dialog"|"touch_id",
-     "origin":{"session_id":<str>, "message_id":<str>|null}, "targets":[<profile>:<session id>...],
-     "text_sha256":<hex sha256 of the UTF-8 text>, "text_len":<UTF-8 byte length of the text>}
-
-``backend`` is ``ofk_`` + the first 16 hex chars of sha256(raw public key): the key is minted per backend
-spawn, so its fingerprint names the spawn and a grant for another (or a restarted) backend fails. ``text_len``
-is a UTF-8 BYTE count so JS (``Buffer.byteLength``) and Python agree; ``String.length`` would not for emoji.
-
-VERIFIER SEAM (for U13, VERIFY addendum §1.2/§2): ``owner.forward`` only talks to a :class:`GrantVerifier`
-(``verify(grant, signature, text) -> VerifyResult``). :class:`PerSpawnKeyVerifier` is today's implementation.
-The v1 envelope (``hermes-owner-grant/v1``, ``{format,kid,payload,sig}``, keys from
-``HERMES_OWNER_GRANT_KEYS`` or the root-owned anchor via ``hermes_owner_grant.verify_envelope``) plugs in as
-another ``GrantVerifier`` returned by :func:`verifier_from_env`; it must return claims carrying the same keys
-this module reads (``nonce``, ``exp``, ``origin``, ``targets``, ``gesture``, ``confirm``) and enforce
-``deliver_by`` plus the spawn binding itself. Nothing below the verifier changes.
+Grant wire format is the canonical ``hermes-owner-grant/v1`` envelope. The exact signed payload bytes
+are verified before parsing; the payload's ``forward_targets`` binds profile-qualified delivery while
+``targets[].session_id`` remains the bare Hermes session id used by hooks. Electron supplies public keys
+and a unique backend spawn id through ``HERMES_OWNER_GRANT_KEYS`` and ``HERMES_OWNER_GRANT_BACKEND``.
 """
 
 from __future__ import annotations
@@ -36,10 +19,8 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import json
 import logging
 import os
-import re
 import threading
 import time
 from collections import deque
@@ -48,18 +29,15 @@ from typing import Any, Iterator, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
-PUBKEY_ENV = "HERMES_OWNER_FORWARD_PUBKEY"
+KEYS_ENV = "HERMES_OWNER_GRANT_KEYS"
+BACKEND_ENV = "HERMES_OWNER_GRANT_BACKEND"
 AUDIENCE = "hermes-owner-forward"
 GRANT_VERSION = 1
-# Domain separation: a signature over these bytes can never be replayed as anything else the key signs
-# (and never as a VERIFY-addendum ``hermes-owner-grant/v1`` envelope, whose prefix differs).
-SIGN_DOMAIN = b"hermes-owner-forward/v1\x00"
 MAX_GRANT_LIFETIME_MS = 60_000
 CLOCK_SKEW_MS = 5_000
-MAX_GRANT_BYTES = 16 * 1024
 HARD_MAX_TARGETS = 5
 HARD_MAX_CHARS = 32_000
-GESTURES = frozenset({"menu", "selection", "slash_to", "proposal"})
+GESTURES = frozenset({"menu", "selection", "slash_to", "proposal", "composer_signed"})
 CONFIRMS = frozenset({"native_dialog", "touch_id"})
 
 # Error codes (the design's 4403 for callers that may never forward; 4125 lives in prompt.submit).
@@ -71,9 +49,6 @@ ERR_TARGET = 4129
 ERR_RATE = 4131
 
 _DEFAULTS: dict[str, Any] = {"enabled": True, "max_chars": 8000, "max_targets": 5, "per_minute": 20}
-
-_B64U_RE = re.compile(r"^[A-Za-z0-9_-]*$")
-
 
 def policy() -> dict[str, Any]:
     """Effective ``owner_forward:`` config block. Values are clamped to the design's hard ceilings: config can
@@ -110,18 +85,7 @@ class GrantVerifier(Protocol):
 
     backend_id: str
 
-    def verify(self, grant: Any, signature: Any, text: Any) -> VerifyResult: ...
-
-
-def _b64u_decode(value: str, max_bytes: int) -> bytes | None:
-    """Strict unpadded base64url: one encoding per byte string, so a grant has no malleable spellings."""
-    if not isinstance(value, str) or len(value) > (max_bytes * 4) // 3 + 4 or not _B64U_RE.match(value):
-        return None
-    try:
-        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except (ValueError, TypeError):
-        return None
-    return raw if base64.urlsafe_b64encode(raw).rstrip(b"=").decode() == value else None
+    def verify(self, envelope: Any, text: Any) -> VerifyResult: ...
 
 
 def _is_int(value: Any) -> bool:
@@ -137,30 +101,41 @@ def check_claims(claims: Any, *, backend_id: str, text: str, now_ms: int) -> Ver
         return fail("malformed")
     if not _is_int(claims.get("v")) or claims["v"] != GRANT_VERSION:
         return fail("version")
-    if claims.get("aud") != AUDIENCE:
+    if not isinstance(claims.get("aud"), list) or AUDIENCE not in claims["aud"]:
         return fail("audience")
     if not backend_id or claims.get("backend") != backend_id:
         return fail("backend")
     nonce = claims.get("nonce")
     if not isinstance(nonce, str) or not 8 <= len(nonce) <= 64:
         return fail("nonce")
-    iat, exp = claims.get("iat"), claims.get("exp")
-    if not (_is_int(iat) and _is_int(exp)) or exp <= iat or exp - iat > MAX_GRANT_LIFETIME_MS:
+    issued_at, deliver_by = claims.get("issued_at"), claims.get("deliver_by")
+    if (not _is_int(issued_at) or not _is_int(deliver_by) or deliver_by <= issued_at
+            or deliver_by - issued_at > MAX_GRANT_LIFETIME_MS):
         return fail("lifetime")
-    if now_ms < iat - CLOCK_SKEW_MS or now_ms > exp + CLOCK_SKEW_MS:
+    if now_ms < issued_at - CLOCK_SKEW_MS or now_ms > deliver_by + CLOCK_SKEW_MS:
         return fail("expired")
     if claims.get("gesture") not in GESTURES:
         return fail("gesture")
     if claims.get("confirm") not in CONFIRMS:
         return fail("confirm")
-    origin = claims.get("origin")
-    if (not isinstance(origin, dict) or not isinstance(origin.get("session_id"), str) or not origin["session_id"]
-            or not (origin.get("message_id") is None or isinstance(origin.get("message_id"), str))):
+    source = claims.get("source_session")
+    if (not isinstance(source, dict) or not isinstance(source.get("session_id"), str)
+            or not source["session_id"]):
         return fail("origin")
     targets = claims.get("targets")
     if (not isinstance(targets, list) or not targets or len(targets) > HARD_MAX_TARGETS
-            or not all(isinstance(t, str) and t for t in targets) or len(set(targets)) != len(targets)):
+            or not all(isinstance(t, dict) and isinstance(t.get("session_id"), str) and t["session_id"]
+                       for t in targets)
+            or len({t["session_id"] for t in targets}) != len(targets)):
         return fail("targets")
+    forward_targets = claims.get("forward_targets")
+    if (not isinstance(forward_targets, list) or not forward_targets
+            or not all(isinstance(t, str) and t for t in forward_targets)
+            or len(set(forward_targets)) != len(forward_targets)
+            or not {t.split(":", 1)[-1] for t in forward_targets} <= {t["session_id"] for t in targets}):
+        return fail("targets")
+    if not _is_int(claims.get("owner_uid")) or claims["owner_uid"] != os.getuid():
+        return fail("owner_uid")
     if not isinstance(text, str):
         return fail("text")
     encoded = text.encode("utf-8", "surrogatepass")
@@ -171,53 +146,61 @@ def check_claims(claims: Any, *, backend_id: str, text: str, now_ms: int) -> Ver
     return VerifyResult(True, claims=claims)
 
 
-class PerSpawnKeyVerifier:
-    """Ed25519 against the per-spawn public key Electron main passed in (base design §2 step 5)."""
+class EnvelopeGrantVerifier:
+    """Verify canonical v1 envelopes against the backend's public key set using strict pure Ed25519."""
 
-    def __init__(self, public_key: bytes, *, clock=time.time) -> None:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        if not isinstance(public_key, (bytes, bytearray)) or len(public_key) != 32:
-            raise ValueError("an Ed25519 public key is 32 raw bytes")
-        self._key = Ed25519PublicKey.from_public_bytes(bytes(public_key))
-        self.backend_id = "ofk_" + hashlib.sha256(bytes(public_key)).hexdigest()[:16]
+    def __init__(self, public_keys: Mapping[str, bytes], *, backend_id: str, clock=time.time) -> None:
+        self._public_keys = dict(public_keys)
+        self.backend_id = backend_id
         self._clock = clock
 
-    def verify(self, grant: Any, signature: Any, text: Any) -> VerifyResult:
-        from cryptography.exceptions import InvalidSignature
+    def verify(self, envelope: Any, text: Any) -> VerifyResult:
+        from hermes_owner_grant import ed25519_pure, envelope as owner_envelope, verify as owner_verify
 
-        payload = _b64u_decode(grant, MAX_GRANT_BYTES) if isinstance(grant, str) else None
-        if not payload or len(payload) > MAX_GRANT_BYTES:
+        try:
+            env = owner_envelope.parse_envelope(envelope)
+        except (owner_envelope.EnvelopeError, TypeError, ValueError):
             return VerifyResult(False, "malformed")
-        sig = _b64u_decode(signature, 64) if isinstance(signature, str) else None
-        if sig is None or len(sig) != 64:
+        pub = self._public_keys.get(env.kid)
+        if pub is None or not ed25519_pure.verify(pub, env.sign_bytes(), env.sig):
             return VerifyResult(False, "signature")
         try:
-            self._key.verify(sig, SIGN_DOMAIN + payload)
-        except InvalidSignature:
-            return VerifyResult(False, "signature")
-        try:  # parsed only after the signature holds
-            claims = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+            claims = owner_envelope.decode_payload(env.payload)
+            owner_verify.validate_payload(claims)
+        except (owner_envelope.EnvelopeError, ValueError, TypeError):
             return VerifyResult(False, "malformed")
-        return check_claims(claims, backend_id=self.backend_id, text=text, now_ms=int(self._clock() * 1000))
+        result = check_claims(claims, backend_id=self.backend_id, text=text, now_ms=int(self._clock() * 1000))
+        return VerifyResult(result.ok, result.reason, {**claims, "_grant_envelope": env.to_dict(),
+                                                       "_grant_id": env.grant_id}) if result.ok else result
 
 
 def verifier_from_env(environ: Mapping[str, str] | None = None) -> Optional[GrantVerifier]:
     """The backend's verifier, or None (owner.forward disabled, fail closed) when the key is missing or bad.
 
-    U13 plugs in here: prefer ``HERMES_OWNER_GRANT_KEYS`` / the anchored v1 verifier when present."""
+    Every configured key entry and the per-spawn backend id must be valid; a malformed key list
+    disables delivery rather than accepting a partial key set."""
     env = os.environ if environ is None else environ
-    raw = str(env.get(PUBKEY_ENV) or "").strip()
-    if not raw:
+    raw = str(env.get(KEYS_ENV) or "").strip()
+    backend_id = str(env.get(BACKEND_ENV) or "").strip()
+    if not raw or not backend_id:
         return None
-    normalized = raw.replace("+", "-").replace("/", "_").rstrip("=")
-    key = _b64u_decode(normalized, 32)
-    if key is None or len(key) != 32:
-        logger.warning("%s is not a base64 Ed25519 public key; owner.forward stays disabled", PUBKEY_ENV)
+    from hermes_owner_grant.envelope import EnvelopeError, b64url_decode, kid_for_pub
+
+    keys = {}
+    try:
+        for entry in raw.split(","):
+            kid, separator, encoded = entry.partition(":")
+            if not separator or not encoded or kid in keys:
+                return None
+            pub = b64url_decode(encoded)
+            if len(pub) != 32 or kid != kid_for_pub(pub):
+                return None
+            keys[kid] = pub
+    except (EnvelopeError, TypeError, ValueError):
+        logger.warning("%s has an invalid owner key entry; owner.forward stays disabled", KEYS_ENV)
         return None
     try:
-        return PerSpawnKeyVerifier(key)
+        return EnvelopeGrantVerifier(keys, backend_id=backend_id)
     except Exception:  # noqa: BLE001 - missing cryptography or a bad point: disabled, never open
         logger.warning("owner.forward verifier unavailable; the method stays disabled", exc_info=True)
         return None
@@ -234,14 +217,14 @@ class _NonceCache:
         self._lock = threading.Lock()
         self._seen: dict[str, int] = {}
 
-    def claim(self, nonce: str, exp_ms: int, now_ms: int) -> bool:
+    def claim(self, nonce: str, deliver_by_ms: int, now_ms: int) -> bool:
         with self._lock:
             for old in [n for n, until in self._seen.items() if until < now_ms]:
                 del self._seen[old]
             if nonce in self._seen:
                 return False
             # Kept until the grant could no longer pass the time check anyway.
-            self._seen[nonce] = exp_ms + CLOCK_SKEW_MS
+            self._seen[nonce] = deliver_by_ms + CLOCK_SKEW_MS
             return True
 
 
@@ -303,15 +286,16 @@ class OwnerForwardStamp:
 
     __slots__ = ("origin_session_id", "origin_title", "origin_message_id", "gesture", "confirm", "nonce",
                  "forwarded_at", "fanout_index", "fanout_total", "target_session_id", "target_session_key",
-                 "target_profile",
-                 "text_sha256", "one_time_id", "_consumed", "_consume_lock")
+                 "target_profile", "text_sha256", "one_time_id", "grant_id", "grant_envelope", "decision_id",
+                 "_consumed", "_consume_lock")
     __mint = object()
 
     def __init__(self, mint: object, /, *, origin_session_id: str, origin_title: str,
                  origin_message_id: Optional[str], gesture: str, confirm: str, nonce: str, forwarded_at: float,
                  fanout_index: int, fanout_total: int, target_session_id: str, target_session_key: str,
                  target_profile: str,
-                 text_sha256: str, one_time_id: str) -> None:
+                 text_sha256: str, one_time_id: str, grant_id: str, grant_envelope: Mapping[str, str],
+                 decision_id: str) -> None:
         if mint is not OwnerForwardStamp.__mint:
             raise TypeError("an OwnerForwardStamp is minted by tui_gateway.owner_forward.deliver() only")
         for name, value in (
@@ -321,6 +305,7 @@ class OwnerForwardStamp:
                 ("fanout_total", fanout_total), ("target_session_id", target_session_id),
                 ("target_session_key", target_session_key),
                 ("target_profile", target_profile), ("text_sha256", text_sha256), ("one_time_id", one_time_id),
+                ("grant_id", grant_id), ("grant_envelope", dict(grant_envelope)), ("decision_id", decision_id),
                 ("_consumed", False), ("_consume_lock", threading.Lock())):
             object.__setattr__(self, name, value)
 
@@ -361,6 +346,8 @@ class OwnerForwardStamp:
             "from_message_id": self.origin_message_id, "gesture": self.gesture, "confirm": self.confirm,
             "grant_nonce": self.nonce, "forwarded_at": self.forwarded_at,
             "fanout": [self.fanout_index, self.fanout_total],
+            "owner_grant": {"id": self.grant_id, "envelope": dict(self.grant_envelope)},
+            "decision_id": self.decision_id,
         }
 
     def __repr__(self) -> str:
@@ -426,7 +413,7 @@ def deliver(claims: Mapping[str, Any], text: str,
             profile_home: Optional[str] = None) -> list[dict[str, Any]]:
     """Fan a verified grant's text out to ``targets`` (``(requested id, compression tip)``), sequentially and
     independently. The ONLY place an :class:`OwnerForwardStamp` is constructed (P-12)."""
-    origin = claims["origin"]
+    origin = claims["source_session"]
     forwarded_at = time.time()
     results = []
     for index, (target_id, tip, target_home, target_profile, stored_target_id) in enumerate(targets):
@@ -438,7 +425,9 @@ def deliver(claims: Mapping[str, Any], text: str,
             fanout_index=index, fanout_total=len(targets), target_session_id=stored_target_id,
             target_session_key=tip, target_profile=target_profile,
             text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            one_time_id=base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii"))
+            one_time_id=base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii"),
+            grant_id=str(claims["_grant_id"]), grant_envelope=claims["_grant_envelope"],
+            decision_id=str(claims["decision_id"]))
         try:
             status, detail = _deliver_one(tip, text, stamp, target_home)
         except Exception as exc:  # noqa: BLE001 - one target's failure never aborts the others
@@ -476,9 +465,10 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
         return [], "", "targets must be a non-empty list of distinct session ids"
     if len(requested) > int(pol["max_targets"]):
         return [], "", f"at most {pol['max_targets']} targets per forward"
-    if set(requested) != set(claims["targets"]) or len(requested) != len(claims["targets"]):
+    if set(requested) != set(claims["forward_targets"]) or len(requested) != len(claims["forward_targets"]):
         return [], "", "the targets differ from the ones the owner confirmed"
-    origin_id = str(claims["origin"]["session_id"])
+    target_session_ids = {t["session_id"] for t in claims["targets"]}
+    origin_id = str(claims["source_session"]["session_id"])
     from tui_gateway import server
 
     resolved: list[tuple[str, str, Optional[str], str, str]] = []
@@ -497,6 +487,8 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
             target_profile, target_id = target.split(":", 1)
             if not target_profile or not target_id:
                 return [], "", "targets must use <profile>:<session_id>"
+            if target_id not in target_session_ids:
+                return [], "", "the targets differ from the sessions the owner confirmed"
             if target_profile == server._current_profile_name():
                 target_home = None
             else:
@@ -516,7 +508,8 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
                 tip = mb._tip(target_db, str(row["id"]))
             if ((target_profile == server._current_profile_name() and target_id == origin_id)
                     or (target_profile == server._current_profile_name() and tip in {origin_id, origin_tip})):
-                return [], "", "a forward cannot target its own origin session"
+                if claims.get("gesture") != "composer_signed" or len(requested) != 1:
+                    return [], "", "a forward cannot target its own origin session"
             if tip in tips:
                 return [], "", "two targets resolve to the same session"
             tips.add(tip)
@@ -543,14 +536,14 @@ def forward_rpc(rid: Any, params: dict) -> dict:
         return server._err(rid, ERR_DISABLED, "owner forward is disabled: this backend has no owner key")
     text = params.get("text")
     try:
-        result = verifier.verify(params.get("grant"), params.get("signature"), text)
+        result = verifier.verify(params.get("envelope"), text)
     except Exception:  # noqa: BLE001 - a verifier crash is a refusal
         logger.warning("owner.forward verifier raised", exc_info=True)
         result = VerifyResult(False, "verifier_error")
     if not result.ok or result.claims is None:
         return server._err(rid, ERR_GRANT, f"owner grant refused ({result.reason or 'invalid'}); send again")
     claims = result.claims
-    if not _NONCES.claim(str(claims["nonce"]), int(claims["exp"]), int(time.time() * 1000)):
+    if not _NONCES.claim(str(claims["nonce"]), int(claims["deliver_by"]), int(time.time() * 1000)):
         return server._err(rid, ERR_GRANT, "owner grant refused (nonce already used); send again")
     # 4. Content.
     if (refusal := _content_refusal(text, pol)) is not None:

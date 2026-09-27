@@ -108,7 +108,7 @@ def make_payload(**overrides):
         "subject": {},
         "text": text,
         "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "text_len": len(text),
+        "text_len": len(text.encode("utf-8")),
     }
     payload.update(overrides)
     return payload
@@ -996,6 +996,12 @@ def test_a_caller_built_envelope_with_a_bad_shape_is_malformed(owner, anchor):
 
 def test_text_sha256_must_match_the_signed_text(owner, anchor):
     env = seal(owner, make_payload(text_sha256="0" * 64))
+    denied(check_env(anchor, env), "malformed")
+
+
+def test_text_len_must_match_utf8_bytes(owner, anchor):
+    text = "approved 🚀"
+    env = seal(owner, make_payload(text=text, text_len=len(text)))
     denied(check_env(anchor, env), "malformed")
 
 

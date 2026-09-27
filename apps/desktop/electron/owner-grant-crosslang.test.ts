@@ -1,7 +1,7 @@
 /**
  * #60 E-10 (E-3 style): an envelope signed by the Electron key store and signing core verifies
- * in the Python verifier `hermes_owner_grant` (the check pipeline, its pure Ed25519, and the
- * `cryptography` Ed25519), and a tampered byte is refused. This is the byte-compatibility proof:
+ * in the Python verifier `hermes_owner_grant`, and through `owner.forward`; a tampered byte is
+ * refused by both. This is the byte-compatibility proof:
  * same domain prefix, same payload bytes, same kid and grant_id derivations, same file name.
  *
  * The Python side runs as a child process with an injected test anchor (never the root-owned
@@ -42,6 +42,7 @@ const mockSafeStorage: SafeStorageLike = {
 const CHILD = String.raw`
 import json, os, sys
 req = json.load(sys.stdin)
+OUTPUT = sys.stdout
 sys.path.insert(0, req["repo"])
 from hermes_owner_grant import anchor as A, envelope as E, verify as V, ed25519_pure
 from cryptography.exceptions import InvalidSignature
@@ -84,7 +85,34 @@ for case in req["cases"]:
         row["lookup"] = {"ok": lr.ok, "reason": lr.reason, "detail": lr.detail,
                          "grant_id": (lr.grant or {}).get("id"), "candidates": lr.candidates}
     out["cases"].append(row)
-print(json.dumps(out))
+if req.get("owner_forward"):
+    from tui_gateway import owner_forward as OF
+    import tui_gateway.server
+    from tui_gateway.transport import bind_transport, reset_transport
+    owner_env = {OF.KEYS_ENV: req["kid"] + ":" + req["pub"],
+                 OF.BACKEND_ENV: req["owner_forward"]["backend"]}
+    out["owner_forward_verifier_configured"] = OF.verifier_from_env(owner_env) is not None
+    OF.policy = lambda: dict(OF._DEFAULTS)
+    OF._resolve_targets = lambda requested, claims, pol, home: (
+        [("w-1", "w-1", None, "default", "w-1")], "manager", None)
+    OF.deliver = lambda claims, text, targets, origin_title="": [
+        {"target_session_id": "w-1", "status": "delivered", "detail": None}]
+    class Transport:
+        session_spawn_capability = None
+    params = {"envelope": req["owner_forward"]["envelope"], "text": req["owner_forward"]["text"],
+              "targets": ["default:w-1"]}
+    token = bind_transport(Transport())
+    try:
+        OF._reset_for_tests()
+        OF._verifier = OF.verifier_from_env(owner_env)
+        good = OF.forward_rpc("valid", params)
+        bad_params = dict(params)
+        bad_params["envelope"] = req["owner_forward"]["tampered"]
+        bad = OF.forward_rpc("tampered", bad_params)
+        out["owner_forward"] = {"good": good, "tampered": bad}
+    finally:
+        reset_transport(token)
+OUTPUT.write(json.dumps(out))
 `
 
 function runPython(input: unknown) {
@@ -98,6 +126,10 @@ function runPython(input: unknown) {
 
   if (res.status !== 0) {
     throw new Error(`python child failed (${res.status}): ${res.stderr}`)
+  }
+
+  if (!res.stdout.trim()) {
+    throw new Error(`python child returned no JSON (signal=${res.signal}): ${res.stderr}`)
   }
 
   return JSON.parse(res.stdout)
@@ -172,6 +204,12 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
       grants_dir: grantsDir,
       kid: info.kid,
       pub: info.pub,
+      owner_forward: {
+        envelope: a.envelope,
+        tampered: tamperSig(a.envelope),
+        text,
+        backend: a.backend
+      },
       cases: [
         { name: 'a', envelope: a.envelope, query: q1, lookup: true },
         { name: 'b', envelope: b.envelope, query: { session: 'w-2', now: now + 1000, text_sha: textSha, scopes: ['conductor:gate:review-budget-enable'] }, lookup: true },
@@ -203,6 +241,12 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
 
     expect(byName['wrong-session'].envelope).toMatchObject({ ok: false, reason: 'session_mismatch' })
     expect(byName['wrong-subject'].envelope).toMatchObject({ ok: false, reason: 'subject_mismatch' })
+
+    expect(result.owner_forward_verifier_configured).toBe(true)
+    expect(result.owner_forward.good).toMatchObject({
+      result: { results: [{ target_session_id: 'w-1', status: 'delivered', detail: null }] }
+    })
+    expect(result.owner_forward.tampered.error.code).toBe(4127)
 
     for (const name of ['tampered-text', 'tampered-scope', 'tampered-sig']) {
       const row = byName[name]

@@ -83,6 +83,17 @@ def test_scrub_helper_is_in_place_and_case_folded():
     assert env == {"PATH": "/bin", "HERMES_DESKTOP": "1"}
 
 
+def test_owner_grant_public_verification_values_are_not_control_plane_secrets():
+    from tools.environments.local_env_policy import is_desktop_control_plane_env, scrub_desktop_control_plane_env
+
+    env = {"HERMES_OWNER_GRANT_KEYS": "ok_0123456789abcdef:public-key", "HERMES_OWNER_GRANT_BACKEND": "spawn-public-id"}
+    assert all(not is_desktop_control_plane_env(name) for name in env)
+    assert scrub_desktop_control_plane_env(env) == {
+        "HERMES_OWNER_GRANT_KEYS": "ok_0123456789abcdef:public-key",
+        "HERMES_OWNER_GRANT_BACKEND": "spawn-public-id",
+    }
+
+
 def test_passthrough_cannot_register_control_plane_names():
     from tools import env_passthrough
 
