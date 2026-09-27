@@ -600,14 +600,16 @@ def _(rid, params: dict) -> dict:
     title_preview = params.get("title_preview")
     if owner_stamp is None and isinstance(title_preview, str) and title_preview.strip():
         display_metadata = {**(display_metadata or {}), "title_preview": title_preview[:1000]}
+    # A typed stop phrase ends voice chat before any session lookup (it needs no live session).
+    # A stamped owner forward is never a stop phrase: it goes straight to stamp consumption.
+    if owner_stamp is None and (stopped := _typed_stop_phrase_response(rid, text)) is not None:
+        return stopped
     session, err = _sess_nowait(params, rid)
     if err:
         return err
     if owner_stamp is not None and (
             not isinstance(text, str) or not owner_stamp.consume(text, session)):
         return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
-    if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
-        return stopped
     if params.get("interrupted"):
         # Client-side barge-in: latch so this turn's model message carries the note.
         from tools.tts_streaming import mark_speech_interrupted
