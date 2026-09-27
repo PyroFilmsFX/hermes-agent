@@ -15,6 +15,7 @@ import inspect
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -49,6 +50,70 @@ from agent.transports.claude_agent_sdk_session_turn import _claim_child_exit_emi
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
 logger = logging.getLogger("agent.claude_sdk_runtime")
+
+
+def _configured_transient_retry_policy() -> tuple[int, tuple[float, ...], float]:
+    """Read bounded Claude SDK transient retry settings from config.yaml."""
+    from agent.transports.claude_agent_sdk_session import _provider_config
+
+    config = _provider_config()
+    retries = config.get("transient_retry_max_retries", 2)
+    if isinstance(retries, bool) or not isinstance(retries, int):
+        retries = 2
+    retries = max(0, min(retries, 10))
+
+    raw_backoff = config.get("transient_retry_backoff_seconds", [2, 8])
+    if not isinstance(raw_backoff, (list, tuple)):
+        raw_backoff = [2, 8]
+    backoff = []
+    for value in raw_backoff:
+        if isinstance(value, bool):
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if seconds >= 0:
+            backoff.append(seconds)
+    if not backoff:
+        backoff = [2.0, 8.0]
+
+    cap = config.get("transient_retry_max_wait_seconds", 60)
+    if isinstance(cap, bool):
+        cap = 60
+    try:
+        cap = max(0.0, min(float(cap), 60.0))
+    except (TypeError, ValueError, OverflowError):
+        cap = 60.0
+    return retries, tuple(backoff), cap
+
+
+def _sdk_attempt_replay_safe(agent, turn: Any) -> bool:
+    """A failed SDK turn is replayable only before any visible/effectful output."""
+    if (
+        bool(getattr(turn, "interrupted", False))
+        or bool(getattr(agent, "_interrupt_requested", False))
+        or bool(getattr(agent, "_sdk_issued_tool_effect", False))
+        or bool(getattr(agent, "_current_streamed_assistant_text", ""))
+    ):
+        return False
+    try:
+        if int(getattr(turn, "tool_iterations", 0) or 0) > 0:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    for message in getattr(turn, "projected_messages", None) or ():
+        if not isinstance(message, dict):
+            continue
+        if message.get("tool_calls") or message.get("tool_use"):
+            return False
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in content
+        ):
+            return False
+    return True
 
 
 class _TurnVisibility:
@@ -846,7 +911,14 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 break
         sink.lifecycle("child_exited", exit_code=exit_code, reason=safe_reason)
 
-    for attempt in (0, 1):
+    max_transient_retries, retry_backoff, max_retry_wait = (
+        _configured_transient_retry_policy()
+    )
+    transient_retries = 0
+    total_retry_wait = 0.0
+    force_fresh_retry = False
+    # One legacy dead-session recovery plus the independent transient budget.
+    for attempt in range(max(2, max_transient_retries + 2)):
         if getattr(agent, "_claude_sdk_rename_pending", False) is True:
             # A title change landed while a turn was live; apply it now by rebuilding the CLI
             # with the new --name (the resume id is kept, so the conversation continues).
@@ -898,9 +970,11 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         if live_session is None:
             resume_id = (
                 _persisted_sdk_session_id(agent)
-                if attempt == 0 or retry_retired_before_query
+                if not force_fresh_retry
+                and (attempt == 0 or retry_retired_before_query)
                 else None
             )
+            force_fresh_retry = False
             resumed = bool(resume_id)
             send_input = user_input
             if not resume_id and len(messages) > 1:
@@ -1094,6 +1168,71 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 # hard watchdog trip) — re-running the stopped turn in full
                 # would evaporate the stop and deliver the answer anyway.
                 resumed = False
+                continue
+
+        # D0 classifies the SDK's structured API signals, but classification
+        # alone does not schedule a retry. Retry only failed turns whose
+        # output is still safe to replay; the transcript and prompt stay intact.
+        if (
+            getattr(turn, "error", None)
+            and transient_retries < max_transient_retries
+            and _sdk_attempt_replay_safe(agent, turn)
+        ):
+            api_signals = {
+                "api_error_kind": getattr(turn, "api_error_kind", None),
+                "api_error_status": getattr(turn, "api_error_status", None),
+                "api_retries": getattr(turn, "api_retries", None),
+                "rate_limit_rejected": getattr(turn, "rate_limit_rejected", None),
+            }
+            # Generic runtime failures have their own provider-failover path.
+            # This retry policy is for API failures observed on the SDK stream.
+            if not any(value is not None for value in api_signals.values()):
+                break
+            from agent.claude_sdk_transient import classify_sdk_api_failure
+
+            verdict, error_class, wait_hint = classify_sdk_api_failure({
+                "turn": turn,
+                "agent": agent,
+                "result_text": getattr(turn, "result_text", None) or turn.error,
+                **api_signals,
+            })
+            if verdict == "transient":
+                if getattr(agent, "_claude_sdk_session", None) is session:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    _clear_claude_sdk_session_if_current(agent, session)
+                _store_sdk_session_id(agent, None)
+                retry_index = transient_retries
+                transient_retries += 1
+                remaining_wait = max(0.0, max_retry_wait - total_retry_wait)
+                requested_wait = (
+                    wait_hint if wait_hint is not None
+                    else retry_backoff[min(retry_index, len(retry_backoff) - 1)]
+                )
+                wait_seconds = min(max(0.0, float(requested_wait)), remaining_wait)
+                emit = getattr(agent, "_emit_status", None)
+                if callable(emit):
+                    try:
+                        emit(f"Retrying ({transient_retries}/{max_transient_retries})…")
+                    except Exception:
+                        logger.debug("failed to emit transient retry status", exc_info=True)
+                logger.warning(
+                    "claude-agent-sdk: retrying transient %s failure (%s/%s) in %.1fs",
+                    error_class, transient_retries, max_transient_retries, wait_seconds,
+                )
+                if wait_seconds:
+                    time.sleep(wait_seconds)
+                    total_retry_wait += wait_seconds
+                if getattr(agent, "_interrupt_requested", False):
+                    # The failed turn may not be replayed after a stop arrives
+                    # during its bounded backoff.
+                    turn.interrupted = True
+                    break
+                force_fresh_retry = True
+                resumed = False
+                recovering_dead_turn = True
                 continue
         break
 

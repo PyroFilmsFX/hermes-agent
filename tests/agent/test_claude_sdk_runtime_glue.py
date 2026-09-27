@@ -36,6 +36,185 @@ def _isolate_provider_config(monkeypatch):
 # ---------- runtime glue ----------
 
 class TestRuntimeGlue:
+    @staticmethod
+    def _state():
+        from agent.claude_sdk_runtime_state import _SdkTurnState
+
+        messages = [{"role": "user", "content": "hello"}]
+        return _SdkTurnState(
+            user_input="hello", original_user_message="hello",
+            messages=messages, messages_before_attempt=list(messages),
+        )
+
+    @staticmethod
+    def _scripted_sessions(monkeypatch, agent, turns):
+        import time
+        import agent.claude_sdk_runtime_session as session_mod
+
+        sessions = []
+        turn_queue = iter(turns)
+
+        def create_session(agent_, **_kwargs):
+            turn = next(turn_queue)
+            session = MagicMock()
+            session._cwd = "/tmp"
+            session.run_turn.return_value = turn
+            sessions.append(session)
+            agent_._claude_sdk_session = session
+            return session
+
+        monkeypatch.setattr(session_mod, "_persisted_sdk_session_id", lambda _agent: None)
+        monkeypatch.setattr(session_mod, "_store_sdk_session_id", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(session_mod, "_create_session", create_session)
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        agent._claude_sdk_session = None
+        agent._current_streamed_assistant_text = ""
+        agent._sdk_issued_tool_effect = False
+        return session_mod, sessions
+
+    def test_retries_replay_safe_transient_failure_once(self, monkeypatch):
+        from types import SimpleNamespace
+
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=False, error="Claude API error (server_error): HTTP 503",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=503, api_error_kind="server_error",
+            api_retries=None, rate_limit_rejected=None,
+        )
+        success = SimpleNamespace(
+            interrupted=False, error=None, thread_id="sdk-session-2",
+            turn_id="turn-2", projected_messages=[], tool_iterations=0,
+            final_text="answer", should_retire=False,
+        )
+        _mod, sessions = self._scripted_sessions(monkeypatch, agent, [failure, success])
+        state = self._state()
+
+        result = _mod._run_sdk_attempts(agent, state)
+
+        assert result is None
+        assert state.turn.final_text == "answer"
+        assert len(sessions) == 2
+        assert [m["role"] for m in state.messages].count("user") == 1
+        agent._emit_status.assert_called_once_with("Retrying (1/2)…")
+
+    def test_permanent_failure_is_not_retried(self, monkeypatch):
+        from types import SimpleNamespace
+
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=False, error="SDK result error: invalid request",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=400, api_error_kind="invalid_request",
+            api_retries=None, rate_limit_rejected=None,
+        )
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, [failure])
+
+        mod._run_sdk_attempts(agent, self._state())
+
+        assert len(sessions) == 1
+
+    @pytest.mark.parametrize("effect", ["tool", "stream"])
+    def test_transient_failure_after_visible_effect_is_not_retried(self, monkeypatch, effect):
+        from types import SimpleNamespace
+
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=False, error="Claude API error (server_error): HTTP 503",
+            thread_id="sdk-session-1", turn_id="turn-1",
+            projected_messages=[], tool_iterations=int(effect == "tool"),
+            final_text="", should_retire=True, api_error_status=503,
+            api_error_kind="server_error", api_retries=None,
+            rate_limit_rejected=None,
+        )
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, [failure])
+        if effect == "stream":
+            agent._current_streamed_assistant_text = "already shown"
+
+        mod._run_sdk_attempts(agent, self._state())
+
+        assert len(sessions) == 1
+
+    def test_interrupt_during_transient_failure_is_not_retried(self, monkeypatch):
+        from types import SimpleNamespace
+
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=True, error="Claude API error (server_error): HTTP 503",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=503, api_error_kind="server_error",
+            api_retries=None, rate_limit_rejected=None,
+        )
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, [failure])
+
+        mod._run_sdk_attempts(agent, self._state())
+
+        assert len(sessions) == 1
+
+    def test_retry_after_hint_is_honoured_and_capped(self, monkeypatch):
+        import time
+        from types import SimpleNamespace
+
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg, "load_config_readonly",
+            lambda *args, **kwargs: {"agent": {"claude_agent_sdk": {
+                "transient_retry_max_retries": 1,
+                "transient_retry_max_wait_seconds": 3,
+            }}},
+            raising=False,
+        )
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=False, error="Claude API error (rate_limit): HTTP 429",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=429, api_error_kind="rate_limit",
+            api_retries=None, rate_limit_rejected={"resets_at": time.time() + 100},
+        )
+        success = SimpleNamespace(
+            interrupted=False, error=None, thread_id="sdk-session-2",
+            turn_id="turn-2", projected_messages=[], tool_iterations=0,
+            final_text="answer", should_retire=False,
+        )
+        mod, _sessions = self._scripted_sessions(monkeypatch, agent, [failure, success])
+        waits = []
+        import time
+        monkeypatch.setattr(time, "sleep", waits.append)
+
+        mod._run_sdk_attempts(agent, self._state())
+
+        assert waits == [3]
+
+    def test_exhausted_retries_keep_original_transient_error(self, monkeypatch):
+        from types import SimpleNamespace
+
+        agent = _make_agent()
+        failure = SimpleNamespace(
+            interrupted=False, error="Claude API error (server_error): HTTP 503",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=503, api_error_kind="server_error",
+            api_retries=None, rate_limit_rejected=None,
+        )
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, [failure, failure, failure])
+        state = self._state()
+
+        result = mod._run_sdk_attempts(agent, state)
+
+        assert len(sessions) == 3
+        assert result is None
+        assert state.turn.error == "Claude API error (server_error): HTTP 503"
+        from agent.claude_sdk_transient import classify_sdk_api_failure
+        assert classify_sdk_api_failure({
+            "api_error_status": state.turn.api_error_status,
+            "api_error_kind": state.turn.api_error_kind,
+        })[:2] == ("transient", "server_error")
+
     def test_stream_ended_pre_query_retries_once_but_post_query_never_retries(self, monkeypatch):
         from types import SimpleNamespace
 

@@ -343,6 +343,11 @@ DEFAULT_CONFIG = {
             # error_max_budget_usd once exceeded (surfaced honestly in the reply). null = no budget;
             # non-numeric / non-positive values are ignored with a warning.
             "max_budget_usd": None,
+            # Replay-safe transient API failures only. Retries always stay on
+            # the Claude SDK provider; total backoff is capped at 60 seconds.
+            "transient_retry_max_retries": 2,
+            "transient_retry_backoff_seconds": [2, 8],
+            "transient_retry_max_wait_seconds": 60,
             # Max size of one NDJSON message read from the Claude CLI. null = Hermes' built-in
             # 10 MiB instead of the SDK's 1 MiB default, which can kill a turn on a large tool
             # result. Invalid values warn and fall back to 10 MiB rather than disabling the OOM

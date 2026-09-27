@@ -643,6 +643,13 @@ class ClaudeSdkTurnMixin:
         result.billing_evidence = turn_data.get("billing_evidence", {})
         result.total_cost_usd = turn_data.get("total_cost_usd")
         result.api_call_made = turn_data.get("api_call_made", True)
+        # Preserve D0 API signals for the runtime's replay-safe transient retry
+        # decision without expanding the shared Codex TurnResult contract.
+        for signal in (
+            "api_error_kind", "api_error_status", "api_retries",
+            "rate_limit_rejected", "result_text",
+        ):
+            setattr(result, signal, turn_data.get(signal))
         result.thread_id = self._session_id
         result.turn_id = turn_data.get("result_uuid")
         # The stream consumer records interruption at the last point where it
