@@ -13,6 +13,7 @@ from . import (  # noqa: F401
     events,
     groups_bot_relay,
     liveness,
+    owner_forward,
     profiles_vault_complete_foreign_subagents,
     projects_pets,
     prompt_voice,

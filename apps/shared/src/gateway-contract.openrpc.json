@@ -1987,6 +1987,24 @@
       }
     },
     {
+      "name": "owner.forward",
+      "summary": "Deliver owner-confirmed text (a signed Owner Gesture Grant) into up to 5 sessions as a user turn.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OwnerForwardParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OwnerForwardResult"
+        }
+      }
+    },
+    {
       "name": "paste.collapse",
       "summary": "Spill a large paste to a file and hand back the inline placeholder.",
       "params": [
@@ -19826,6 +19844,92 @@
           }
         },
         "title": "OptionalProjectResult",
+        "type": "object"
+      },
+      "OwnerForwardParams": {
+        "additionalProperties": false,
+        "description": "``grant``: base64url (unpadded) of the exact payload bytes main signed. ``signature``: base64url of the\nEd25519 signature over the domain prefix plus those bytes. ``text`` is the owner's text exactly as\nconfirmed; ``targets`` the stored session ids, equal as a set to the grant's.",
+        "properties": {
+          "grant": {
+            "title": "Grant",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "grant",
+          "signature",
+          "text",
+          "targets"
+        ],
+        "title": "OwnerForwardParams",
+        "type": "object"
+      },
+      "OwnerForwardResult": {
+        "additionalProperties": false,
+        "properties": {
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerForwardTargetResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "nonce",
+          "results"
+        ],
+        "title": "OwnerForwardResult",
+        "type": "object"
+      },
+      "OwnerForwardTargetResult": {
+        "additionalProperties": false,
+        "properties": {
+          "target_session_id": {
+            "title": "Target Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "target_session_id",
+          "status"
+        ],
+        "title": "OwnerForwardTargetResult",
         "type": "object"
       },
       "PaneRevealPayload": {

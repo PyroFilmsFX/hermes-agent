@@ -1748,6 +1748,22 @@ export interface ClientCapabilitiesParams {
 export interface ClientCapabilitiesResult {
   server_requests: string[]
 }
+/** ``grant``: base64url (unpadded) of the exact payload bytes main signed. ``signature``: base64url of the Ed25519 signature over the domain prefix plus those bytes. ``text`` is the owner's text exactly as confirmed; ``targets`` the stored session ids, equal as a set to the grant's. */
+export interface OwnerForwardParams {
+  grant: string
+  signature: string
+  text: string
+  targets: string[]
+}
+export interface OwnerForwardResult {
+  nonce: string
+  results: OwnerForwardTargetResult[]
+}
+export interface OwnerForwardTargetResult {
+  target_session_id: string
+  status: string
+  detail?: string | null
+}
 /** ``word`` is the token under the cursor (``@`` prefix = context reference); ``cwd`` / ``session_id`` pick the directory the listing resolves against. */
 export interface CompletePathParams {
   profile?: string | null
@@ -5102,6 +5118,8 @@ export interface RpcMethods {
   'onboarding.ensure_setup_profile': { params: Params; result: OnboardingEnsureSetupProfileResult }
   /** Restore the setup profile to its created state in place (soul, memories, skills, sessions). */
   'onboarding.reset_setup_profile': { params: Params; result: OnboardingResetSetupProfileResult }
+  /** Deliver owner-confirmed text (a signed Owner Gesture Grant) into up to 5 sessions as a user turn. */
+  'owner.forward': { params: OwnerForwardParams; result: OwnerForwardResult }
   /** Spill a large paste to a file and hand back the inline placeholder. */
   'paste.collapse': { params: PasteCollapseParams; result: PasteCollapseResult }
   /** Render a PDF's pages to PNG and queue them as images for the next turn. */
@@ -5489,6 +5507,7 @@ export const RPC_METHODS = [
   'model.save_key',
   'onboarding.ensure_setup_profile',
   'onboarding.reset_setup_profile',
+  'owner.forward',
   'paste.collapse',
   'pdf.attach',
   'peer_mailbox.cancel',

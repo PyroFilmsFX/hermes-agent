@@ -49,6 +49,9 @@ class PromptSubmitParams(SessionParams):
     turn_author: JsonValue | None = Field(default=None, exclude=True, alias="_turn_author")
     hosted_terminal_callback: JsonValue | None = Field(
         default=None, exclude=True, alias="_hosted_terminal_callback")
+    # In-process only: owner.forward's OwnerForwardStamp. Declared so a client value reaches the handler and
+    # answers 4125 (not a generic 4000); excluded from the rendered wire.
+    owner_forward: JsonValue | None = Field(default=None, exclude=True, alias="_owner_forward")
 
 
 class PromptSubmitStatus(WireEnum):

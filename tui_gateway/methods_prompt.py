@@ -22,9 +22,15 @@ def _submit_display(params: dict) -> tuple:
     """(display_kind, display_metadata) prompt.submit may honor. Whitelisted to "hidden" — this RPC
     must not mint kinds. "peer_message" and its metadata are honored only for the in-process peer
     mailbox, which submits with no client transport bound (dispatch() always binds one for a real
-    client); otherwise any client could forge a card "from" another session. (cntrl carry)"""
+    client); otherwise any client could forge a card "from" another session. (cntrl carry)
+    "owner_forward" is honored ONLY with the gateway's ``OwnerForwardStamp`` (minted by
+    ``owner_forward.deliver`` after grant verification), whose metadata replaces the caller's."""
+    from tui_gateway.owner_forward import OwnerForwardStamp
     from tui_gateway.transport import current_transport
 
+    stamp = params.get("_owner_forward")
+    if isinstance(stamp, OwnerForwardStamp):
+        return "owner_forward", stamp.display_metadata()
     internal = current_transport() is None
     requested = params.get("display_kind")
     kind = requested if requested == "hidden" or (requested == "peer_message" and internal) else None
@@ -458,7 +464,7 @@ def _storage_error_data(failure, raw) -> dict:
     return {"code": failure.code, "cause": failure.cause, "details": storage_failure_details(raw)}
 
 
-def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
+def _persist_session_row_for_submit(rid, session, text=None, display_kind=None, display_metadata=None):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here), then the message itself (#111868: a freeze during the first build must leave a
     resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast)."""
@@ -473,7 +479,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 data=_storage_error_data(failure, _db_error))
         else:
             _persist_branch_seed(session)
-            _persist_submit_user_row(session, text, display_kind)
+            _persist_submit_user_row(session, text, display_kind, display_metadata)
             return None
     except Exception as exc:
         failure = describe_storage_failure(exc)
@@ -578,14 +584,21 @@ _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
+    from tui_gateway.owner_forward import OwnerForwardStamp
+
+    # Only owner.forward's deliver() builds a stamp, after verifying the owner's signed grant. Anything else
+    # here is a client claiming the owner's voice; refused before any side effect.
+    owner_stamp = params.get("_owner_forward")
+    if owner_stamp is not None and not isinstance(owner_stamp, OwnerForwardStamp):
+        return _err(rid, 4125, "owner forward is stamped by the gateway, never by a client")
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
-    # Off-screen sends (widget intents) type the row so no client renders a bubble;
-    # whitelisted to "hidden" (plus the in-process peer mailbox's "peer_message") — this RPC must not mint kinds.
+    # Off-screen sends (widget intents) type the row so no client renders a bubble; whitelisted to "hidden"
+    # (plus the in-process peer mailbox's "peer_message" and the stamped "owner_forward") — this RPC must not mint kinds.
     display_kind, display_metadata = _submit_display(params)
     title_preview = params.get("title_preview")
-    if isinstance(title_preview, str) and title_preview.strip():
+    if owner_stamp is None and isinstance(title_preview, str) and title_preview.strip():
         display_metadata = {**(display_metadata or {}), "title_preview": title_preview[:1000]}
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
@@ -660,7 +673,8 @@ def _(rid, params: dict) -> dict:
             # for `running` to clear and resubmits with the truncation intact.
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author)
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
+            display_kind=display_kind, display_metadata=display_metadata)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -692,7 +706,7 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+    if (err := _persist_session_row_for_submit(rid, session, text, display_kind, display_metadata)) is not None:
         return err
     # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
     staged_user = session.get("_submit_user_row") or {}
