@@ -4,7 +4,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getLatestSessionMessages, getSession } from '@/hermes'
+import { getLatestSessionMessages, getSession, transcribeAudio } from '@/hermes'
 import { textPart, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
@@ -35,6 +35,12 @@ import { SESSION_COMPRESS_TIMEOUT_MS } from './slash'
 import type { SubmitTextOptions } from './utils'
 
 import { uploadComposerAttachment, usePromptActions } from '.'
+
+const { transcribeAudioClientDirect } = vi.hoisted(() => ({ transcribeAudioClientDirect: vi.fn() }))
+
+vi.mock('@/lib/voice-client-direct', () => ({
+  transcribeAudioClientDirect: (...args: unknown[]) => transcribeAudioClientDirect(...args)
+}))
 
 // Suites in this file reuse the same stored-id constants. The module-level
 // single-flight resume map (and drift-recovery cache) would otherwise leak a
@@ -108,6 +114,7 @@ interface HarnessHandle {
   steerPrompt: (text: string) => Promise<boolean>
   submitTextRaw: (text: string, options?: SubmitTextOptions) => Promise<boolean>
   submitText: (text: string, options?: SubmitTextOptions) => Promise<boolean>
+  transcribeVoiceAudio: (audio: Blob, signal?: AbortSignal) => Promise<string>
 }
 
 function Harness({
@@ -130,7 +137,8 @@ function Harness({
   selectedStoredSessionIdRef: selectedStoredSessionIdRefProp,
   storedSessionId,
   activeSessionId,
-  createBackendSessionForSend
+  createBackendSessionForSend,
+  sttEnabled = false
 }: {
   activeSessionIdRef?: MutableRefObject<string | null>
   busyRef?: MutableRefObject<boolean>
@@ -156,6 +164,7 @@ function Harness({
   storedSessionId?: null | string
   activeSessionId?: null | string
   createBackendSessionForSend?: (preview?: null | string) => Promise<null | string>
+  sttEnabled?: boolean
 }) {
   const localActiveSessionIdRef = useRef<string | null>(
     activeSessionId === undefined ? RUNTIME_SESSION_ID : activeSessionId
@@ -206,7 +215,7 @@ function Harness({
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionIdRef,
     startFreshSessionDraft: () => undefined,
-    sttEnabled: false,
+    sttEnabled,
     updateSessionState: (sessionId, updater, storedSessionId) => {
       // Seed with interrupted:true so we can prove a fresh submit clears it.
       const next = updater(stateRef.current) as unknown as Record<string, unknown>
@@ -235,7 +244,9 @@ function Harness({
         act(async () => actions.steerPrompt(...args)) as Promise<boolean>,
       submitTextRaw: actions.submitText,
       submitText: (...args: Parameters<typeof actions.submitText>) =>
-        act(async () => actions.submitText(...args)) as Promise<boolean>
+        act(async () => actions.submitText(...args)) as Promise<boolean>,
+      transcribeVoiceAudio: (...args: Parameters<typeof actions.transcribeVoiceAudio>) =>
+        actions.transcribeVoiceAudio(...args)
     })
   }, [
     actions.cancelRun,
@@ -327,6 +338,47 @@ describe('usePromptActions /title', () => {
     )
     expect(refreshSessions).not.toHaveBeenCalled()
     expect($sessions.get()[0]?.title).toBe('Old title')
+  })
+})
+
+describe('usePromptActions voice transcription', () => {
+  it('forwards the recorder AbortSignal to the direct transcription request', async () => {
+    const signal = new AbortController().signal
+    transcribeAudioClientDirect.mockResolvedValue('recognized')
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={vi.fn(async () => ({}) as never)}
+        sttEnabled
+      />
+    )
+
+    await expect(handle!.transcribeVoiceAudio(new Blob(['voice']), signal)).resolves.toBe('recognized')
+    expect(transcribeAudioClientDirect).toHaveBeenCalledWith(expect.any(Blob), signal)
+  })
+
+  it('forwards the recorder AbortSignal to the relay request', async () => {
+    const signal = new AbortController().signal
+    transcribeAudioClientDirect.mockResolvedValue(null)
+    vi.mocked(transcribeAudio).mockResolvedValue({ ok: true, transcript: 'recognized' })
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={vi.fn(async () => ({}) as never)}
+        sttEnabled
+      />
+    )
+
+    await expect(handle!.transcribeVoiceAudio(new Blob(['voice'], { type: 'audio/webm' }), signal)).resolves.toBe(
+      'recognized'
+    )
+    expect(transcribeAudio).toHaveBeenCalledWith(expect.stringContaining('data:audio/webm;base64,'), 'audio/webm', signal)
   })
 })
 

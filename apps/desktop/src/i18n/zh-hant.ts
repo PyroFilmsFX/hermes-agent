@@ -2815,6 +2815,7 @@ export const zhHant = defineLocale({
     endShort: '結束',
     stopDictation: '停止聽寫',
     transcribingDictation: '正在轉寫聽寫',
+    cancelTranscription: '取消轉寫',
     voiceControls: '語音',
     voiceDictation: '語音聽寫',
     speakReplies: '朗讀回覆',

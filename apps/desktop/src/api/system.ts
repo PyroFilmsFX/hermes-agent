@@ -168,8 +168,13 @@ export function getActionStatus(name: string, lines = 200, profile?: ProfileScop
   })
 }
 
-export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<AudioTranscriptionResponse> {
-  return hermesApi<AudioTranscriptionResponse>({
+export function transcribeAudio(
+  dataUrl: string,
+  mimeType?: string,
+  signal?: AbortSignal
+): Promise<AudioTranscriptionResponse> {
+  signal?.throwIfAborted()
+  const request = hermesApi<AudioTranscriptionResponse>({
     path: '/api/audio/transcribe',
     method: 'POST',
     ...profileScoped(),
@@ -181,6 +186,26 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
     // encoding finish. Remote providers and long clips regularly exceed the
     // default 15s Electron backend timeout.
     timeoutMs: audioTranscribeRequestTimeoutMs(dataUrl)
+  })
+
+  if (!signal) {
+    return request
+  }
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    request.then(
+      result => {
+        signal.removeEventListener('abort', onAbort)
+        signal.throwIfAborted()
+        resolve(result)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      }
+    )
   })
 }
 

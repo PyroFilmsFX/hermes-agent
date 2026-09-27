@@ -94,6 +94,55 @@ test('listWorktrees marks branches merged into the default branch', async () => 
   }
 })
 
+test('listWorktrees ignores an init.defaultBranch that does not exist and uses a present trunk', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-worktrees-default-'))
+  const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' }).toString().trim()
+
+  try {
+    git('init', '-b', 'main')
+    git('config', 'init.defaultBranch', 'missing-trunk')
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    fs.writeFileSync(path.join(dir, 'README'), 'root\n')
+    git('add', 'README')
+    git('commit', '-m', 'root')
+    git('switch', '-c', 'feature/merged')
+    fs.writeFileSync(path.join(dir, 'merged.txt'), 'merged\n')
+    git('add', 'merged.txt')
+    git('commit', '-m', 'merged')
+    git('switch', 'main')
+    git('merge', '--ff-only', 'feature/merged')
+    git('worktree', 'add', path.join(dir, 'feature-wt'), 'feature/merged')
+
+    const trees = await listWorktrees(dir, 'git')
+    assert.equal(trees.find(tree => tree.branch === 'feature/merged')?.merged, true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees reports no merged branches when no default branch resolves', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-worktrees-no-default-'))
+  const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' }).toString().trim()
+
+  try {
+    git('init', '-b', 'topic')
+    git('config', 'init.defaultBranch', 'missing-trunk')
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    fs.writeFileSync(path.join(dir, 'README'), 'root\n')
+    git('add', 'README')
+    git('commit', '-m', 'root')
+    git('branch', 'feature/branch')
+    git('worktree', 'add', path.join(dir, 'feature-wt'), 'feature/branch')
+
+    const trees = await listWorktrees(dir, 'git')
+    assert.ok(trees.every(tree => tree.merged === false))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('ensureGitRepo: inits a plain dir with a root commit so worktrees branch', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-wt-'))
   const git = (...args) => execFileSync('git', args, { cwd: dir }).toString().trim()

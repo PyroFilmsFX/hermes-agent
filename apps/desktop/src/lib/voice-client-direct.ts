@@ -195,13 +195,14 @@ export function sttTimeoutSeconds(stt: Pick<DirectSttConfig, 'timeout_s'>): numb
  * dictation UI in "transcribing" forever — the browser applies no timeout of
  * its own to a POST that never answers.
  */
-async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit): Promise<Response> {
+async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
   const seconds = sttTimeoutSeconds(stt)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), seconds * 1000)
+  const signals = [controller.signal, init.signal, signal].filter((item): item is AbortSignal => item !== undefined)
 
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, { ...init, signal: AbortSignal.any(signals) })
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(`Transcription timed out after ${seconds}s (${stt.provider} did not answer)`)
@@ -220,8 +221,10 @@ async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit): P
  * re-running the same request through the gateway would just fail again
  * slower and hide the real error.
  */
-export async function transcribeAudioClientDirect(audio: Blob): Promise<null | string> {
+export async function transcribeAudioClientDirect(audio: Blob, signal?: AbortSignal): Promise<null | string> {
+  signal?.throwIfAborted()
   const config = await fetchVoiceClientConfig()
+  signal?.throwIfAborted()
   const stt = config?.stt
 
   if (!stt || stt.mode !== 'direct') {
@@ -247,7 +250,7 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: form,
       signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
-    })
+    }, signal)
 
     if (!response.ok) {
       throw new Error(`${stt.provider} STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
@@ -270,7 +273,7 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: form,
       signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
-    })
+    }, signal)
 
     if (!response.ok) {
       throw new Error(`xAI STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
@@ -298,7 +301,7 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       headers: { 'xi-api-key': stt.api_key },
       body: form,
       signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
-    })
+    }, signal)
 
     if (!response.ok) {
       throw new Error(`ElevenLabs STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)

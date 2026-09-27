@@ -166,23 +166,30 @@ async function defaultBranch(gitBin, cwd) {
     await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
   ).replace(/^origin\//, '')
 
-  if (remote) {
+  if (remote && (await branchExists(gitBin, cwd, remote))) {
     return remote
   }
 
   const configured = await gitLine(gitBin, ['config', '--get', 'init.defaultBranch'], cwd)
 
-  if (configured) {
+  if (configured && (await branchExists(gitBin, cwd, configured))) {
     return configured
   }
 
   for (const branch of TRUNK_BRANCHES) {
-    if (await gitLine(gitBin, ['show-ref', '--verify', `refs/heads/${branch}`], cwd)) {
+    if (await branchExists(gitBin, cwd, branch)) {
       return branch
     }
   }
 
   return ''
+}
+
+async function branchExists(gitBin, cwd, branch) {
+  return (
+    (await gitOk(gitBin, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], cwd)) ||
+    (await gitOk(gitBin, ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`], cwd))
+  )
 }
 
 // A brand-new project folder isn't a git repo — and a freshly-init'd one has no

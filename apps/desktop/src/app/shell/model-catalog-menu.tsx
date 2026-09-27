@@ -52,7 +52,10 @@ import {
   DEFAULT_VISIBLE_PER_PROVIDER,
   effectiveVisibleKeys,
   type ModelFamily,
+  markFamiliesSeen,
+  markProvidersSeen,
   modelVisibilityKey,
+  seedSeenModels,
   seedKnownModels,
   setModelVisibilityOpen
 } from '@/store/model-visibility'
@@ -290,7 +293,11 @@ export function ModelCatalogMenu({
   // Resolve visibility HERE, against the catalog we actually fetched: an empty
   // provider list would otherwise resolve to an empty key set that reads as
   // "user hid everything" and blanks the menu on first open.
-  useEffect(() => seedKnownModels(pickerProviders), [pickerProviders])
+  useEffect(() => {
+    seedKnownModels(pickerProviders)
+    seedSeenModels(pickerProviders)
+    markProvidersSeen(pickerProviders)
+  }, [pickerProviders])
 
   const shownKeys = useMemo(
     () => effectiveVisibleKeys(visibleModels, pickerProviders),
@@ -351,6 +358,8 @@ export function ModelCatalogMenu({
     if ((await controller.select(targetId, provider.slug)) === false) {
       return false
     }
+
+    markFamiliesSeen([family], provider.slug)
 
     controller.applyPreset(
       {

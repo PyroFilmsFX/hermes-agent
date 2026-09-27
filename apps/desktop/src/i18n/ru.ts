@@ -2801,6 +2801,7 @@ export const ru = defineLocale({
     endShort: 'Завершить',
     stopDictation: 'Остановить диктовку',
     transcribingDictation: 'Расшифровка диктовки',
+    cancelTranscription: 'Отменить расшифровку',
     voiceControls: 'Голос',
     voiceDictation: 'Голосовая диктовка',
     speakReplies: 'Зачитывать ответы вслух',

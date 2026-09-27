@@ -46,7 +46,7 @@ export function VoiceFan({ autoSpeak, disabled, state, voiceStatus, onDictate, o
     voiceStatus === 'recording'
       ? c.stopDictation
       : voiceStatus === 'transcribing'
-        ? c.transcribingDictation
+        ? c.cancelTranscription
         : c.voiceDictation
 
   const hubLabel = dictating ? dictationLabel : c.voiceDictation
@@ -63,7 +63,7 @@ export function VoiceFan({ autoSpeak, disabled, state, voiceStatus, onDictate, o
       id: 'dictate',
       active: dictating,
       className: cn(GHOST_ICON_BTN, 'rounded-full p-0', dictating && ACTIVE_ICON_BTN),
-      disabled: disabled || !state.voice.enabled || voiceStatus === 'transcribing',
+      disabled: voiceStatus === 'transcribing' ? false : disabled || !state.voice.enabled,
       icon:
         voiceStatus === 'recording' ? (
           <Square className={cn('fill-current', iconSize.xs)} />

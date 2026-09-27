@@ -20,6 +20,7 @@ import { $localModelsEnabled } from '@/store/local-models-flag'
 import { localModelsKey, localModelsOwner } from '@/store/local-runtime-jobs'
 import {
   $modelVisibilityOpen,
+  $seenModels,
   $visibleModels,
   modelVisibilityKey,
   setModelVisibilityOpen,
@@ -102,6 +103,23 @@ describe('catalog provider ordering', () => {
 
     expect(compareCatalogProviders(google, openai, 'claude-agent-sdk')).toBeLessThan(0)
     expect(compareCatalogProviders(google, openai, 'anthropic')).toBeLessThan(0)
+  })
+})
+
+describe('new model acknowledgement', () => {
+  it('marks the catalog models seen when the picker is shown', async () => {
+    $seenModels.set(new Set(['claude-opus-4-5']))
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        { models: ['claude-opus-4-5', 'claude-opus-5-5'], name: 'Anthropic', slug: 'anthropic' }
+      ]
+    })
+
+    renderMenu()
+    await screen.findByText(/Opus 5\.5/i)
+
+    expect($seenModels.get()?.has('claude-opus-5-5')).toBe(true)
+    expect($seenModels.get()?.has(modelVisibilityKey('anthropic', 'claude-opus-5-5'))).toBe(true)
   })
 })
 

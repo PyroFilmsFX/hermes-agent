@@ -4127,6 +4127,7 @@ export const frOverrides = {
     endShort: 'Terminer',
     stopDictation: 'Arrêter la dictée',
     transcribingDictation: 'Transcription de la dictée',
+    cancelTranscription: 'Annuler la transcription',
     voiceControls: 'Voix',
     voiceEngine: 'Moteur de conversation vocale',
     voiceEngineChained: 'Reconnaissance vocale + voix Hermes',

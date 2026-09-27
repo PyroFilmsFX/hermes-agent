@@ -71,7 +71,7 @@ export function VoiceMenu({
     voiceStatus === 'recording'
       ? c.stopDictation
       : voiceStatus === 'transcribing'
-        ? c.transcribingDictation
+        ? c.cancelTranscription
         : c.voiceDictation
 
   const wakeLabel = wakeListening ? c.wakeWordListening(phrase) : c.wakeWordOff(phrase)
@@ -84,7 +84,7 @@ export function VoiceMenu({
           <Button
             aria-label={triggerLabel}
             className={cn(GHOST_ICON_BTN, 'p-0', active && ACTIVE_ICON_BTN)}
-            disabled={disabled}
+            disabled={disabled && voiceStatus !== 'transcribing'}
             size="icon"
             type="button"
             variant="ghost"
@@ -122,7 +122,7 @@ export function VoiceMenu({
         <DropdownMenuCheckboxItem
           checked={dictating}
           className={dropdownMenuRow}
-          disabled={disabled || !state.voice.enabled || voiceStatus === 'transcribing'}
+          disabled={voiceStatus === 'transcribing' ? false : disabled || !state.voice.enabled}
           onSelect={event => {
             // Keep the menu open: dictation is a mode you watch, and closing
             // on select hides the recording state the trigger just entered.

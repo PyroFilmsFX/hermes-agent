@@ -3097,6 +3097,7 @@ export interface Translations {
     endShort: string
     stopDictation: string
     transcribingDictation: string
+    cancelTranscription: string
     voiceControls: string
     voiceEngine: string
     voiceEngineChained: string

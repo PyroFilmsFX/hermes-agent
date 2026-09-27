@@ -3675,6 +3675,7 @@ export const en: Translations = {
     endShort: 'End',
     stopDictation: 'Stop dictation',
     transcribingDictation: 'Transcribing dictation',
+    cancelTranscription: 'Cancel transcription',
     voiceControls: 'Voice',
     voiceEngine: 'Voice chat engine',
     voiceEngineChained: 'Speech-to-text + Hermes voice',

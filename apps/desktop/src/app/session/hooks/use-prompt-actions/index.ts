@@ -661,10 +661,12 @@ export function usePromptActions({
   )
 
   const transcribeVoiceAudio = useCallback(
-    async (audio: Blob) => {
+    async (audio: Blob, signal?: AbortSignal) => {
       if (!sttEnabled) {
         throw new Error(copy.sttDisabled)
       }
+
+      signal?.throwIfAborted()
 
       // Client-direct first: mic audio goes straight to the profile's STT
       // provider (config + key fetched from the connected gateway), cutting
@@ -672,14 +674,15 @@ export function usePromptActions({
       // (local whisper, command providers, older backend) → relay unchanged.
       // Provider REJECTIONS surface — re-running the same request through
       // the relay would fail identically, just slower.
-      const direct = await transcribeAudioClientDirect(audio)
+      const direct = await transcribeAudioClientDirect(audio, signal)
+      signal?.throwIfAborted()
 
       if (direct !== null) {
         return direct
       }
 
       const dataUrl = await blobToDataUrl(audio)
-      const result = await transcribeAudio(dataUrl, audio.type)
+      const result = await transcribeAudio(dataUrl, audio.type, signal)
 
       return result.transcript
     },

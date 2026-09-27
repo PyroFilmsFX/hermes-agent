@@ -241,6 +241,34 @@ export function markFamiliesSeen(families: readonly ModelFamily[], provider?: st
   persistSeenModels(current)
 }
 
+/** Seed first-run state from the catalog already available to the picker. */
+export function seedSeenModels(providers: readonly ModelOptionProvider[]): void {
+  if ($seenModels.get() !== null || providers.length === 0) {
+    return
+  }
+
+  const seen = new Set<string>()
+
+  for (const provider of providers) {
+    for (const family of collapseModelFamilies(provider.models ?? [])) {
+      seen.add(family.id)
+
+      if (family.fastId) {
+        seen.add(family.fastId)
+      }
+    }
+  }
+
+  persistSeenModels(seen)
+}
+
+/** Opening the catalog acknowledges the model families that are currently shown. */
+export function markProvidersSeen(providers: readonly ModelOptionProvider[]): void {
+  for (const provider of providers) {
+    markFamiliesSeen(collapseModelFamilies(provider.models ?? []), provider.slug)
+  }
+}
+
 export function clearSeenModels(): void {
   $seenModels.set(new Set())
   persistString(SEEN_STORAGE_KEY, null)

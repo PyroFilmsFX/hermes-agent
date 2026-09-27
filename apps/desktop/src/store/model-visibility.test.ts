@@ -10,10 +10,12 @@ import {
   emptyProviderSentinelKey,
   isProviderSentinel,
   markModelSeen,
+  markProvidersSeen,
   modelVisibilityKey,
   resolveVisibleKeys,
   setProviderVisibility,
   setSeenModels,
+  seedSeenModels,
   toggleModelVisibility
 } from './model-visibility'
 
@@ -343,6 +345,19 @@ describe('seen-set newest model leads', () => {
   beforeEach(() => {
     window.localStorage.clear()
     clearSeenModels()
+  })
+
+  it('seeds the first catalog without reordering and promotes only models added later until shown', () => {
+    $seenModels.set(null)
+    const initial = provider('anthropic', ['claude-opus-4-5'])
+    seedSeenModels([initial])
+    expect(collapseModelFamilies(initial.models ?? []).map(f => f.id)).toEqual(['claude-opus-4-5'])
+
+    const updated = provider('anthropic', ['claude-opus-4-5', 'claude-opus-5-5'])
+    expect(collapseModelFamilies(updated.models ?? []).map(f => f.id)).toEqual(['claude-opus-5-5', 'claude-opus-4-5'])
+
+    markProvidersSeen([updated])
+    expect(collapseModelFamilies(updated.models ?? []).map(f => f.id)).toEqual(['claude-opus-4-5', 'claude-opus-5-5'])
   })
 
   it('sorts an unseen model in a family to the top of that family (unseen newest first)', () => {

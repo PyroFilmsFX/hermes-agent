@@ -552,10 +552,30 @@ def _slugify(name: str) -> str:
 
 
 def _default_branch(cwd: str) -> str:
-    return (
-        _origin_head(cwd).replace("origin/", "", 1)
-        or _git_line(cwd, ["config", "--get", "init.defaultBranch"])
-        or next((b for b in _TRUNK_BRANCHES if _git_line(cwd, ["show-ref", "--verify", f"refs/heads/{b}"])), "")
+    origin_head = _origin_head(cwd).removeprefix("origin/")
+
+    if origin_head and (
+        _ref_exists(cwd, f"refs/heads/{origin_head}")
+        or _ref_exists(cwd, f"refs/remotes/origin/{origin_head}")
+    ):
+        return origin_head
+
+    configured = _git_line(cwd, ["config", "--get", "init.defaultBranch"])
+
+    if configured and (
+        _ref_exists(cwd, f"refs/heads/{configured}")
+        or _ref_exists(cwd, f"refs/remotes/origin/{configured}")
+    ):
+        return configured
+
+    return next(
+        (
+            branch
+            for branch in _TRUNK_BRANCHES
+            if _ref_exists(cwd, f"refs/heads/{branch}")
+            or _ref_exists(cwd, f"refs/remotes/origin/{branch}")
+        ),
+        "",
     )
 
 

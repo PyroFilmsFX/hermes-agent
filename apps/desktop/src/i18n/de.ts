@@ -4118,6 +4118,7 @@ export const deOverrides = {
     endShort: 'Ende',
     stopDictation: 'Diktat stoppen',
     transcribingDictation: 'Transkribiert Diktat',
+    cancelTranscription: 'Transkription abbrechen',
     voiceControls: 'Sprache',
     voiceEngine: 'Sprachchat-Engine',
     voiceEngineChained: 'Sprache-zu-Text + Hermes-Stimme',

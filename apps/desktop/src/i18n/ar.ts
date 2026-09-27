@@ -2193,6 +2193,7 @@ export const ar = defineLocale({
     endShort: 'إنهاء',
     stopDictation: 'إيقاف الإملاء',
     transcribingDictation: 'جار تفريغ الإملاء',
+    cancelTranscription: 'إلغاء التفريغ',
     voiceControls: 'صوت',
     voiceDictation: 'إملاء صوتي',
     lookupLoading: 'جار البحث...',

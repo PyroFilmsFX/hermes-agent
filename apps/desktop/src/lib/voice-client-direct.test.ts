@@ -244,6 +244,23 @@ describe('transcribeAudioClientDirect', () => {
     }
   })
 
+  it('forwards cancellation to the provider request', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal)
+      controller.abort()
+      init?.signal?.throwIfAborted()
+      return new Response('unreachable')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+
+    await expect(
+      transcribeAudioClientDirect(new Blob(['audio'], { type: 'audio/webm' }), controller.signal)
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
   it('honours the gateway-resolved stt.openai.timeout for the direct request', async () => {
     vi.useFakeTimers()
 
