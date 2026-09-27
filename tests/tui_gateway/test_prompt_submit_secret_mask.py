@@ -345,3 +345,47 @@ def test_paste_collapse_masks_before_private_file_write(monkeypatch, tmp_path):
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+def test_submit_fails_closed_when_s1_and_fallback_raise(monkeypatch, tmp_path):
+    import agent.redact as rd
+    import agent.secret_hygiene as sh
+
+    db, sid, key, session, runs = _submit_harness(monkeypatch, tmp_path)
+    token = _gh(98)
+    raw = f"push with {token}"
+
+    monkeypatch.setattr(sh, "mask_secrets_for_ingest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("S1 broke")))
+    monkeypatch.setattr(rd, "redact_sensitive_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("legacy broke")))
+
+    try:
+        resp = _submit(sid, raw)
+        assert "error" in resp
+        assert "Couldn't check this message for secrets; not sent" in resp["error"]["message"]
+        rows = db.get_messages_as_conversation(key)
+        assert len(rows) == 0
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+def test_submit_records_fallback_metadata_when_s1_raises(monkeypatch, tmp_path):
+    import agent.secret_hygiene as sh
+
+    db, sid, key, session, runs = _submit_harness(monkeypatch, tmp_path)
+    token = _gh(97)
+    raw = f"push with {token}"
+
+    monkeypatch.setattr(sh, "mask_secrets_for_ingest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("S1 broke")))
+
+    try:
+        resp = _submit(sid, raw)
+        assert "result" in resp
+        rows = db.get_messages_as_conversation(key)
+        assert len(rows) == 1
+        assert token not in rows[0]["content"]
+        assert rows[0]["display_metadata"]["secret_mask"] == "fallback"
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+

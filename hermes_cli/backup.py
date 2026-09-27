@@ -476,7 +476,7 @@ def _zip_egress_file(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_pa
             tmp_db.unlink(missing_ok=True)
 
     data = abs_path.read_bytes()
-    masked = masker.payload(data, abs_path.name)
+    masked = masker.payload(data, abs_path.name, path=abs_path)
     if masked == data:
         zf.write(abs_path, arcname=str(rel_path))
         return len(data)

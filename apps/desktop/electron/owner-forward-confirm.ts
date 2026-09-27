@@ -306,6 +306,12 @@ export function buildConfirmDialog(
   lines.push(`Text (${counts}):`)
   lines.push(dialogText(model))
 
+  const matches = model.text.match(/\[REDACTED:[^\]\n]+\]/g)
+  if (matches && matches.length > 0) {
+    const n = matches.length
+    lines.push(`${n} ${n === 1 ? 'secret' : 'secrets'} masked`)
+  }
+
   const long = isLongText(model.text)
 
   if (long) {

@@ -485,3 +485,14 @@ def test_json_entropy_rule_only_under_secret_named_keys(fixed_tag_key):
     assert new["note"] == value and new["request_id"] == value and new["cursor"] == value
     assert new["content"] == f"cursor_pos = {value}"
     assert sum(counts.values()) == 1
+
+
+def test_optout_allowed_config_parsing():
+    from agent.secret_hygiene import load_secret_hygiene_config
+
+    assert load_secret_hygiene_config({"optout": {"allowed": True}}).optout_allowed is True
+    assert load_secret_hygiene_config({"optout": {"allowed": False}}).optout_allowed is False
+    assert load_secret_hygiene_config({"optout": {"allowed": 0}}).optout_allowed is False
+    assert load_secret_hygiene_config({"optout": {"allowed": None}}).optout_allowed is False
+    assert load_secret_hygiene_config({"optout": {"allowed": ""}}).optout_allowed is False
+

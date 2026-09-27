@@ -587,3 +587,101 @@ def test_backup_masks_sqlite_files_by_extension_or_header(tmp_path, name):
     assert "[REDACTED:" in cell
     with sqlite3.connect(live) as conn:
         assert conn.execute("SELECT value FROM sample").fetchone()[0] == secret
+
+
+def test_owner_grant_envelope_and_grant_files_preserved_during_egress(tmp_path):
+    from agent.secret_egress import EgressMasker, mask_egress_value
+    from hermes_cli.backup import _zip_egress_file
+    from hermes_cli.session_export import render_session_for_save
+    from hermes_owner_grant import verify as verify_mod
+
+    fixture_path = _REPO / "tests" / "hermes_owner_grant" / "fixtures" / "verify_v1_fixture.json"
+    fx = json.loads(fixture_path.read_text(encoding="utf-8"))
+    env = fx["envelope"]
+
+    # 1. Row in SQLite state.db with display_metadata carrying owner_grant.envelope
+    meta = {"kind": "owner_forward", "owner_grant": {"id": fx["grant_id"], "envelope": env}}
+    meta_json = json.dumps(meta)
+
+    # stored() preserves envelope byte-identical
+    masked_meta_json = EgressMasker("test").stored(meta_json)
+    masked_meta = json.loads(masked_meta_json)
+    assert masked_meta["owner_grant"]["envelope"] == env
+
+    # 2. /save session export
+    session = {
+        "id": fx["session"],
+        "messages": [
+            {"role": "user", "content": fx["text_sha256"], "display_metadata": meta}
+        ]
+    }
+    saved_json = render_session_for_save(session, "json")
+    saved_data = json.loads(saved_json)
+    saved_env = saved_data["messages"][0]["display_metadata"]["owner_grant"]["envelope"]
+    assert saved_env == env
+
+    # Verify envelope still verifies
+    from hermes_owner_grant import anchor as anchor_mod
+    anchor = anchor_mod.parse_anchor(json.dumps({
+        "format": "hermes-owner-anchor/v1",
+        "owner_uid": fx["uid"],
+        "grants_dir": os.path.realpath(str(tmp_path / "owner-grants")),
+        "keys": [fx["anchor_key"]],
+        "verifier_sha256": "ab" * 32,
+    }).encode("utf-8"))
+    verdict = verify_mod.verify_envelope(
+        saved_env, anchor=anchor, session=fx["session"],
+        claude_session=fx["claude_session"], now=fx["now"], uid=fx["uid"],
+        text_sha=fx["text_sha256"], scopes=[fx["scope"]],
+    )
+    assert verdict.ok is True
+
+    # 3. SQLite file masking preserves envelope
+    db_path = tmp_path / "test_state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT, display_metadata TEXT)")
+        conn.execute("INSERT INTO messages (id, content, display_metadata) VALUES (1, 'hello', ?)", (meta_json,))
+    EgressMasker("test").sqlite_file(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row_meta = json.loads(conn.execute("SELECT display_metadata FROM messages WHERE id = 1").fetchone()[0])
+    assert row_meta["owner_grant"]["envelope"] == env
+
+    # 4. Grant files under owner-grants dir are preserved
+    grants_dir = tmp_path / "owner-grants"
+    grants_dir.mkdir(parents=True, exist_ok=True)
+    grant_file = grants_dir / fx["file_name"]
+    grant_content = json.dumps(env).encode("utf-8")
+    grant_file.write_bytes(grant_content)
+
+    masker = EgressMasker("backup")
+    assert masker.payload(grant_content, name=str(grant_file.name), path=grant_file) == grant_content
+
+    # Backup zip preserves grant file
+    archive = tmp_path / "backup.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        _zip_egress_file(zf, grant_file, Path("owner-grants") / fx["file_name"], tmp_path, masker, tmp_path)
+    with zipfile.ZipFile(archive) as zf:
+        backed_up = json.loads(zf.read(f"owner-grants/{fx['file_name']}"))
+    assert backed_up == env
+
+
+
+def test_a_look_alike_grant_envelope_wrapping_a_raw_secret_is_still_masked():
+    # Egress may skip only a well-formed envelope whose signed payload is already clean (D25);
+    # an agent can't smuggle a secret past backup/sync by dressing it up as a grant.
+    import base64
+    import json as _json
+
+    from agent import secret_hygiene as sh
+
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    dirty = base64.urlsafe_b64encode(_json.dumps({"text": "token " + secret}).encode()).decode().rstrip("=")
+    clean = base64.urlsafe_b64encode(_json.dumps({"text": "ship it"}).encode()).decode().rstrip("=")
+    fake = {"format": "hermes-owner-grant/v1", "kid": "ok_x", "payload": dirty, "sig": "s"}
+    real = {"format": "hermes-owner-grant/v1", "kid": "ok_x", "payload": clean, "sig": "s"}
+    assert sh.is_clean_owner_grant_envelope(real) is True
+    assert sh.is_clean_owner_grant_envelope(fake) is False
+    assert sh.is_clean_owner_grant_envelope({**real, "extra": 1}) is False
+    # A format marker anywhere else never exempts a node.
+    masked, _ = sh.mask_json_value({"note": {"format": "hermes-owner-grant/v1", "secret": secret}})
+    assert secret not in _json.dumps(masked)

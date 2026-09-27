@@ -145,6 +145,10 @@ def _code(resp) -> int | None:
     return (resp.get("error") or {}).get("code")
 
 
+def _msg(resp) -> str:
+    return (resp.get("error") or {}).get("message") or ""
+
+
 # ── positive control (without it every refusal below could be a broken happy path) ─────────
 
 
@@ -575,6 +579,30 @@ def test_f1_stamp_binds_text_target_and_is_single_use(of, monkeypatch):
     assert stamp.target_profile == of.server._current_profile_name()
     assert stamp.text_sha256 == hashlib.sha256(b"confirmed").hexdigest()
     assert not hasattr(of.ofm, "_MINT")
+
+
+def test_owner_forward_submit_refuses_unmasked_secret_text(of, monkeypatch):
+    secret = "ghp_FakeSecretToken0123456789abcdefgh"
+    unmasked = f"forward with {secret}"
+    of.call(of.grant(unmasked, ["target"]))
+    stamp = of.submits[0]["_owner_forward"]
+    session = {
+        "agent": SimpleNamespace(), "session_key": "target", "profile_home": None, "history": [],
+        "history_lock": threading.Lock(), "history_version": 0, "running": True, "transport": None,
+        "attached_images": [], "inflight_turn": {"user": "long running task"},
+    }
+    of.sessions["live-bound"] = session
+    monkeypatch.setattr(of.server, "_ensure_active_session_slot", lambda sid, session: None)
+    monkeypatch.setattr(of.server, "_reattach_refusal", lambda rid, sid, session: None)
+    monkeypatch.setattr(of.server, "_session_uses_compute_host", lambda *a, **k: False)
+    monkeypatch.setattr(of.server, "_load_dashboard_process_isolation_config", lambda: {})
+    of.passthrough["real"] = True
+
+    handler = of.server._methods["prompt.submit"]
+    resp = handler("p_sec", {"session_id": "live-bound", "text": unmasked, "_owner_forward": stamp})
+    assert _code(resp) == 4125
+    assert "secret" in _msg(resp).lower()
+
 
 
 def test_f2_busy_owner_forward_leaves_staged_image_for_next_turn(of, monkeypatch):

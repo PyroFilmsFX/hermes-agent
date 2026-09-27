@@ -24,7 +24,8 @@ The verifier checks the envelope and key, signature, audience, owner uid, sessio
 time bounds, every requested scope, required subject, approved text match, revocation and
 single-use state. A conductor-scope grant must bind its target to a Claude CLI session id;
 otherwise verification denies it with `claude_session_unbound`. Quote-only grants may omit
-that binding. Grant files and the revocation/consume ledgers are under the grants
+that binding. A transient-API retry starts a fresh Claude session, so a conductor grant bound
+to the previous session fails closed (re-send the decision). Grant files and the revocation/consume ledgers are under the grants
 directory pinned in the trusted anchor, not under `HERMES_HOME`.
 
 ## Scope grammar and policy

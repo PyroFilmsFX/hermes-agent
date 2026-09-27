@@ -229,3 +229,26 @@ def test_api_server_turns_stay_unmasked_in_v1():
     agent = _FakeAgent()
     agent.platform = "api_server"
     assert token in _build(agent, user_message=f"use {token}").messages[-1]["content"]
+
+
+def test_mask_ingress_text_falls_back_to_legacy_redactor_when_s1_detector_raises(monkeypatch, caplog):
+    import agent.secret_hygiene as sh
+    from agent.secret_hygiene import mask_ingress_text
+
+    token = _gh(99)
+    raw = f"please use {token} for deployment"
+
+    def _boom(*a, **k):
+        raise RuntimeError("S1 detector failed")
+
+    monkeypatch.setattr(sh, "mask_secrets_for_ingest", _boom)
+    with caplog.at_level(logging.WARNING):
+        masked, findings = mask_ingress_text(raw)
+
+    assert token not in masked
+    assert "..." in masked or "redacted" in masked or "«redacted" in masked
+    assert getattr(findings, "fallback", False) is True or getattr(findings, "metadata", None) == {"secret_mask": "fallback"} or (hasattr(findings, "get") and findings.get("secret_mask") == "fallback")
+
+    assert token not in caplog.text
+    assert f"{len(raw)} chars" in caplog.text
+

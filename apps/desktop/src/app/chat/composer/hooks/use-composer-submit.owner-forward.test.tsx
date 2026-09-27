@@ -159,12 +159,17 @@ describe('V-5: a typed /to', () => {
       envelope: { format: 'hermes-owner-grant/v1', kid: 'k', payload: 'p', sig: 's' },
       targets: ['default:worker_session_1']
     })
-    gatewayRequest.mockResolvedValue({ results: [{ target_session_id: 'worker_session_1', status: 'queued' }] })
+    // D25: the forward text goes through secrets.mask before signing; clean text comes back unchanged.
+    gatewayRequest.mockImplementation(async (method: string, params: { text?: string }) =>
+      method === 'secrets.mask'
+        ? { text: params.text }
+        : { results: [{ target_session_id: 'worker_session_1', status: 'queued' }] }
+    )
     const { clearDraft, hook, onSubmit } = renderSubmit({ text: '/to hermes:worker-one yes, merge\nafter CI' })
 
     act(() => hook.result.current.submitDraft())
 
-    await vi.waitFor(() => expect(gatewayRequest).toHaveBeenCalled())
+    await vi.waitFor(() => expect(gatewayRequest).toHaveBeenCalledWith('owner.forward', expect.anything(), expect.anything()))
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({
         gesture: 'slash_to',
@@ -193,7 +198,7 @@ describe('V-5: a typed /to', () => {
     await Promise.resolve()
     expect(clearDraft).not.toHaveBeenCalled()
     expect(draftRef.current).toBe('/to hermes:worker-one yes')
-    expect(gatewayRequest).not.toHaveBeenCalled()
+    expect(gatewayRequest).not.toHaveBeenCalledWith('owner.forward', expect.anything(), expect.anything())
   })
 
   it('an unknown target opens the sheet prefilled instead of the dialog', () => {

@@ -248,7 +248,39 @@ describe('Forward sheet', () => {
 
     expect(($forwardSheet.get() as any).targets).toHaveLength(5)
   })
+
+  it('masks secrets before calling confirm IPC and signs the masked text', async () => {
+    trust.on = true
+    gatewayRequest.mockImplementation(async (method: string, params: any) => {
+      if (method === 'secrets.mask') {
+        return { text: params.text.replace('ghp_secretToken', '[REDACTED:token:1234]') }
+      }
+      if (method === 'owner.forward') {
+        return { results: [{ target_session_id: 'w1', status: 'delivered', detail: null }] }
+      }
+      return null
+    })
+    confirm.mockResolvedValue({
+      ok: true,
+      decisionId: 'od',
+      grantId: 'og',
+      envelope: { format: 'hermes-owner-grant/v1', kid: 'k', payload: 'p', sig: 's' },
+      targets: ['default:w1']
+    })
+    openSheet({ text: 'send with ghp_secretToken' })
+    fireEvent.click(screen.getByRole('button', { name: /^send/i }))
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled())
+    expect(confirm.mock.calls[0][0].text).toBe('send with [REDACTED:token:1234]')
+    expect(gatewayRequest).toHaveBeenCalledWith('secrets.mask', expect.objectContaining({
+      text: 'send with ghp_secretToken'
+    }))
+    expect(gatewayRequest).toHaveBeenCalledWith('owner.forward', expect.objectContaining({
+      text: 'send with [REDACTED:token:1234]'
+    }), expect.anything())
+  })
 })
+
 
 describe('proposal card', () => {
   const text = 'please merge the lane'

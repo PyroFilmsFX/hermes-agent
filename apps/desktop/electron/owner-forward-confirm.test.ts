@@ -274,6 +274,34 @@ describe('the native confirm shows what main resolved, never renderer labels', (
     expect(short).toContain('hello there')
   })
 
+  test('dialog shows N secrets masked when text contains redacted placeholders', () => {
+    const model = {
+      targets: [{ profile: 'default', session_id: 'w1', title: 'Worker', claude_session_id: 'c1' }],
+      scopes: [],
+      quoteOnly: true,
+      expiresAt: 1000,
+      text: 'run with [REDACTED:github-token:abcd1234]',
+      textChars: 40,
+      textBytes: 40,
+      requiresTouchId: false,
+      requiresUnrecognizedAck: false
+    } as any
+
+    const detail = buildConfirmDialog(model, ms => String(ms)).detail
+    expect(detail).toContain('[REDACTED:github-token:abcd1234]')
+    expect(detail).toContain('1 secret masked')
+
+    const model2 = {
+      ...model,
+      text: 'a [REDACTED:token:1234] b [REDACTED:token:5678]',
+      textChars: 46,
+      textBytes: 46
+    }
+    const detail2 = buildConfirmDialog(model2, ms => String(ms)).detail
+    expect(detail2).toContain('2 secrets masked')
+  })
+
+
   test('an unrecognized scope needs the dialog checkbox', async () => {
     const h = harness()
     const result = await h.handler(h.event(), req({ scope: ['conductor:gate:not-in-catalog'] }))

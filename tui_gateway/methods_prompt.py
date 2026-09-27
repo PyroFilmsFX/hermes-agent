@@ -605,24 +605,44 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     # Verify the stamp against the exact signed text before any ingress transformation.
-    if owner_stamp is not None and (
-            not isinstance(raw_text, str) or not owner_stamp.consume(raw_text, session)):
-        return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
+    if owner_stamp is not None:
+        if not isinstance(raw_text, str):
+            return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
+        masked_check, _ = _mask_submit_text(raw_text, frozenset())
+        if masked_check != raw_text:
+            return _err(rid, 4125, "owner-forward text contains unmasked secrets; forward refused")
+        if not owner_stamp.consume(raw_text, session):
+            return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
     # Secret hygiene (E2): mask before the stop-phrase check, the busy queue, the submit-row
     # write and the turn. A confirmed opt-out (single-use nonce from secrets.mask, bound to
     # this exact text) leaves only its tags raw, for this turn only.
-    optout_tags = _consume_secret_optout(sid, text, params.get("secret_optout"))
-    optout_text, optout_meta = _mask_submit_text(text, optout_tags) if optout_tags else (None, None)
-    text, secret_meta = _mask_submit_text(text, frozenset())
+    try:
+        optout_tags = _consume_secret_optout(sid, text, params.get("secret_optout"))
+        optout_text, optout_meta = _mask_submit_text(text, optout_tags) if optout_tags else (None, None)
+        text, secret_meta = _mask_submit_text(text, frozenset())
+        if owner_stamp is not None:
+            assert text == raw_text, "stamped owner forward stored text must equal signed text"
+    except Exception as exc:
+        from agent.secret_hygiene import IngressMaskError
+        if isinstance(exc, IngressMaskError) or "Couldn't check this message for secrets; not sent" in str(exc):
+            return _err(rid, 5000, "Couldn't check this message for secrets; not sent")
+        raise
     # Off-screen sends (widget intents) type the row so no client renders a bubble; whitelisted to "hidden"
     # (plus the in-process peer mailbox's "peer_message" and the stamped "owner_forward") — this RPC must not mint kinds.
     display_kind, display_metadata = _submit_display(params)
     title_preview = params.get("title_preview")
     if owner_stamp is None and isinstance(title_preview, str) and title_preview.strip():
-        display_metadata = {**(display_metadata or {}), "title_preview": _mask_submit_text(
-            title_preview[:1000], frozenset())[0]}
+        try:
+            display_metadata = {**(display_metadata or {}), "title_preview": _mask_submit_text(
+                title_preview[:1000], frozenset())[0]}
+        except Exception as exc:
+            from agent.secret_hygiene import IngressMaskError
+            if isinstance(exc, IngressMaskError) or "Couldn't check this message for secrets; not sent" in str(exc):
+                return _err(rid, 5000, "Couldn't check this message for secrets; not sent")
+            raise
     if secret_meta:
         display_metadata = {**(display_metadata or {}), **secret_meta}
+
     if params.get("interrupted"):
         # Client-side barge-in: latch so this turn's model message carries the note.
         from tools.tts_streaming import mark_speech_interrupted

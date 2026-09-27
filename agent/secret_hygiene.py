@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DETECTOR_VERSION", "PLACEHOLDER_RE", "FileTagKeyProvider", "IngestFinding",
+    "IngressFindings", "IngressMaskError",
     "SecretHygieneConfig", "StaticTagKeyProvider", "TagKeyProvider", "default_reveal_dir",
     "load_secret_hygiene_config", "mask_json_value", "mask_secrets", "mask_secrets_for_ingest",
     "mask_stored_text", "scan_secrets", "set_tag_key_provider",
@@ -63,7 +64,27 @@ KEYCHAIN_ACCOUNT = "tag-key"
 _TAG_KEY_BYTES = 32
 
 
+class IngressMaskError(RuntimeError):
+    """Raised when ingest secret masking cannot safely complete (fails closed)."""
+
+
+class IngressFindings(tuple):
+    """Result tuple of findings that can carry fallback metadata."""
+    fallback: bool = False
+    metadata: Optional[Dict[str, Any]] = None
+
+    def __new__(cls, items=(), *, fallback: bool = False, metadata: Optional[Dict[str, Any]] = None):
+        inst = super().__new__(cls, items)
+        inst.fallback = fallback
+        inst.metadata = metadata or {}
+        return inst
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return (self.metadata or {}).get(key, default)
+
+
 # ---------------------------------------------------------------------------
+
 # Config (config.yaml ``security.secret_hygiene``)
 # ---------------------------------------------------------------------------
 
@@ -124,19 +145,21 @@ def _strs(value: Any) -> Tuple[str, ...]:
     return tuple(str(v) for v in value if isinstance(v, (str, int))) if isinstance(value, (list, tuple)) else ()
 
 
-def load_secret_hygiene_config() -> SecretHygieneConfig:
+def load_secret_hygiene_config(raw: Optional[Dict[str, Any]] = None) -> SecretHygieneConfig:
     """Read ``security.secret_hygiene`` leniently; a bad value falls back to its default.
 
     ``security.redact_secrets: false`` does NOT disable ingest masking; only
     ``secret_hygiene.enabled: false`` does.
     """
-    try:
-        raw = _load_security_section().get("secret_hygiene") or {}
-    except Exception:
-        logger.warning("secret_hygiene: config unreadable, using secure defaults", exc_info=True)
-        raw = {}
+    if raw is None:
+        try:
+            raw = _load_security_section().get("secret_hygiene") or {}
+        except Exception:
+            logger.warning("secret_hygiene: config unreadable, using secure defaults", exc_info=True)
+            raw = {}
     if not isinstance(raw, dict):
         raw = {}
+
     d = SecretHygieneConfig()
     ent = raw.get("entropy") if isinstance(raw.get("entropy"), dict) else {}
     sweep = raw.get("sweep") if isinstance(raw.get("sweep"), dict) else {}
@@ -156,7 +179,7 @@ def load_secret_hygiene_config() -> SecretHygieneConfig:
         allow_value_sha256=tuple(s.lower() for s in _strs(raw.get("allow_value_sha256"))),
         sweep_backup_retention_days=_num(sweep.get("backup_retention_days", 7), 7, int, 1, 3650),
         sweep_live_window_hours=_num(sweep.get("live_window_hours", 24), 24.0, float, 0.0, 24 * 365),
-        optout_allowed=optout.get("allowed", d.optout_allowed) is not False,
+        optout_allowed=optout.get("allowed", d.optout_allowed) is True,
         sweep_on_backup=sweep.get("on_backup", d.sweep_on_backup) is not False,
     )
 
@@ -315,6 +338,41 @@ def scan_secrets(text: Any, *, config: Optional[SecretHygieneConfig] = None) -> 
     return _group(find_secrets(text, cfg.detect_options()))
 
 
+
+_OWNER_GRANT_ENVELOPE_KEYS = frozenset(("format", "kid", "payload", "sig"))
+
+
+def is_clean_owner_grant_envelope(node: Any) -> bool:
+    """True only for a well-formed owner-grant envelope whose signed payload holds no secret.
+
+    Signed envelopes must stay byte-identical to verify, so egress masking may skip them, but only
+    when there is nothing to mask: since D25 the owner signs already-masked text, so a real grant
+    always passes, while a look-alike wrapping a raw secret does not and is masked as usual."""
+    if not isinstance(node, dict) or set(node) != _OWNER_GRANT_ENVELOPE_KEYS:
+        return False
+    if node.get("format") != "hermes-owner-grant/v1" or not isinstance(node.get("payload"), str):
+        return False
+    import base64
+    raw = node["payload"]
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(decoded, dict):
+        return False
+
+    def _strings(value: Any):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from _strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from _strings(item)
+
+    return not any(scan_secrets(text) for text in _strings(decoded))
+
 def mask_secrets_for_ingest(
     text: Any, *, config: Optional[SecretHygieneConfig] = None,
     key_provider: Optional[TagKeyProvider] = None,
@@ -419,7 +477,13 @@ def mask_json_value(value: Any, *, config: Optional[SecretHygieneConfig] = None,
         if isinstance(node, list):
             return [_walk(v) for v in node]
         if isinstance(node, dict):
-            return {k: _walk(v, k if isinstance(k, str) else None) for k, v in node.items()}
+            out = {}
+            for k, v in node.items():
+                if ctx_key == "owner_grant" and k == "envelope" and is_clean_owner_grant_envelope(v):
+                    out[k] = v
+                else:
+                    out[k] = _walk(v, k if isinstance(k, str) else None)
+            return out
         return node
 
     return _walk(value), counts
@@ -486,20 +550,36 @@ def ingress_config() -> Optional[SecretHygieneConfig]:
 def mask_ingress_text(
     text: Any, *, optout_tags: Optional[frozenset] = None,
     config: Optional[SecretHygieneConfig] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Tuple[IngestFinding, ...]]:
     """Mask user content at an ingest edge; ``(masked, findings)``.
 
     Honours ``enabled`` and ``mask_ingress``. Deterministic and idempotent, so an edge and
     the ``build_turn_context`` backstop compose (the backstop is a no-op on masked text).
     ``optout_tags`` leaves those tags raw (a confirmed per-message opt-out, one turn only).
-    A tag-key failure falls back to a process-local key; a detector failure is logged
-    (never the value) and the text passes through unchanged.
+    A tag-key failure falls back to a process-local key; a detector failure falls back to the
+    legacy log redactor, recording metadata {'secret_mask': 'fallback'}. If the fallback also
+    fails, fails closed with IngressMaskError ("Couldn't check this message for secrets; not sent").
     """
     if not isinstance(text, str) or not text:
         return text, ()
     cfg = config or ingress_config()
     if cfg is None:
         return text, ()
+
+    def _fallback_mask() -> Tuple[Any, Any]:
+        logger.warning("secret_hygiene: ingest masking failed (%d chars); falling back to legacy redactor", len(text))
+        try:
+            from agent.redact import redact_sensitive_text
+            masked = redact_sensitive_text(text, force=True)
+            meta = {"secret_mask": "fallback"}
+            if isinstance(metadata, dict):
+                metadata.update(meta)
+            return masked, IngressFindings((), fallback=True, metadata=meta)
+        except Exception:
+            logger.error("secret_hygiene: fallback redaction failed (%d chars); refusing message", len(text))
+            raise IngressMaskError("Couldn't check this message for secrets; not sent") from None
+
     skip = frozenset(optout_tags or ()) if cfg.optout_allowed else frozenset()
     try:
         return mask_secrets_for_ingest(text, config=cfg, skip_tags=skip)
@@ -509,11 +589,10 @@ def mask_ingress_text(
             return mask_secrets_for_ingest(text, config=cfg, key_provider=_EphemeralTagKeyProvider(),
                                            skip_tags=skip)
         except Exception:
-            logger.error("secret_hygiene: ingest masking failed (%d chars left unmasked)", len(text))
-            return text, ()
+            return _fallback_mask()
     except Exception:
-        logger.error("secret_hygiene: ingest masking failed (%d chars left unmasked)", len(text))
-        return text, ()
+        return _fallback_mask()
+
 
 
 def ingress_kind_counts(findings: Tuple[IngestFinding, ...]) -> Dict[str, int]:

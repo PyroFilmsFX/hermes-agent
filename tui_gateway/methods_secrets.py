@@ -44,9 +44,12 @@ def _mask_submit_text(text, optout_tags) -> tuple:
     if not isinstance(text, str) or not text:
         return text, {}
     masked, findings = mask_ingress_text(text, optout_tags=optout_tags)
+    if getattr(findings, "fallback", False) or getattr(findings, "metadata", None) == {"secret_mask": "fallback"}:
+        return masked, {"secret_mask": "fallback"}
     if not findings:
         return masked, {}
     return masked, {"secret_mask": {"v": 1, "kinds": ingress_kind_counts(findings)}}
+
 
 
 def _optout_kinds(full_meta: dict, kept_meta: dict) -> dict:

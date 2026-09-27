@@ -23,6 +23,7 @@ disabling secret hygiene turns off egress masking with the rest of the feature.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import sqlite3
@@ -188,21 +189,35 @@ class EgressMasker:
 
     def _value_with_key(self, node: Any, key: Optional[str] = None) -> Any:
         if isinstance(node, str):
+            if key == "display_metadata":
+                return self.stored(node)
             return self.text(node, key=key)
         if isinstance(node, list):
             return [self._value_with_key(v, key) for v in node]
         if isinstance(node, tuple):
             return tuple(self._value_with_key(v, key) for v in node)
         if isinstance(node, dict):
-            return {k: self._value_with_key(v, k if isinstance(k, str) else None)
-                    for k, v in node.items()}
+            res = {}
+            for k, v in node.items():
+                if key == "owner_grant" and k == "envelope" and _sh.is_clean_owner_grant_envelope(v):
+                    res[k] = v
+                else:
+                    res[k] = self._value_with_key(v, k if isinstance(k, str) else None)
+            return res
         return node
 
-    def payload(self, data: bytes, name: str = "") -> bytes:
+    def payload(self, data: bytes, name: str = "", path: Optional[Union[str, Path]] = None) -> bytes:
         """Mask a text-like file payload; binary (images, PDFs, archives, DBs) passes through."""
         if not self.active or not _sh.is_text_payload(data):
             return data
         text = bytes(data).decode("utf-8")
+        if os.path.splitext(name or str(path or ""))[1].lower() == ".json":
+            # A signed grant file stays byte-identical so it still verifies, but only when clean.
+            try:
+                if _sh.is_clean_owner_grant_envelope(json.loads(text)):
+                    return data
+            except ValueError:
+                pass
         suffix = os.path.splitext(name)[1].lower()
         if suffix == ".jsonl":
             parts = []
@@ -237,7 +252,7 @@ class EgressMasker:
             data = path.read_bytes()
         except OSError as exc:
             raise self._fail(exc) from None
-        new = self.payload(data, path.name)
+        new = self.payload(data, path.name, path=path)
         if new is data or new == data:
             return False
         tmp = path.with_name(f".{path.name}.egress-{os.getpid()}.tmp")

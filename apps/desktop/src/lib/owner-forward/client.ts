@@ -177,12 +177,32 @@ export async function sendOwnerForward(
   }
 
   const subject = input.subject?.trim()
+  const request = gatewayRequest()
+
+  if (!request) {
+    return { kind: 'error', message: 'Hermes gateway unavailable' }
+  }
+
+  let textToSign = input.text
+
+  try {
+    const masked = (await request('secrets.mask', {
+      text: input.text,
+      session_id: input.origin.session_id || null
+    })) as { text?: string } | null
+
+    if (typeof masked?.text === 'string') {
+      textToSign = masked.text
+    }
+  } catch {
+    // If secrets.mask fails or is unavailable, keep textToSign as input.text
+  }
 
   let confirmed: Awaited<ReturnType<typeof bridge.confirm>>
 
   try {
     confirmed = await bridge.confirm({
-      text: input.text,
+      text: textToSign,
       gesture: input.gesture,
       origin: { ...input.origin },
       profile: forwardProfile(),
@@ -202,18 +222,12 @@ export async function sendOwnerForward(
 
   hooks.onConfirmed?.()
 
-  const request = gatewayRequest()
-
-  if (!request) {
-    return { kind: 'error', message: 'Hermes gateway unavailable' }
-  }
-
   let outcome: ForwardOutcome
 
   try {
     const response = (await request(
       'owner.forward',
-      { envelope: confirmed.envelope, text: input.text, targets: confirmed.targets },
+      { envelope: confirmed.envelope, text: textToSign, targets: confirmed.targets },
       FORWARD_TIMEOUT_MS
     )) as { results?: Array<{ target_session_id?: string; status?: string; detail?: null | string }> } | null
 
