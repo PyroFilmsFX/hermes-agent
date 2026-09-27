@@ -357,6 +357,7 @@ import { registerNativeNotifications } from './notification-ipc'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { wireOauthSessionResponse } from './oauth-session-response'
+import { createOwnerKeyStore, defaultOwnerKeyDir, OwnerKeyError } from './owner-grant-key'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -7993,6 +7994,26 @@ function secretStoragePolicy(): SecretStoragePolicy {
 function setSecretStoragePolicy(next: SecretStoragePolicy) {
   _secretStoragePolicy = { on: next.on === true, migrated: next.migrated === true }
   writeSecretStoragePolicy(_secretStoragePolicy, _secretStoragePolicyIo)
+}
+
+// #60 U10 (VERIFY addendum §1.2): the owner-grant Ed25519 key. Its private half exists only in
+// this process (owner-grant-key.ts). Launch loads it only when the owner already enrolled (a
+// wrapped blob exists), so a machine that never enabled owner grants gets no Keychain touch. No
+// IPC or renderer surface yet: the signing core (owner-grant-sign.ts) and anchor (U11) use it here.
+const ownerGrantKeyStore = createOwnerKeyStore({
+  safeStorage,
+  keyDir: defaultOwnerKeyDir(),
+  log: (level, message, meta) =>
+    rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
+})
+
+function loadOwnerGrantKeyAtLaunch(): void {
+  try {
+    ownerGrantKeyStore.loadIfEnrolled()
+  } catch (error) {
+    // Fail closed: no key means no owner-grant signing this run. Only the code is logged.
+    rememberLog(`[owner-grant] key not loaded: ${error instanceof OwnerKeyError ? error.code : 'unexpected error'}`)
+  }
 }
 
 /**
@@ -18197,6 +18218,10 @@ app.whenReady().then(() => {
     passwordStoreSwitch: app.commandLine.getSwitchValue('password-store'),
     safeStorageApi: safeStorage
   })
+
+  // After the password-store switch: this may unwrap the owner-grant key through safeStorage,
+  // and only does so when the owner enrolled before.
+  loadOwnerGrantKeyAtLaunch()
 
   // Keychain encryption is opt-in (default OFF). One-shot: rewrite any
   // legacy safeStorage-encrypted secrets as plain so no later launch ever
