@@ -89,9 +89,12 @@ if req.get("owner_forward"):
     from tui_gateway import owner_forward as OF
     import tui_gateway.server
     from tui_gateway.transport import bind_transport, reset_transport
-    owner_env = {OF.KEYS_ENV: req["kid"] + ":" + req["pub"],
-                 OF.BACKEND_ENV: req["owner_forward"]["backend"]}
-    out["owner_forward_verifier_configured"] = OF.verifier_from_env(owner_env) is not None
+    # The gateway's trust root is the root-owned anchor: inject the same in-process test anchor
+    # (the real loader reads /Library, which a test never touches). The backend binding is the
+    # start-of-process value, passed here as the start env.
+    OF._load_anchor = lambda: anchor
+    start_env = {OF.BACKEND_ENV: req["owner_forward"]["backend"]}
+    out["owner_forward_verifier_configured"] = OF.verifier_at_startup(start_env) is not None
     OF.policy = lambda: dict(OF._DEFAULTS)
     OF._resolve_targets = lambda requested, claims, pol, home: (
         [("w-1", "w-1", None, "default", "w-1")], "manager", None)
@@ -104,12 +107,18 @@ if req.get("owner_forward"):
     token = bind_transport(Transport())
     try:
         OF._reset_for_tests()
-        OF._verifier = OF.verifier_from_env(owner_env)
+        OF._verifier = OF.verifier_at_startup(start_env)
         good = OF.forward_rpc("valid", params)
         bad_params = dict(params)
         bad_params["envelope"] = req["owner_forward"]["tampered"]
         bad = OF.forward_rpc("tampered", bad_params)
-        out["owner_forward"] = {"good": good, "tampered": bad}
+        OF._load_anchor = lambda: A.parse_anchor(json.dumps({
+            "format": "hermes-owner-anchor/v1", "owner_uid": uid, "grants_dir": req["grants_dir"],
+            "keys": [{"kid": req["kid"], "alg": "Ed25519", "pub": req["pub"], "status": "revoked",
+                      "not_before": 0, "retired_at": None}]}).encode("utf-8"))
+        OF._reset_for_tests()
+        revoked = OF.forward_rpc("revoked", params)
+        out["owner_forward"] = {"good": good, "tampered": bad, "revoked": revoked}
     finally:
         reset_transport(token)
 OUTPUT.write(json.dumps(out))
@@ -247,6 +256,8 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
       result: { results: [{ target_session_id: 'w-1', status: 'delivered', detail: null }] }
     })
     expect(result.owner_forward.tampered.error.code).toBe(4127)
+    // The same envelope is refused once the anchor revokes the key: the anchor is the trust root.
+    expect(result.owner_forward.revoked.error.code).toBe(4127)
 
     for (const name of ['tampered-text', 'tampered-scope', 'tampered-sig']) {
       const row = byName[name]

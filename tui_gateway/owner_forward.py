@@ -10,8 +10,15 @@ constructor call is in :func:`deliver`, after verification (static test P-12).
 
 Grant wire format is the canonical ``hermes-owner-grant/v1`` envelope. The exact signed payload bytes
 are verified before parsing; the payload's ``forward_targets`` binds profile-qualified delivery while
-``targets[].session_id`` remains the bare Hermes session id used by hooks. Electron supplies public keys
-and a unique backend spawn id through ``HERMES_OWNER_GRANT_KEYS`` and ``HERMES_OWNER_GRANT_BACKEND``.
+``targets[].session_id`` remains the bare Hermes session id used by hooks.
+
+Trust root (review P0/P1, 2026-09-27): the ONLY source of trusted keys is the root-owned anchor
+(``hermes_owner_grant.anchor.load_trusted_anchor``: hard-coded path, StrictModes checks), re-read on
+every call. An envelope verifies only under the anchor's ACTIVE key for this uid; no anchor means
+owner.forward is disabled. Nothing an agent can write (``os.environ``, ``$HERMES_HOME/.env``, files
+under ``~/.hermes``) can add a key. ``HERMES_OWNER_GRANT_KEYS`` is a public hint Electron still passes;
+this module never reads it. The backend binding ``HERMES_OWNER_GRANT_BACKEND`` is the value the parent
+passed at spawn, as captured before any dotenv load (``hermes_cli.env_loader.spawn_env_at_start``).
 """
 
 from __future__ import annotations
@@ -80,12 +87,15 @@ class VerifyResult:
 
 
 class GrantVerifier(Protocol):
-    """The seam ``owner.forward`` depends on. ``verify`` checks signature, audience, version, backend binding,
-    time window and the text binding; the caller owns nonce, content, target and rate checks."""
+    """The seam ``owner.forward`` depends on. ``load_anchor`` returns the trusted root-owned anchor or raises
+    :class:`AnchorUnavailable`; ``verify`` checks the anchor key status, signature, audience, version,
+    backend binding, time window and the text binding; the caller owns nonce, content, target and rate."""
 
     backend_id: str
 
-    def verify(self, envelope: Any, text: Any) -> VerifyResult: ...
+    def load_anchor(self) -> Any: ...
+
+    def verify(self, envelope: Any, text: Any, anchor: Any = None) -> VerifyResult: ...
 
 
 def _is_int(value: Any) -> bool:
@@ -138,7 +148,10 @@ def check_claims(claims: Any, *, backend_id: str, text: str, now_ms: int) -> Ver
         return fail("owner_uid")
     if not isinstance(text, str):
         return fail("text")
-    encoded = text.encode("utf-8", "surrogatepass")
+    try:
+        encoded = text.encode("utf-8")  # strict, like the hook verifier: a lone surrogate has no bytes
+    except UnicodeEncodeError:
+        return fail("text")
     if claims.get("text_sha256") != hashlib.sha256(encoded).hexdigest():
         return fail("text_hash")
     if not _is_int(claims.get("text_len")) or claims["text_len"] != len(encoded):
@@ -146,70 +159,111 @@ def check_claims(claims: Any, *, backend_id: str, text: str, now_ms: int) -> Ver
     return VerifyResult(True, claims=claims)
 
 
-class EnvelopeGrantVerifier:
-    """Verify canonical v1 envelopes against the backend's public key set using strict pure Ed25519."""
+ANCHOR_REQUIRED_MESSAGE = "owner-forward needs the anchor: run the one-time enable"
 
-    def __init__(self, public_keys: Mapping[str, bytes], *, backend_id: str, clock=time.time) -> None:
-        self._public_keys = dict(public_keys)
+
+def _load_anchor():
+    """The root-owned anchor, freshly loaded and trust-checked (raises ``AnchorError``). Module-level
+    so tests can route it through an injected fake filesystem; production never passes a path."""
+    from hermes_owner_grant import anchor as owner_anchor
+
+    return owner_anchor.load_trusted_anchor()
+
+
+class AnchorUnavailable(Exception):
+    """No trusted anchor for this uid: owner.forward is disabled until the one-time enable."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class EnvelopeGrantVerifier:
+    """Verify canonical v1 envelopes against the root-owned anchor's ACTIVE key (strict pure Ed25519).
+
+    The anchor is loaded per call (it is one small file): a later one-time enable works without a
+    restart, and a revoked or retired key stops verifying at once."""
+
+    def __init__(self, *, backend_id: str, anchor_loader=None, clock=time.time) -> None:
         self.backend_id = backend_id
+        self._anchor_loader = anchor_loader
         self._clock = clock
 
-    def verify(self, envelope: Any, text: Any) -> VerifyResult:
-        from hermes_owner_grant import ed25519_pure, envelope as owner_envelope, verify as owner_verify
+    def load_anchor(self):
+        """The trusted anchor for this uid, or raise :class:`AnchorUnavailable`."""
+        from hermes_owner_grant.anchor import AnchorError
 
+        try:
+            trusted = (self._anchor_loader or _load_anchor)()
+        except AnchorError as exc:
+            raise AnchorUnavailable(exc.reason) from None
+        except Exception:  # noqa: BLE001 - an anchor we can't read is no anchor
+            logger.warning("owner-grant anchor could not be loaded", exc_info=True)
+            raise AnchorUnavailable("anchor_untrusted") from None
+        if not _is_int(getattr(trusted, "owner_uid", None)) or trusted.owner_uid != os.getuid():
+            raise AnchorUnavailable("anchor_owner_uid")
+        return trusted
+
+    def verify(self, envelope: Any, text: Any, anchor: Any = None) -> VerifyResult:
+        from hermes_owner_grant import ed25519_pure, envelope as owner_envelope, verify as owner_verify
+        from hermes_owner_grant.anchor import STATUS_ACTIVE, check_key
+
+        if anchor is None:
+            try:
+                anchor = self.load_anchor()
+            except AnchorUnavailable as exc:
+                return VerifyResult(False, exc.reason)
         try:
             env = owner_envelope.parse_envelope(envelope)
         except (owner_envelope.EnvelopeError, TypeError, ValueError):
             return VerifyResult(False, "malformed")
-        pub = self._public_keys.get(env.kid)
-        if pub is None or not ed25519_pure.verify(pub, env.sign_bytes(), env.sig):
+        key = anchor.key(env.kid)
+        if key is None:
+            return VerifyResult(False, "unknown_kid")
+        if key.status != STATUS_ACTIVE:
+            # A forward is delivered live (60 s window), never backdated: only the active key forwards.
+            return VerifyResult(False, "key_" + key.status)
+        if not ed25519_pure.verify(key.pub, env.sign_bytes(), env.sig):
             return VerifyResult(False, "signature")
         try:
             claims = owner_envelope.decode_payload(env.payload)
             owner_verify.validate_payload(claims)
         except (owner_envelope.EnvelopeError, ValueError, TypeError):
             return VerifyResult(False, "malformed")
-        result = check_claims(claims, backend_id=self.backend_id, text=text, now_ms=int(self._clock() * 1000))
+        now_ms = int(self._clock() * 1000)
+        issued_at = claims.get("issued_at")
+        if not _is_int(issued_at):
+            return VerifyResult(False, "lifetime")
+        if (key_refusal := check_key(anchor, env.kid, issued_at=issued_at, now=now_ms)) is not None:
+            return VerifyResult(False, key_refusal)
+        result = check_claims(claims, backend_id=self.backend_id, text=text, now_ms=now_ms)
         return VerifyResult(result.ok, result.reason, {**claims, "_grant_envelope": env.to_dict(),
                                                        "_grant_id": env.grant_id}) if result.ok else result
 
 
-def verifier_from_env(environ: Mapping[str, str] | None = None) -> Optional[GrantVerifier]:
-    """The backend's verifier, or None (owner.forward disabled, fail closed) when the key is missing or bad.
+def verifier_at_startup(start_env: Mapping[str, Optional[str]] | None = None) -> Optional[GrantVerifier]:
+    """The backend's verifier, or None (owner.forward disabled, fail closed) when the parent passed no
+    backend binding at spawn.
 
-    Every configured key entry and the per-spawn backend id must be valid; a malformed key list
-    disables delivery rather than accepting a partial key set."""
-    env = os.environ if environ is None else environ
-    raw = str(env.get(KEYS_ENV) or "").strip()
-    backend_id = str(env.get(BACKEND_ENV) or "").strip()
-    if not raw or not backend_id:
-        return None
-    from hermes_owner_grant.envelope import EnvelopeError, b64url_decode, kid_for_pub
+    The binding comes from ``start_env`` (default: the values captured before any dotenv load), never
+    from the live ``os.environ``: ``$HERMES_HOME/.env`` is agent-writable. Keys are not read here at
+    all; they come from the anchor on every call."""
+    if start_env is None:
+        from hermes_cli.env_loader import spawn_env_at_start
 
-    keys = {}
-    try:
-        for entry in raw.split(","):
-            kid, separator, encoded = entry.partition(":")
-            if not separator or not encoded or kid in keys:
-                return None
-            pub = b64url_decode(encoded)
-            if len(pub) != 32 or kid != kid_for_pub(pub):
-                return None
-            keys[kid] = pub
-    except (EnvelopeError, TypeError, ValueError):
-        logger.warning("%s has an invalid owner key entry; owner.forward stays disabled", KEYS_ENV)
+        backend_id = str(spawn_env_at_start(BACKEND_ENV) or "").strip()
+    else:
+        backend_id = str(start_env.get(BACKEND_ENV) or "").strip()
+    if not backend_id or len(backend_id) > 128 or not backend_id.isprintable():
         return None
-    try:
-        return EnvelopeGrantVerifier(keys, backend_id=backend_id)
-    except Exception:  # noqa: BLE001 - missing cryptography or a bad point: disabled, never open
-        logger.warning("owner.forward verifier unavailable; the method stays disabled", exc_info=True)
-        return None
+    return EnvelopeGrantVerifier(backend_id=backend_id)
 
 
 _verifier: Optional[GrantVerifier] = None
 
 
-# ── single-use and rate state (in memory: the key is per spawn, so a restart voids every grant) ─
+# ── single-use and rate state (in memory: every grant names this backend's per-spawn binding, so a
+#    restart, which mints a new binding, voids every outstanding grant) ─────────────────────────
 
 
 class _NonceCache:
@@ -529,14 +583,22 @@ def forward_rpc(rid: Any, params: dict) -> dict:
     # 2. Never a scoped session-spawn connection (ws.py already refuses the method there; defense in depth).
     if getattr(transport, "session_spawn_capability", None) is not None or "_session_spawn_capability" in params:
         return server._err(rid, ERR_CALLER, "owner.forward is refused on a session-spawn connection")
-    # 3. The grant: configured key, signature, claims, time; then the nonce, burned before delivery starts.
+    # 3. The grant: the root-owned anchor (re-read now), its active key, signature, claims, time; then
+    #    the nonce, burned before delivery starts.
     pol = policy()
     verifier = _verifier
     if verifier is None or not pol["enabled"]:
-        return server._err(rid, ERR_DISABLED, "owner forward is disabled: this backend has no owner key")
+        return server._err(rid, ERR_DISABLED, "owner forward is disabled: this backend has no owner-grant binding")
+    try:
+        trusted_anchor = verifier.load_anchor()
+    except AnchorUnavailable as exc:
+        return server._err(rid, ERR_DISABLED, f"{ANCHOR_REQUIRED_MESSAGE} ({exc.reason})")
+    except Exception:  # noqa: BLE001 - fail closed
+        logger.warning("owner.forward anchor check raised", exc_info=True)
+        return server._err(rid, ERR_DISABLED, f"{ANCHOR_REQUIRED_MESSAGE} (anchor_error)")
     text = params.get("text")
     try:
-        result = verifier.verify(params.get("envelope"), text)
+        result = verifier.verify(params.get("envelope"), text, anchor=trusted_anchor)
     except Exception:  # noqa: BLE001 - a verifier crash is a refusal
         logger.warning("owner.forward verifier raised", exc_info=True)
         result = VerifyResult(False, "verifier_error")
@@ -560,9 +622,10 @@ def forward_rpc(rid: Any, params: dict) -> dict:
 
 
 def register(server) -> None:
-    """Install ``owner.forward`` (a pool handler: a cold target resumes) and read the key once, at startup.
+    """Install ``owner.forward`` (a pool handler: a cold target resumes) and bind the verifier to the
+    backend id the parent passed at spawn. Keys are never read here: every call re-reads the anchor.
     Not ``bind_module``: this module's state (verifier, nonces, the stamp class) stays here, not on server."""
     global _verifier
     server.register_method("owner.forward", forward_rpc)
     server._LONG_HANDLERS = server._LONG_HANDLERS | {"owner.forward"}
-    _verifier = verifier_from_env()
+    _verifier = verifier_at_startup()

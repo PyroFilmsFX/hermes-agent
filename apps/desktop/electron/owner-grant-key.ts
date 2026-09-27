@@ -17,12 +17,17 @@
  * - `kid` = `ok_` + the first 16 hex chars of sha256(raw 32-byte public key), exactly
  *   `hermes_owner_grant.envelope.kid_for_pub`.
  * - Signing always prepends the `hermes-owner-grant/v1\0` domain prefix, so this key can't be
- *   used as a general signing oracle. Conductor-scoped signing needs the root-owned anchor's
- *   ACTIVE key to be this key (§1.4 step 4); quote-only grants (plain forwards) still sign, since
- *   backends verify them through `HERMES_OWNER_GRANT_KEYS`.
- * - The blob records the public key and kid in clear. On load the unwrapped private key must
- *   derive that same public key, which catches a blob stitched together from two keys; a
- *   wholesale swapped blob shows up as an anchor mismatch instead (T-4).
+ *   used as a general signing oracle. EVERY signature, quote-only forwards included, needs the
+ *   root-owned anchor's ACTIVE key to be this key (§1.4 step 4; review P1 2026-09-27): the
+ *   anchor is the only trust root, and every verifier (hooks and the gateway's owner.forward)
+ *   trusts only the anchor, never `HERMES_OWNER_GRANT_KEYS` or anything else an agent can write.
+ * - The blob lives in agent-writable `~/.hermes`, so it is never a trust root. At launch
+ *   `loadIfEnrolled()` adopts it only when the anchor (set first with `setAnchor()`, read by
+ *   owner-grant-anchor.ts) pins exactly its kid and public key as the active key, and checks that
+ *   before any Keychain touch. On load the unwrapped private key must also derive the recorded
+ *   public key, which catches a blob stitched together from two keys; a wholesale swapped blob is
+ *   an anchor mismatch (T-4). `ensure()` (the enable path) adopts an unanchored blob only while
+ *   no anchor exists at all, i.e. before the one-time enable pinned a key.
  */
 
 import {
@@ -221,18 +226,34 @@ class OwnerKeyStoreImpl {
       return null
     }
 
+    // The blob is agent-writable: adopt it only when the root-owned anchor pins it (no Keychain
+    // touch otherwise).
+    this.#requireAnchored(doc)
     this.#adopt(doc)
 
     return { ...this.#public! }
   }
 
   /** Enable path: load the existing key, or generate, wrap and persist a new one. An existing
-   *  blob that fails to load is an error, never a reason to overwrite it with a fresh key. */
+   *  blob that fails to load is an error, never a reason to overwrite it with a fresh key. Once an
+   *  anchor exists, an existing blob must be its active key; before the one-time enable (no
+   *  anchor at all) the blob is adopted so its public key can be pinned, and nothing signs until
+   *  the anchor pins it. */
   ensure(): OwnerKeyPublic {
-    const loaded = this.loadIfEnrolled()
+    if (this.#public) {
+      return { ...this.#public }
+    }
 
-    if (loaded) {
-      return loaded
+    const existing = this.#readBlob()
+
+    if (existing) {
+      if (this.#anchor) {
+        this.#requireAnchored(existing)
+      }
+
+      this.#adopt(existing)
+
+      return { ...this.#public! }
     }
 
     if (!this.#encryptionAvailable()) {
@@ -263,8 +284,16 @@ class OwnerKeyStoreImpl {
     }
 
     if (!this.#writeBlobExclusive(JSON.stringify(doc))) {
-      // Another writer won the race: trust only what is on disk now.
-      return this.loadIfEnrolled() ?? this.#fail('key_blob_corrupt', 'the owner key blob vanished during creation')
+      // Another writer won the race: trust only what is on disk now, under the same rules.
+      const raced = this.#readBlob() ?? this.#fail('key_blob_corrupt', 'the owner key blob vanished during creation')
+
+      if (this.#anchor) {
+        this.#requireAnchored(raced)
+      }
+
+      this.#adopt(raced)
+
+      return { ...this.#public! }
     }
 
     this.#privateKey = privateKey
@@ -283,7 +312,8 @@ class OwnerKeyStoreImpl {
     return this.#public ? `${this.#public.kid}:${this.#public.pub}` : null
   }
 
-  /** Record the root-owned anchor as U11 read it (or null when absent/untrusted). */
+  /** Record the root-owned anchor as `readTrustedOwnerAnchor()` read it (null when absent or
+   *  untrusted). Call it before `loadIfEnrolled()`; a later call re-gates signing at once. */
   setAnchor(anchor: AnchorView | null): AnchorState {
     this.#anchor = anchor && Array.isArray(anchor.keys) ? { keys: anchor.keys.map(k => ({ ...k })) } : null
 
@@ -302,20 +332,17 @@ class OwnerKeyStoreImpl {
       : 'mismatch'
   }
 
-  /** Throws unless this key may sign a grant carrying `scopes`. */
-  assertMaySign(scopes: readonly string[]): void {
+  /** Throws unless this key may sign a grant carrying `scopes`. Every grant, quote-only forwards
+   *  included, needs the anchor's active key to be this key: no verifier trusts anything else. */
+  assertMaySign(_scopes: readonly string[]): void {
     if (!this.#privateKey || !this.#public) {
       throw new OwnerKeyError('no_key', 'no owner key is loaded')
-    }
-
-    if (scopes.length === 0) {
-      return
     }
 
     const state = this.anchorState()
 
     if (state === 'missing') {
-      throw new OwnerKeyError('anchor_missing', 'conductor-scoped grants need the owner-grant anchor installed')
+      throw new OwnerKeyError('anchor_missing', 'owner grants need the owner-grant anchor: run the one-time enable')
     }
 
     if (state === 'mismatch') {
@@ -361,6 +388,19 @@ class OwnerKeyStoreImpl {
     this.#log('error', 'owner-grant key refused', { code })
 
     throw new OwnerKeyError(code, message)
+  }
+
+  /** The anchor must list exactly this blob's kid AND public key as its one active key. */
+  #requireAnchored(doc: BlobDoc): void {
+    if (!this.#anchor) {
+      this.#fail('anchor_missing', 'the owner key is not loaded: no owner-grant anchor pins it')
+    }
+
+    const active = this.#anchor.keys.filter(k => k.status === 'active')
+
+    if (active.length !== 1 || active[0].kid !== doc.kid || active[0].pub !== doc.pub) {
+      this.#fail('anchor_mismatch', "the owner key blob is not the owner-grant anchor's active key")
+    }
   }
 
   #encryptionAvailable(): boolean {

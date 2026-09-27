@@ -213,13 +213,16 @@ describe('E-7: the confirm model lists scopes, classes and expiry; prod needs To
     expect((await confirmAndSignGrants(unknown, ack)).cancelled).toBe(false)
   })
 
-  test('E-7f a conductor-scoped grant is refused before the dialog when the anchor does not pin this key', async () => {
+  test('E-7f any grant, quote-only included, is refused before the dialog when the anchor does not pin this key', async () => {
     const base = readyStore({ anchored: false })
     const p = ports(base)
     await expect(confirmAndSignGrants(request(), p)).rejects.toMatchObject({ code: 'anchor_missing' })
+    // A quote-only forward too: backends only trust the root-owned anchor, never an env key.
+    await expect(confirmAndSignGrants(request({ scope: [] }), p)).rejects.toMatchObject({ code: 'anchor_missing' })
+    base.store.setAnchor({ keys: [{ kid: 'ok_0000000000000000', pub: base.info.pub, status: 'active' }] })
+    await expect(confirmAndSignGrants(request({ scope: [] }), p)).rejects.toMatchObject({ code: 'anchor_mismatch' })
     expect(p.confirm).not.toHaveBeenCalled()
-    // A quote-only forward is still signed (forwards keep working through the env keys).
-    expect((await confirmAndSignGrants(request({ scope: [] }), p)).cancelled).toBe(false)
+    expect(listGrants(base.grantsDir)).toEqual([])
   })
 
   test('E-7g self-targets only for composer_signed, and composer_signed only targets its own session', async () => {

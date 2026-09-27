@@ -105,8 +105,10 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
     // A second ensure() in the same run is a no-op.
     expect(first.ensure()).toEqual(info)
 
-    // "Restart": a brand-new store over the same dir and the same Keychain.
+    // "Restart": a brand-new store over the same dir and the same Keychain, with the root anchor
+    // (installed by the one-time enable) pinning this key.
     const second = createOwnerKeyStore({ safeStorage: ss.api, keyDir })
+    second.setAnchor(anchorFor(info.pub))
     expect(second.loadIfEnrolled()).toEqual(info)
     expect(second.ensure()).toEqual(info)
     expect(fs.readFileSync(blobPath).equals(blobBytes)).toBe(true)
@@ -135,33 +137,96 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
     expect(ss.calls).not.toContain('encryptString')
   })
 
-  test('E-5d conductor-scoped signing needs an anchor whose active key is this key; quote-only forwards still sign', () => {
+  test('E-5d every signature needs an anchor whose active key is this key: quote-only forwards included', () => {
     const keyDir = tmpKeyDir()
     const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
     const info = store.ensure()
     const payload = Buffer.from('{"v":1}')
     const scoped = ['conductor:gate:review-budget-enable']
 
-    // No anchor installed yet.
+    // No anchor installed yet: nothing signs, not even a quote-only forward.
     expect(store.anchorState()).toBe('missing')
     expect(() => store.assertMaySign(scoped)).toThrowError(expect.objectContaining({ code: 'anchor_missing' }))
-    expect(() => store.assertMaySign([])).not.toThrow()
+    expect(() => store.assertMaySign([])).toThrowError(expect.objectContaining({ code: 'anchor_missing' }))
+    expect(() => store.signEnvelope(payload, [])).toThrowError(expect.objectContaining({ code: 'anchor_missing' }))
 
     // Anchor pins someone else's key (a phished admin prompt, or a swapped blob).
     const other = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir: tmpKeyDir() }).ensure()
     expect(store.setAnchor(anchorFor(other.pub))).toBe('mismatch')
     expect(() => store.assertMaySign(scoped)).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
     expect(() => store.signEnvelope(payload, scoped)).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
-    expect(store.signEnvelope(payload, []).kid).toBe(info.kid)
+    expect(() => store.signEnvelope(payload, [])).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
 
     // A retired or revoked entry for our kid is not "active": still a mismatch.
     expect(store.setAnchor(anchorFor(info.pub, 'retired'))).toBe('mismatch')
+    expect(() => store.signEnvelope(payload, [])).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
     expect(store.setAnchor(anchorFor(info.pub, 'revoked'))).toBe('mismatch')
 
-    // The matching anchor enables conductor scopes.
+    // The matching anchor enables signing, scoped and quote-only.
     expect(store.setAnchor(anchorFor(info.pub))).toBe('match')
     expect(() => store.assertMaySign(scoped)).not.toThrow()
     expect(store.signEnvelope(payload, scoped).kid).toBe(info.kid)
+    expect(store.signEnvelope(payload, []).kid).toBe(info.kid)
+  })
+
+  test('E-5l loadIfEnrolled() never adopts a blob the root anchor does not pin, and checks before any Keychain touch', () => {
+    const keyDir = tmpKeyDir()
+    const enroll = mockSafeStorage()
+    const info = createOwnerKeyStore({ safeStorage: enroll.api, keyDir }).ensure()
+
+    const noAnchor = mockSafeStorage()
+    const a = createOwnerKeyStore({ safeStorage: { ...noAnchor.api, decryptString: enroll.api.decryptString }, keyDir })
+    expect(() => a.loadIfEnrolled()).toThrowError(expect.objectContaining({ code: 'anchor_missing' }))
+    expect(a.publicInfo()).toBeNull()
+    expect(a.grantKeysEnvValue()).toBeNull()
+    expect(noAnchor.calls).toEqual([])
+
+    const other = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir: tmpKeyDir() }).ensure()
+
+    for (const anchor of [anchorFor(other.pub), anchorFor(info.pub, 'retired'), anchorFor(info.pub, 'revoked')]) {
+      const store = createOwnerKeyStore({ safeStorage: enroll.api, keyDir })
+      store.setAnchor(anchor)
+      expect(() => store.loadIfEnrolled()).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
+      expect(store.publicInfo()).toBeNull()
+      expect(() => store.signEnvelope(Buffer.from('{}'), [])).toThrowError(expect.objectContaining({ code: 'no_key' }))
+    }
+
+    const good = createOwnerKeyStore({ safeStorage: enroll.api, keyDir })
+    good.setAnchor(anchorFor(info.pub))
+    expect(good.loadIfEnrolled()).toEqual(info)
+  })
+
+  test('E-5m a wholesale swapped blob (a whole, decryptable blob of another key) is refused at launch (T-4)', () => {
+    const keyDir = tmpKeyDir()
+    const ss = mockSafeStorage()
+    const owner = createOwnerKeyStore({ safeStorage: ss.api, keyDir }).ensure()
+    // The attacker makes a complete blob for its own key with the same Keychain wrap, then swaps it in.
+    const attackerDir = tmpKeyDir()
+    const attacker = createOwnerKeyStore({ safeStorage: ss.api, keyDir: attackerDir }).ensure()
+    fs.copyFileSync(path.join(attackerDir, OWNER_KEY_FILE), path.join(keyDir, OWNER_KEY_FILE))
+
+    const launch = createOwnerKeyStore({ safeStorage: ss.api, keyDir })
+    launch.setAnchor(anchorFor(owner.pub))
+    expect(() => launch.loadIfEnrolled()).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
+    expect(launch.publicInfo()).toBeNull()
+    expect(() => launch.signEnvelope(Buffer.from('{"v":1}'), [])).toThrowError(expect.objectContaining({ code: 'no_key' }))
+    // ensure() (the enable path) doesn't adopt it either while an anchor pins another key.
+    expect(() => launch.ensure()).toThrowError(expect.objectContaining({ code: 'anchor_mismatch' }))
+    expect(launch.publicInfo()).toBeNull()
+    expect(attacker.kid).not.toBe(owner.kid)
+  })
+
+  test('E-5n main.ts reads the root anchor and calls setAnchor() before loadIfEnrolled() at launch', () => {
+    const main = fs.readFileSync(path.join(__dirname, 'main.ts'), 'utf8')
+    const start = main.indexOf('function loadOwnerGrantKeyAtLaunch')
+    expect(start).toBeGreaterThan(0)
+    const body = main.slice(start, main.indexOf('\n}\n', start))
+    const read = body.indexOf('readTrustedOwnerAnchor(')
+    const set = body.indexOf('ownerGrantKeyStore.setAnchor(')
+    const load = body.indexOf('ownerGrantKeyStore.loadIfEnrolled(')
+    expect(read).toBeGreaterThan(0)
+    expect(set).toBeGreaterThan(read)
+    expect(load).toBeGreaterThan(set)
   })
 
   test('E-5e a blob whose recorded public key differs from the unwrapped private key is refused (swap detection)', () => {
@@ -176,6 +241,8 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
     fs.writeFileSync(blobPath, JSON.stringify(doc), { mode: 0o600 })
 
     const store = createOwnerKeyStore({ safeStorage: ss.api, keyDir })
+    // Even an anchor pinning the recorded (other) key doesn't make the stitched blob load.
+    store.setAnchor(anchorFor(other.pub))
     expect(() => store.loadIfEnrolled()).toThrowError(expect.objectContaining({ code: 'key_blob_inconsistent' }))
     expect(store.publicInfo()).toBeNull()
     expect(() => store.signEnvelope(Buffer.from('{}'), [])).toThrowError(expect.objectContaining({ code: 'no_key' }))
@@ -220,7 +287,9 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
     fs.chmodSync(blobPath, 0o644)
     const log = captureLog()
 
-    expect(createOwnerKeyStore({ safeStorage: ss.api, keyDir, log: log.log }).loadIfEnrolled()).toEqual(info)
+    const store = createOwnerKeyStore({ safeStorage: ss.api, keyDir, log: log.log })
+    store.setAnchor(anchorFor(info.pub))
+    expect(store.loadIfEnrolled()).toEqual(info)
     expect(fs.statSync(blobPath).mode & 0o777).toBe(0o600)
     expect(log.lines.join('\n')).toMatch(/tightened/)
   })
@@ -229,6 +298,7 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
     const keyDir = tmpKeyDir()
     const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
     const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
     const payload = Buffer.from('{"text":"héllo 👋","v":1}', 'utf8')
     const env = store.signEnvelope(payload, [])
 
@@ -282,13 +352,14 @@ describe('E-6: the private key never appears in IPC, env, logs or a grant', () =
     const log = captureLog()
     const envBefore = JSON.stringify(process.env)
     const store = createOwnerKeyStore({ safeStorage: ss.api, keyDir, log: log.log })
-    store.ensure()
+    const enrolled = store.ensure()
     const restarted = createOwnerKeyStore({ safeStorage: ss.api, keyDir, log: log.log })
+    restarted.setAnchor(anchorFor(enrolled.pub))
     restarted.loadIfEnrolled()
     restarted.setAnchor(null)
     const errors: string[] = []
 
-    for (const scopes of [['conductor:prod:target'], ['conductor:gate:review-budget-enable']]) {
+    for (const scopes of [['conductor:prod:target'], ['conductor:gate:review-budget-enable'], []]) {
       try {
         restarted.signEnvelope(Buffer.from('{"v":1}'), scopes)
       } catch (error) {
@@ -296,7 +367,8 @@ describe('E-6: the private key never appears in IPC, env, logs or a grant', () =
       }
     }
 
-    expect(errors.length).toBeGreaterThan(0)
+    expect(errors.length).toBe(9)
+    restarted.setAnchor(anchorFor(enrolled.pub))
     const envelope = restarted.signEnvelope(Buffer.from('{"v":1,"text":"ok"}'), [])
     const wrapped = JSON.parse(fs.readFileSync(path.join(keyDir, OWNER_KEY_FILE), 'utf8')).wrapped
     const forbidden = forbiddenStrings(ss.plaintexts, wrapped)

@@ -59,7 +59,22 @@ _DOTENV_LOCK = threading.RLock()
 # the same token for its own /api probes). They are never .env configuration, so a persisted value in
 # ~/.hermes/.env must not replace an injected one — the parent would then 401 against its own child
 # (#115955). A value an earlier dotenv pass published is still reloaded normally.
-_SPAWN_CREDENTIAL_KEYS: frozenset[str] = frozenset({"HERMES_DASHBOARD_SESSION_TOKEN"})
+#
+# The owner-grant pair is stricter still. Electron mints HERMES_OWNER_GRANT_BACKEND (the per-spawn
+# binding every owner grant must name) and HERMES_OWNER_GRANT_KEYS (a public hint, possibly empty
+# before enrollment) for each backend spawn. Neither is ever .env configuration, and an agent can
+# write $HERMES_HOME/.env, so .env never publishes them at all, even over an empty or absent value.
+# The gateway also binds to the values captured when this module was first imported
+# (:func:`spawn_env_at_start`), which is before any ``load_hermes_dotenv`` in the process can run.
+OWNER_GRANT_SPAWN_ENV_KEYS: frozenset[str] = frozenset({"HERMES_OWNER_GRANT_BACKEND", "HERMES_OWNER_GRANT_KEYS"})
+_SPAWN_CREDENTIAL_KEYS: frozenset[str] = frozenset({"HERMES_DASHBOARD_SESSION_TOKEN"}) | OWNER_GRANT_SPAWN_ENV_KEYS
+_SPAWN_ENV_AT_START: dict[str, str | None] = {name: os.environ.get(name) for name in OWNER_GRANT_SPAWN_ENV_KEYS}
+
+
+def spawn_env_at_start(name: str) -> str | None:
+    """The value the parent passed for a parent-minted owner-grant name, as captured at import (before
+    any dotenv load). None when the parent passed nothing or ``name`` isn't one of those names."""
+    return _SPAWN_ENV_AT_START.get(name)
 
 # Behavioral routing keys a parent Hermes process injects into child env that silently redirect a profile
 # onto the wrong provider path; these — and ONLY these — are scrubbed at startup when absent from the
@@ -313,6 +328,8 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
             current = os.environ.get(name)
             record = _DOTENV_PUBLISHED.get(name)
             ours = record is not None and current == record[1]
+            if name in OWNER_GRANT_SPAWN_ENV_KEYS:
+                continue  # parent-minted owner-grant binding: never .env configuration (see above)
             if name in _SPAWN_CREDENTIAL_KEYS and current and not ours:
                 continue  # parent-minted per-process credential: .env must not split it from the parent
             # Ours and untouched since → keep the original baseline; anything else is a newer outside value.

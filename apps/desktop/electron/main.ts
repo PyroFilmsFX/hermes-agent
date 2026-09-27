@@ -357,6 +357,7 @@ import { registerNativeNotifications } from './notification-ipc'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { wireOauthSessionResponse } from './oauth-session-response'
+import { readTrustedOwnerAnchor } from './owner-grant-anchor'
 import { createOwnerKeyStore, defaultOwnerKeyDir, OwnerKeyError } from './owner-grant-key'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
@@ -7998,8 +7999,10 @@ function setSecretStoragePolicy(next: SecretStoragePolicy) {
 
 // #60 U10 (VERIFY addendum §1.2): the owner-grant Ed25519 key. Its private half exists only in
 // this process (owner-grant-key.ts). Launch loads it only when the owner already enrolled (a
-// wrapped blob exists), so a machine that never enabled owner grants gets no Keychain touch. No
-// IPC or renderer surface yet: the signing core (owner-grant-sign.ts) and anchor (U11) use it here.
+// wrapped blob exists) AND the root-owned anchor pins it as the active key, so a machine that
+// never enabled owner grants gets no Keychain touch, and a swapped blob is never adopted. No
+// IPC or renderer surface yet: the signing core (owner-grant-sign.ts) and the enable flow (U11)
+// use it here.
 const ownerGrantKeyStore = createOwnerKeyStore({
   safeStorage,
   keyDir: defaultOwnerKeyDir(),
@@ -8016,6 +8019,16 @@ function ownerGrantBackendSpawnEnv() {
 }
 
 function loadOwnerGrantKeyAtLaunch(): void {
+  // The root-owned anchor is the trust root: set it first, so loadIfEnrolled() adopts only the
+  // key it pins, and signing (quote-only included) stays off without it.
+  const anchor = readTrustedOwnerAnchor()
+
+  if (anchor.ok === false && anchor.reason !== 'anchor_missing') {
+    rememberLog(`[owner-grant] anchor not trusted: ${anchor.detail}`)
+  }
+
+  ownerGrantKeyStore.setAnchor(anchor.ok ? anchor.anchor : null)
+
   try {
     ownerGrantKeyStore.loadIfEnrolled()
   } catch (error) {

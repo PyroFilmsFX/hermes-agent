@@ -70,7 +70,14 @@ def of(monkeypatch, tmp_path):
     pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     backend_id = "spawn-test"
     kid = grant_envelope.kid_for_pub(pub)
-    verifier = ofm.EnvelopeGrantVerifier({kid: pub}, backend_id=backend_id)
+    from hermes_owner_grant import anchor as anchor_mod
+
+    # The trust root is the root-owned anchor; here an in-process anchor pinning this test key.
+    test_anchor = anchor_mod.parse_anchor(json.dumps({
+        "format": "hermes-owner-anchor/v1", "owner_uid": os.getuid(), "grants_dir": "/Users/owner/.hermes/owner-grants",
+        "keys": [{"kid": kid, "alg": "Ed25519", "pub": _b64u(pub), "status": "active", "not_before": 0,
+                  "retired_at": None}]}).encode("utf-8"))
+    verifier = ofm.EnvelopeGrantVerifier(backend_id=backend_id, anchor_loader=lambda: test_anchor)
     monkeypatch.setattr(ofm, "_verifier", verifier)
     ofm._reset_for_tests()
 
@@ -96,7 +103,7 @@ def of(monkeypatch, tmp_path):
     monkeypatch.setitem(server._methods, "prompt.submit", submit)
     monkeypatch.setitem(server._methods, "session.resume", resume)
 
-    def grant(text: str, targets, **overrides):
+    def grant(text: str, targets, *, signer=None, **overrides):
         now = int(time.time() * 1000)
         current_profile = server._current_profile_name()
         qualified_targets = [target if ":" in target else f"{current_profile}:{target}" for target in targets]
@@ -114,7 +121,8 @@ def of(monkeypatch, tmp_path):
         }
         claims.update(overrides)
         payload = grant_envelope.encode_payload(claims)
-        envelope = grant_envelope.seal(payload, kid, key.sign)
+        sign_kid, sign_key = (kid, key) if signer is None else signer
+        envelope = grant_envelope.seal(payload, sign_kid, sign_key.sign)
         return {"envelope": envelope.to_dict(), "text": text, "targets": qualified_targets}
 
     def call(params, transport=None):
@@ -289,18 +297,16 @@ def test_p1_no_configured_pubkey_disables_the_method(of, monkeypatch):
     assert of.submits == []
 
 
-def test_p1_verifier_from_env_fails_closed(of):
+def test_p1_verifier_at_startup_needs_the_spawn_binding_and_ignores_keys(of):
     keys_env, backend_env = of.ofm.KEYS_ENV, of.ofm.BACKEND_ENV
-    assert of.ofm.verifier_from_env({}) is None
-    assert of.ofm.verifier_from_env({keys_env: ""}) is None
-    assert of.ofm.verifier_from_env({keys_env: "not base64 !!", backend_env: of.backend_id}) is None
-    bad_key = f"{of.kid}:{_b64u(bytes([1]) * 31)}"
-    assert of.ofm.verifier_from_env({keys_env: bad_key, backend_env: of.backend_id}) is None
-    assert of.ofm.verifier_from_env({keys_env: f"ok_0000000000000000:{_b64u(of.pub)}", backend_env: of.backend_id}) is None
-    assert of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)},bad", backend_env: of.backend_id}) is None
-    assert of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)}"}) is None
-    good = of.ofm.verifier_from_env({keys_env: f"{of.kid}:{_b64u(of.pub)}", backend_env: of.backend_id})
+    assert of.ofm.verifier_at_startup({}) is None
+    assert of.ofm.verifier_at_startup({keys_env: f"{of.kid}:{_b64u(of.pub)}"}) is None
+    assert of.ofm.verifier_at_startup({backend_env: "  "}) is None
+    assert of.ofm.verifier_at_startup({backend_env: "x" * 129}) is None
+    assert of.ofm.verifier_at_startup({backend_env: "spawn\nid"}) is None
+    good = of.ofm.verifier_at_startup({backend_env: of.backend_id, keys_env: "not base64 !!"})
     assert good is not None and good.backend_id == of.backend_id
+    assert not hasattr(good, "_public_keys")  # no env-sourced key set exists any more
 
 
 def test_p1_backend_binding_is_required_and_signed(of):
@@ -859,3 +865,219 @@ def test_p12_stamp_is_sealed(of):
         pickle.dumps(stamp)
     with pytest.raises(TypeError):
         of.ofm.OwnerForwardStamp(origin_session_id="origin")  # no mint token: refused at runtime too
+
+
+# ── A-*: the root-owned anchor is the only trust root (Grok 4.6 P0/P1, 2026-09-27) ──────────
+# The gateway used to trust HERMES_OWNER_GRANT_KEYS from os.environ, and server.py loads
+# $HERMES_HOME/.env with override=True before the snapshot: an agent could plant its own key.
+# These tests never touch /Library: the real StrictModes loader runs over an injected fake fs.
+
+_ANCHOR_CHAIN = ("/", "/Library", "/Library/Application Support", "/Library/Application Support/Hermes",
+                 "/Library/Application Support/Hermes/owner-grant")
+_ANCHOR_FILE = _ANCHOR_CHAIN[-1] + "/anchor.json"
+
+
+def _st(kind, uid=0, perm=0o755, ino=1):
+    import stat as _stat
+
+    return SimpleNamespace(st_mode=getattr(_stat, kind) | perm, st_uid=uid, st_gid=0, st_dev=1, st_ino=ino)
+
+
+class _AnchorFS:
+    """A fake filesystem presenting a root-owned (or not) anchor at the real, hard-coded path."""
+
+    def __init__(self, doc=None, *, file_uid=0):
+        self.entries = {path: _st("S_IFDIR", ino=10 + i) for i, path in enumerate(_ANCHOR_CHAIN)}
+        self.content = None
+        self.set(doc, file_uid=file_uid)
+
+    def set(self, doc, *, file_uid=0):
+        if doc is None:
+            self.entries.pop(_ANCHOR_FILE, None)
+            self.content = None
+            return
+        self.content = json.dumps(doc).encode("utf-8")
+        self.entries[_ANCHOR_FILE] = _st("S_IFREG", uid=file_uid, perm=0o644, ino=99)
+
+    def lstat(self, path):
+        if path not in self.entries:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        return self.entries[path]
+
+    def read_nofollow(self, path, limit):
+        if path not in self.entries or self.content is None:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        return self.entries[path], self.content[:limit]
+
+
+def _anchor_key(pub: bytes, status="active", not_before=0, retired_at=None) -> dict:
+    return {"kid": grant_envelope.kid_for_pub(pub), "alg": "Ed25519", "pub": _b64u(pub), "status": status,
+            "not_before": not_before, "retired_at": retired_at}
+
+
+def _anchor_doc(*keys, owner_uid=None) -> dict:
+    return {"format": "hermes-owner-anchor/v1", "owner_uid": os.getuid() if owner_uid is None else owner_uid,
+            "grants_dir": "/Users/owner/.hermes/owner-grants", "keys": list(keys)}
+
+
+def _attacker():
+    key = Ed25519PrivateKey.generate()
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return key, pub, grant_envelope.kid_for_pub(pub)
+
+
+@pytest.fixture
+def anchored(of, monkeypatch):
+    """Route owner.forward through the real anchor loader over a fake fs pinning the owner's key, and
+    make the backend's start snapshot the fixture's backend id (what Electron minted at spawn)."""
+    from hermes_cli import env_loader
+    from hermes_owner_grant import anchor as anchor_mod
+
+    fake = _AnchorFS(_anchor_doc(_anchor_key(of.pub)))
+    monkeypatch.setattr(of.ofm, "_load_anchor", lambda: anchor_mod.load_trusted_anchor(fs=fake), raising=False)
+    monkeypatch.setattr(env_loader, "_SPAWN_ENV_AT_START",
+                        {of.ofm.BACKEND_ENV: of.backend_id, of.ofm.KEYS_ENV: None}, raising=False)
+    monkeypatch.setenv(of.ofm.BACKEND_ENV, of.backend_id)
+    monkeypatch.delenv(of.ofm.KEYS_ENV, raising=False)
+    return fake
+
+
+def _register_from_env(of):
+    """What gateway startup does: owner_forward.register() builds the verifier."""
+    of.ofm.register(of.server)
+    of.ofm._reset_for_tests()
+
+
+def test_a1_dotenv_planted_key_is_refused(of, anchored, monkeypatch, tmp_path):
+    """The P0 end to end: an agent writes its own public key into $HERMES_HOME/.env, the gateway loads
+    that .env (override=True) before owner_forward reads its keys, and signs a forward itself."""
+    from hermes_cli.env_loader import load_hermes_dotenv
+
+    key, pub, kid = _attacker()
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    (home / ".env").write_text(f"{of.ofm.KEYS_ENV}={kid}:{_b64u(pub)}\n", encoding="utf-8")
+    load_hermes_dotenv(hermes_home=home)
+    _register_from_env(of)
+
+    resp = of.call(of.grant("merge it", ["target"], signer=(kid, key)))
+
+    assert _code(resp) == 4127, resp
+    assert of.submits == [] and of.resumes == []
+    # Positive control: the anchored owner key still delivers after the same startup.
+    assert "result" in of.call(of.grant("merge it", ["target"]))
+
+
+def test_a2_env_key_not_in_the_anchor_is_refused(of, anchored, monkeypatch):
+    key, pub, kid = _attacker()
+    monkeypatch.setenv(of.ofm.KEYS_ENV, f"{kid}:{_b64u(pub)},{of.kid}:{_b64u(of.pub)}")
+    _register_from_env(of)
+
+    resp = of.call(of.grant("merge it", ["target"], signer=(kid, key)))
+
+    assert _code(resp) == 4127 and "unknown_kid" in resp["error"]["message"], resp
+    assert of.submits == []
+
+
+@pytest.mark.parametrize("anchor_state", ["missing", "user_owned", "other_owner_uid"])
+def test_a3_missing_or_untrusted_anchor_disables_owner_forward(of, anchored, monkeypatch, anchor_state):
+    """No trusted anchor = owner.forward is off, whatever the env says (even the owner's own key)."""
+    monkeypatch.setenv(of.ofm.KEYS_ENV, f"{of.kid}:{_b64u(of.pub)}")
+    if anchor_state == "missing":
+        anchored.set(None)
+    elif anchor_state == "user_owned":
+        anchored.set(_anchor_doc(_anchor_key(of.pub)), file_uid=os.getuid() or 501)
+    else:
+        anchored.set(_anchor_doc(_anchor_key(of.pub), owner_uid=os.getuid() + 1))
+    _register_from_env(of)
+
+    resp = of.call(of.grant("merge it", ["target"]))
+
+    assert _code(resp) == 4126, resp
+    assert "owner-forward needs the anchor" in resp["error"]["message"]
+    assert of.submits == []
+
+
+@pytest.mark.parametrize("status", ["revoked", "retired_before_issue", "retired_after_issue"])
+def test_a4_revoked_or_retired_anchor_key_is_refused(of, anchored, status):
+    """owner.forward needs the ACTIVE anchor key: a retired key stops forwarding at once (a forward is
+    live, never backdated), and a revoked one fails whatever the grant claims about time."""
+    now = int(time.time() * 1000)
+    if status == "revoked":
+        entry = _anchor_key(of.pub, status="revoked")
+    elif status == "retired_before_issue":
+        entry = _anchor_key(of.pub, status="retired", retired_at=now - 60_000)
+    else:
+        entry = _anchor_key(of.pub, status="retired", retired_at=now + 60_000)
+    new_key, new_pub, _ = _attacker()
+    anchored.set(_anchor_doc(entry, _anchor_key(new_pub)))
+    _register_from_env(of)
+
+    resp = of.call(of.grant("merge it", ["target"]))
+
+    assert _code(resp) == 4127, resp
+    assert of.submits == []
+
+
+def test_a5_the_anchor_is_read_per_call(of, anchored):
+    """A later one-time enable works without a restart, and a revocation takes effect at once."""
+    anchored.set(None)
+    _register_from_env(of)
+    assert _code(of.call(of.grant("one", ["target"]))) == 4126
+
+    anchored.set(_anchor_doc(_anchor_key(of.pub)))
+    assert "result" in of.call(of.grant("two", ["target"]))
+
+    anchored.set(_anchor_doc(_anchor_key(of.pub, status="revoked")))
+    assert _code(of.call(of.grant("three", ["target"]))) == 4127
+    assert len(of.submits) == 1
+
+
+def test_a6_backend_id_is_the_start_snapshot_not_the_dotenv_value(of, anchored, monkeypatch):
+    """The backend binding is what the parent minted at spawn, captured before any .env load: a
+    later os.environ value (a .env the agent wrote) never becomes the binding."""
+    from hermes_cli import env_loader
+
+    monkeypatch.setattr(env_loader, "_SPAWN_ENV_AT_START",
+                        {of.ofm.BACKEND_ENV: "spawn-parent", of.ofm.KEYS_ENV: None}, raising=False)
+    monkeypatch.setenv(of.ofm.BACKEND_ENV, "spawn-dotenv")
+    monkeypatch.setenv(of.ofm.KEYS_ENV, f"{of.kid}:{_b64u(of.pub)}")
+    _register_from_env(of)
+
+    assert _code(of.call(of.grant("x", ["target"], backend="spawn-dotenv"))) == 4127
+    assert of.submits == []
+    assert "result" in of.call(of.grant("y", ["target"], backend="spawn-parent"))
+
+
+def test_a6_no_backend_at_start_disables_even_if_dotenv_sets_one(of, anchored, monkeypatch):
+    from hermes_cli import env_loader
+
+    monkeypatch.setattr(env_loader, "_SPAWN_ENV_AT_START",
+                        {of.ofm.BACKEND_ENV: None, of.ofm.KEYS_ENV: None}, raising=False)
+    monkeypatch.setenv(of.ofm.BACKEND_ENV, "spawn-dotenv")
+    monkeypatch.setenv(of.ofm.KEYS_ENV, f"{of.kid}:{_b64u(of.pub)}")
+    _register_from_env(of)
+
+    assert _code(of.call(of.grant("x", ["target"], backend="spawn-dotenv"))) == 4126
+    assert of.submits == []
+
+
+def test_a7_text_len_uses_strict_utf8_like_the_hook_verifier(of):
+    """A lone surrogate has no strict UTF-8 encoding: the hook verifier can't hash it, so neither may
+    owner.forward (it used ``surrogatepass``)."""
+    text = "hi \ud800"
+    raw = text.encode("utf-8", "surrogatepass")
+    now = int(time.time() * 1000)
+    claims = {
+        "v": 1, "aud": ["hermes-owner-forward"], "backend": of.backend_id, "nonce": "n" * 16,
+        "issued_at": now, "deliver_by": now + 30_000, "gesture": "menu", "confirm": "native_dialog",
+        "source_session": {"session_id": "origin"}, "targets": [{"session_id": "target"}],
+        "forward_targets": ["default:target"], "owner_uid": os.getuid(),
+        "text_sha256": hashlib.sha256(raw).hexdigest(), "text_len": len(raw),
+    }
+    assert of.ofm.check_claims(dict(claims, text_sha256=hashlib.sha256(b"hi").hexdigest(), text_len=2),
+                               backend_id=of.backend_id, text="hi", now_ms=now).ok  # positive control
+
+    result = of.ofm.check_claims(claims, backend_id=of.backend_id, text=text, now_ms=now)
+
+    assert not result.ok and result.reason == "text"

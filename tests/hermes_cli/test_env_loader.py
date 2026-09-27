@@ -622,3 +622,73 @@ def test_dotenv_published_dashboard_session_token_still_reloads(tmp_path, monkey
     (home / ".env").write_text("HERMES_DASHBOARD_SESSION_TOKEN=second\n", encoding="utf-8")
     load_hermes_dotenv(hermes_home=home)
     assert os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] == "second"
+
+
+_OWNER_GRANT_NAMES = ("HERMES_OWNER_GRANT_BACKEND", "HERMES_OWNER_GRANT_KEYS")
+
+
+def _plant_owner_grant_dotenv(tmp_path):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text(
+        "HERMES_OWNER_GRANT_BACKEND=spawn-planted\nHERMES_OWNER_GRANT_KEYS=ok_0123456789abcdef:planted\n"
+        "HERMES_DASHBOARD_PUBLIC_URL=http://127.0.0.1:1\n",
+        encoding="utf-8",
+    )
+    return home
+
+
+def test_owner_grant_spawn_values_are_never_replaced_by_dotenv(tmp_path, monkeypatch):
+    """The owner-grant backend binding and key hint are minted by the Electron parent per spawn. An
+    agent can write $HERMES_HOME/.env, so .env must never replace them, not even an empty value
+    (the pre-enrollment KEYS='' the parent passes)."""
+    home = _plant_owner_grant_dotenv(tmp_path)
+    monkeypatch.setenv("HERMES_OWNER_GRANT_BACKEND", "spawn-parent")
+    monkeypatch.setenv("HERMES_OWNER_GRANT_KEYS", "")
+    monkeypatch.setenv("HERMES_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:43123")
+
+    load_hermes_dotenv(hermes_home=home)
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.environ["HERMES_OWNER_GRANT_BACKEND"] == "spawn-parent"
+    assert os.environ["HERMES_OWNER_GRANT_KEYS"] == ""
+    assert os.environ["HERMES_DASHBOARD_PUBLIC_URL"] == "http://127.0.0.1:1"  # control: .env still wins
+
+
+def test_owner_grant_spawn_values_are_not_published_from_dotenv_when_absent(tmp_path, monkeypatch):
+    home = _plant_owner_grant_dotenv(tmp_path)
+    for name in _OWNER_GRANT_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert [name for name in _OWNER_GRANT_NAMES if name in os.environ] == []
+
+
+def test_owner_grant_spawn_env_is_captured_before_any_dotenv_load(tmp_path):
+    """A fresh process: the values the parent passed are what spawn_env_at_start() reports, whatever
+    a later load_hermes_dotenv() does (the gateway binds to this snapshot, not os.environ)."""
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    home = _plant_owner_grant_dotenv(tmp_path)
+    repo = Path(__file__).resolve().parents[2]
+    code = (
+        "import json, os, sys\n"
+        "from hermes_cli import env_loader\n"
+        "env_loader.load_hermes_dotenv(hermes_home=sys.argv[1])\n"
+        "names = ('HERMES_OWNER_GRANT_BACKEND', 'HERMES_OWNER_GRANT_KEYS')\n"
+        "print(json.dumps({'start': {n: env_loader.spawn_env_at_start(n) for n in names},\n"
+        "                  'environ': {n: os.environ.get(n) for n in names}}))\n"
+    )
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path), "HERMES_HOME": str(home),
+           "PYTHONPATH": str(repo), "HERMES_OWNER_GRANT_BACKEND": "spawn-parent"}
+    out = subprocess.run([sys.executable, "-c", code, str(home)], cwd=str(repo), env=env, capture_output=True,
+                         text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+
+    assert result["start"] == {"HERMES_OWNER_GRANT_BACKEND": "spawn-parent", "HERMES_OWNER_GRANT_KEYS": None}
+    assert result["environ"] == {"HERMES_OWNER_GRANT_BACKEND": "spawn-parent", "HERMES_OWNER_GRANT_KEYS": None}
