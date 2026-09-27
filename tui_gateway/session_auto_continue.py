@@ -267,13 +267,13 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     with session["history_lock"]:
         if not session.get("running"):
             return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
-        image_paths = list(session.get("attached_images", []))
+        image_paths = [] if display_kind == "owner_forward" else list(session.get("attached_images", []))
         if image_paths:
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
     # the proven interrupt + queue path.
-    if plain_text and agent is not None:
+    if plain_text and agent is not None and display_kind != "owner_forward":
         supported = {
             "steer": hasattr(agent, "steer"),
             "interrupt": getattr(agent, "_supports_active_turn_redirect", False) is True and hasattr(agent, "redirect")}
@@ -438,7 +438,14 @@ def _queued_prompt_snapshot(session: dict) -> dict | None:
     reconnect while it is still queued)."""
     queued = session.get("queued_prompt")
     user = _inflight_text(queued.get("text")) if isinstance(queued, dict) else ""
-    return {"user": user} if user else None
+    if not user:
+        return None
+    snapshot = {"user": user}
+    if queued.get("display_kind"):
+        snapshot["display_kind"] = queued["display_kind"]
+        if isinstance(queued.get("display_metadata"), dict):
+            snapshot["display_metadata"] = dict(queued["display_metadata"])
+    return snapshot
 
 
 def register(server) -> None:

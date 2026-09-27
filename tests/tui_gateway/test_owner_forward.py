@@ -87,7 +87,8 @@ def of(monkeypatch, tmp_path):
     def resume(rid, params):
         resumes.append(params)
         sid = f"rt-{len(resumes)}"
-        sessions[sid] = {"session_key": params["session_id"], "profile_home": None,
+        home = server._profile_home(params.get("profile")) if params.get("profile") else None
+        sessions[sid] = {"session_key": params["session_id"], "profile_home": str(home) if home else None,
                          "transport": server._detached_ws_transport}
         return {"result": {"session_id": sid}}
 
@@ -96,16 +97,18 @@ def of(monkeypatch, tmp_path):
 
     def grant(text: str, targets, **overrides):
         now = int(time.time() * 1000)
+        current_profile = server._current_profile_name()
+        qualified_targets = [target if ":" in target else f"{current_profile}:{target}" for target in targets]
         claims = {
             "v": 1, "aud": "hermes-owner-forward", "backend": verifier.backend_id, "nonce": _b64u(os.urandom(16)),
             "iat": now, "exp": now + 60_000, "gesture": "menu", "confirm": "native_dialog",
-            "origin": {"session_id": "origin", "message_id": "m-1"}, "targets": sorted(targets),
+            "origin": {"session_id": "origin", "message_id": "m-1"}, "targets": sorted(qualified_targets),
             "text_sha256": hashlib.sha256(text.encode()).hexdigest(), "text_len": len(text.encode()),
         }
         claims.update(overrides)
         payload = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
         sig = key.sign(ofm.SIGN_DOMAIN + payload)
-        return {"grant": _b64u(payload), "signature": _b64u(sig), "text": text, "targets": list(targets)}
+        return {"grant": _b64u(payload), "signature": _b64u(sig), "text": text, "targets": qualified_targets}
 
     def call(params, transport=None):
         from tui_gateway.transport import bind_transport, reset_transport
@@ -442,7 +445,7 @@ def test_p0_stamped_submit_writes_the_owner_forward_row_at_submit(of, monkeypatc
 # ── P-0c: a busy target queues the forward as the next user turn, kind intact ────────────────
 
 
-def test_p0c_owner_forward_busy_target_queues_with_stamp(of, monkeypatch):
+def test_p0c_owner_forward_busy_target_queues_with_stamp(of, monkeypatch, tmp_path):
     of.passthrough["real"] = True
     session = {
         "agent": SimpleNamespace(), "session_key": "target", "profile_home": None, "history": [],
@@ -454,6 +457,11 @@ def test_p0c_owner_forward_busy_target_queues_with_stamp(of, monkeypatch):
     monkeypatch.setattr(of.server, "_reattach_refusal", lambda rid, sid, session: None)
     monkeypatch.setattr(of.server, "_session_uses_compute_host", lambda *a, **k: False)
     monkeypatch.setattr(of.server, "_load_dashboard_process_isolation_config", lambda: {})
+    monkeypatch.setattr(of.server, "_start_agent_build", lambda *args: None)
+    image = tmp_path / "staged.png"
+    image.write_bytes(b"png")
+    attached = of.server._methods["image.attach"]("img", {"session_id": "live-busy", "path": str(image)})
+    assert attached["result"]["attached"] is True
 
     resp = of.call(of.grant("yes, merge it", ["target"]))
 
@@ -461,6 +469,8 @@ def test_p0c_owner_forward_busy_target_queues_with_stamp(of, monkeypatch):
     queued = session["queued_prompt"]
     assert queued["text"] == "yes, merge it" and queued["display_kind"] == "owner_forward"
     assert queued["display_metadata"]["from_session_id"] == "origin"
+    assert "image_paths" not in queued
+    assert session["attached_images"] == [str(image)]
     drained = {}
     monkeypatch.setattr(
         of.server, "_run_prompt_submit", lambda rid, sid, s, text, **kw: drained.update(text=text, **kw))
@@ -468,6 +478,109 @@ def test_p0c_owner_forward_busy_target_queues_with_stamp(of, monkeypatch):
     assert of.server._drain_queued_prompt("r", "live-busy", session) is True
     assert drained["display_kind"] == "owner_forward"
     assert drained["display_metadata"]["kind"] == "owner_forward"
+
+
+def test_f1_stamp_binds_text_target_and_is_single_use(of, monkeypatch):
+    of.call(of.grant("confirmed", ["target"]))
+    stamp = of.submits[0]["_owner_forward"]
+    session = {
+        "agent": SimpleNamespace(), "session_key": "target", "profile_home": None, "history": [],
+        "history_lock": threading.Lock(), "history_version": 0, "running": True, "transport": None,
+        "attached_images": [], "inflight_turn": {"user": "long running task"},
+    }
+    of.sessions["live-bound"] = session
+    monkeypatch.setattr(of.server, "_ensure_active_session_slot", lambda sid, session: None)
+    monkeypatch.setattr(of.server, "_reattach_refusal", lambda rid, sid, session: None)
+    monkeypatch.setattr(of.server, "_session_uses_compute_host", lambda *a, **k: False)
+    monkeypatch.setattr(of.server, "_load_dashboard_process_isolation_config", lambda: {})
+    of.passthrough["real"] = True
+
+    handler = of.server._methods["prompt.submit"]
+    wrong_text = handler("p1", {"session_id": "live-bound", "text": "edited", "_owner_forward": stamp})
+    assert _code(wrong_text) == 4125
+    of.sessions["wrong-target"] = {**session, "session_key": "other", "history_lock": threading.Lock()}
+    wrong_target = handler("p0", {"session_id": "wrong-target", "text": "confirmed", "_owner_forward": stamp})
+    assert _code(wrong_target) == 4125
+    monkeypatch.setattr("hermes_constants.profile_name_for_home", lambda home: "other-profile" if home else None)
+    of.sessions["wrong-profile"] = {**session, "profile_home": "/other/profile", "history_lock": threading.Lock()}
+    wrong_profile = handler("p4", {"session_id": "wrong-profile", "text": "confirmed", "_owner_forward": stamp})
+    assert _code(wrong_profile) == 4125
+
+    accepted = handler("p2", {"session_id": "live-bound", "text": "confirmed", "_owner_forward": stamp})
+    assert accepted["result"]["status"] == "queued", accepted
+    reused = handler("p3", {"session_id": "live-bound", "text": "confirmed", "_owner_forward": stamp})
+    assert _code(reused) == 4125
+    assert stamp.target_session_id == "target"
+    assert stamp.target_profile == of.server._current_profile_name()
+    assert stamp.text_sha256 == hashlib.sha256(b"confirmed").hexdigest()
+    assert not hasattr(of.ofm, "_MINT")
+
+
+def test_f2_busy_owner_forward_leaves_staged_image_for_next_turn(of, monkeypatch):
+    image = "/tmp/staged.png"
+    session = {"agent": None, "history_lock": threading.Lock(), "running": True,
+               "attached_images": [image], "inflight_turn": {"user": "busy"}}
+    response = of.server._handle_busy_submit(
+        "r", "sid", session, "forwarded text", None, display_kind="owner_forward",
+        display_metadata={"kind": "owner_forward"})
+
+    assert response["result"]["status"] == "queued"
+    assert session["queued_prompt"]["text"] == "forwarded text"
+    assert "image_paths" not in session["queued_prompt"]
+    assert session["attached_images"] == [image]
+
+
+def test_f2_idle_owner_forward_leaves_staged_image_for_next_turn(of, monkeypatch, tmp_path):
+    image = tmp_path / "staged.png"
+    image.write_bytes(b"png")
+    session = {"history_lock": threading.Lock(), "running": True, "_closing": False,
+               "attached_images": [], "agent": SimpleNamespace(clear_interrupt=lambda: None)}
+    of.sessions["idle-forward"] = session
+    monkeypatch.setattr(of.server, "_start_agent_build", lambda *args: None)
+    monkeypatch.setattr(of.server, "_ensure_active_session_slot", lambda *a, **k: None)
+    attached = of.server._methods["image.attach"]("img", {"session_id": "idle-forward", "path": str(image)})
+    assert attached["result"]["attached"] is True
+
+    admitted = of.server._admit_prompt_turn(
+        "sid", session, "forwarded text", None, None, "owner_forward", {"kind": "owner_forward"})
+
+    assert admitted[0] == []
+    assert session["attached_images"] == [str(image)]
+
+
+def test_f3_owner_forward_targets_are_profile_qualified(of, monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    secondary = tmp_path / "profile-a"
+    secondary.mkdir()
+    second_db = SessionDB(secondary / "state.db")
+    second_db.create_session("target", "desktop")
+    monkeypatch.setattr(server, "_profile_home", lambda name: secondary if name == "profile-a" else None)
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "default")
+    monkeypatch.setattr("hermes_constants.profile_name_for_home", lambda home: "profile-a" if str(home) == str(secondary) else None)
+    # The same identifier in the launch store must never be selected for this signed profile.
+    params = of.grant("hello", ["profile-a:target"])
+    response = of.call(params)
+
+    assert response["result"]["results"][0]["target_session_id"] == "profile-a:target"
+    assert of.resumes[-1]["profile"] == "profile-a"
+    second_db.close()
+
+
+def test_f3_unserved_profile_target_is_refused(of):
+    response = of.call(of.grant("hello", ["missing-profile:target"]))
+
+    assert _code(response) == 4129
+    assert "profile 'missing-profile' is not served" in response["error"]["message"]
+    assert of.submits == [] and of.resumes == []
+
+
+def test_p2_owner_forward_queue_snapshot_keeps_kind_and_metadata():
+    metadata = {"kind": "owner_forward", "from_session_id": "origin"}
+    snapshot = __import__("tui_gateway.server", fromlist=["_queued_prompt_snapshot"])._queued_prompt_snapshot({
+        "queued_prompt": {"text": "approve", "display_kind": "owner_forward", "display_metadata": metadata}})
+
+    assert snapshot == {"user": "approve", "display_kind": "owner_forward", "display_metadata": metadata}
 
 
 # ── P-5 / P-6: peer mailbox and bot relay cannot produce an owner_forward turn ───────────────

@@ -138,8 +138,9 @@ def _admit_prompt_turn(
             session["running"] = False
             session.pop("_submit_user_row", None)
             return None
-        images = list(session.get("attached_images", []) if image_paths is None else image_paths)
-        if image_paths is None:
+        images = ([] if display_kind == "owner_forward" else
+                  list(session.get("attached_images", []) if image_paths is None else image_paths))
+        if image_paths is None and display_kind != "owner_forward":
             session["attached_images"] = []
         inflight = session.get("inflight_turn")
         # A retained failed turn (see _fail_inflight_turn) is a stale leftover

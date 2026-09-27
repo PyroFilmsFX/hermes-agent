@@ -15,7 +15,7 @@ addendum's D-5, which avoids byte-identical JS/Python serializers). Payload (JSO
 
     {"v":1, "aud":"hermes-owner-forward", "backend":<backend_id>, "nonce":<str>, "iat":<ms>, "exp":<ms>,
      "gesture":"menu"|"selection"|"slash_to"|"proposal", "confirm":"native_dialog"|"touch_id",
-     "origin":{"session_id":<str>, "message_id":<str>|null}, "targets":[<session id>...],
+     "origin":{"session_id":<str>, "message_id":<str>|null}, "targets":[<profile>:<session id>...],
      "text_sha256":<hex sha256 of the UTF-8 text>, "text_len":<UTF-8 byte length of the text>}
 
 ``backend`` is ``ofk_`` + the first 16 hex chars of sha256(raw public key): the key is minted per backend
@@ -296,28 +296,49 @@ def _reset_for_tests() -> None:
 
 # ── the stamp ───────────────────────────────────────────────────────────────────────────────
 
-_MINT = object()
-
-
 class OwnerForwardStamp:
     """In-process proof that ``owner.forward`` verified a grant for this turn. Immutable, uncopyable across
     processes, and minted only by :func:`deliver` (P-12). ``prompt.submit`` reads ``display_metadata()`` and
     ignores any caller-supplied metadata when a stamp is present."""
 
     __slots__ = ("origin_session_id", "origin_title", "origin_message_id", "gesture", "confirm", "nonce",
-                 "forwarded_at", "fanout_index", "fanout_total")
+                 "forwarded_at", "fanout_index", "fanout_total", "target_session_id", "target_session_key",
+                 "target_profile",
+                 "text_sha256", "one_time_id", "_consumed", "_consume_lock")
+    __mint = object()
 
     def __init__(self, mint: object, /, *, origin_session_id: str, origin_title: str,
                  origin_message_id: Optional[str], gesture: str, confirm: str, nonce: str, forwarded_at: float,
-                 fanout_index: int, fanout_total: int) -> None:
-        if mint is not _MINT:
+                 fanout_index: int, fanout_total: int, target_session_id: str, target_session_key: str,
+                 target_profile: str,
+                 text_sha256: str, one_time_id: str) -> None:
+        if mint is not OwnerForwardStamp.__mint:
             raise TypeError("an OwnerForwardStamp is minted by tui_gateway.owner_forward.deliver() only")
         for name, value in (
                 ("origin_session_id", origin_session_id), ("origin_title", origin_title),
                 ("origin_message_id", origin_message_id), ("gesture", gesture), ("confirm", confirm),
                 ("nonce", nonce), ("forwarded_at", forwarded_at), ("fanout_index", fanout_index),
-                ("fanout_total", fanout_total)):
+                ("fanout_total", fanout_total), ("target_session_id", target_session_id),
+                ("target_session_key", target_session_key),
+                ("target_profile", target_profile), ("text_sha256", text_sha256), ("one_time_id", one_time_id),
+                ("_consumed", False), ("_consume_lock", threading.Lock())):
             object.__setattr__(self, name, value)
+
+    def consume(self, text: str, session: dict) -> bool:
+        """Atomically validate the signed text and destination, then spend this stamp."""
+        from hermes_constants import profile_name_for_home
+        from tui_gateway import server
+
+        profile = profile_name_for_home(session.get("profile_home")) or server._current_profile_name()
+        if (hashlib.sha256(text.encode("utf-8")).hexdigest() != self.text_sha256
+                or str(session.get("session_key") or "") != self.target_session_key
+                or profile != self.target_profile):
+            return False
+        with self._consume_lock:
+            if self._consumed:
+                return False
+            object.__setattr__(self, "_consumed", True)
+            return True
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("OwnerForwardStamp is immutable")
@@ -400,21 +421,26 @@ def _deliver_one(tip: str, text: str, stamp: OwnerForwardStamp, profile_home: Op
         return _status_from_submit(_submit_stamped(sid, text, stamp), woke=True)
 
 
-def deliver(claims: Mapping[str, Any], text: str, targets: list[tuple[str, str]], *, origin_title: str = "",
+def deliver(claims: Mapping[str, Any], text: str,
+            targets: list[tuple[str, str, Optional[str], str, str]], *, origin_title: str = "",
             profile_home: Optional[str] = None) -> list[dict[str, Any]]:
     """Fan a verified grant's text out to ``targets`` (``(requested id, compression tip)``), sequentially and
     independently. The ONLY place an :class:`OwnerForwardStamp` is constructed (P-12)."""
     origin = claims["origin"]
     forwarded_at = time.time()
     results = []
-    for index, (target_id, tip) in enumerate(targets):
+    for index, (target_id, tip, target_home, target_profile, stored_target_id) in enumerate(targets):
         stamp = OwnerForwardStamp(
-            _MINT, origin_session_id=str(origin["session_id"]), origin_title=origin_title,
+            OwnerForwardStamp._OwnerForwardStamp__mint,
+            origin_session_id=str(origin["session_id"]), origin_title=origin_title,
             origin_message_id=origin.get("message_id"), gesture=str(claims["gesture"]),
             confirm=str(claims["confirm"]), nonce=str(claims["nonce"]), forwarded_at=forwarded_at,
-            fanout_index=index, fanout_total=len(targets))
+            fanout_index=index, fanout_total=len(targets), target_session_id=stored_target_id,
+            target_session_key=tip, target_profile=target_profile,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            one_time_id=base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii"))
         try:
-            status, detail = _deliver_one(tip, text, stamp, profile_home)
+            status, detail = _deliver_one(tip, text, stamp, target_home)
         except Exception as exc:  # noqa: BLE001 - one target's failure never aborts the others
             logger.warning("owner.forward delivery to %s failed", tip, exc_info=True)
             status, detail = "failed:submit", str(exc) or type(exc).__name__
@@ -441,8 +467,8 @@ def _content_refusal(text: str, pol: Mapping[str, Any]) -> Optional[str]:
 
 
 def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str, Any],
-                     profile_home: Optional[str]) -> tuple[list[tuple[str, str]], str, Optional[str]]:
-    """``([(id, tip)], origin_title, refusal)``. Ids only: title hints are resolved client-side."""
+                     profile_home: Optional[str]) -> tuple[list[tuple[str, str, Optional[str], str, str]], str, Optional[str]]:
+    """``([(display id, tip, profile home, profile name, stored id)], origin_title, refusal)``."""
     from tui_gateway import session_mailbox as mb
 
     if (not isinstance(requested, list) or not requested
@@ -453,7 +479,9 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
     if set(requested) != set(claims["targets"]) or len(requested) != len(claims["targets"]):
         return [], "", "the targets differ from the ones the owner confirmed"
     origin_id = str(claims["origin"]["session_id"])
-    resolved: list[tuple[str, str]] = []
+    from tui_gateway import server
+
+    resolved: list[tuple[str, str, Optional[str], str, str]] = []
     with mb._open_db(profile_home) as db:
         if db is None:
             return [], "", "session store is unavailable"
@@ -464,20 +492,36 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
         origin_tip = mb._tip(db, origin_id)
         tips: set[str] = set()
         for target in requested:
-            row = None
-            with contextlib.suppress(Exception):
-                row = db.get_session(target)
-            if not row:
-                return [], "", f"no stored session {target!r}"
-            if str(row.get("source") or "") not in mb._ADDRESSABLE_SOURCES:
-                return [], "", f"session {target!r} cannot receive forwards"
-            tip = mb._tip(db, str(row["id"]))
-            if target == origin_id or tip in {origin_id, origin_tip}:
+            if ":" not in target:
+                return [], "", "targets must use <profile>:<session_id>"
+            target_profile, target_id = target.split(":", 1)
+            if not target_profile or not target_id:
+                return [], "", "targets must use <profile>:<session_id>"
+            if target_profile == server._current_profile_name():
+                target_home = None
+            else:
+                try:
+                    target_home = server._profile_home(target_profile)
+                except server.ProfileUnavailableError:
+                    return [], "", f"profile {target_profile!r} is not served by this backend"
+            target_profile_home = str(target_home) if target_home is not None else None
+            with mb._open_db(target_profile_home) as target_db:
+                row = None
+                with contextlib.suppress(Exception):
+                    row = target_db.get_session(target_id) if target_db is not None else None
+                if not row:
+                    return [], "", f"no stored session {target_id!r} in profile {target_profile!r}"
+                if str(row.get("source") or "") not in mb._ADDRESSABLE_SOURCES:
+                    return [], "", f"session {target_id!r} cannot receive forwards"
+                tip = mb._tip(target_db, str(row["id"]))
+            if ((target_profile == server._current_profile_name() and target_id == origin_id)
+                    or (target_profile == server._current_profile_name() and tip in {origin_id, origin_tip})):
                 return [], "", "a forward cannot target its own origin session"
             if tip in tips:
                 return [], "", "two targets resolve to the same session"
             tips.add(tip)
-            resolved.append((target, tip))
+            result_id = target_id if target_profile == server._current_profile_name() else target
+            resolved.append((result_id, tip, target_profile_home, target_profile, target_id))
     return resolved, origin_title, None
 
 
@@ -511,7 +555,7 @@ def forward_rpc(rid: Any, params: dict) -> dict:
     # 4. Content.
     if (refusal := _content_refusal(text, pol)) is not None:
         return server._err(rid, ERR_CONTENT, refusal)
-    # 5. Targets (active profile only: the grant binds ids, not a profile).
+    # 5. Targets are bound to a served profile as well as a stored session id.
     targets, origin_title, refusal = _resolve_targets(params.get("targets"), claims, pol, None)
     if refusal is not None:
         return server._err(rid, ERR_TARGET, refusal)

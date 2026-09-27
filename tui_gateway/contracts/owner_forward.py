@@ -11,7 +11,7 @@ from .registry import method
 class OwnerForwardParams(Params):
     """``grant``: base64url (unpadded) of the exact payload bytes main signed. ``signature``: base64url of the
     Ed25519 signature over the domain prefix plus those bytes. ``text`` is the owner's text exactly as
-    confirmed; ``targets`` the stored session ids, equal as a set to the grant's."""
+    confirmed; ``targets`` are profile-qualified ``<profile>:<session_id>`` strings equal as a set to the grant's."""
 
     grant: str
     signature: str
