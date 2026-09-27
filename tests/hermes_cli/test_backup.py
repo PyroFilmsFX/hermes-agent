@@ -859,7 +859,7 @@ class TestRoundTrip:
 
         # Verify key files
         assert (dst_home / "config.yaml").read_text() == "model:\n  provider: openrouter\n"
-        assert (dst_home / ".env").read_text() == "OPENROUTER_API_KEY=sk-test-123\n"
+        assert "OPENROUTER_API_KEY=[REDACTED:" in (dst_home / ".env").read_text()
         assert (dst_home / "skills" / "my-skill" / "SKILL.md").exists()
         assert (dst_home / "profiles" / "coder" / "config.yaml").exists()
         assert (dst_home / "sessions" / "abc123.json").exists()
@@ -871,6 +871,53 @@ class TestRoundTrip:
         assert not (dst_home / "plugins" / "__pycache__").exists()
         # PID files should NOT be present
         assert not (dst_home / "gateway.pid").exists()
+
+
+@pytest.mark.parametrize("live_value", ["keep-this-value", None])
+def test_import_does_not_replace_live_credentials_with_backup_placeholders(
+    tmp_path, monkeypatch, capsys, live_value
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    if live_value:
+        (home / ".env").write_text(f"PGPASSWORD={live_value}\n", encoding="utf-8")
+    zip_path = tmp_path / "masked.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(".env", "PGPASSWORD=[REDACTED:db-password:0123456789abcdef]\n")
+
+    from hermes_cli.backup import run_import
+    run_import(Namespace(zipfile=str(zip_path), force=True))
+
+    result = (home / ".env").read_text(encoding="utf-8")
+    output = capsys.readouterr().out
+    if live_value:
+        if live_value not in result:
+            pytest.fail("import replaced an existing credential with its archive placeholder")
+        assert "must be re-entered" not in output
+    else:
+        assert "PGPASSWORD=[REDACTED:" in result
+        assert "1 credentials were masked in this backup and must be re-entered: PGPASSWORD" in output
+
+
+def test_import_preserves_live_values_in_other_placeholder_files(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (home / "auth.json").write_text('{"access_token":"live-token-value"}', encoding="utf-8")
+    zip_path = tmp_path / "masked-json.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("config.yaml", "model: test\n")
+        zf.writestr("auth.json", '{"access_token":"[REDACTED:generic-secret:0123456789abcdef]"}')
+
+    from hermes_cli.backup import run_import
+    run_import(Namespace(zipfile=str(zip_path), force=True))
+
+    restored = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+    if restored["access_token"] != "live-token-value":
+        pytest.fail("import replaced a live JSON credential with its archive placeholder")
 
 
 # ---------------------------------------------------------------------------

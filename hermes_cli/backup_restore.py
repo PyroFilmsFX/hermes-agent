@@ -270,6 +270,7 @@ def _extract_member_atomically(
     member: str,
     target: Path,
     new_file_mode: Optional[int] = None,
+    member_data: Optional[bytes] = None,
 ) -> None:
     """Restore one zip member onto *target* with no truncation window.
 
@@ -349,8 +350,11 @@ def _extract_member_atomically(
                     os.chmod(tmp_name, mode)
             # Stream instead of ``src.read()``: a multi-gigabyte state.db member
             # must not be held in memory in one piece.
-            with zf.open(member) as src:
-                shutil.copyfileobj(src, dst)
+            if member_data is None:
+                with zf.open(member) as src:
+                    shutil.copyfileobj(src, dst)
+            else:
+                dst.write(member_data)
             dst.flush()
             os.fsync(dst.fileno())
         real_path = Path(atomic_replace(tmp_name, target))

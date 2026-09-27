@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -461,7 +462,7 @@ def _zip_egress_file(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_pa
                      masker, hermes_root: Path) -> Optional[int]:
     """Add a masked staged copy of one backup member; the live file is read-only here."""
     mode = stat.S_IMODE(abs_path.stat().st_mode)
-    if abs_path.suffix.lower() == ".db":
+    if _is_sqlite_backup_file(abs_path):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=str(out_path.parent)) as tmp:
             tmp_db = Path(tmp.name)
         try:
@@ -510,7 +511,7 @@ def _write_zip_entries(
                     on_db_failure(rel_path)
                     continue
                 total_bytes += size
-            elif abs_path.suffix == ".db":
+            elif _is_sqlite_backup_file(abs_path):
                 size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
                 if size is None:
                     on_db_failure(rel_path)
@@ -527,6 +528,93 @@ def _write_zip_entries(
             on_progress(i)
     masker.log_summary()
     return total_bytes
+
+
+def _is_sqlite_backup_file(path: Path) -> bool:
+    """Recognize SQLite snapshots by supported suffix or their database header."""
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        return True
+    try:
+        with Path(path).open("rb") as fh:
+            return fh.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except OSError:
+        return False
+
+
+_BACKUP_KEY_VALUE_RE = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*[:=]\s*)(.*?)(\r?\n)?$")
+
+
+def _preserve_live_masked_values(zf: zipfile.ZipFile, member: str, target: Path):
+    """Keep live values where a backup placeholder would otherwise replace them."""
+    from agent.redact_detect import PLACEHOLDER_RE
+
+    try:
+        archived = zf.read(member)
+        archived_text = archived.decode("utf-8")
+    except (UnicodeDecodeError, *_ZIP_MEMBER_READ_ERRORS):
+        return None, set()
+    if not PLACEHOLDER_RE.search(archived_text):
+        return None, set()
+    try:
+        live_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    except (OSError, UnicodeDecodeError):
+        live_text = ""
+
+    def assignments(text):
+        values = {}
+        for line in text.splitlines(keepends=True):
+            match = _BACKUP_KEY_VALUE_RE.match(line)
+            if match:
+                values[match.group(2)] = match.group(4).rstrip("\r\n")
+        return values
+
+    live_values = assignments(live_text)
+    missing = set()
+
+    def report_key(key: str) -> str:
+        return key if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", key) else "credential"
+
+    try:
+        archived_json = json.loads(archived_text)
+        live_json = json.loads(live_text) if live_text else None
+    except (TypeError, ValueError):
+        archived_json = None
+        live_json = None
+    if isinstance(archived_json, (dict, list)):
+        def preserve_json(node, live_node, key="value"):
+            if isinstance(node, dict):
+                live_map = live_node if isinstance(live_node, dict) else {}
+                return {name: preserve_json(value, live_map.get(name), str(name))
+                        for name, value in node.items()}
+            if isinstance(node, list):
+                live_items = live_node if isinstance(live_node, list) else []
+                return [preserve_json(value, live_items[i] if i < len(live_items) else None, key)
+                        for i, value in enumerate(node)]
+            if isinstance(node, str) and PLACEHOLDER_RE.search(node):
+                if isinstance(live_node, str) and not PLACEHOLDER_RE.search(live_node):
+                    return PLACEHOLDER_RE.sub(lambda _match: live_node, node)
+                missing.add(report_key(key))
+            return node
+
+        restored_json = preserve_json(archived_json, live_json)
+        if restored_json != archived_json:
+            archived_text = json.dumps(restored_json, ensure_ascii=False)
+        return archived_text.encode("utf-8"), missing
+
+    lines = []
+    for line in archived_text.splitlines(keepends=True):
+        match = _BACKUP_KEY_VALUE_RE.match(line)
+        if not match or not PLACEHOLDER_RE.search(match.group(4)):
+            lines.append(line)
+            continue
+        key, archived_value = match.group(2), match.group(4)
+        live_value = live_values.get(key)
+        if live_value and not PLACEHOLDER_RE.search(live_value):
+            line = f"{match.group(1)}{key}{match.group(3)}{live_value}{match.group(5) or ''}"
+        else:
+            missing.add(report_key(key))
+        lines.append(line)
+    return "".join(lines).encode("utf-8"), missing
 
 
 def _print_capped(header: str, lines: List[str], indent: str) -> None:
@@ -808,6 +896,7 @@ def run_import(args) -> Optional[int]:
         restored = 0
         restored_external = 0
         skipped_runtime: list[str] = []
+        masked_credentials: set[str] = set()
         # (rel, live_counts, imported_counts) for every session database the
         # import replaced with one holding fewer rows. A restore is allowed to
         # do that — it just must not do it silently (issue #100960).
@@ -835,7 +924,12 @@ def run_import(args) -> Optional[int]:
                     continue
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _extract_member_atomically(zf, member, target, new_file_mode)
+                    member_data, missing = _preserve_live_masked_values(zf, member, target)
+                    masked_credentials.update(missing)
+                    if member_data is None:
+                        _extract_member_atomically(zf, member, target, new_file_mode)
+                    else:
+                        _extract_member_atomically(zf, member, target, new_file_mode, member_data=member_data)
                     # External provider configs commonly hold credentials.
                     if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
                         try:
@@ -911,7 +1005,12 @@ def run_import(args) -> Optional[int]:
                     if before and after and after[1] < before[1]:
                         db_shrunk.append((rel, before, after))
                 else:
-                    _extract_member_atomically(zf, member, target, new_file_mode)
+                    member_data, missing = _preserve_live_masked_values(zf, member, target)
+                    masked_credentials.update(missing)
+                    if member_data is None:
+                        _extract_member_atomically(zf, member, target, new_file_mode)
+                    else:
+                        _extract_member_atomically(zf, member, target, new_file_mode, member_data=member_data)
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -940,6 +1039,10 @@ def run_import(args) -> Optional[int]:
                 print(e)
             if len(errors) > 10:
                 print(f"  ... and {len(errors) - 10} more")
+
+        if masked_credentials:
+            keys = ", ".join(sorted(masked_credentials))
+            print(f"\n  {len(masked_credentials)} credentials were masked in this backup and must be re-entered: {keys}")
 
         if db_shrunk:
             # The backup predates work that is now overwritten. Say so: the
