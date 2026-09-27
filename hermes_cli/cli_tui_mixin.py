@@ -1767,11 +1767,21 @@ class CLITuiMixin:
     def _tui_collapse_paste(self, text: str, line_count: int, *, fallback: bool) -> str:
         """Save a large paste under ~/.hermes/pastes and return the placeholder for the buffer."""
         from cli import _hermes_home, datetime, logger
+        from agent.secret_hygiene import mask_ingress_text
+        text, _ = mask_ingress_text(text)
         self._tui_paste_counter += 1
         paste_dir = _hermes_home / "pastes"
         paste_dir.mkdir(parents=True, exist_ok=True)
         paste_file = paste_dir / f"paste_{self._tui_paste_counter}_{datetime.now().strftime('%H%M%S')}.txt"
-        paste_file.write_text(text, encoding="utf-8")
+        fd = os.open(paste_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.chmod(paste_file, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                fd = -1
+                stream.write(text)
+        finally:
+            if fd >= 0:
+                os.close(fd)
         logger.info(
             "Collapsed paste #%d: %d lines, %d chars -> %s" + (" (fallback)" if fallback else ""),
             self._tui_paste_counter, line_count + 1, len(text), paste_file)

@@ -316,10 +316,12 @@ def _live_woken_count() -> int:
 def _envelope(row: dict) -> str:
     """What the receiving model sees for a mailbox delivery, on EVERY transport (see
     agent.transports.claude_sdk_peer_envelope: the CLI drops stream-json origin)."""
+    from agent.secret_hygiene import mask_ingress_text
     from agent.transports.claude_sdk_peer_envelope import build
 
+    body, _ = mask_ingress_text(str(row.get("body") or ""))
     return build(sender=str(row.get("from_session_id") or ""), label=str(row.get("from_label") or ""),
-                 msg_id=row.get("id"), body=str(row.get("body") or ""))
+                 msg_id=row.get("id"), body=body)
 
 
 def _live_claude_sdk(session: dict) -> Any | None:
@@ -331,13 +333,16 @@ def _live_claude_sdk(session: dict) -> Any | None:
 
 
 def _peer_origin(row: dict) -> dict[str, Any]:
+    from agent.secret_hygiene import mask_ingress_text
+
+    body, _ = mask_ingress_text(str(row.get("body") or ""))
     return {
         "kind": "peer",
         "subkind": "peer-send-message",
         "from": str(row.get("from_label") or row.get("from_session_id") or "another session"),
         "fromSession": str(row.get("from_session_id") or ""),
         "msg_id": str(row.get("id") or ""),
-        "body": str(row.get("body") or ""),
+        "body": body,
     }
 
 
@@ -538,10 +543,12 @@ def send_message(
             if from_session_id and tip in {from_session_id, _tip(db, from_session_id)}:
                 return {"status": STATUS_FAILED, "error": "a session cannot message itself"}
             dedupe_key = f"{from_session_id or 'operator'}:{request_id}" if request_id else None
+            from agent.secret_hygiene import mask_ingress_text
+            masked_body, _ = mask_ingress_text(body)
             from hermes_state_peer_mailbox import PeerMailboxQueueFull
             try:
                 row, created = db.peer_mailbox_enqueue(
-                    target_session_id=tip, body=body, from_session_id=from_session_id, from_label=from_label,
+                    target_session_id=tip, body=masked_body, from_session_id=from_session_id, from_label=from_label,
                     dedupe_key=dedupe_key, target_hint=str(target),
                     sender_auth=json.dumps(sender_auth, sort_keys=True) if sender_auth else None,
                     max_queued_per_sender=int(pol.get("max_queued_per_sender") or 0))

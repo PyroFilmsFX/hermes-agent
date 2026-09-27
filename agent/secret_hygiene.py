@@ -83,7 +83,7 @@ class SecretHygieneConfig:
     allow_value_sha256: Tuple[str, ...] = ()
     sweep_backup_retention_days: int = 7
     sweep_live_window_hours: float = 24.0
-    optout_allowed: bool = True
+    optout_allowed: bool = False
 
     def detect_options(self) -> DetectOptions:
         return DetectOptions(

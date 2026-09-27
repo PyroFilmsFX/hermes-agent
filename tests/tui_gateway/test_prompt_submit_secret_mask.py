@@ -149,6 +149,10 @@ def test_turn_prep_masks_the_expanded_prompt(monkeypatch, tmp_path):
 
 def test_turn_prep_hands_a_confirmed_optout_to_its_turn_only(monkeypatch, tmp_path):
     from tui_gateway import prompt_turn
+    from agent import secret_hygiene
+
+    monkeypatch.setattr(secret_hygiene, "load_secret_hygiene_config",
+                        lambda: secret_hygiene.SecretHygieneConfig(optout_allowed=True))
 
     token = _gh(10)
     text = f"write {token} into .env"
@@ -245,6 +249,10 @@ def test_optout_without_valid_nonce_stays_masked(monkeypatch, tmp_path):
 
 
 def test_optout_with_nonce_is_single_use_and_bound_to_text(monkeypatch, tmp_path):
+    from agent import secret_hygiene
+
+    monkeypatch.setattr(secret_hygiene, "_load_security_section", lambda: {
+        "secret_hygiene": {"optout": {"allowed": True}}})
     db, sid, key, session, runs = _submit_harness(monkeypatch, tmp_path)
     token = _gh(8)
     text = f"write {token} into .env"
@@ -280,6 +288,32 @@ def test_optout_with_nonce_is_single_use_and_bound_to_text(monkeypatch, tmp_path
         db.close()
 
 
+def test_default_config_nonce_submit_stays_masked(monkeypatch, tmp_path):
+    from agent import secret_hygiene
+
+    db, sid, key, _session, _runs = _submit_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(secret_hygiene, "_load_security_section", lambda: {
+        "secret_hygiene": {"optout": {"allowed": True}}})
+    token = _gh(18)
+    text = f"write {token} into .env"
+    try:
+        mask_result = server.handle_request({"id": "m", "method": "secrets.mask", "params": {
+            "session_id": sid, "text": text,
+            "optout_tags": [t["tag"] for t in secret_hygiene.ingress_secret_tags(text)]}})["result"]
+        assert mask_result["confirm_nonce"]
+        # The configured default (no user override) rejects this client-asserted nonce.
+        monkeypatch.setattr(secret_hygiene, "_load_security_section", lambda: {})
+        _submit(sid, text, secret_optout={
+            "tags": [t["tag"] for t in mask_result["tags"]],
+            "confirm_nonce": mask_result["confirm_nonce"]})
+        [row] = db.get_messages_as_conversation(key)
+        assert token not in row["content"]
+        assert "[REDACTED:github-token:" in row["content"]
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_secrets_mask_rpc_never_returns_values(monkeypatch, tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     sid, _key = _desktop_session(monkeypatch, db)
@@ -291,6 +325,23 @@ def test_secrets_mask_rpc_never_returns_values(monkeypatch, tmp_path):
         assert result["kinds"] == {"neon-url": 1}
         assert "[REDACTED:neon-url:" in result["text"]
         assert result.get("confirm_nonce") in (None, "")
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+def test_paste_collapse_masks_before_private_file_write(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, _key = _desktop_session(monkeypatch, db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path / "home")
+    token = _gh(19)
+    try:
+        result = server.handle_request({"id": "p", "method": "paste.collapse", "params": {
+            "text": f"use {token} in the terminal"}})["result"]
+        path = __import__("pathlib").Path(result["path"])
+        assert token not in path.read_text()
+        assert "[REDACTED:github-token:" in path.read_text()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     finally:
         server._sessions.pop(sid, None)
         db.close()
