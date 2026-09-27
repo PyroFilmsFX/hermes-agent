@@ -430,7 +430,7 @@ export function ChatBar({
 
   // The submit engine — the orchestration seam where draft + queue meet. Owns
   // the submit decision tree, the send-with-restore primitive, and steer.
-  const { queueDraft, steerDraft, submitDraft } = useComposerSubmit({
+  const { queueDraft, signedSendDraft, steerDraft, submitDraft } = useComposerSubmit({
     activeQueueSessionKey,
     activeQueueSessionKeyRef,
     attachments,
@@ -958,6 +958,15 @@ export function ChatBar({
           loadIntoComposer(result.text, scope.attachments.$attachments.get())
         }
       }
+
+      return
+    }
+
+    // #60 ⌘⇧↩ "Send as signed decision": the owner signs what they typed, for this chat only. Main
+    // shows the native confirm; a script-dispatched key (isTrusted false) is ignored.
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey) {
+      event.preventDefault()
+      void signedSendDraft((event as { nativeEvent?: Event }).nativeEvent ?? event)
 
       return
     }

@@ -13,6 +13,7 @@ import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
 import { isWindowsAbsolutePath } from '@/lib/path-compare'
+import { refuseForwardInSubmitText } from '@/lib/owner-forward/submit-guard'
 import { normalize } from '@/lib/text'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
 import { clearClarifyRequest } from '@/store/clarify'
@@ -646,6 +647,14 @@ export function usePromptActions({
       const visibleText = sanitizeComposerInput(rawText).trim()
       const attachments = options?.attachments ?? $composerAttachments.get()
 
+      // #60 owner-forward (V-1..V-3): widgets, `::ask`, plugins and queue drains all land here, never
+      // in the composer's submitDraft, so a `/to` reaching submitText was not typed. Refuse it.
+      if (refuseForwardInSubmitText(visibleText)) {
+        notify({ kind: 'error', message: t.ownerForward.refuseSubmitText })
+
+        return false
+      }
+
       if (!attachments.length && SLASH_COMMAND_RE.test(visibleText)) {
         triggerHaptic('selection')
         // Forward the explicit target (background queue drain, tile) — dropping
@@ -657,7 +666,7 @@ export function usePromptActions({
 
       return await submitPromptText(rawText, options)
     },
-    [executeSlashCommand, submitPromptText]
+    [executeSlashCommand, submitPromptText, t]
   )
 
   const transcribeVoiceAudio = useCallback(

@@ -223,7 +223,9 @@ const COMPARED_FIELDS = [
   // must re-render (set once at completion; stable afterwards).
   'durationS',
   'deliveryId',
-  'peerMetadata'
+  'peerMetadata',
+  // #60 owner-forward chip (from / grant): compared by grant id and origin title.
+  'ownerForward'
 ] as const
 
 const IGNORED_FIELDS = ['attachmentRefs', 'parts', 'serverRowSpan'] as const
@@ -349,7 +351,9 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     (a.peerMetadata?.attempts ?? null) !== (b.peerMetadata?.attempts ?? null) ||
     (a.peerMetadata?.direction ?? null) !== (b.peerMetadata?.direction ?? null) ||
     (a.peerMetadata?.peer ?? null) !== (b.peerMetadata?.peer ?? null) ||
-    (a.peerMetadata?.via ?? null) !== (b.peerMetadata?.via ?? null)
+    (a.peerMetadata?.via ?? null) !== (b.peerMetadata?.via ?? null) ||
+    (a.ownerForward?.grantId ?? null) !== (b.ownerForward?.grantId ?? null) ||
+    (a.ownerForward?.fromTitle ?? null) !== (b.ownerForward?.fromTitle ?? null)
   ) {
     return false
   }

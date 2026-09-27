@@ -1,14 +1,29 @@
 import { SLASH_COMMAND_RE } from '@hermes/shared'
+import { useStore } from '@nanostores/react'
 import { type RefObject, useLayoutEffect, useRef } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
+import {
+  describeForwardResult,
+  forwardCandidates,
+  type ForwardOutcome,
+  forwardProfile,
+  openForwardSheetFromTypedDraft,
+  sendOwnerForward
+} from '@/lib/owner-forward/client'
+import { isForwardCommandText, parseToDraft, resolveToTokens } from '@/lib/owner-forward/parse-to'
+import { isTrustedGesture } from '@/lib/owner-forward/trusted'
 import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-queue'
 import { hasConnectionRequest, skipConnectionRequest } from '@/store/connection-request'
+import { notify } from '@/store/notifications'
 import { hasBlockingPromptRequest } from '@/store/prompts'
+import { $sessions } from '@/store/session'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
@@ -82,6 +97,9 @@ export function useComposerSubmit({
   const paneVisible = usePaneVisible()
   const scope = useComposerScope()
   const surfaceId = useComposerSurfaceId()
+  const { t } = useI18n()
+  const forwardCopy = t.ownerForward
+  const storedSessionId = useStore(useSessionView().$storedId)
 
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
@@ -189,6 +207,122 @@ export function useComposerSubmit({
     [activeQueueSessionKeyRef, inputDisabled, paneVisible, scope.target, sessionId, surfaceId]
   )
 
+  // Re-read the draft from the DOM editor (see submitDraft for why state can lag a keystroke).
+  const syncDraftFromEditor = () => {
+    const editor = editorRef.current
+
+    if (editor) {
+      const domText = composerPlainText(editor)
+
+      if (domText !== draftRef.current) {
+        draftRef.current = domText
+        setComposerText(domText)
+      }
+    }
+  }
+
+  // #60 owner-forward. The only composer entry points: a TYPED `/to` (here, in submitDraft, never in
+  // submitText, so widget / ::ask / plugin sends can't reach it) and ⌘⇧↩ (signedSendDraft). Both go
+  // to main's native confirm; the draft clears only after the owner presses Send there.
+  const reportForward = (outcome: ForwardOutcome) => {
+    if (outcome.kind === 'sent') {
+      const failed = outcome.results.some(line => line.status.startsWith('failed'))
+
+      notify({
+        kind: failed ? 'error' : 'success',
+        message: outcome.results.map(line => describeForwardResult(line, forwardCopy)).join('\n') || forwardCopy.sent
+      })
+    } else if (outcome.kind === 'error') {
+      notify({ kind: 'error', message: `${forwardCopy.failed}: ${outcome.message}` })
+    }
+  }
+
+  const clearAfterConfirm = () => {
+    const submittedScope = activeQueueSessionKeyRef.current
+
+    return () => {
+      clearDraft()
+      clearSessionDraft(submittedScope)
+    }
+  }
+
+  const forwardTypedDraft = (text: string) => {
+    if (attachments.length > 0) {
+      notify({ kind: 'error', message: forwardCopy.attachmentsRefused })
+
+      return
+    }
+
+    const parsed = parseToDraft(text)
+
+    if (!parsed || !parsed.ok) {
+      notify({ kind: 'error', message: parsed?.ok === false && parsed.error === 'too_many' ? forwardCopy.tooManyTargets : forwardCopy.grammar })
+
+      return
+    }
+
+    if (!storedSessionId) {
+      notify({ kind: 'error', message: forwardCopy.signedNeedsSession })
+
+      return
+    }
+
+    const origin = { session_id: storedSessionId, message_id: null, role: 'user' as const }
+    const resolution = resolveToTokens(parsed.tokens, forwardCandidates(storedSessionId))
+
+    if (resolution.status !== 'exact') {
+      openForwardSheetFromTypedDraft({ text: parsed.body, gesture: 'slash_to', origin, targets: resolution.targets })
+
+      return
+    }
+
+    triggerHaptic('submit')
+    void sendOwnerForward(
+      { text: parsed.body, gesture: 'slash_to', origin, targets: resolution.targets },
+      { onConfirmed: clearAfterConfirm() }
+    ).then(reportForward)
+  }
+
+  // ⌘⇧↩ "Send as signed decision": the owner signs what they typed, for THIS chat only.
+  const signedSendDraft = async (event: { isTrusted?: boolean } | null | undefined) => {
+    if (disabled || !isTrustedGesture(event)) {
+      return
+    }
+
+    syncDraftFromEditor()
+    const text = draftRef.current.trim()
+
+    if (!text) {
+      return
+    }
+
+    if (attachments.length > 0) {
+      notify({ kind: 'error', message: forwardCopy.attachmentsRefused })
+
+      return
+    }
+
+    if (!storedSessionId) {
+      notify({ kind: 'error', message: forwardCopy.signedNeedsSession })
+
+      return
+    }
+
+    const row = $sessions.get().find(s => s.id === storedSessionId)
+
+    const outcome = await sendOwnerForward(
+      {
+        text,
+        gesture: 'composer_signed',
+        origin: { session_id: storedSessionId, message_id: null, role: 'user' },
+        targets: [{ profile: row?.profile || forwardProfile(), session_id: storedSessionId, title: row?.title ?? null }]
+      },
+      { onConfirmed: clearAfterConfirm() }
+    )
+
+    reportForward(outcome)
+  }
+
   const submitDraft = () => {
     if (disabled) {
       return
@@ -216,6 +350,14 @@ export function useComposerSubmit({
     // A path that never got its committing space (`@apps/desktop/` left by a Tab
     // descend, then Enter) is still the reference the user picked — promote it
     // on the way out so it attaches instead of submitting as inert text.
+    // A typed `/to` never becomes a turn: it goes to the owner-forward confirm (or the sheet).
+    if (!queueEdit && isForwardCommandText(draftRef.current)) {
+      forwardTypedDraft(draftRef.current)
+      focusInput()
+
+      return
+    }
+
     const text = pathifyRefs(draftRef.current)
     const payloadPresent = text.trim().length > 0 || attachments.length > 0
 
@@ -337,5 +479,5 @@ export function useComposerSubmit({
     focusInput()
   }
 
-  return { dispatchSubmit, queueDraft, steerDraft, submitDraft }
+  return { dispatchSubmit, queueDraft, signedSendDraft, steerDraft, submitDraft }
 }

@@ -70,6 +70,16 @@ export type ChatMessage = {
   deliveryId?: string
   /** Peer message delivery metadata (direction, peer, msg_id, status, attempts). */
   peerMetadata?: PeerMetadata
+  /** #60: an owner-forward user row (DB `display_kind='owner_forward'` only). The chip re-verifies
+   *  `envelope` in main; nothing here is trusted by itself. */
+  ownerForward?: OwnerForwardMetadata
+}
+
+export interface OwnerForwardMetadata {
+  fromSessionId: null | string
+  fromTitle: string
+  envelope: unknown
+  grantId: null | string
 }
 
 export interface PeerMetadata {

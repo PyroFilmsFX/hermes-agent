@@ -1,6 +1,8 @@
 import { ActionBarPrimitive, BranchPickerPrimitive, MessagePrimitive, useAuiState } from '@assistant-ui/react'
+import { useStore } from '@nanostores/react'
 import { type FC, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { DirectiveContent } from '@/components/assistant-ui/directive-text'
 import {
   messageAttachmentRefs,
@@ -13,10 +15,12 @@ import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timel
 import { type RestoreMessageTarget } from '@/components/assistant-ui/thread/types'
 import { useMessageReactions } from '@/components/assistant-ui/thread/use-message-reactions'
 import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
+import { OwnerForwardChip } from '@/components/owner-forward/owner-forward-chip'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { useI18n } from '@/i18n'
+import type { OwnerForwardMetadata } from '@/lib/chat-messages/types'
 import { triggerHaptic } from '@/lib/haptics'
 import { StopFilled } from '@/lib/icons'
 import { LruCache } from '@/lib/lru-cache'
@@ -280,6 +284,13 @@ export const UserMessage: FC<{
     return null
   })
 
+  // #60: an owner-forward row carries its grant; the chip asks main to re-verify it (U16).
+  const ownerForward = useAuiState(
+    s => ((s.message.metadata?.custom ?? {}) as { ownerForward?: OwnerForwardMetadata }).ownerForward ?? null
+  )
+
+  const viewStoredId = useStore(useSessionView().$storedId)
+
   const attachmentRefs = useAuiState(s => {
     const custom = (s.message.metadata?.custom ?? {}) as { attachmentRefs?: unknown }
 
@@ -423,6 +434,14 @@ export const UserMessage: FC<{
       >
         <ActionBarPrimitive.Root className="relative w-full max-w-full" data-slot="aui_user-bubble-actions">
           <div className="human-message-with-todos-wrapper flex w-full flex-col gap-0">
+            {ownerForward ? (
+              <OwnerForwardChip
+                envelope={ownerForward.envelope}
+                fromTitle={ownerForward.fromTitle}
+                sessionId={viewStoredId}
+                text={messageText}
+              />
+            ) : null}
             <ReactionPicker
               onOpenChange={setPickerOpen}
               onSelect={pickEmoji}

@@ -3070,6 +3070,53 @@ export interface Translations {
     markAllRead: string
   }
 
+  /** #60 owner-forward: the Forward sheet, /to, proposal cards, ⌘⇧↩ and the verified chip. */
+  ownerForward: {
+    forwardTo: string
+    sheetTitle: string
+    sheetDescription: string
+    targets: string
+    searchTargets: string
+    maxTargets: string
+    noTargets: string
+    text: string
+    charCount: (count: number, max: number) => string
+    scopes: string
+    scopeNone: string
+    scopeClass: { allowlist: string; gate: string; marker: string; prod: string }
+    otherScope: string
+    addScope: string
+    badScope: string
+    subject: string
+    subjectPlaceholder: string
+    send: string
+    sending: string
+    cancel: string
+    done: string
+    cancelled: string
+    failed: string
+    statusDelivered: (target: string) => string
+    statusQueued: (target: string) => string
+    statusResumed: (target: string) => string
+    statusFailed: (target: string, detail: string) => string
+    refuseSubmitText: string
+    attachmentsRefused: string
+    grammar: string
+    tooManyTargets: string
+    proposalTitle: (targets: string) => string
+    reviewSend: string
+    dismiss: string
+    dismissed: string
+    sent: string
+    forwardedFrom: (title: string) => string
+    checking: string
+    verified: string
+    unverified: string
+    verifiedHint: string
+    unverifiedHint: string
+    signedSend: string
+    signedNeedsSession: string
+  }
   composer: {
     message: string
     wakingProfile: (profile: string) => string

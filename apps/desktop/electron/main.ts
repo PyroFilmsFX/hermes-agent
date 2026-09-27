@@ -364,6 +364,8 @@ import {
   type OwnerGrantConfirmRequest
 } from './owner-grant-anchor-install'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
+import { createOwnerForwardConfirmHandler, isAppChromeSender } from './owner-forward-confirm'
+import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -8052,11 +8054,20 @@ const ownerGrantController = createOwnerGrantController({
     rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
 })
 
-function ownerGrantBackendSpawnEnv() {
+// #60 owner-forward: the backend id each app-spawned backend was handed, by profile. A signed
+// forward is bound to the backend that will deliver it; a profile with no entry (an attached or
+// remote backend) can't take signed forwards. A respawn replaces the entry, so a grant signed for
+// a dead backend fails the gateway's backend check (fail closed).
+const ownerGrantBackendIds = new Map<string, string>()
+
+function ownerGrantBackendSpawnEnv(profile: string) {
+  const backendId = `spawn_${crypto.randomBytes(16).toString('hex')}`
+  ownerGrantBackendIds.set(profile, backendId)
+
   return {
     // These are public verification inputs. The backend's spawned agent shells may inherit them.
     HERMES_OWNER_GRANT_KEYS: ownerGrantKeyStore.grantKeysEnvValue() ?? '',
-    HERMES_OWNER_GRANT_BACKEND: `spawn_${crypto.randomBytes(16).toString('hex')}`
+    HERMES_OWNER_GRANT_BACKEND: backendId
   }
 }
 
@@ -11865,7 +11876,7 @@ async function spawnPoolBackend(
         ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile }),
         HERMES_HOME,
         ...backend.env,
-        ...ownerGrantBackendSpawnEnv(),
+        ...ownerGrantBackendSpawnEnv(profile),
         // Pin the gateway's tool/terminal cwd to the same directory we chose for
         // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
         // can still point at the install dir even when spawn cwd is home.
@@ -12762,7 +12773,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
           // can't reliably do that, so we set it inline for every spawn.
           HERMES_HOME,
           ...backend.env,
-          ...ownerGrantBackendSpawnEnv(),
+          ...ownerGrantBackendSpawnEnv(profile),
           TERMINAL_CWD: hermesCwd,
           // Marks this dashboard backend as desktop-spawned so it runs the cron
           // scheduler tick loop (the gateway isn't running under the app).
@@ -15379,6 +15390,66 @@ ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => appl
 // asks; main shows the native confirm (with the new kid) before the one macOS admin prompt.
 ipcMain.handle('hermes:owner-grant:status', async () => ownerGrantController.status())
 ipcMain.handle('hermes:owner-grant:action', async (_event: any, action: any) => ownerGrantController.runAction(action))
+
+// #60 owner-forward: the ONLY path to an owner-signed forward. Main checks the sender is an app
+// window's main frame, resolves every target title itself (its own backend token, never renderer
+// labels), shows the native "Send as you?" confirm (Touch ID after Send for prod scopes), signs,
+// and writes the grant file before returning the envelope. Rate gates live in the handler.
+const handleOwnerForwardConfirm = createOwnerForwardConfirmHandler({
+  isTrustedSender: event =>
+    isAppChromeSender(event, sender =>
+      BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.webContents === sender)
+    ),
+  backendIdForProfile: profile => ownerGrantBackendIds.get(profile) ?? null,
+  resolveSession: async (profile, sessionId, backendProfile) => {
+    try {
+      const row: any = await fetchJsonForProfile(
+        backendProfile,
+        `/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}`
+      )
+
+      if (!row || typeof row !== 'object' || row.id !== sessionId) {
+        return null
+      }
+
+      return {
+        title: typeof row.title === 'string' && row.title.trim() ? row.title.trim() : null,
+        claude_session_id: typeof row.claude_session_id === 'string' && row.claude_session_id ? row.claude_session_id : null
+      }
+    } catch {
+      return null
+    }
+  },
+  showMessageBox: async options => {
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+
+    return parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options)
+  },
+  touchId: {
+    canPrompt: () => process.platform === 'darwin' && systemPreferences.canPromptTouchID(),
+    prompt: reason => systemPreferences.promptTouchID(reason)
+  },
+  store: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir(),
+  ownerUid: process.getuid?.() ?? -1,
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+
+ipcMain.handle('hermes:owner-forward:confirm', async (event: any, request: any) =>
+  handleOwnerForwardConfirm(event, request)
+)
+
+// #60 U16: re-verify a delivered owner_forward row's stored envelope against the root-owned anchor
+// (re-read per call). Display only; never a gate.
+ipcMain.handle('hermes:owner-grant:verify', async (_event: any, check: any) => {
+  const read = readTrustedOwnerAnchor()
+
+  return verifyStoredOwnerGrant(
+    { envelope: check?.envelope, text: check?.text, sessionId: check?.sessionId },
+    read.ok ? { ok: true, keys: read.anchor.keys } : { ok: false, keys: [] }
+  )
+})
 
 // ── v2 connection registry IPC (multi-source) ───────────────────────────────
 // Storage-level CRUD for named agent sources. Routing/pooling consumption of

@@ -212,6 +212,12 @@ declare global {
       ownerGrant?: {
         status: () => Promise<DesktopOwnerGrantStatus>
         action: (action: 'enable' | 'revoke' | 'rotate') => Promise<DesktopOwnerGrantActionResult>
+        // #60 U16: main re-verifies a delivered owner_forward row's stored envelope (display only).
+        verify?: (check: { envelope: unknown; text: string; sessionId: string }) => Promise<DesktopOwnerGrantVerdict>
+      }
+      // #60 owner-forward: native confirm + sign in main (mirrors electron/owner-forward-confirm.ts).
+      ownerForward?: {
+        confirm: (request: DesktopOwnerForwardConfirmRequest) => Promise<DesktopOwnerForwardConfirmResult>
       }
       // v2 multi-connection registry: named agent sources, all persisted
       // together (local + any number of remote/cloud/ssh instances).
@@ -645,6 +651,33 @@ export interface DesktopOwnerGrantStatus {
   message: string
   busy: boolean
 }
+
+export type DesktopOwnerGrantVerdict = { state: 'verified' } | { state: 'unverified'; reason: string }
+
+export type DesktopOwnerForwardGesture = 'composer_signed' | 'menu' | 'proposal' | 'selection' | 'slash_to'
+
+export interface DesktopOwnerForwardConfirmRequest {
+  text: string
+  gesture: DesktopOwnerForwardGesture
+  origin: { session_id: string; message_id: null | string; role: 'assistant' | 'peer' | 'user' | null }
+  /** The profile whose backend delivers the forward (the renderer's active gateway). */
+  profile: string
+  targets: Array<{ profile: string; session_id: string }>
+  scope: string[]
+  subject?: string
+  ttlMs?: number
+}
+
+export type DesktopOwnerForwardConfirmResult =
+  | {
+      ok: true
+      decisionId: string
+      grantId: string
+      envelope: { format: string; kid: string; payload: string; sig: string }
+      targets: string[]
+    }
+  | { ok: false; cancelled: true; reason: 'dialog' | 'touch_id' | 'unrecognized_scope' }
+  | { ok: false; cancelled?: undefined; code: string; error: string }
 
 export interface DesktopOwnerGrantActionResult {
   ok: boolean

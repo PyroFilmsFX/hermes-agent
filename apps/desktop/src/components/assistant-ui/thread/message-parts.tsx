@@ -11,6 +11,10 @@ import { type ComponentProps, type FC, type ReactNode, useEffect, useRef, useSta
 
 import { CatalogInstallTool } from '@/components/assistant-ui/catalog-install-tool'
 import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
+import {
+  isOwnerForwardProposeName,
+  OwnerForwardProposalTool
+} from '@/components/owner-forward/owner-forward-proposal-tool'
 import { ConnectorExecution, ConnectorTool } from '@/components/assistant-ui/connector-tool'
 import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { McpSetupTool } from '@/components/assistant-ui/mcp-setup-tool'
@@ -105,6 +109,12 @@ const ChainToolFallback: FC<TimelineToolCallProps> = props => {
 
   if (props.toolName === 'image_generate') {
     return <ImageGenerateTool {...props} />
+  }
+
+  // #60: a manager's owner_forward_propose result renders as a native card that only opens the
+  // Forward sheet (strict names; anything else falls back inside the component).
+  if (isOwnerForwardProposeName(props.toolName)) {
+    return <OwnerForwardProposalTool {...props} />
   }
 
   if (props.toolName === 'clarify') {

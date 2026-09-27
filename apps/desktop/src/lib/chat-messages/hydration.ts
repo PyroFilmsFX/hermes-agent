@@ -20,7 +20,7 @@ import {
   toolPartFromStoredCall,
   withUniqueToolCallIds
 } from './tool-parts'
-import type { ChatMessage, ChatMessagePart, PeerMetadata } from './types'
+import type { ChatMessage, ChatMessagePart, OwnerForwardMetadata, PeerMetadata } from './types'
 
 const ATTACHED_CONTEXT_MARKER_RE = /(?:^|\n)--- Attached Context ---\s*\n/
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
@@ -477,6 +477,17 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
   return content
 }
 
+function ownerForwardMetadata(meta: Record<string, unknown> | null | undefined): OwnerForwardMetadata {
+  const grant = meta?.owner_grant && typeof meta.owner_grant === 'object' ? (meta.owner_grant as Record<string, unknown>) : null
+
+  return {
+    fromSessionId: typeof meta?.from_session_id === 'string' ? meta.from_session_id : null,
+    fromTitle: typeof meta?.from_title === 'string' ? meta.from_title : '',
+    envelope: grant?.envelope && typeof grant.envelope === 'object' ? grant.envelope : null,
+    grantId: typeof grant?.id === 'string' ? grant.id : null
+  }
+}
+
 export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   const result: ChatMessage[] = []
   let pendingToolParts: ChatMessagePart[] = []
@@ -578,9 +589,13 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     const textContent = textFromUnknown(content)
     const parsedEnvelope = parsePeerMessageEnvelope(textContent)
     const isPeerEnvelope = parsedEnvelope !== null
-    const isPeerMessage = message.display_kind === 'peer_message' || isPeerEnvelope
+    // #60: an owner_forward row is the owner's own turn. It wins over envelope sniffing, so text that
+    // happens to look like a peer envelope still renders as the owner's bubble.
+    const isOwnerForwardRow = message.display_kind === 'owner_forward' && message.role === 'user'
+    const isPeerMessage = !isOwnerForwardRow && (message.display_kind === 'peer_message' || isPeerEnvelope)
 
     const metaRecord = parseDisplayMetadata(message.display_metadata)
+    const ownerForward = isOwnerForwardRow ? ownerForwardMetadata(metaRecord) : undefined
 
     const direction: 'in' | 'out' =
       metaRecord?.direction === 'out' || (!metaRecord?.direction && message.role === 'assistant') ? 'out' : 'in'
@@ -811,6 +826,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: sessionLifecycleBody(message.display_metadata) }
         : {}),
       ...(peerMetadata ? { peerMetadata } : {}),
+      ...(ownerForward ? { ownerForward } : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(deliveryId ? { deliveryId } : {}),
       ...(rowId !== undefined ? { rowId } : {}),

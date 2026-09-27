@@ -284,7 +284,15 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   // and the one macOS admin prompt; no key material ever crosses this bridge.
   ownerGrant: {
     status: () => ipcRenderer.invoke('hermes:owner-grant:status'),
-    action: (action: 'enable' | 'revoke' | 'rotate') => ipcRenderer.invoke('hermes:owner-grant:action', action)
+    action: (action: 'enable' | 'revoke' | 'rotate') => ipcRenderer.invoke('hermes:owner-grant:action', action),
+    // #60 U16: main re-verifies a delivered owner_forward row's stored envelope (display only).
+    verify: (check: { envelope: unknown; text: string; sessionId: string }) =>
+      ipcRenderer.invoke('hermes:owner-grant:verify', check)
+  },
+  // #60 owner-forward: main resolves titles, shows the native "Send as you?" confirm, signs, and
+  // returns the envelope. Only the Forward sheet, a typed /to and ⌘⇧↩ call this.
+  ownerForward: {
+    confirm: (request: unknown) => ipcRenderer.invoke('hermes:owner-forward:confirm', request)
   },
   // v2 multi-connection registry: named agent sources (local / remote / cloud / ssh).
   connections: {
