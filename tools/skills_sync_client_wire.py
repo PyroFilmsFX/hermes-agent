@@ -106,21 +106,34 @@ def _file_mode(path: Path) -> str:
     return MODE_FILE
 
 
-def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> str:
+def _egress_masker():
+    from agent.secret_egress import EgressMasker
+
+    return EgressMasker("skill sync")
+
+
+def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int, _masker: Any = None) -> str:
     """Build objects for *dir_path* recursively; return the tree address. Symlinks/special files are
-    skipped (contract). A blob over *max_object_bytes* raises ValueError (server would 413)."""
+    skipped (contract). A blob over *max_object_bytes* raises ValueError (server would 413).
+
+    Text blobs are secret-masked before they are hashed (``[REDACTED:<kind>:<tag>]``), so the
+    content address is that of the bytes that actually leave; binary blobs are untouched and a
+    masking failure raises ``EgressMaskError`` (nothing is pushed)."""
+    masker = _masker if _masker is not None else _egress_masker()
     entries: List[Dict[str, str]] = []
     for child in sorted(dir_path.iterdir(), key=lambda p: p.name):
         if child.is_symlink():
             logger.debug("skills_sync_client: skipping symlink %s", child)
         elif child.is_dir():
-            entries.append(_entry(child.name, KIND_TREE, build_tree(child, objects, max_object_bytes=max_object_bytes),
-                                  MODE_DIR))
+            entries.append(_entry(child.name, KIND_TREE, build_tree(child, objects, max_object_bytes=max_object_bytes,
+                                                                    _masker=masker), MODE_DIR))
         elif child.is_file():
-            data = child.read_bytes()
+            data = masker.payload(child.read_bytes(), child.name)
             if len(data) > max_object_bytes:
                 raise ValueError(f"file {child} is {len(data)} bytes > max_object_bytes {max_object_bytes}")
             entries.append(_entry(child.name, KIND_BLOB, objects.add(KIND_BLOB, data), _file_mode(child)))
+    if _masker is None:
+        masker.log_summary()
     return _add_tree(entries, objects)
 
 
@@ -131,7 +144,7 @@ def build_commit(tree_hash: str, parents: List[str], *, owner: str, device: str,
         "type": KIND_COMMIT, "tree": tree_hash, "parents": list(parents),
         "author": {"owner": owner, "device": device},
         "ts": ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "message": message, "artifact_type": ARTIFACT_TYPE_SKILL}))
+        "message": _egress_masker().text(message), "artifact_type": ARTIFACT_TYPE_SKILL}))
 
 
 def build_root_tree(node: Dict[str, Any], objects: ObjectSet, *, manifest_hash: Optional[str] = None) -> str:

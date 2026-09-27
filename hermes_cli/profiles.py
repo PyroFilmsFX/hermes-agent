@@ -2136,29 +2136,32 @@ def _should_redact_export_file(path: Path) -> bool:
 
 
 def _scrub_export_secrets(staged: Path) -> None:
-    """Force-redact secret-shaped strings in a staged export tree (same pass as ``hermes
-    sessions export --redact``). Runs on the staged copy only; symlinks to text files are
-    materialized when content changes so redaction never follows a link back into the source."""
-    from agent.redact import redact_sensitive_text
+    """Mask only the staged export tree; never rewrite the live profile files."""
+    from agent.secret_egress import EgressMasker, STATE_DB_COLUMNS
+
+    masker = EgressMasker("profile export")
     for path in staged.rglob("*"):
-        try:
-            is_link = path.is_symlink()
-            if not path.is_file():  # broken links, symlinked dirs, non-files
-                continue
-        except OSError:
+        if not path.is_file():
             continue
-        if not _should_redact_export_file(path):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8-sig")
-        except (UnicodeDecodeError, OSError):
-            continue
-        redacted = redact_sensitive_text(text, force=True)
-        if redacted == text:
-            continue
-        if is_link:
-            path.unlink()
-        path.write_text(redacted, encoding="utf-8")
+        if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+            if path.is_symlink():
+                from hermes_cli.backup_sqlite import _safe_copy_db
+
+                source_mode = path.stat().st_mode
+                with tempfile.NamedTemporaryFile(suffix=path.suffix, delete=False, dir=path.parent) as tmp:
+                    snapshot = Path(tmp.name)
+                try:
+                    if not _safe_copy_db(path, snapshot):
+                        raise OSError("could not make a safe SQLite export snapshot")
+                    os.chmod(snapshot, source_mode)
+                    os.replace(snapshot, path)
+                finally:
+                    snapshot.unlink(missing_ok=True)
+            masker.sqlite_file(path, STATE_DB_COLUMNS if path.name == "state.db" else None,
+                               extension_homes=(staged,))
+        else:
+            masker.file_in_place(path)
+    masker.log_summary()
 
 
 def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, str]] = None) -> Path:

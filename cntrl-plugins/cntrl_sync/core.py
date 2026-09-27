@@ -144,6 +144,17 @@ def assignee_for(task: dict, profile_map: dict) -> Optional[str]:
     return None
 
 
+# ---------- egress masking ----------
+
+
+def _mask_outbound(value: Any) -> Any:
+    """Mask secrets in text bound for cntrl (``[REDACTED:<kind>:<tag>]``); raises
+    ``agent.secret_egress.EgressMaskError`` instead of sending unmasked content."""
+    from agent.secret_egress import mask_egress_value
+
+    return mask_egress_value(value, surface="cntrl_sync")
+
+
 # ---------- cntrl HTTP client ----------
 
 
@@ -160,7 +171,9 @@ class CntrlClient:
         self.timeout = timeout
 
     def _req(self, method: str, path: str, body: Optional[dict] = None) -> Any:
-        data = json.dumps(body).encode("utf-8") if body is not None else None
+        # Every payload leaves masked (secret hygiene, fail closed): no request is sent when
+        # masking fails. flow_up already masks its comments; this covers any other caller.
+        data = json.dumps(_mask_outbound(body)).encode("utf-8") if body is not None else None
         req = urllib.request.Request(
             self.base_url + path,
             data=data,
@@ -347,12 +360,17 @@ def flow_up(client: CntrlClient, conn: sqlite3.Connection, task_id: str, *, reas
     remote = client.get_task(cid)
     if str(remote.get("status") or "").lower() == target and task.status not in ("blocked",):
         return {"cntrl_id": cid, "status": target, "skipped": "already there"}
-    client.move(cid, target, int(remote.get("position") or 0))
+    note: Optional[str] = None
     if task.status == "done":
         result = (getattr(task, "result", None) or "").strip()
-        client.comment(cid, "Hermes completed this task." + (f"\n\n{result}" if result else ""))
+        note = "Hermes completed this task." + (f"\n\n{result}" if result else "")
     elif task.status == "blocked":
-        client.comment(cid, "Hermes blocked this task." + (f" Reason: {reason}" if reason else ""))
+        note = "Hermes blocked this task." + (f" Reason: {reason}" if reason else "")
+    # Masked before anything is sent: a masking failure blocks the move and the comment.
+    note = _mask_outbound(note) if note else note
+    client.move(cid, target, int(remote.get("position") or 0))
+    if note:
+        client.comment(cid, note)
     return {"cntrl_id": cid, "status": target}
 
 

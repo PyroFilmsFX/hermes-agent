@@ -22,8 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Prepended to upload-bound content when redaction is enabled so paste reviewers know.
 _REDACTION_BANNER = (
-    "[hermes debug share: log content redacted at upload time. "
-    "run with --no-redact to disable]\n")
+    "[hermes debug share: detected secrets masked before upload; --no-redact disables extra log scrubbing]\n")
 _EMAIL_ADDRESS_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
@@ -256,13 +255,12 @@ def _resolve_log_path(log_name: str) -> Optional[Path]:
     return None
 
 
-def _redact_log_text(text: str) -> str:
-    """``redact_sensitive_text(force=True)`` + email scrub — fires regardless of the operator's
-    ``security.redact_secrets`` setting; only the in-memory upload copy is sanitized."""
+def _redact_log_text(text: str, *, legacy: bool = True) -> str:
+    """Mask secrets for debug-share egress, then apply legacy display scrubbing if requested."""
     if not text:
         return text
-    from agent.redact import redact_sensitive_text
-    text = redact_sensitive_text(text, force=True)
+    from agent.secret_egress import mask_egress_text
+    text = mask_egress_text(text, surface="debug share", legacy=legacy)
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
 
@@ -394,11 +392,20 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     The dump header is prepended to each full log so every file is self-contained, and the
     redaction banner is prepended when ``redact`` is True.
     """
-    dump_text = _capture_dump()
+    dump_text = _redact_log_text(_capture_dump(), legacy=redact)
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
+    # Snapshot providers can be replaced by integrations or tests; apply the S1
+    # masker at the final bundle boundary as well, even for --no-redact.
+    log_snapshots = {
+        name: LogSnapshot(path=snapshot.path,
+                          tail_text=_redact_log_text(snapshot.tail_text, legacy=redact),
+                          full_text=_redact_log_text(snapshot.full_text, legacy=redact)
+                          if snapshot.full_text is not None else None)
+        for name, snapshot in log_snapshots.items()
+    }
     report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
                                   log_snapshots=log_snapshots)
-    banner = _REDACTION_BANNER if redact else ""
+    banner = _REDACTION_BANNER
     bundle: dict[str, str] = {"report": banner + report}
     for name in _FULL_LOGS:
         if full := log_snapshots[name].full_text:
@@ -409,9 +416,11 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
 def build_nous_bundle(bundle: dict[str, str], redact: bool = True) -> bytes:
     """Gzip a :func:`collect_share_bundle` mapping into the Nous envelope (shape parsed by the
     discord-support viewer — keep it stable)."""
+    from agent.secret_egress import mask_egress_value
+
     envelope = {"format": _NOUS_BUNDLE_FORMAT, "redacted": bool(redact),
                 "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "files": bundle}
+                "files": mask_egress_value(bundle, surface="debug share")}
     return gzip.compress(json.dumps(envelope).encode("utf-8"))
 
 
@@ -544,7 +553,7 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
     if not _confirm_upload(args):
         return
     if not redact:
-        print("⚠️  --no-redact is set: secrets in your logs will NOT be redacted before upload.\n")
+        print("--no-redact is set: extra log scrubbing is disabled; detected secrets remain masked before upload.\n")
     print("Collecting debug report...")
     _best_effort_sweep_expired_pastes()
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
@@ -617,7 +626,7 @@ Options (share):
   --local      Print report locally instead of uploading
   --nous       Upload to Nous-internal storage (private, staff-only,
                auto-deletes in 14 days) instead of a public paste
-  --no-redact  Disable upload-time secret redaction (default: redact)
+  --no-redact  Disable extra log scrubbing (detected secrets remain masked)
 
 Options (delete):
   <url> ...    One or more paste URLs to delete"""

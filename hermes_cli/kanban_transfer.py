@@ -155,6 +155,13 @@ def export_board(
         attachments = copy_regular_files(kb.attachments_root(slug), staged / "attachments") if include_attachments else 0
         logs = copy_regular_files(kb.worker_logs_dir(slug), staged / "logs") if include_logs else 0
 
+        from agent.secret_egress import EgressMasker
+
+        masker = EgressMasker("kanban export")
+        masker.sqlite_file(staged / "kanban.db", extension_homes=(Path.home() / ".hermes",))
+        masker.tree_in_place(staged)
+        masker.log_summary()
+
         from hermes_cli.version_info import get_version_info
 
         manifest = {

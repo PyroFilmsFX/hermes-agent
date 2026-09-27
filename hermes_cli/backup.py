@@ -457,6 +457,39 @@ def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, ou
         tmp_db.unlink(missing_ok=True)
 
 
+def _zip_egress_file(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_path: Path,
+                     masker, hermes_root: Path) -> Optional[int]:
+    """Add a masked staged copy of one backup member; the live file is read-only here."""
+    mode = stat.S_IMODE(abs_path.stat().st_mode)
+    if abs_path.suffix.lower() == ".db":
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=str(out_path.parent)) as tmp:
+            tmp_db = Path(tmp.name)
+        try:
+            if not _safe_copy_db(abs_path, tmp_db):
+                return None
+            masker.sqlite_file(tmp_db, extension_homes=(hermes_root,))
+            os.chmod(tmp_db, mode)
+            zf.write(tmp_db, arcname=str(rel_path))
+            return tmp_db.stat().st_size
+        finally:
+            tmp_db.unlink(missing_ok=True)
+
+    data = abs_path.read_bytes()
+    masked = masker.payload(data, abs_path.name)
+    if masked == data:
+        zf.write(abs_path, arcname=str(rel_path))
+        return len(data)
+    with tempfile.NamedTemporaryFile(delete=False, dir=str(out_path.parent)) as tmp:
+        staged = Path(tmp.name)
+        tmp.write(masked)
+    try:
+        os.chmod(staged, mode)
+        zf.write(staged, arcname=str(rel_path))
+        return len(masked)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def _write_zip_entries(
     zf: zipfile.ZipFile, files_to_add: List[Tuple[Path, Path]], out_path: Path,
     *, on_db_failure, on_error, on_progress, track_bytes: bool) -> int:
@@ -466,10 +499,18 @@ def _write_zip_entries(
     ``on_error(rel_path, exc)`` records a read failure; ``on_progress(i)`` fires every 500 files;
     ``track_bytes`` stats plain files for the size total.
     """
+    from agent.secret_egress import EgressMasker
+    masker = EgressMasker("hermes backup")
     total_bytes = 0
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
         try:
-            if abs_path.suffix == ".db":
+            if masker.active:
+                size = _zip_egress_file(zf, abs_path, rel_path, out_path, masker, get_default_hermes_root())
+                if size is None:
+                    on_db_failure(rel_path)
+                    continue
+                total_bytes += size
+            elif abs_path.suffix == ".db":
                 size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
                 if size is None:
                     on_db_failure(rel_path)
@@ -484,6 +525,7 @@ def _write_zip_entries(
             continue
         if i % 500 == 0:
             on_progress(i)
+    masker.log_summary()
     return total_bytes
 
 
@@ -597,12 +639,24 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
             on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"))
         # External memory-provider state never includes ``.db`` files in practice, so a
         # straight zf.write is fine.
+        from agent.secret_egress import EgressMasker
+
+        external_masker = EgressMasker("hermes backup external state")
         for abs_path, arcname in external_to_add:
             try:
-                zf.write(abs_path, arcname=arcname)
-                total_bytes += abs_path.stat().st_size
+                if external_masker.active:
+                    size = _zip_egress_file(zf, abs_path, Path(arcname), out_path, external_masker,
+                                            get_default_hermes_root())
+                    if size is None:
+                        errors.append(f"{arcname}: SQLite safe copy failed")
+                        continue
+                    total_bytes += size
+                else:
+                    zf.write(abs_path, arcname=arcname)
+                    total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
+        external_masker.log_summary()
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
     logger.info("backup phase=archive status=complete duration_ms=%.1f files=%d errors=%d bytes=%d",

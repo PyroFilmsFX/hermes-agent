@@ -84,6 +84,7 @@ class SecretHygieneConfig:
     sweep_backup_retention_days: int = 7
     sweep_live_window_hours: float = 24.0
     optout_allowed: bool = False
+    sweep_on_backup: bool = True
 
     def detect_options(self) -> DetectOptions:
         return DetectOptions(
@@ -156,6 +157,7 @@ def load_secret_hygiene_config() -> SecretHygieneConfig:
         sweep_backup_retention_days=_num(sweep.get("backup_retention_days", 7), 7, int, 1, 3650),
         sweep_live_window_hours=_num(sweep.get("live_window_hours", 24), 24.0, float, 0.0, 24 * 365),
         optout_allowed=optout.get("allowed", d.optout_allowed) is not False,
+        sweep_on_backup=sweep.get("on_backup", d.sweep_on_backup) is not False,
     )
 
 
