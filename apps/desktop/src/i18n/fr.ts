@@ -4009,6 +4009,7 @@ export const frOverrides = {
       noBranches: 'Aucune branche trouvée',
       removeWorktree: 'Supprimer le worktree',
       removeWorktreeFailed: 'Impossible de supprimer le worktree (modifications non validées ?)',
+      merged: 'fusionné',
       removeWorktreeConfirm:
         'Supprimez-le de git (supprime le répertoire du worktree ; la branche reste), ou masquez simplement la voie de la barre latérale et laissez le worktree sur le disque.',
       removeWorktreeDirty:

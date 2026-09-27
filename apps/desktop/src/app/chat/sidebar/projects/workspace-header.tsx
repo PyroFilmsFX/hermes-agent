@@ -242,6 +242,7 @@ export function WorkspaceHeader({
   emphasis = false,
   icon,
   label,
+  badge,
   onToggle,
   open,
   title,
@@ -253,6 +254,7 @@ export function WorkspaceHeader({
   emphasis?: boolean
   icon: React.ReactNode
   label: string
+  badge?: string
   onToggle: () => void
   open: boolean
   /** Hover tooltip — the lane's full on-disk path (worktree / repo root). */
@@ -278,6 +280,7 @@ export function WorkspaceHeader({
       >
         <SidebarRowLead>{icon}</SidebarRowLead>
         <LaneLabel label={label} title={title ? `${label}\n${title}` : label} />
+        {badge && <span className="shrink-0 text-[0.625rem] font-normal text-(--ui-text-quaternary)">{badge}</span>}
         <DisclosureCaret
           className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100"
           open={open}

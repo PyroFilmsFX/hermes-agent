@@ -2995,6 +2995,7 @@ export interface Translations {
       noBranches: string
       removeWorktree: string
       removeWorktreeFailed: string
+      merged: string
       removeWorktreeConfirm: string
       removeWorktreeDirty: string
       forceRemove: string

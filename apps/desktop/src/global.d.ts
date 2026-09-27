@@ -1467,6 +1467,7 @@ export interface HermesGitWorktree {
   isMain: boolean
   detached: boolean
   locked: boolean
+  merged?: boolean
 }
 
 // A branch that the "convert a branch into a worktree" picker offers: the local

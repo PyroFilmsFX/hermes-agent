@@ -3991,6 +3991,7 @@ export const esOverrides = {
       noBranches: 'No se encontraron ramas',
       removeWorktree: 'Eliminar worktree',
       removeWorktreeFailed: 'No se pudo eliminar el worktree (¿hay cambios sin confirmar?)',
+      merged: 'fusionado',
       removeWorktreeConfirm:
         'Elimínalo de Git (se borra el directorio del worktree; la rama se conserva) o simplemente oculta el carril de la barra lateral y deja el worktree en disco.',
       removeWorktreeDirty:

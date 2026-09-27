@@ -7,7 +7,7 @@ import { $sidebarWorkspaceNodeOpen } from '@/store/layout'
 import type * as SessionDotStateMod from '@/store/session-dot-state'
 
 import { RepoFlatSection } from './entered-content'
-import { ConductorLaneRollup } from './lane-rollup'
+import { WorktreeLaneRollup } from './lane-rollup'
 import type { SidebarSessionGroup, SidebarWorkspaceTree } from './workspace-groups'
 
 afterEach(cleanup)
@@ -60,6 +60,7 @@ vi.mock('@/i18n', () => ({
         projects: {
           enter: (label: string) => `Open ${label}`,
           forceRemove: 'Force remove',
+          merged: 'merged',
           menu: 'Actions',
           removeFromSidebar: 'Remove from sidebar',
           removeWorktree: 'Remove worktree',
@@ -104,7 +105,7 @@ const makeLane = (over: Partial<SidebarSessionGroup> & { id: string; label: stri
   ...over
 })
 
-describe('ConductorLaneRollup', () => {
+describe('WorktreeLaneRollup', () => {
   beforeEach(() => {
     mockDotStates.set({})
     $sidebarWorkspaceNodeOpen.set({})
@@ -112,7 +113,7 @@ describe('ConductorLaneRollup', () => {
 
   it('renders nothing when lanes is empty', () => {
     const { container } = render(
-      <ConductorLaneRollup
+      <WorktreeLaneRollup
         lanes={[]}
         renderRows={() => null}
         repoRoot="/repo"
@@ -132,7 +133,7 @@ describe('ConductorLaneRollup', () => {
     ]
 
     render(
-      <ConductorLaneRollup
+      <WorktreeLaneRollup
         lanes={lanes}
         renderRows={() => null}
         repoRoot="/repo"
@@ -155,6 +156,27 @@ describe('ConductorLaneRollup', () => {
     expect(screen.getByTitle(/lane-3/)).toBeTruthy()
     expect(screen.getByTitle(/lane-4/)).toBeTruthy()
     expect(screen.getByTitle(/lane-5/)).toBeTruthy()
+  })
+
+  it('shows merged lanes with a muted flag after unmerged lanes', () => {
+    const activeLane = makeLane({ id: '/repo/active', label: 'feature/active' })
+    const mergedLane = Object.assign(makeLane({ id: '/repo/merged', label: 'feature/merged' }), { merged: true })
+
+    render(
+      <WorktreeLaneRollup
+        lanes={[mergedLane, activeLane]}
+        renderRows={() => null}
+        repoRoot="/repo"
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /2 lanes/ }))
+
+    const laneTitles = screen.getAllByTitle(/feature\//).map(node => node.getAttribute('title')?.split('\n')[0])
+
+    expect(laneTitles).toEqual(['feature/active', 'feature/merged'])
+    expect(screen.getByText('merged')).toBeTruthy()
+    expect(screen.getByText('merged').className).toContain('text-(--ui-text-quaternary)')
   })
 
   it('counts running lanes and renders running dot and running arc when M > 0', () => {
@@ -195,7 +217,7 @@ describe('ConductorLaneRollup', () => {
     })
 
     const { container } = render(
-      <ConductorLaneRollup
+      <WorktreeLaneRollup
         lanes={lanes}
         renderRows={() => null}
         repoRoot="/repo"
@@ -214,7 +236,7 @@ describe('ConductorLaneRollup', () => {
     const lanes = [makeLane({ id: '/repo/.claude/worktrees/lane-1', label: 'lane-1' })]
 
     const { unmount } = render(
-      <ConductorLaneRollup
+      <WorktreeLaneRollup
         lanes={lanes}
         renderRows={() => null}
         repoRoot="/repo/"
@@ -228,7 +250,7 @@ describe('ConductorLaneRollup', () => {
 
     // Render with "/repo" (no trailing slash) - should already be open
     render(
-      <ConductorLaneRollup
+      <WorktreeLaneRollup
         lanes={lanes}
         renderRows={() => null}
         repoRoot="/repo"
@@ -244,7 +266,7 @@ describe('RepoFlatSection integration', () => {
     $sidebarWorkspaceNodeOpen.set({})
   })
 
-  it('5 conductor lanes + 1 regular lane -> one "5 lanes" node directly after home lane, default collapsed, expands to 5 lanes', () => {
+  it('rolls all linked worktrees into one repo row after the home lane', () => {
     const repo: SidebarWorkspaceTree = {
       groups: [
         makeLane({ id: '/repo::branch::main', isHome: true, isMain: true, label: 'main' }),
@@ -270,17 +292,19 @@ describe('RepoFlatSection integration', () => {
       />
     )
 
-    // Home lane and regular lane are directly visible
+    // Home lane stays visible; linked worktrees live in the rollup.
     expect(screen.getByTitle(/main/)).toBeTruthy()
-    expect(screen.getByTitle(/feat-payment/)).toBeTruthy()
+    expect(screen.queryByTitle(/feat-payment/)).toBeNull()
 
-    // Conductor lanes are collapsed into "5 lanes" node
-    expect(screen.getByTitle('5 lanes')).toBeTruthy()
+    // Every linked worktree is collapsed into the repo's 6-lane node.
+    expect(screen.getByTitle('6 lanes')).toBeTruthy()
+    expect(screen.queryByTitle(/feat-payment/)).toBeNull()
     expect(screen.queryByTitle(/lane-1/)).toBeNull()
     expect(screen.queryByTitle(/lane-5/)).toBeNull()
 
-    // Expanding "5 lanes" reveals the 5 conductor lanes
-    fireEvent.click(screen.getByRole('button', { name: /5 lanes/ }))
+    // Expanding the rollup reveals all six worktrees.
+    fireEvent.click(screen.getByRole('button', { name: /6 lanes/ }))
+    expect(screen.getByTitle(/feat-payment/)).toBeTruthy()
     expect(screen.getByTitle(/lane-1/)).toBeTruthy()
     expect(screen.getByTitle(/lane-2/)).toBeTruthy()
     expect(screen.getByTitle(/lane-3/)).toBeTruthy()
@@ -288,7 +312,7 @@ describe('RepoFlatSection integration', () => {
     expect(screen.getByTitle(/lane-5/)).toBeTruthy()
   })
 
-  it('zero conductor lanes -> no rollup node rendered', () => {
+  it('a single linked worktree is still grouped in the repo rollup', () => {
     const repo: SidebarWorkspaceTree = {
       groups: [
         makeLane({ id: '/repo::branch::main', isHome: true, isMain: true, label: 'main' }),
@@ -310,8 +334,8 @@ describe('RepoFlatSection integration', () => {
     )
 
     expect(screen.getByTitle(/main/)).toBeTruthy()
-    expect(screen.getByTitle(/feat-login/)).toBeTruthy()
-    expect(screen.queryByTitle(/lanes/i)).toBeNull()
+    expect(screen.queryByTitle(/feat-login/)).toBeNull()
+    expect(screen.getByTitle('1 lane')).toBeTruthy()
   })
 
   it('kanban skip is unchanged', () => {

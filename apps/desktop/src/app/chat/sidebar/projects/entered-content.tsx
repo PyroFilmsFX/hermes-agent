@@ -15,14 +15,14 @@ import { removeWorktreePath } from '@/store/projects'
 
 import { SidebarRowStack } from '../chrome'
 
-import { ConductorLaneRollup } from './lane-rollup'
+import { WorktreeLaneRollup } from './lane-rollup'
 import { PROJECT_SESSION_PAGE, useRevealedRows, useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
 import {
   mergeRepoWorktreeGroups,
   normalizePath,
   overlayRepoLanes,
-  partitionConductorLanes,
+  partitionWorktreeLanes,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   type SidebarWorkspaceTree
@@ -164,7 +164,7 @@ export function RepoFlatSection({
       (removedWorktrees.includes(group.id) && group.path && discoveredWorktreePaths.has(group.path))
   )
 
-  const { regular, conductor } = useMemo(() => partitionConductorLanes(ordered), [ordered])
+  const { regular, worktrees } = useMemo(() => partitionWorktreeLanes(ordered), [ordered])
   const homeIndex = regular.findIndex(group => group.isHome || group.isMain)
   const beforeLanes = homeIndex >= 0 ? regular.slice(0, homeIndex + 1) : []
   const afterLanes = homeIndex >= 0 ? regular.slice(homeIndex + 1) : regular
@@ -210,10 +210,10 @@ export function RepoFlatSection({
   const body = (
     <>
       {beforeLanes.map(renderGroup)}
-      {conductor.length > 0 && (
-        <ConductorLaneRollup
+      {worktrees.length > 0 && (
+        <WorktreeLaneRollup
           key={`${normalizePath(repo.path || repo.id)}::lanes`}
-          lanes={conductor}
+          lanes={worktrees}
           onNewSession={onNewSession}
           onNewSessionSplit={onNewSessionSplit}
           onRemoveLane={setRemoveTarget}

@@ -28,6 +28,8 @@ export interface SidebarSessionGroup {
   // worktrees (`<repo>/.worktrees/t_*`) into one row, so a heavy board doesn't
   // spray hundreds of throwaway branch lanes across the sidebar.
   isKanban?: boolean
+  // True when git reports this linked worktree's branch merged into the repo default.
+  merged?: boolean
   mode?: 'profile' | 'source' | 'workspace'
   sourceId?: string
   // Exact owner for gateway/profile sidebar sections; absent for workspace lanes.
@@ -124,17 +126,11 @@ export function kanbanWorktreeDir(path: string): null | string {
   return path.match(KANBAN_DIR_RE)?.[1] ?? null
 }
 
-const CLAUDE_WORKTREE_LANE_RE = /(?:^|\/)\.claude\/worktrees\/(?:lane-|lane\/)/i
-
 /**
- * Predicate to identify conductor lane worktrees.
- * Returns true when any of these hold:
- *  - (a) the normalised path contains a "/.claude/worktrees/" segment whose next segment starts with "lane-" or "lane/"
- *  - (b) the branch starts with "lane/" (the conductor's slash form), anywhere
- *  - (c) the branch or path basename is exactly "pr-base"
- * Never true for isMain.
+ * Every linked worktree lane belongs in the repo rollup, whatever its branch or
+ * directory name. The main checkout and kanban aggregate keep their own rows.
  */
-export function isConductorLane(
+export function isLinkedWorktreeLane(
   worktree:
     | HermesGitWorktree
     | SidebarSessionGroup
@@ -150,50 +146,35 @@ export function isConductorLane(
     return false
   }
 
-  const path = worktree.path || ''
-  const normalizedPath = path.replace(/\\/g, '/')
-
-  if (CLAUDE_WORKTREE_LANE_RE.test(normalizedPath)) {
-    return true
-  }
-
-  const branch = (('branch' in worktree && worktree.branch) || ('label' in worktree && worktree.label) || '').trim()
-
-  if (branch.startsWith('lane/')) {
-    return true
-  }
-
-  const base = baseName(path) ?? ''
-
-  return branch === 'pr-base' || base === 'pr-base'
+  return true
 }
 
-export interface ConductorLanePartition extends Array<SidebarSessionGroup[]> {
+export interface WorktreeLanePartition extends Array<SidebarSessionGroup[]> {
   0: SidebarSessionGroup[]
   1: SidebarSessionGroup[]
   regular: SidebarSessionGroup[]
-  conductor: SidebarSessionGroup[]
+  worktrees: SidebarSessionGroup[]
 }
 
 /**
- * Partition lanes into regular lanes and conductor lanes.
+ * Partition repo lanes into regular checkout lanes and linked worktrees.
  * Preserved as a pure function to leave room for future parent-session marker grouping (e.g. `.hermes-parent`).
  */
-export function partitionConductorLanes(groups: SidebarSessionGroup[]): ConductorLanePartition {
+export function partitionWorktreeLanes(groups: SidebarSessionGroup[]): WorktreeLanePartition {
   const regular: SidebarSessionGroup[] = []
-  const conductor: SidebarSessionGroup[] = []
+  const worktrees: SidebarSessionGroup[] = []
 
   for (const group of groups) {
-    if (isConductorLane(group)) {
-      conductor.push(group)
+    if (isLinkedWorktreeLane(group)) {
+      worktrees.push(group)
     } else {
       regular.push(group)
     }
   }
 
-  const result = [regular, conductor] as unknown as ConductorLanePartition
+  const result = [regular, worktrees] as unknown as WorktreeLanePartition
   result.regular = regular
-  result.conductor = conductor
+  result.worktrees = worktrees
 
   return result
 }
@@ -419,13 +400,26 @@ export function mergeRepoWorktreeGroups(
       continue
     }
 
-    merged.push({ id, isMain: worktree.isMain, label, path: wtPath, sessions: [] })
+    merged.push({ id, isMain: worktree.isMain, label, merged: worktree.merged, path: wtPath, sessions: [] })
     seenIds.add(id)
     seenPaths.add(wtPath)
     seenLabels.add(label.toLowerCase())
   }
 
-  return sortWorktreeGroups(merged)
+  const byWorktreePath = new Map((discoveredWorktrees ?? []).map(worktree => [normalizePath(worktree.path), worktree]))
+  const byBranch = new Map(
+    (discoveredWorktrees ?? [])
+      .filter(worktree => worktree.branch)
+      .map(worktree => [worktree.branch!.toLowerCase(), worktree])
+  )
+  const annotated = merged.map(group => {
+    const worktree = byWorktreePath.get(normalizePath(group.path)) ?? byBranch.get(group.label.toLowerCase())
+    const isMerged = worktree?.merged ?? group.merged
+
+    return isMerged === group.merged ? group : { ...group, merged: isMerged }
+  })
+
+  return sortWorktreeGroups(annotated)
 }
 
 // ── Live session overlay ─────────────────────────────────────────────────────

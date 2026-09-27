@@ -2485,6 +2485,7 @@ export const ja = defineLocale({
       noBranches: 'ブランチが見つかりません',
       removeWorktree: 'ワークツリーを削除',
       removeWorktreeFailed: 'ワークツリーを削除できませんでした（コミットされていない変更？）',
+      merged: 'マージ済み',
       removeWorktreeConfirm:
         'git から削除（ワークツリーのディレクトリを削除しますが、ブランチは残ります）するか、サイドバーからレーンを隠してワークツリーをディスク上に残します。',
       removeWorktreeDirty:

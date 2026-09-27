@@ -14,7 +14,7 @@ import { SidebarWorkspaceGroup } from './workspace-group'
 import { normalizePath, type SidebarSessionGroup } from './workspace-groups'
 import { WorkspaceHeader } from './workspace-header'
 
-export interface ConductorLaneRollupProps {
+export interface WorktreeLaneRollupProps {
   repoRoot: string
   lanes: SidebarSessionGroup[]
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
@@ -24,22 +24,21 @@ export interface ConductorLaneRollupProps {
 }
 
 /**
- * Collapsible rollup node that groups ephemeral conductor lane worktrees into
- * a single row per repo, preventing conductor lanes from flooding the sidebar.
+ * Collapsible rollup node that groups linked worktrees into one row per repo.
  */
-export function ConductorLaneRollup({
+export function WorktreeLaneRollup({
   repoRoot,
   lanes,
   renderRows,
   onNewSession,
   onNewSessionSplit,
   onRemoveLane
-}: ConductorLaneRollupProps) {
+}: WorktreeLaneRollupProps) {
   const { t } = useI18n()
   const nodeId = `${normalizePath(repoRoot)}::lanes`
   const [open, toggleOpen] = useWorkspaceNodeOpen(nodeId, false)
 
-  // M counts conductor lanes containing at least one session with a running arc (live turn)
+  // M counts lanes containing at least one session with a running arc (live turn).
   const runningCount = useStoreSelector($sessionDotStateById, dotStates =>
     lanes.reduce((acc, lane) => {
       const isRunning = lane.sessions.some(session => showsRunningArc(dotStates[session.id] ?? 'idle'))
@@ -53,6 +52,7 @@ export function ConductorLaneRollup({
   }
 
   const count = lanes.length
+  const orderedLanes = [...lanes].sort((a, b) => Number(Boolean(a.merged)) - Number(Boolean(b.merged)))
 
   const label = t.sidebar.laneRollup(count, runningCount)
 
@@ -76,7 +76,7 @@ export function ConductorLaneRollup({
       </div>
       {open && (
         <SidebarRowStack className="pl-2">
-          {lanes.map(lane => (
+          {orderedLanes.map(lane => (
             <SidebarWorkspaceGroup
               group={lane}
               key={lane.id}

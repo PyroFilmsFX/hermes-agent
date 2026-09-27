@@ -74,13 +74,23 @@ async function listWorktrees(repoPath, gitBin) {
 
   try {
     const out = await runGit(gitBin, ['worktree', 'list', '--porcelain'], resolved)
+    const trees = parseWorktrees(out)
+    const trunk = await defaultBranch(gitBin, resolved)
+    const mergedBranches = trunk
+      ? (await gitLine(gitBin, ['branch', '--merged', trunk], resolved))
+          .split('\n')
+          .map(branch => branch.replace(/^[*+]\s*/, '').trim())
+          .filter(Boolean)
+      : []
+    const mergedSet = new Set(mergedBranches)
 
-    return parseWorktrees(out).map((tree, index) => ({
+    return trees.map((tree, index) => ({
       path: tree.path,
       branch: tree.branch,
       isMain: index === 0,
       detached: tree.detached,
-      locked: tree.locked
+      locked: tree.locked,
+      merged: Boolean(tree.branch && tree.branch !== trunk && mergedSet.has(tree.branch))
     }))
   } catch {
     return []
@@ -112,7 +122,7 @@ function slugify(name) {
   return slug || 'work'
 }
 
-const TRUNK_BRANCHES = ['main', 'master']
+const TRUNK_BRANCHES = ['main', 'master', 'trunk', 'develop']
 
 async function gitLine(gitBin, args, cwd) {
   try {

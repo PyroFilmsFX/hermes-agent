@@ -24,7 +24,7 @@ _UNTRACKED_LINE_MAX_BYTES = 1024 * 1024
 _UNTRACKED_SCAN_CAP = 500
 _COMMIT_CONTEXT_DIFF_MAX_CHARS = 120_000
 _COMMIT_CONTEXT_UNTRACKED_MAX = 80
-_TRUNK_BRANCHES = ("main", "master")
+_TRUNK_BRANCHES = ("main", "master", "trunk", "develop")
 
 
 def _run(argv: list[str], cwd: str, timeout: int, env: dict) -> subprocess.CompletedProcess | None:
@@ -501,7 +501,7 @@ def review_create_pr(cwd: str) -> dict:
 
 
 def worktree_list(cwd: str) -> list[dict]:
-    """``git worktree list --porcelain`` -> one dict per tree (main tree first)."""
+    """``git worktree list --porcelain`` plus merge status for each local branch."""
     trees: list[dict] = []
     for line in _git_out(cwd, ["worktree", "list", "--porcelain"]).split("\n"):
         if line.startswith("worktree "):
@@ -515,6 +515,16 @@ def worktree_list(cwd: str) -> list[dict]:
             trees[-1]["detached"] = True
         elif line.startswith("locked"):
             trees[-1]["locked"] = True
+    trunk = _default_branch(cwd)
+    merged_branches: set[str] = set()
+    if trunk:
+        merged_branches = {
+            line.lstrip("*+ ").strip()
+            for line in _git_out(cwd, ["branch", "--merged", trunk]).splitlines()
+            if line.strip()
+        }
+    for tree in trees:
+        tree["merged"] = bool(tree["branch"] and tree["branch"] != trunk and tree["branch"] in merged_branches)
     return trees
 
 

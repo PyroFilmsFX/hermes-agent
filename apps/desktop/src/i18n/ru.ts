@@ -2678,6 +2678,7 @@ export const ru = defineLocale({
       noBranches: 'Ветки не найдены',
       removeWorktree: 'Удалить worktree',
       removeWorktreeFailed: 'Не удалось удалить worktree (есть незакоммиченные изменения?)',
+      merged: 'слито',
       removeWorktreeConfirm:
         'Удалить из git (сотрёт каталог worktree; ветка останется) или просто скрыть лану из боковой панели, оставив worktree на диске.',
       removeWorktreeDirty:

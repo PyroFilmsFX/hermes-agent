@@ -3554,6 +3554,7 @@ export const en: Translations = {
       noBranches: 'No branches found',
       removeWorktree: 'Remove worktree',
       removeWorktreeFailed: 'Could not remove worktree (uncommitted changes?)',
+      merged: 'merged',
       removeWorktreeConfirm:
         'Remove it from git (deletes the worktree directory; the branch stays), or just hide the lane from the sidebar and leave the worktree on disk.',
       removeWorktreeDirty:

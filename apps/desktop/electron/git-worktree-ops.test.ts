@@ -11,6 +11,7 @@ import {
   ensureGitRepo,
   listBaseBranches,
   listBranches,
+  listWorktrees,
   parseWorktrees,
   sanitizeBranch,
   switchBranch
@@ -56,6 +57,41 @@ test('parseWorktrees: detached + locked flags', () => {
 
 test('parseWorktrees: empty input', () => {
   assert.deepEqual(parseWorktrees(''), [])
+})
+
+test('listWorktrees marks branches merged into the default branch', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-worktrees-'))
+  const git = (...args) => execFileSync('git', args, { cwd: dir }).toString().trim()
+
+  try {
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    fs.writeFileSync(path.join(dir, 'README'), 'root\n')
+    git('add', 'README')
+    git('commit', '-m', 'root')
+    const root = git('rev-parse', 'HEAD')
+
+    git('switch', '-c', 'feature/merged')
+    fs.writeFileSync(path.join(dir, 'merged.txt'), 'merged\n')
+    git('add', 'merged.txt')
+    git('commit', '-m', 'merged change')
+    git('switch', 'main')
+    git('merge', '--ff-only', 'feature/merged')
+    git('worktree', 'add', path.join(dir, 'merged-wt'), 'feature/merged')
+    git('worktree', 'add', '-b', 'feature/unmerged', path.join(dir, 'unmerged-wt'), root)
+    fs.writeFileSync(path.join(dir, 'unmerged-wt', 'pending.txt'), 'pending\n')
+    execFileSync('git', ['add', 'pending.txt'], { cwd: path.join(dir, 'unmerged-wt') })
+    execFileSync('git', ['commit', '-m', 'unmerged change'], { cwd: path.join(dir, 'unmerged-wt') })
+
+    const byBranch = Object.fromEntries((await listWorktrees(dir, 'git')).map(tree => [tree.branch, tree]))
+
+    assert.equal(byBranch['feature/merged'].merged, true)
+    assert.equal(byBranch['feature/unmerged'].merged, false)
+    assert.equal(byBranch.main.merged, false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('ensureGitRepo: inits a plain dir with a root commit so worktrees branch', async () => {

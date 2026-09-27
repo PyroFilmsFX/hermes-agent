@@ -7,14 +7,14 @@ import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 import {
   baseName,
   excludeProjectSessions,
-  isConductorLane,
+  isLinkedWorktreeLane,
   kanbanWorktreeDir,
   liveSessionProjectId,
   mergeRepoWorktreeGroups,
   NO_PROJECT_ID,
   overlayLiveLanes,
   overlayLivePreviews,
-  partitionConductorLanes,
+  partitionWorktreeLanes,
   projectOwnerBySessionId,
   reconcileEnteredProjectSessions,
   sessionBucketId,
@@ -58,7 +58,7 @@ describe('kanbanWorktreeDir', () => {
   })
 })
 
-describe('isConductorLane', () => {
+describe('isLinkedWorktreeLane', () => {
   it.each([
     // Positive: path contains /.claude/worktrees/lane-
     {
@@ -126,125 +126,150 @@ describe('isConductorLane', () => {
       reason: 'standard main worktree',
       wt: { branch: 'main', isMain: true, path: '/repos/hermes' }
     },
-    // Negative: branch "lane-detection" outside .claude
+    // Every linked worktree is grouped regardless of name.
     {
-      expected: false,
-      reason: 'branch lane-detection outside .claude',
+      expected: true,
+      reason: 'ordinary branch outside .claude',
       wt: { branch: 'lane-detection', isMain: false, path: '/repos/hermes/wt' }
     },
     // Negative: branch ^lane- outside .claude
     {
-      expected: false,
+      expected: true,
       reason: 'branch lane-pf-s1 outside .claude',
       wt: { branch: 'lane-pf-s1', isMain: false, path: '/repos/hermes/wt1' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'branch lane-wm-abc outside .claude',
       wt: { branch: 'lane-wm-abc', isMain: false, path: '/repos/hermes/wt3' }
     },
     // Negative: basename "lane-x" outside .claude
     {
-      expected: false,
+      expected: true,
       reason: 'basename lane-x outside .claude',
       wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-x' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'path basename lane-worker-1 outside .claude',
       wt: { branch: 'feat', isMain: false, path: '/repos/hermes/lane-worker-1' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'Windows path basename lane-1 outside .claude',
       wt: { branch: 'feat', isMain: false, path: 'C:\\repos\\hermes\\lane-1' }
     },
     // Negative: branch or basename "pr-base-auth" and "pr-base-*" (not exact pr-base)
     {
-      expected: false,
+      expected: true,
       reason: 'branch pr-base-auth',
       wt: { branch: 'pr-base-auth', isMain: false, path: '/repos/hermes/wt5' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'basename pr-base-auth',
       wt: { branch: 'other', isMain: false, path: '/repos/hermes/pr-base-auth' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'basename starts with pr-base-',
       wt: { branch: 'other', isMain: false, path: '/repos/hermes/pr-base-feature' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'branch starts with pr-base-',
       wt: { branch: 'pr-base-hotfix', isMain: false, path: '/repos/hermes/wt5' }
     },
     // Negative: branch "feature/lane-thing"
     {
-      expected: false,
+      expected: true,
       reason: 'branch feature/lane-thing does not match ^lane/',
       wt: { branch: 'feature/lane-thing', isMain: false, path: '/repos/hermes/wt' }
     },
     // Negative: path ".../my-lane"
     {
-      expected: false,
+      expected: true,
       reason: 'path .../my-lane does not match ^lane/',
       wt: { branch: 'my-lane', isMain: false, path: '/repos/hermes/my-lane' }
     },
-    // Negative: other non-conductor paths/branches
+    // Ordinary branches are worktree lanes too.
     {
-      expected: false,
+      expected: true,
       reason: 'arbitrary feature branch',
       wt: { branch: 'feature', isMain: false, path: '/repos/hermes/feature-lane' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'branch pr-baseline does not equal pr-base or start with pr-base-',
       wt: { branch: 'pr-baseline', isMain: false, path: '/repos/hermes/wt' }
     },
     {
-      expected: false,
+      expected: true,
       reason: 'basename pr-baseline does not equal pr-base or start with pr-base-',
       wt: { branch: 'feat', isMain: false, path: '/repos/hermes/pr-baseline' }
     }
   ])('$reason -> $expected', ({ wt, expected }) => {
-    expect(isConductorLane(wt as HermesGitWorktree)).toBe(expected)
+    expect(isLinkedWorktreeLane(wt as HermesGitWorktree)).toBe(expected)
   })
 })
 
-describe('partitionConductorLanes', () => {
-  it('partitions into regular and conductor lanes, leaving room for parent grouping', () => {
+describe('partitionWorktreeLanes', () => {
+  it('partitions home and kanban rows from linked worktrees', () => {
     const homeLane = lane({ id: '/repo::branch::main', isHome: true, isMain: true, label: 'main' })
     const regularLane = lane({ id: '/repo/feat', label: 'feat', path: '/repo/feat' })
     const kanbanLane = lane({ id: '/repo::kanban', isKanban: true, label: 'kanban' })
 
-    const conductor1 = lane({ id: '/repo/.claude/worktrees/lane-1', label: 'lane-1', path: '/repo/.claude/worktrees/lane-1' })
-    const conductor2 = lane({ id: '/repo/.claude/worktrees/lane/w_2', label: 'lane/w_2', path: '/repo/.claude/worktrees/lane/w_2' })
-    const conductor3 = lane({ id: '/repo/other-dir', label: 'lane/slash-branch', path: '/repo/other-dir' })
-    const conductor4 = lane({ id: '/repo/pr-base', label: 'pr-base', path: '/repo/pr-base' })
+    const worktree1 = lane({ id: '/repo/.claude/worktrees/lane-1', label: 'lane-1', path: '/repo/.claude/worktrees/lane-1' })
+    const worktree2 = lane({ id: '/repo/.claude/worktrees/lane/w_2', label: 'lane/w_2', path: '/repo/.claude/worktrees/lane/w_2' })
+    const worktree3 = lane({ id: '/repo/other-dir', label: 'lane/slash-branch', path: '/repo/other-dir' })
+    const worktree4 = lane({ id: '/repo/pr-base', label: 'pr-base', path: '/repo/pr-base' })
 
     const userLane1 = lane({ id: '/repo/lane-detection', label: 'lane-detection', path: '/repo/lane-detection' })
     const userLane2 = lane({ id: '/repo/pr-base-auth', label: 'pr-base-auth', path: '/repo/pr-base-auth' })
 
-    const all = [homeLane, conductor1, regularLane, conductor2, userLane1, conductor3, kanbanLane, conductor4, userLane2]
-    const { regular, conductor } = partitionConductorLanes(all)
+    const all = [homeLane, worktree1, regularLane, worktree2, userLane1, worktree3, kanbanLane, worktree4, userLane2]
+    const { regular, worktrees } = partitionWorktreeLanes(all)
 
-    expect(conductor.map(g => g.label)).toEqual(['lane-1', 'lane/w_2', 'lane/slash-branch', 'pr-base'])
-    expect(regular.map(g => g.label)).toEqual(['main', 'feat', 'lane-detection', 'kanban', 'pr-base-auth'])
+    expect(worktrees.map(g => g.label)).toEqual([
+      'lane-1',
+      'feat',
+      'lane/w_2',
+      'lane-detection',
+      'lane/slash-branch',
+      'pr-base',
+      'pr-base-auth'
+    ])
+    expect(regular.map(g => g.label)).toEqual(['main', 'kanban'])
 
     // Array destructuring compatibility
-    const [arrReg, arrCond] = partitionConductorLanes(all)
+    const [arrReg, arrCond] = partitionWorktreeLanes(all)
     expect(arrReg).toEqual(regular)
-    expect(arrCond).toEqual(conductor)
+    expect(arrCond).toEqual(worktrees)
   })
 
-  it('handles zero conductor lanes gracefully', () => {
-    const regular = [lane({ id: '1', label: 'dev' }), lane({ id: '2', label: 'main', isMain: true })]
-    const part = partitionConductorLanes(regular)
+  it('handles repos with no linked worktrees', () => {
+    const regular = [lane({ id: '1', label: 'dev', isMain: true }), lane({ id: '2', label: 'main', isMain: true })]
+    const part = partitionWorktreeLanes(regular)
 
-    expect(part.conductor).toEqual([])
+    expect(part.worktrees).toEqual([])
     expect(part.regular).toEqual(regular)
+  })
+
+  it('rolls ordinary feature worktrees up with the other repo lanes', () => {
+    const featureWorktree = lane({
+      id: '/tmp/lane-payment',
+      label: 'feature/payment',
+      path: '/tmp/lane-payment',
+      isMain: false
+    })
+
+    const part = partitionWorktreeLanes([
+      lane({ id: '/repo::branch::main', label: 'main', isHome: true, isMain: true }),
+      featureWorktree
+    ])
+
+    expect(part.worktrees).toContainEqual(featureWorktree)
+    expect(part.regular.map(group => group.label)).toEqual(['main'])
   })
 })
 
@@ -297,6 +322,22 @@ describe('mergeRepoWorktreeGroups (visual enhancer)', () => {
     expect(merged.map(g => g.label)).toEqual(['main', 'feature'])
     // The injected lane is empty (visual only — never carries sessions).
     expect(merged.find(g => g.label === 'feature')?.sessions).toEqual([])
+  })
+
+  it('copies merged status from git onto an existing branch lane', () => {
+    const repo = {
+      id: '/repo',
+      path: '/repo',
+      groups: [
+        lane({ id: '/repo/main', label: 'main', isMain: true, path: '/repo' }),
+        lane({ id: '/repo-wt-feature', label: 'feature/payment', path: '/repo-wt-feature' })
+      ]
+    }
+    const discovered: HermesGitWorktree[] = [
+      { branch: 'feature/payment', detached: false, isMain: false, locked: false, merged: true, path: '/repo-wt-feature' }
+    ]
+
+    expect(mergeRepoWorktreeGroups(repo, discovered).find(group => group.label === 'feature/payment')?.merged).toBe(true)
   })
 
   it('never spawns a lane per kanban task worktree', () => {

@@ -2104,6 +2104,7 @@ export const ar = defineLocale({
       noBranches: 'لم يتم العثور على فروع',
       removeWorktree: 'إزالة شجرة العمل',
       removeWorktreeFailed: 'تعذّر إزالة شجرة العمل (تغييرات غير مُودعة؟)',
+      merged: 'مدموج',
       removeWorktreeConfirm:
         'أزِلها من git (يحذف مجلد شجرة العمل؛ يبقى الفرع)، أو فقط أخفِ المسار من الشريط الجانبي واترك شجرة العمل على القرص.',
       removeWorktreeDirty:

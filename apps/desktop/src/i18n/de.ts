@@ -4000,6 +4000,7 @@ export const deOverrides = {
       noBranches: 'Keine Branches gefunden',
       removeWorktree: 'Worktree entfernen',
       removeWorktreeFailed: 'Worktree konnte nicht entfernt werden (nicht committete Änderungen?)',
+      merged: 'gemergt',
       removeWorktreeConfirm:
         'Aus Git entfernen (löscht das Worktree-Verzeichnis; der Branch bleibt), oder einfach die Lane aus der Sidebar ausblenden und den Worktree auf der Festplatte belassen.',
       removeWorktreeDirty:

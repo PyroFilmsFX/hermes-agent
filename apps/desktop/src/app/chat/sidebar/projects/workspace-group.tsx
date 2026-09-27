@@ -218,6 +218,7 @@ export function SidebarWorkspaceGroup({
             }
             icon={leadingIcon}
             label={group.label}
+            badge={group.merged ? s.projects.merged : undefined}
             onToggle={toggleOpen}
             open={open}
             title={group.path ? displayPath(group.path) : undefined}
