@@ -1,5 +1,6 @@
 """Imported turns retain their receipt and cannot bypass the local FIFO."""
 import threading
+import time
 from types import SimpleNamespace
 
 from tui_gateway.method_ctx import rebind
@@ -82,6 +83,7 @@ def test_local_work_blocks_mailbox_claim_without_consuming_envelope(monkeypatch,
         kwargs["terminal_callback"]({"status": "settled", "text": "reply"})
         return True
     poll = rebind(session_notifications._poll_bot_live_delivery_once, {
+        "time": time,  # the claimed delivery stamps turn_started_at (server.py provides it in production)
         "_session_home": lambda session: tmp_path,
         "_session_turn_admission": _session_turn_admission,
         "_run_prompt_submit": submit,
@@ -161,6 +163,7 @@ def test_mailbox_poll_delivers_past_a_schema_damaged_ticket(monkeypatch, tmp_pat
         kwargs["terminal_callback"]({"status": "settled", "text": "reply"})
         return True
     poll = rebind(session_notifications._poll_bot_live_delivery_once, {
+        "time": time,  # the claimed delivery stamps turn_started_at (server.py provides it in production)
         "_session_home": lambda session: tmp_path,
         "_session_turn_admission": _session_turn_admission,
         "_run_prompt_submit": submit,
