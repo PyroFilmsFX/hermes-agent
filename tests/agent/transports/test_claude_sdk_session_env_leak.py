@@ -139,3 +139,111 @@ def test_mcp_and_cli_subprocess_session_ids_match(monkeypatch):
 
     assert cli_session_id == "aligned-session-id"
     assert mcp_session_id == "aligned-session-id"
+
+
+def test_respawned_cli_rebuilds_hermes_tools_config_with_clean_env(monkeypatch, tmp_path):
+    """A replacement CLI gets an importable MCP child and a fresh scoped capability."""
+    import json
+    import sys
+    import sysconfig
+
+    from agent.transports import claude_agent_sdk_session_config as config
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("PYTHONPATH", "/desktop/backend/first/site-packages")
+    monkeypatch.setattr(config, "_hermes_repo_root", lambda: "/hermes/repo")
+    monkeypatch.setattr(config, "_provider_config", lambda: {
+        "session_spawn": {"enabled": True},
+        "session_send": {"enabled": True},
+    })
+    issued = iter(("scoped-capability-first", "scoped-capability-replacement"))
+    monkeypatch.setattr(
+        "agent.transports.hermes_gateway_session_bridge.issue_scoped_capability",
+        lambda _session_id: next(issued),
+    )
+
+    session = ClaudeAgentSdkSession(hermes_session_id="respawn-owner", cwd="/tmp")
+    first = session.build_option_fields()
+    # The replacement is built after the backend environment has changed; a
+    # respawn must keep the first launch's hermes-tools child contract.
+    monkeypatch.setenv("PYTHONPATH", "/desktop/backend/replacement/site-packages")
+    replacement = session.build_option_fields()
+    first_mcp = first["mcp_servers"]["hermes-tools"]
+    replacement_mcp = replacement["mcp_servers"]["hermes-tools"]
+
+    assert replacement_mcp["command"] == first_mcp["command"] == sys.executable
+    assert replacement_mcp["args"] == first_mcp["args"] == [
+        "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
+    ]
+    assert replacement_mcp["env"]["PYTHONPATH"] == first_mcp["env"]["PYTHONPATH"]
+    python_paths = ["/hermes/repo"]
+    for key in ("purelib", "platlib"):
+        site_packages = sysconfig.get_paths().get(key)
+        if site_packages and os.path.isdir(site_packages) and site_packages not in python_paths:
+            python_paths.append(site_packages)
+    assert first_mcp["env"]["PYTHONPATH"] == replacement_mcp["env"]["PYTHONPATH"] == os.pathsep.join(
+        python_paths
+    )
+    assert replacement["env"]["PYTHONPATH"] == "", "the SDK CLI's interpreter scrub remains active"
+    capability_path = replacement_mcp["env"]["HERMES_SESSION_SPAWN_CAPABILITY_FILE"]
+    assert first_mcp["env"]["HERMES_SESSION_SPAWN_CAPABILITY_FILE"] == capability_path
+    assert (home / capability_path.removeprefix(str(home) + os.sep)).read_text(encoding="utf-8") == (
+        "scoped-capability-replacement"
+    )
+    assert "scoped-capability-replacement" not in json.dumps(replacement_mcp)
+    assert replacement_mcp["env"]["HERMES_SESSION_ID"] == "respawn-owner"
+
+
+def test_mcp_config_imports_from_resolved_venv_interpreter(monkeypatch, tmp_path):
+    """The CLI may respawn a venv symlink's resolved interpreter."""
+    import asyncio
+    import importlib.util
+    import subprocess
+    import sys
+
+    real_interpreter = os.path.realpath(sys.executable)
+    if real_interpreter == sys.executable or importlib.util.find_spec("mcp") is None:
+        pytest.skip("requires a venv symlink and the MCP package")
+
+    from agent.transports import claude_agent_sdk_session_config as config
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    mcp_config = config._build_hermes_tools_mcp_config()
+    child_env = dict(mcp_config["env"])
+    child_env.update({
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "PYTHONHOME": "",
+        "PYTHONUTF8": "1",
+    })
+    result = subprocess.run(
+        [real_interpreter, "-c", "import mcp, agent.transports.hermes_tools_mcp_server"],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    async def list_tools():
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        params = StdioServerParameters(
+            command=real_interpreter,
+            args=mcp_config["args"],
+            env=child_env,
+            cwd=str(tmp_path),
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                listed = await client.list_tools()
+                return {tool.name for tool in listed.tools}
+
+    assert "read_file" in asyncio.run(list_tools())

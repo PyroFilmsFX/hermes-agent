@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import sysconfig
 
 import pytest
 
@@ -88,7 +89,12 @@ def test_mcp_config_is_byte_shape_compatible_without_capability(monkeypatch):
     monkeypatch.delenv("HERMES_HOME", raising=False)
     actual = config._build_hermes_tools_mcp_config()
     expected_env = {key: os.environ[key] for key in config._MCP_ENV_ALLOWLIST if os.environ.get(key)}
-    expected_env["PYTHONPATH"] = "/repo" + os.pathsep + os.environ.get("PYTHONPATH", "")
+    python_paths = ["/repo"]
+    for key in ("purelib", "platlib"):
+        site_packages = sysconfig.get_paths().get(key)
+        if site_packages and os.path.isdir(site_packages) and site_packages not in python_paths:
+            python_paths.append(site_packages)
+    expected_env["PYTHONPATH"] = os.pathsep.join(python_paths)
     expected = {"type": "stdio", "command": sys.executable, "args": [
         "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
     ], "env": expected_env}
@@ -119,7 +125,12 @@ def test_mcp_config_without_issued_capability_preserves_baseline_with_session_id
     monkeypatch.delenv("HERMES_HOME", raising=False)
     actual = config._build_hermes_tools_mcp_config("owner")
     expected_env = {key: os.environ[key] for key in config._MCP_ENV_ALLOWLIST if os.environ.get(key)}
-    expected_env["PYTHONPATH"] = "/repo" + os.pathsep + os.environ.get("PYTHONPATH", "")
+    python_paths = ["/repo"]
+    for key in ("purelib", "platlib"):
+        site_packages = sysconfig.get_paths().get(key)
+        if site_packages and os.path.isdir(site_packages) and site_packages not in python_paths:
+            python_paths.append(site_packages)
+    expected_env["PYTHONPATH"] = os.pathsep.join(python_paths)
     expected_env["HERMES_SESSION_ID"] = "owner"
     expected = {"type": "stdio", "command": sys.executable, "args": [
         "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",

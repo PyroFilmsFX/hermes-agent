@@ -15,6 +15,7 @@ import os
 import secrets
 import stat
 import sys
+import sysconfig
 import contextlib
 from typing import Any, Optional
 
@@ -1086,7 +1087,15 @@ def _build_hermes_tools_mcp_config(
     # Multiplexed gateway turns bind HERMES_HOME through a context override,
     # not process-wide os.environ; the child must discover the same profile's
     # owner lease and state registry.
-    env["PYTHONPATH"] = _hermes_repo_root() + os.pathsep + os.environ.get("PYTHONPATH", "")
+    # Claude CLI may resolve the venv's python symlink before respawning this
+    # server. Preserve the active venv's packages for that base interpreter,
+    # without carrying a desktop or project PYTHONPATH into the MCP child.
+    python_paths = [_hermes_repo_root()]
+    for key in ("purelib", "platlib"):
+        site_packages = sysconfig.get_paths().get(key)
+        if site_packages and os.path.isdir(site_packages) and site_packages not in python_paths:
+            python_paths.append(site_packages)
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
     if hermes_session_id is None:
         try:
             from gateway.session_context import _SESSION_ID, _UNSET
