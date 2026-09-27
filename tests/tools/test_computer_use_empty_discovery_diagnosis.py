@@ -7,6 +7,7 @@ Live-QA findings (Aug 2026, locked KDE desktop):
    running", a permanent condition for that invocation.
 """
 
+import threading
 import pytest
 
 from tools.computer_use import cua_backend as cb
@@ -68,7 +69,9 @@ def test_cli_fallback_fails_fast_on_daemon_not_running(monkeypatch):
     import subprocess as _sp
     import time as _time
     monkeypatch.setattr(_sp, "run", _fake_run)
-    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+    _me = threading.current_thread()
+    # time.sleep is process-global: record only this test's thread, not stray background pollers.
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s) if threading.current_thread() is _me else None)
 
     with pytest.raises(RuntimeError, match="daemon is not running"):
         session._call_tool_via_cli("list_windows", {}, 10.0)

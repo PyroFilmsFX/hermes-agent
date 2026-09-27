@@ -184,7 +184,10 @@ class TestRuntimeGlue:
         mod, _sessions = self._scripted_sessions(monkeypatch, agent, [failure, success])
         waits = []
         import time
-        monkeypatch.setattr(time, "sleep", waits.append)
+        import threading
+        _me = threading.current_thread()
+        # time.sleep is process-global: record only this test's thread, not stray background pollers.
+        monkeypatch.setattr(time, "sleep", lambda s: waits.append(s) if threading.current_thread() is _me else None)
 
         mod._run_sdk_attempts(agent, self._state())
 
