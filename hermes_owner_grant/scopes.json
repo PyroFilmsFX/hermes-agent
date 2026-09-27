@@ -1,0 +1,74 @@
+{
+  "classes": {
+    "allowlist": {
+      "default_ttl_ms": 43200000,
+      "max_ttl_ms": 259200000,
+      "single_use": false,
+      "subject_required": false,
+      "touch_id": "never"
+    },
+    "gate": {
+      "default_ttl_ms": 43200000,
+      "max_ttl_ms": 259200000,
+      "single_use": false,
+      "subject_required": false,
+      "touch_id": "never"
+    },
+    "marker": {
+      "default_ttl_ms": 3600000,
+      "max_ttl_ms": 14400000,
+      "single_use": true,
+      "subject_required": false,
+      "touch_id": "never"
+    },
+    "prod": {
+      "default_ttl_ms": 900000,
+      "max_ttl_ms": 3600000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "when_available"
+    },
+    "quote-only": {
+      "default_ttl_ms": 604800000,
+      "max_ttl_ms": 604800000,
+      "single_use": false,
+      "subject_required": false,
+      "touch_id": "never"
+    }
+  },
+  "format": "hermes-owner-grant-scopes/v1",
+  "scopes": [
+    {
+      "label": "Allowlisted member profile",
+      "scope": "conductor:allowlist:member-profile"
+    },
+    {
+      "label": "Block job store writes",
+      "scope": "conductor:gate:job-store-write-block"
+    },
+    {
+      "label": "Enable lane test budget",
+      "scope": "conductor:gate:lane-test-budget-enable"
+    },
+    {
+      "label": "Enable PR discipline",
+      "scope": "conductor:gate:pr-discipline-enable"
+    },
+    {
+      "label": "Enable review budget",
+      "scope": "conductor:gate:review-budget-enable"
+    },
+    {
+      "label": "Bypass marker",
+      "scope": "conductor:marker:bypass"
+    },
+    {
+      "label": "Restore marker",
+      "scope": "conductor:marker:restore"
+    },
+    {
+      "label": "Production target",
+      "scope": "conductor:prod:target"
+    }
+  ]
+}
