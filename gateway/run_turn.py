@@ -1843,12 +1843,15 @@ class GatewayTurnMixin:
         # transcript that reflects what was said. The caller pairs it with a stable assistant safety
         # boundary rather than the provider error text. Hidden-reasoning-only incomplete turns follow the
         # same persistence rule so peer-agent channels don't ingest provider details. (#7100, #51628)
+        # prepared.message_text carries @-expanded file contents and inlined text documents;
+        # this row is written without passing the turn backstop, so mask it here (secret hygiene).
+        from agent.secret_hygiene import mask_ingress_content
         _user_entry = {
             "role": "user",
-            "content": (
+            "content": mask_ingress_content(
                 prepared.persist_user_message if prepared.persist_user_message is not None
                 else prepared.message_text
-            ),
+            )[0],
             "timestamp": prepared.persist_user_timestamp if prepared.persist_user_timestamp is not None else ts,
         }
         if prepared.persist_user_display_kind:

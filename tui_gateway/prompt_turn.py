@@ -698,6 +698,11 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     _register_session_cwd(session)
     cols = session.get("cols", 80)
     streamer = make_stream_renderer(cols)
+    # A confirmed secret opt-out applies only to the turn that runs the exact text it was
+    # confirmed for (prompt.submit set it); the backstop consumes it from the agent.
+    optout = session.pop("_secret_optout", None)
+    optout_tags = optout["tags"] if isinstance(optout, dict) and optout.get("text") == text else frozenset()
+    agent._secret_optout_tags = optout_tags
     prompt = text
     if isinstance(prompt, str) and "@" in prompt:
         from agent.context_references import preprocess_context_references
@@ -715,6 +720,11 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
                 "error", sid, {"message": "\n".join(ctx.warnings) or "Context injection refused."})
             return None
         prompt = ctx.message
+    if isinstance(prompt, str):
+        # Secret hygiene: the @-expansion inlines file contents, and the adopt below UPDATEs the
+        # submit row to this prompt, so mask here (same bytes the turn backstop would produce).
+        from agent.secret_hygiene import mask_ingress_text
+        prompt = mask_ingress_text(prompt, optout_tags=optout_tags)[0]
     st.prompt_text = prompt if isinstance(prompt, str) else ""
     run_message: Any = _route_turn_images(agent, prompt, images) if images else prompt
     from agent.notification_presentation import event_presentation_muted

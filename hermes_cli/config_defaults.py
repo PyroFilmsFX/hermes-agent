@@ -1947,6 +1947,9 @@ DEFAULT_CONFIG = {
             "allow_patterns": [],
             "allow_value_sha256": [],
             "sweep": {"backup_retention_days": 7, "live_window_hours": 24},
+            # Per-message opt-out (desktop only): each unmasked send needs an explicit confirm and
+            # a single-use nonce; false disables it everywhere. Opt-out is never on by default.
+            "optout": {"allowed": True},
         },
     },
 

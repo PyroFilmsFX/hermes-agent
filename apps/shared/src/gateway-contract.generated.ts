@@ -2544,6 +2544,12 @@ export interface PromptSubmitParams {
   confirm_truncate?: boolean | null
   confirm_empty_truncate?: boolean | null
   rebind_survivor_row_ids?: number[] | null
+  secret_optout?: SecretOptout | null
+}
+/** A confirmed per-message opt-out from secret masking (HE-SECRET-HYGIENE §3.4): the tags to leave raw for THIS turn only, plus the single-use nonce ``secrets.mask`` minted for this exact text. A missing, stale, reused or mismatched nonce leaves the message fully masked. */
+export interface SecretOptout {
+  tags?: string[]
+  confirm_nonce?: string | null
 }
 /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
 export interface PromptSubmitResult {
@@ -2555,6 +2561,24 @@ export interface PromptSubmitResult {
   turn_isolation?: boolean | null
 }
 export type PromptSubmitStatus = 'streaming' | 'queued' | 'steered' | 'redirected'
+/** Mask composer text before it is saved or sent. ``optout_tags`` (after the client's explicit confirm) mints a single-use nonce for exactly this text and session. */
+export interface SecretsMaskParams {
+  session_id?: string | null
+  profile?: string | null
+  text?: string
+  optout_tags?: string[] | null
+}
+/** Never carries a secret value: masked text, per-kind counts and the placeholder tags. */
+export interface SecretsMaskResult {
+  text: string
+  kinds: Record<string, number>
+  tags: SecretTagInfo[]
+  confirm_nonce?: string | null
+}
+export interface SecretTagInfo {
+  kind: string
+  tag: string
+}
 export interface ClipboardPasteParams {
   session_id: string
   profile?: string | null
@@ -5240,6 +5264,8 @@ export interface RpcMethods {
   'rollback.list': { params: RollbackListParams; result: RollbackListResult }
   /** Restore the working tree (or one file) to a checkpoint by hash or 1-based index. */
   'rollback.restore': { params: RollbackRestoreParams; result: RollbackRestoreResult }
+  /** Mask secrets in composer text as [REDACTED:<kind>:<tag>]; optionally mint an opt-out nonce. */
+  'secrets.mask': { params: SecretsMaskParams; result: SecretsMaskResult }
   /** Attach the frontend to a live session without closing the previously focused one. */
   'session.activate': { params: SessionActivateParams; result: SessionActivateResult }
   /** Live sessions in this process, insertion order (not a DB browser). */
@@ -5568,6 +5594,7 @@ export const RPC_METHODS = [
   'rollback.diff',
   'rollback.list',
   'rollback.restore',
+  'secrets.mask',
   'session.activate',
   'session.active_list',
   'session.branch',

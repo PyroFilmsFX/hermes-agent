@@ -1903,9 +1903,10 @@ class ClaudeSdkTurnMixin:
                     }
                     items.append(item)
                     tool_items[tool_use_id] = item
-                item["result"] = _flatten_tool_result_content(
+                from agent.secret_hygiene import mask_tool_result_text
+                item["result"] = mask_tool_result_text(_flatten_tool_result_content(
                     getattr(block, "content", None)
-                )
+                ))
                 item["is_error"] = bool(getattr(block, "is_error", False))
             return
 

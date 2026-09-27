@@ -23,6 +23,15 @@ class ClientSurface(WireEnum):
     voice_live = "voice-live"
 
 
+class SecretOptout(Params):
+    """A confirmed per-message opt-out from secret masking (HE-SECRET-HYGIENE §3.4): the tags to
+    leave raw for THIS turn only, plus the single-use nonce ``secrets.mask`` minted for this exact
+    text. A missing, stale, reused or mismatched nonce leaves the message fully masked."""
+
+    tags: list[str] = Field(default_factory=list, max_length=64)
+    confirm_nonce: str | None = None
+
+
 class PromptSubmitParams(SessionParams):
     """``text`` is normally a string; the relay / hosted paths may hand a structured (parts list)
     payload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit
@@ -43,6 +52,7 @@ class PromptSubmitParams(SessionParams):
     confirm_truncate: bool | None = None
     confirm_empty_truncate: bool | None = None
     rebind_survivor_row_ids: list[int] | None = None
+    secret_optout: SecretOptout | None = None
     # In-process only: injected by the hosted-room / bot-relay handlers, never accepted from a
     # client (a client dict for ``_turn_author`` answers 4124). Excluded from the rendered wire.
     hosted_task: JsonValue | None = Field(default=None, exclude=True, alias="_hosted_task")
@@ -78,6 +88,37 @@ class PromptSubmitResult(Result):
 
 method("prompt.submit", params=PromptSubmitParams, result=PromptSubmitResult,
        doc="Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing.")
+
+
+# ── secrets.mask ──────────────────────────────────────────────────────────────────────────────
+
+
+class SecretsMaskParams(Params):
+    """Mask composer text before it is saved or sent. ``optout_tags`` (after the client's explicit
+    confirm) mints a single-use nonce for exactly this text and session."""
+
+    session_id: str | None = None
+    profile: str | None = None
+    text: str = ""
+    optout_tags: list[str] | None = Field(default=None, max_length=64)
+
+
+class SecretTagInfo(Result):
+    kind: str
+    tag: str
+
+
+class SecretsMaskResult(Result):
+    """Never carries a secret value: masked text, per-kind counts and the placeholder tags."""
+
+    text: str
+    kinds: dict[str, int]
+    tags: list[SecretTagInfo]
+    confirm_nonce: str | None = None
+
+
+method("secrets.mask", params=SecretsMaskParams, result=SecretsMaskResult,
+       doc="Mask secrets in composer text as [REDACTED:<kind>:<tag>]; optionally mint an opt-out nonce.")
 
 
 # ── attachments ───────────────────────────────────────────────────────────────────────────────

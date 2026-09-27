@@ -594,24 +594,36 @@ def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    # Verify the stamp against the exact signed text before any ingress transformation.
+    if owner_stamp is not None and (
+            not isinstance(raw_text, str) or not owner_stamp.consume(raw_text, session)):
+        return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
+    # Secret hygiene (E2): mask before the stop-phrase check, the busy queue, the submit-row
+    # write and the turn. A confirmed opt-out (single-use nonce from secrets.mask, bound to
+    # this exact text) leaves only its tags raw, for this turn only.
+    optout_tags = _consume_secret_optout(sid, text, params.get("secret_optout"))
+    optout_text, optout_meta = _mask_submit_text(text, optout_tags) if optout_tags else (None, None)
+    text, secret_meta = _mask_submit_text(text, frozenset())
     # Off-screen sends (widget intents) type the row so no client renders a bubble; whitelisted to "hidden"
     # (plus the in-process peer mailbox's "peer_message" and the stamped "owner_forward") — this RPC must not mint kinds.
     display_kind, display_metadata = _submit_display(params)
     title_preview = params.get("title_preview")
     if owner_stamp is None and isinstance(title_preview, str) and title_preview.strip():
-        display_metadata = {**(display_metadata or {}), "title_preview": title_preview[:1000]}
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    if owner_stamp is not None and (
-            not isinstance(text, str) or not owner_stamp.consume(text, session)):
-        return _err(rid, 4125, "owner-forward stamp does not match this text and target or was already used")
+        display_metadata = {**(display_metadata or {}), "title_preview": _mask_submit_text(
+            title_preview[:1000], frozenset())[0]}
+    if secret_meta:
+        display_metadata = {**(display_metadata or {}), **secret_meta}
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
         # Client-side barge-in: latch so this turn's model message carries the note.
         from tools.tts_streaming import mark_speech_interrupted
         mark_speech_interrupted()
+    # Any earlier unspent opt-out hand-off is dropped: it can never unmask a later message.
+    session.pop("_secret_optout", None)
     from tools.bot_relay import DeliveryAuthor
 
     # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
@@ -636,7 +648,7 @@ def _(rid, params: dict) -> dict:
     session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""
     # Live-voice delegations carry the recent spoken transcript for the MODEL INPUT only (the persisted
     # user row stays the words the user said); anything else clears it.
-    voice_context = params.get("voice_context")
+    voice_context = _mask_submit_text(params.get("voice_context"), frozenset())[0]
     session["voice_live_context"] = (
         voice_context[:6000] if session["client_surface"] == "voice-live" and isinstance(voice_context, str) else "")
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)
@@ -680,6 +692,14 @@ def _(rid, params: dict) -> dict:
             display_kind=display_kind, display_metadata=display_metadata)
         if busy_response is not None:
             return busy_response
+    if optout_text is not None:
+        # This submit runs directly (a busy/queued submit never reaches here and stays fully
+        # masked): the row keeps the confirmed tags raw, and prompt_turn hands them to THIS turn.
+        text = optout_text
+        display_metadata = {k: v for k, v in (display_metadata or {}).items() if k != "secret_mask"}
+        display_metadata.update(optout_meta or {})
+        display_metadata["secret_optout"] = {"kinds": _optout_kinds(secret_meta, optout_meta)}
+        session["_secret_optout"] = {"text": text, "tags": optout_tags}
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
@@ -1202,13 +1222,15 @@ def _spawn_side_agent(
 
 
 def _side_agent_args(rid, params, prefix):
-    """Shared admission for the side-agent RPCs: ``(session, text, parent, task_id, err)``."""
+    """Shared admission for the side-agent RPCs: ``(session, text, parent, task_id, err)``.
+    The side question / background prompt is masked like a submit (secret hygiene E2)."""
     session, err = _sess(params, rid)
     if err:
         return None, None, None, None, err
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
         return None, None, None, None, _err(rid, 4012, "text required")
+    text = _mask_submit_text(text, frozenset())[0]
     return session, text, parent, f"{prefix}_{uuid.uuid4().hex[:6]}", None
 
 

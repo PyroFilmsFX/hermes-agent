@@ -101,6 +101,8 @@ class CLIChatTurnMixin:
             # Lone surrogates (rich-text clipboard paste) crash the OpenAI SDK's JSON serialization.
             from agent.message_sanitization import _sanitize_surrogates
             message = _sanitize_surrogates(message)
+        if not isinstance(message, TimelineNotification):
+            message = self._chat_mask_user_message(message)
 
         self._chat_stage_user_message(agent, message)
         if isinstance(message, TimelineNotification):
@@ -235,6 +237,14 @@ class CLIChatTurnMixin:
             except Exception as _img_exc:
                 logging.warning("native image attach failed, falling back to text: %s", _img_exc)
         return self._preprocess_images_with_vision(text, images)
+
+    def _chat_mask_user_message(self, message):
+        """Secret-hygiene ingest edge (E5): mask the (@-expanded) input before it is staged
+        into the transcript, so the staged row, the close-path persist and the turn all carry
+        the same masked bytes (the turn backstop is then a no-op and still adopts the row)."""
+        from agent.secret_hygiene import mask_ingress_content
+
+        return mask_ingress_content(message)[0]
 
     def _chat_stage_user_message(self, agent, message):
         """Append the staged user dict to the transcript under the agent's persist lock."""
