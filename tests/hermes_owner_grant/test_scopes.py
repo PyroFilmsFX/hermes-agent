@@ -143,3 +143,13 @@ def test_catalog_is_schema_valid_sorted_and_uses_the_shared_grammar():
         raw == json.dumps(catalog, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     )
     assert seen == set(scopes.CATALOG_BY_SCOPE)
+
+
+
+@pytest.mark.parametrize("value", ["conductor:marker:rebind-owner", "conductor:marker:repoint-ledger"])
+def test_conductor_marker_rebind_and_repoint_are_catalogued_single_use_markers(value):
+    # conductor 3.62 requests these two marker verbs; the dialog can only target catalogued scopes.
+    parsed = scopes.parse_scope(value)
+    assert parsed.scope_class == "marker"
+    assert parsed.single_use is True
+    assert parsed.is_catalogued is True

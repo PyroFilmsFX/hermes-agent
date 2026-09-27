@@ -68,6 +68,8 @@ export const SCOPE_LABELS: Record<string, string> = {
   'conductor:gate:pr-discipline-enable': 'Enable PR discipline',
   'conductor:gate:review-budget-enable': 'Enable review budget',
   'conductor:marker:bypass': 'Bypass marker',
+  'conductor:marker:rebind-owner': 'Rebind marker owner',
+  'conductor:marker:repoint-ledger': 'Repoint marker ledger',
   'conductor:marker:restore': 'Restore marker',
   'conductor:prod:target': 'Production target'
 }

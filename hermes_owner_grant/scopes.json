@@ -63,6 +63,14 @@
       "scope": "conductor:marker:bypass"
     },
     {
+      "label": "Rebind marker owner",
+      "scope": "conductor:marker:rebind-owner"
+    },
+    {
+      "label": "Repoint marker ledger",
+      "scope": "conductor:marker:repoint-ledger"
+    },
+    {
       "label": "Restore marker",
       "scope": "conductor:marker:restore"
     },

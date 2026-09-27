@@ -54,6 +54,8 @@ export const SCOPE_CATALOG: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'conductor:gate:pr-discipline-enable', label: 'Enable PR discipline' },
   { value: 'conductor:gate:review-budget-enable', label: 'Enable review budget' },
   { value: 'conductor:marker:bypass', label: 'Bypass marker' },
+  { value: 'conductor:marker:rebind-owner', label: 'Rebind marker owner' },
+  { value: 'conductor:marker:repoint-ledger', label: 'Repoint marker ledger' },
   { value: 'conductor:marker:restore', label: 'Restore marker' },
   { value: 'conductor:prod:target', label: 'Production target' }
 ]

@@ -49,3 +49,11 @@ def test_owner_grants_doc_covers_hook_trust_boundaries_and_amendments():
         "§7",
     ):
         assert phrase in text
+
+
+def test_owner_grants_doc_warns_against_dev_fd_invocation():
+    # /usr/bin/python3 -I -S /dev/fd/N exits 0 on macOS without running the script.
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "website/docs/reference/owner-grants.md").read_text()
+    assert "/dev/fd" in text and "ok: true" in text

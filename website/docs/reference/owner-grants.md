@@ -113,6 +113,8 @@ Anything else inside the owner text is a refused fragment (`quote_fragment`).
 
 ## Conductor contract
 
+> **Never run the verifier through `/dev/fd/N` (or any fd path).** On macOS, `/usr/bin/python3 -I -S /dev/fd/N` exits 0 without running the script. Exec only the installed absolute path, `/Library/Application Support/Hermes/owner-grant/hermes_owner_verify.py`, and authorize only when the exit code is 0 **and** stdout parses as the verifier's JSON result with `ok: true`. A verifier that never ran prints nothing, so it can't pass.
+
 Conductor calls the verifier and consumes its result. It must not reimplement Ed25519,
 signature parsing, or grant validation. It must not trust `revoked.jsonl` as the only
 revocation control: the anchor's key status and the verifier's TTL, subject, signature and
