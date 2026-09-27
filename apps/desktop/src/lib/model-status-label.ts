@@ -72,17 +72,24 @@ const VARIANT_TAGS: ReadonlyArray<readonly [RegExp, string]> = [
 
 const titleCase = (text: string): string => text.replace(/\b\w/g, char => char.toUpperCase()).trim()
 
+const CLAUDE_FAMILY_RE = /^(?:claude-)?(opus|sonnet|haiku|fable)\b/i
+
+function isClaudeFamily(base: string): boolean {
+  return /^claude-/i.test(base) || CLAUDE_FAMILY_RE.test(base)
+}
+
 function prettifyBase(base: string): string {
   if (/^deepseek-flash$/i.test(base)) {
     return 'DeepSeek V4.1 Flash'
   }
 
-  if (/^claude-/i.test(base)) {
+  if (isClaudeFamily(base)) {
     // Anthropic ids spell the version with hyphens (`haiku-4-5`, `fable-5-1`);
     // the human name is dotted ("Haiku 4.5"), not "Haiku 4 5".
+    const cleaned = base.replace(/^claude-/i, '').replace(/-\d{8}$/, '')
+
     return titleCase(
-      base
-        .replace(/^claude-/i, '')
+      cleaned
         .replace(/(\d)-(?=\d)/g, '$1.')
         .replace(/-/g, ' ')
     )
@@ -93,7 +100,7 @@ function prettifyBase(base: string): string {
   }
 
   if (/^gemini-/i.test(base)) {
-    return base.replace(/^gemini-/i, 'Gemini ').replace(/-/g, ' ')
+    return titleCase(base.replace(/^gemini-/i, 'Gemini ').replace(/-/g, ' '))
   }
 
   return titleCase(base.replace(/-/g, ' '))

@@ -1,15 +1,19 @@
 import type { ModelOptionProvider } from '@hermes/shared'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  $seenModels,
+  clearSeenModels,
   collapseModelFamilies,
   defaultVisibleKeys,
   effectiveVisibleKeys,
   emptyProviderSentinelKey,
   isProviderSentinel,
+  markModelSeen,
   modelVisibilityKey,
   resolveVisibleKeys,
   setProviderVisibility,
+  setSeenModels,
   toggleModelVisibility
 } from './model-visibility'
 
@@ -332,5 +336,66 @@ describe('setProviderVisibility', () => {
     expect(next.has(modelVisibilityKey('nous', 'model'))).toBe(true)
     // The -fast sibling is represented by its base family, not its own key.
     expect(next.has(modelVisibilityKey('nous', 'model-fast'))).toBe(false)
+  })
+})
+
+describe('seen-set newest model leads', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    clearSeenModels()
+  })
+
+  it('sorts an unseen model in a family to the top of that family (unseen newest first)', () => {
+    // claude-opus-4-5 has been seen; claude-opus-5-5 is a newly released unseen model in the same Opus family
+    setSeenModels(new Set(['claude-opus-4-5']))
+
+    const models = ['claude-opus-4-5', 'claude-opus-5-5']
+    const families = collapseModelFamilies(models)
+
+    expect(families.map(f => f.id)).toEqual(['claude-opus-5-5', 'claude-opus-4-5'])
+  })
+
+  it('preserves the family relative position among other families while promoting unseen within the family', () => {
+    setSeenModels(new Set(['claude-sonnet-4-6', 'claude-opus-4-5', 'claude-haiku-4-5']))
+
+    const models = ['claude-sonnet-4-6', 'claude-opus-4-5', 'claude-opus-5-5', 'claude-haiku-4-5']
+    const families = collapseModelFamilies(models)
+
+    // claude-opus-5-5 leads the Opus family, but Sonnet remains first
+    expect(families.map(f => f.id)).toEqual([
+      'claude-sonnet-4-6',
+      'claude-opus-5-5',
+      'claude-opus-4-5',
+      'claude-haiku-4-5'
+    ])
+  })
+
+  it('retains default curated order once the model is marked seen after display', () => {
+    setSeenModels(new Set(['claude-opus-4-5']))
+
+    const models = ['claude-opus-4-5', 'claude-opus-5-5']
+    const initial = collapseModelFamilies(models)
+    expect(initial.map(f => f.id)).toEqual(['claude-opus-5-5', 'claude-opus-4-5'])
+
+    // Marked seen after display / selection
+    markModelSeen('claude-opus-5-5')
+
+    const afterDisplay = collapseModelFamilies(models)
+    expect(afterDisplay.map(f => f.id)).toEqual(['claude-opus-4-5', 'claude-opus-5-5'])
+  })
+
+  it('persists seen models across reload via the existing persistence mock', async () => {
+    setSeenModels(new Set(['claude-opus-4-5']))
+    markModelSeen('claude-opus-5-5')
+
+    // Simulate reload via vi.resetModules()
+    vi.resetModules()
+    const reloaded = await import('./model-visibility')
+
+    expect(reloaded.$seenModels.get()?.has('claude-opus-5-5')).toBe(true)
+
+    const models = ['claude-opus-4-5', 'claude-opus-5-5']
+    const families = reloaded.collapseModelFamilies(models)
+    expect(families.map(f => f.id)).toEqual(['claude-opus-4-5', 'claude-opus-5-5'])
   })
 })

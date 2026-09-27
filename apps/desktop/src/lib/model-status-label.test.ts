@@ -9,6 +9,28 @@ describe('model-status-label', () => {
     expect(displayModelName('claude-fable-5-1')).toBe('Fable 5.1')
   })
 
+  it('formats Claude family model labels with dotted versions for Claude and non-prefixed Claude ids', () => {
+    expect(displayModelName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(displayModelName('opus-5-5')).toBe('Opus 5.5')
+    expect(displayModelName('claude-sonnet-5')).toBe('Sonnet 5')
+    expect(displayModelName('sonnet-5')).toBe('Sonnet 5')
+    expect(displayModelName('claude-haiku-4-5')).toBe('Haiku 4.5')
+    expect(displayModelName('haiku-4-5')).toBe('Haiku 4.5')
+    expect(displayModelName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(displayModelName('fable-5-1')).toBe('Fable 5.1')
+    expect(displayModelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(displayModelName('haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(displayModelName('anthropic/claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(displayModelName('anthropic/opus-5-5')).toBe('Opus 5.5')
+  })
+
+  it('preserves non-Claude model ids without joining hyphenated numbers with dots', () => {
+    expect(displayModelName('qwen-2-5-72b')).toBe('Qwen 2 5 72b')
+    expect(displayModelName('llama-3-1-8b')).toBe('Llama 3 1 8b')
+    expect(displayModelName('openai/gpt-5.5')).toBe('GPT-5.5')
+    expect(displayModelName('google/gemini-2.0-flash')).toBe('Gemini 2.0 Flash')
+  })
+
   it('renders the Anthropic 1M-context route suffix as a tag, never raw brackets', () => {
     expect(modelDisplayParts('claude-sonnet-5[1m]')).toEqual({ name: 'Sonnet 5', tag: '1M' })
     expect(modelDisplayParts('claude-fable-5-1[1m]')).toEqual({ name: 'Fable 5.1', tag: '1M' })

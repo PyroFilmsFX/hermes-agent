@@ -10,6 +10,7 @@ const STORAGE_KEY = 'hermes.desktop.visible-models'
  *  AFTER the user last curated (plugin update, catalog refresh, new release), so
  *  it falls through to the curated default rule instead of defaulting to hidden. */
 const KNOWN_STORAGE_KEY = 'hermes.desktop.known-models'
+const SEEN_STORAGE_KEY = 'hermes.desktop.seen-models'
 
 /** Models shown per provider in the status-bar dropdown before the user has
  *  customized the list. Backend `models` are already relevance-ordered. */
@@ -38,10 +39,56 @@ export interface ModelFamily {
   id: string
 }
 
+/** Derive the family group key for a model to group related tiers/versions. */
+export function modelFamilyKey(model: string): string {
+  const base = model.trim().toLowerCase().replace(/^.*[/]/, '').replace(/-\d{8}$/, '')
+  const claude = base.match(/(?:^|[-_])(opus|sonnet|haiku|fable)(?:[-_.]|$)/)
+
+  if (claude) {
+    return claude[1]
+  }
+
+  const generic = base.match(/^([a-z0-9]+(?:[-_.][a-z0-9]+)?)/)
+
+  return generic ? generic[1] : base
+}
+
+/** Check whether a model has been seen/acknowledged. */
+export function isModelSeen(
+  model: string,
+  provider?: string,
+  seen: Set<string> | null = $seenModels.get()
+): boolean {
+  if (!seen || seen.size === 0) {
+    return false
+  }
+
+  if (seen.has(model)) {
+    return true
+  }
+
+  if (provider && seen.has(modelVisibilityKey(provider, model))) {
+    return true
+  }
+
+  for (const key of seen) {
+    if (key === model || key.endsWith(`::${model}`)) {
+      return true
+    }
+  }
+
+  return false
+}
+
 /** Collapse a provider's model list so a base model and its `…-fast` variant
  *  become a single family (one row, one toggle). Order is preserved by the
- *  base model's position. A `…-fast` model with no base stands on its own. */
-export function collapseModelFamilies(models: readonly string[]): ModelFamily[] {
+ *  base model's position. A `…-fast` model with no base stands on its own.
+ *  When a seen set is present, an unseen model in a family sorts to the top
+ *  of that family once. */
+export function collapseModelFamilies(
+  models: readonly string[],
+  seen: Set<string> | null = $seenModels.get()
+): ModelFamily[] {
   const present = new Set(models)
   const families: ModelFamily[] = []
   const consumed = new Set<string>()
@@ -71,7 +118,44 @@ export function collapseModelFamilies(models: readonly string[]): ModelFamily[] 
     }
   }
 
-  return families
+  if (!seen || seen.size === 0) {
+    return families
+  }
+
+  const isFamilySeen = (family: ModelFamily) =>
+    isModelSeen(family.id, undefined, seen) || (family.fastId !== null && isModelSeen(family.fastId, undefined, seen))
+
+  const familyOrder: string[] = []
+  const familyBuckets = new Map<string, ModelFamily[]>()
+
+  for (const family of families) {
+    const key = modelFamilyKey(family.id)
+
+    if (!familyBuckets.has(key)) {
+      familyBuckets.set(key, [])
+      familyOrder.push(key)
+    }
+
+    familyBuckets.get(key)!.push(family)
+  }
+
+  const result: ModelFamily[] = []
+
+  for (const key of familyOrder) {
+    const bucket = familyBuckets.get(key)!
+    const hasSeen = bucket.some(isFamilySeen)
+    const hasUnseen = bucket.some(f => !isFamilySeen(f))
+
+    if (hasSeen && hasUnseen) {
+      const unseenItems = bucket.filter(f => !isFamilySeen(f))
+      const seenItems = bucket.filter(isFamilySeen)
+      result.push(...unseenItems, ...seenItems)
+    } else {
+      result.push(...bucket)
+    }
+  }
+
+  return result
 }
 
 function loadKeySet(storageKey: string): Set<string> | null {
@@ -97,6 +181,70 @@ export const $visibleModels = atom<Set<string> | null>(loadKeySet(STORAGE_KEY))
 /** Keys the user has seen, or null when nothing has been recorded yet (a fresh
  *  install, or a store written before the snapshot existed). */
 export const $knownModels = atom<Set<string> | null>(loadKeySet(KNOWN_STORAGE_KEY))
+
+/** Models the user has seen, persisted across reload so newly released models surface first. */
+export const $seenModels = atom<Set<string> | null>(loadKeySet(SEEN_STORAGE_KEY))
+
+function persistSeenModels(seen: Set<string>): void {
+  $seenModels.set(new Set(seen))
+  persistString(SEEN_STORAGE_KEY, JSON.stringify([...seen]))
+}
+
+export function setSeenModels(keys: Set<string>): void {
+  persistSeenModels(keys)
+}
+
+export function markModelSeen(model: string, provider?: string): void {
+  const current = new Set($seenModels.get() ?? [])
+  current.add(model)
+
+  if (provider) {
+    current.add(modelVisibilityKey(provider, model))
+  }
+
+  persistSeenModels(current)
+}
+
+export function markModelsSeen(models: readonly string[], provider?: string): void {
+  const current = new Set($seenModels.get() ?? [])
+
+  for (const m of models) {
+    current.add(m)
+
+    if (provider) {
+      current.add(modelVisibilityKey(provider, m))
+    }
+  }
+
+  persistSeenModels(current)
+}
+
+export function markFamiliesSeen(families: readonly ModelFamily[], provider?: string): void {
+  const current = new Set($seenModels.get() ?? [])
+
+  for (const f of families) {
+    current.add(f.id)
+
+    if (provider) {
+      current.add(modelVisibilityKey(provider, f.id))
+    }
+
+    if (f.fastId) {
+      current.add(f.fastId)
+
+      if (provider) {
+        current.add(modelVisibilityKey(provider, f.fastId))
+      }
+    }
+  }
+
+  persistSeenModels(current)
+}
+
+export function clearSeenModels(): void {
+  $seenModels.set(new Set())
+  persistString(SEEN_STORAGE_KEY, null)
+}
 
 export const $modelVisibilityOpen = atom(false)
 
