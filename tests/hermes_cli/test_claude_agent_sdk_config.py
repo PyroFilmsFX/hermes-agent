@@ -104,6 +104,11 @@ class TestClaudeAgentSdkDefaults:
             # reprobe_on_restart (U1.13): opt-in re-evaluation of a persisted exposed:false after a
             # backend restart; off by default because it costs that conversation one cache miss.
             "session_send": {"enabled": True, "reprobe_on_restart": False},
+            # #31: replay-safe transient API failures retry on the same provider with a
+            # capped backoff. The upstream PR candidate should default max_retries to 0.
+            "transient_retry_max_retries": 2,
+            "transient_retry_backoff_seconds": [2, 8],
+            "transient_retry_max_wait_seconds": 60,
         }
         for key, expected in fork_truthy.items():
             assert block[key] == expected, f"fork default for {key!r} drifted"

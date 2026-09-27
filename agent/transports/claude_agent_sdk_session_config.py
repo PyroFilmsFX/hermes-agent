@@ -167,9 +167,13 @@ def _sdk_env_overrides(
     # Conductor's worker-spawn hook honors TB_STATE_ROOT. Keep its artifacts
     # out of the checked-out project and scope them to the active Hermes
     # profile; a cwd hash gives each project a stable, filesystem-safe root.
+    # Only a real SDK session (which passes its cwd) gets a root; the process cwd
+    # is not a project.
+    if not sdk_cwd:
+        return overrides
     from hermes_constants import get_hermes_home
 
-    project_cwd = Path(sdk_cwd or os.getcwd()).expanduser().resolve()
+    project_cwd = Path(sdk_cwd).expanduser().resolve()
     cwd_hash = hashlib.sha256(os.fsencode(project_cwd)).hexdigest()[:16]
     state_dir = get_hermes_home() / "sdk-state" / cwd_hash
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)

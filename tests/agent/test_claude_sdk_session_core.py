@@ -642,7 +642,9 @@ class TestSession:
         for key in ("PYTHONPATH", "PYTHONHOME"):
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
-        assert session.build_option_fields()["env"] == {}
+        env = session.build_option_fields()["env"]
+        env.pop("TB_STATE_ROOT", None)  # the per-session hook state root is independent of this
+        assert env == {}
 
     def test_allow_metered_key_disables_the_scrub(self, monkeypatch):
         # allow_metered_key: true is the operator's explicit metered opt-in
@@ -662,7 +664,9 @@ class TestSession:
         for key in ("PYTHONPATH", "PYTHONHOME"):  # interpreter-path scrub is independent of this opt-in
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
-        assert session.build_option_fields()["env"] == {}
+        env = session.build_option_fields()["env"]
+        env.pop("TB_STATE_ROOT", None)  # the per-session hook state root is independent of this
+        assert env == {}
 
     def test_metered_key_refuses_startup_fail_closed(self, monkeypatch):
         # The hard rule enforced at the front door: a present metered key
