@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -51,6 +52,7 @@ _FTS_REBUILD_KEYS = ("fts_rebuild_progress", "fts_rebuild_high_water",
                      "fts_cjk_rebuild_progress", "fts_cjk_rebuild_high_water")
 _BATCH = 500
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_ENV_ASSIGNMENT_RE = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(.*?)(\r?\n)?$")
 
 
 class EgressMaskError(RuntimeError):
@@ -133,10 +135,22 @@ class EgressMasker:
 
     # -- values ------------------------------------------------------------
 
-    def text(self, value: Any) -> Any:
+    def text(self, value: Any, *, key: Optional[str] = None) -> Any:
         """Mask free text with every rule (prefix tokens, DB URLs, assignments, entropy)."""
         if not self.active or not isinstance(value, str) or not value:
             return value
+        if key:
+            return self._keyed_text(value, key)
+        lines = value.splitlines(keepends=True)
+        if len(lines) > 1:
+            return "".join(self.text(line) for line in lines)
+        if match := _ENV_ASSIGNMENT_RE.match(value):
+            prefix, env_key, equals, raw, newline = match.groups()
+            candidate = raw.strip().strip("\"'")
+            if candidate:
+                masked = self._keyed_text(candidate, env_key)
+                if masked != candidate:
+                    return f"{prefix}{env_key}{equals}{masked}{newline or ''}"
         try:
             masked, findings = _sh.mask_secrets_for_ingest(value, config=self.config, key_provider=self._kp)
         except Exception as exc:
@@ -144,6 +158,18 @@ class EgressMasker:
         for f in findings:
             self.counts[f.kind] += f.count
         return masked
+
+    def _keyed_text(self, value: str, key: str) -> str:
+        """Apply the detector's structured key rules to one value."""
+        try:
+            probe = f"{key}={value}"
+            masked, findings = _sh.mask_secrets_for_ingest(
+                probe, config=self.config, key_provider=self._kp)
+        except Exception as exc:
+            raise self._fail(exc) from None
+        for finding in findings:
+            self.counts[finding.kind] += finding.count
+        return masked[len(key) + 1:]
 
     def stored(self, value: Any) -> Any:
         """Mask a stored cell/document, JSON-aware (never corrupts serialized JSON)."""
@@ -158,14 +184,18 @@ class EgressMasker:
 
     def value(self, node: Any) -> Any:
         """Recursively mask the string leaves of a dict/list/tuple (keys are left alone)."""
+        return self._value_with_key(node)
+
+    def _value_with_key(self, node: Any, key: Optional[str] = None) -> Any:
         if isinstance(node, str):
-            return self.text(node)
+            return self.text(node, key=key)
         if isinstance(node, list):
-            return [self.value(v) for v in node]
+            return [self._value_with_key(v, key) for v in node]
         if isinstance(node, tuple):
-            return tuple(self.value(v) for v in node)
+            return tuple(self._value_with_key(v, key) for v in node)
         if isinstance(node, dict):
-            return {k: self.value(v) for k, v in node.items()}
+            return {k: self._value_with_key(v, k if isinstance(k, str) else None)
+                    for k, v in node.items()}
         return node
 
     def payload(self, data: bytes, name: str = "") -> bytes:
@@ -246,8 +276,8 @@ class EgressMasker:
                     extension_homes: Sequence[Path] = ()) -> int:
         """Mask text cells of a STAGED SQLite snapshot; returns cells rewritten.
 
-        ``columns`` maps table -> columns (``STATE_DB_COLUMNS`` for state.db); ``None`` masks
-        every text column of every ordinary table except id/primary-key columns. With
+        ``columns`` is retained for callers on older releases; masking inspects the staged
+        schema and covers every stored text cell in every ordinary table. With
         ``secure_delete`` on, every FTS5 index is rebuilt from the masked content, the file
         is VACUUMed and the WAL truncated, so no freed page, index segment or WAL frame keeps
         the raw value. ``extension_homes`` are HERMES_HOMEs to load the cjk tokenizer from.
@@ -266,7 +296,10 @@ class EgressMasker:
             for n in fts:
                 if "content=''" in tables[n].replace(" ", "").replace('"', "'"):
                     raise EgressMaskError(f"{self.surface}: contentless FTS table cannot be rebuilt masked")
-            plan = dict(columns) if columns is not None else _generic_columns(conn, tables, fts)
+            # Inspect the staged database itself. State DB schemas evolve faster
+            # than this masker; a curated list silently leaves newer text fields
+            # (including JSON columns) untouched in an outbound snapshot.
+            plan = _generic_columns(conn, tables, fts)
             conn.execute("PRAGMA secure_delete=ON")
             changed = 0
             conn.execute("BEGIN IMMEDIATE")
@@ -333,15 +366,14 @@ def _rollback(conn: Optional[sqlite3.Connection]) -> None:
 
 
 def _generic_columns(conn: sqlite3.Connection, tables: Mapping[str, str], fts: Sequence[str]) -> Dict[str, tuple]:
-    """Every column of every ordinary table, minus id/primary-key columns and FTS shadow tables."""
+    """Every column of every ordinary table, excluding only FTS internals."""
     plan: Dict[str, tuple] = {}
     for table, sql in tables.items():
         if table.startswith("sqlite_") or table in fts or "VIRTUAL TABLE" in sql.upper():
             continue
         if any(table.startswith(f"{name}_") for name in fts):
             continue
-        cols = tuple(str(r[1]) for r in conn.execute(f'PRAGMA table_info("{table}")')
-                     if not r[5] and not _sh._is_id_key(str(r[1])))
+        cols = tuple(str(r[1]) for r in conn.execute(f'PRAGMA table_info("{table}")'))
         if cols:
             plan[table] = cols
     return plan

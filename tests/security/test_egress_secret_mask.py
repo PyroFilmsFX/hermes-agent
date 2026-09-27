@@ -301,6 +301,34 @@ def test_save_redact_token_keeps_placeholders_whole():
     assert "[REDACTED:db-password:01234567]" in out
 
 
+def test_save_masks_short_value_using_credential_key_context():
+    from agent.secret_egress import mask_egress_text
+    from hermes_cli.session_export import render_session_for_save
+
+    session = {"id": "s1", "messages": [], "credentials": {"PGPASSWORD": "Tr0ub4dor&3"}}
+    out = render_session_for_save(session, "json")
+    if "Tr0ub4dor&3" in out:
+        pytest.fail("/save retained a credential under its structured key")
+    assert "[REDACTED:" in out
+    env_line = mask_egress_text("export PGPASSWORD=Tr0ub4dor&3\n", surface="test")
+    if "Tr0ub4dor&3" in env_line:
+        pytest.fail("egress retained an environment credential under its key")
+    assert "[REDACTED:" in env_line
+
+
+def test_trace_upload_no_redact_masks_short_value_using_credential_key_context():
+    from agent.trace_upload import build_trace_jsonl
+
+    args = json.dumps({"PGPASSWORD": "Tr0ub4dor&3"})
+    messages = [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": "call_1", "function": {"name": "terminal", "arguments": args}}
+    ]}]
+    out = build_trace_jsonl(messages, session_id="s1", redact=False)
+    if "Tr0ub4dor&3" in out:
+        pytest.fail("trace upload retained a credential under its structured key")
+    assert "[REDACTED:" in out
+
+
 # ---------------------------------------------------------------------------
 # hermes backup
 # ---------------------------------------------------------------------------
@@ -515,3 +543,47 @@ def test_egress_file_mask_preserves_mode_and_replaces_symlink(tmp_path):
     assert FLY in src.read_text(encoding="utf-8")  # never written through the link
     assert stat.S_IMODE(plain.stat().st_mode) == 0o604
     assert masker.counts["fly-token"] == 2
+
+
+def test_sqlite_egress_masks_every_table_text_column(tmp_path):
+    from agent.secret_egress import EgressMasker, STATE_DB_COLUMNS
+
+    secret = "npg_" + "fakeTestCredential0123456789"
+    path = tmp_path / "staged.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE messages (reasoning_details TEXT, codex_message_items TEXT)")
+        conn.execute("INSERT INTO messages VALUES (?, ?)",
+                     (secret, json.dumps({"token": secret})))
+        conn.execute("CREATE TABLE system_prompts (prompt TEXT)")
+        conn.execute("INSERT INTO system_prompts VALUES (?)", (secret,))
+
+    EgressMasker("test").sqlite_file(path, STATE_DB_COLUMNS)
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute("SELECT reasoning_details, codex_message_items FROM messages").fetchone()
+        prompt = conn.execute("SELECT prompt FROM system_prompts").fetchone()[0]
+    if any(secret in value for value in (*rows, prompt)):
+        pytest.fail("staged SQLite text column retained a detected secret")
+    assert all("[REDACTED:" in value for value in (*rows, prompt))
+
+
+@pytest.mark.parametrize("name", ["data.sqlite", "data.sqlite3", "data.bin"])
+def test_backup_masks_sqlite_files_by_extension_or_header(tmp_path, name):
+    from agent.secret_egress import EgressMasker
+    from hermes_cli.backup import _zip_egress_file
+
+    secret = "npg_" + "fakeBackupCredential0123456789"
+    live = tmp_path / name
+    with sqlite3.connect(live) as conn:
+        conn.execute("CREATE TABLE sample (value TEXT)")
+        conn.execute("INSERT INTO sample VALUES (?)", (secret,))
+    archive = tmp_path / "backup.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        _zip_egress_file(zf, live, Path(name), tmp_path, EgressMasker("test"), tmp_path)
+    with zipfile.ZipFile(archive) as zf, sqlite3.connect(":memory:") as conn:
+        conn.deserialize(zf.read(name))
+        cell = conn.execute("SELECT value FROM sample").fetchone()[0]
+    if secret in cell:
+        pytest.fail("backup SQLite snapshot retained a detected secret")
+    assert "[REDACTED:" in cell
+    with sqlite3.connect(live) as conn:
+        assert conn.execute("SELECT value FROM sample").fetchone()[0] == secret
