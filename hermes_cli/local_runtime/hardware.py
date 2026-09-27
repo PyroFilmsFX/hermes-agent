@@ -107,8 +107,12 @@ def _linux_ram_from_meminfo(text: str) -> tuple[int, int] | None:
         return None
 
 
+_ram_cache: tuple[int, int] | None = None
+
+
 def _ram_bytes() -> tuple[int, int]:
     """(total, available) physical memory, cross-platform stdlib."""
+    global _ram_cache
     try:
         import ctypes
 
@@ -121,6 +125,9 @@ def _ram_bytes() -> tuple[int, int]:
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        if stat.ullTotalPhys > 0:
+            _ram_cache = (stat.ullTotalPhys, stat.ullAvailPhys)
+            return _ram_cache
         return stat.ullTotalPhys, stat.ullAvailPhys
     except (AttributeError, OSError):
         pass
@@ -130,9 +137,9 @@ def _ram_bytes() -> tuple[int, int]:
             # return (0, 0) and every model would read unavailable. sysctl is the platform truth.
             total = int(_stdout("/usr/sbin/sysctl", "-n", "hw.memsize").strip() or 0)
             if total <= 0:
-                return 0, 0
+                return _ram_cache if _ram_cache is not None else (0, 0)
             avail = total // 2  # conservative fallback
-            with suppress(OSError, ValueError):
+            with suppress(OSError, ValueError, subprocess.SubprocessError):
                 out = _stdout("/usr/bin/vm_stat")
                 page_m = re.search(r"page size of (\d+)", out)
                 page = int(page_m.group(1)) if page_m else 16384
@@ -143,22 +150,27 @@ def _ram_bytes() -> tuple[int, int]:
                     if (m := re.search(rf"{key}:\s+(\d+)\.", out)))
                 if pages > 0:
                     avail = pages * page
+            _ram_cache = (total, avail)
             return total, avail
         if sys.platform.startswith("linux"):
             meminfo = _linux_meminfo_text()
             if meminfo is not None:
                 linux_ram = _linux_ram_from_meminfo(meminfo)
                 if linux_ram is not None:
+                    _ram_cache = linux_ram
                     return linux_ram
         # POSIX
         page = int(_stdout("getconf", "PAGE_SIZE") or 4096)
         total = int(_stdout("getconf", "_PHYS_PAGES") or 0) * page
+        if total <= 0:
+            return _ram_cache if _ram_cache is not None else (0, 0)
         avail = total // 2  # conservative when _AVPHYS is unavailable
-        with suppress(OSError, ValueError):
+        with suppress(OSError, ValueError, subprocess.SubprocessError):
             avail = int(_stdout("getconf", "_AVPHYS_PAGES") or 0) * page or avail
+        _ram_cache = (total, avail)
         return total, avail
-    except (OSError, ValueError):
-        return 0, 0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return _ram_cache if _ram_cache is not None else (0, 0)
 
 
 # nvidia-smi lives at a fixed path under the driver install; PATH presence varies by session type
