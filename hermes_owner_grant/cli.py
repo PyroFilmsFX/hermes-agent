@@ -238,6 +238,8 @@ def main(
         )
         return verify_mod.EXIT_INTERNAL
     _write(output_stream, result.to_dict())
+    # Exit 6 (EXIT_EVIDENCE) for --audit-at and --allow-fragment passes: evidence only, so a
+    # caller that authorizes on exit 0 never authorizes on them.
     return result.exit_code
 
 

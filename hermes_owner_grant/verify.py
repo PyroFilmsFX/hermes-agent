@@ -100,6 +100,9 @@ EXIT_USAGE = 2
 EXIT_ANCHOR = 3
 EXIT_NOT_FOUND = 4
 EXIT_INTERNAL = 5
+# A passing result that is evidence only, never authorization: an audit re-evaluation
+# (audit_at) or a fragment quote accepted with allow_fragment. ``ok`` stays true.
+EXIT_EVIDENCE = 6
 
 _MIN_QUOTE = 12  # addendum §4.2; quote.match_quote enforces the same default
 _ANCHOR_REASONS = frozenset((REASON_ANCHOR_MISSING, REASON_ANCHOR_UNTRUSTED))
@@ -163,6 +166,10 @@ class VerifyResult:
     @property
     def exit_code(self) -> int:
         if self.ok:
+            if self.audit or (
+                self.match is not None and self.match.get("kind") == "fragment"
+            ):
+                return EXIT_EVIDENCE
             return EXIT_OK
         if self.reason in _ANCHOR_REASONS:
             return EXIT_ANCHOR

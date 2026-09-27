@@ -1152,3 +1152,65 @@ def test_isolated_system_python_verifies_the_precomputed_fixture():
         "uid": (False, "anchor_untrusted", 3, None),
     }
     assert all(r["impl"] == "pure" for r in rows)
+
+
+# -- evidence-only results never exit 0 (review P2) ----------------------------------------
+
+
+def test_allow_fragment_match_is_evidence_only_exit_6(owner, grants, anchor):
+    write_grant(grants, seal(owner, make_payload()))
+    result = check(anchor, quote="merge until CI is green", allow_fragment=True)
+    assert result.ok is True and result.match["kind"] == "fragment"
+    assert result.exit_code == 6 == verify_mod.EXIT_EVIDENCE
+    assert result.to_dict()["match"]["kind"] == "fragment"
+
+
+def test_audit_at_result_is_evidence_only_exit_6(owner, grants, anchor):
+    payload = make_payload(issued_at=NOW - 2 * DAY, expires_at=NOW - DAY)
+    env = seal(owner, payload)
+    write_grant(grants, env)
+    audited = check_env(anchor, env, audit_at=NOW - DAY - HOUR)
+    assert audited.ok is True and audited.audit is True
+    assert audited.exit_code == 6
+    looked_up = check(anchor, text_sha=sha(), audit_at=NOW - DAY - HOUR)
+    assert looked_up.ok is True and looked_up.to_dict()["audit"] is True
+    assert looked_up.exit_code == 6
+    # A denied audit stays a deny, not evidence.
+    denied_audit = check_env(anchor, env, audit_at=NOW)
+    assert denied_audit.ok is False and denied_audit.exit_code == 1
+
+
+def test_whole_segment_quote_still_exits_0(owner, grants, anchor):
+    write_grant(grants, seal(owner, make_payload()))
+    result = check(anchor, quote="Do not merge until CI is green. Then ship it.")
+    assert result.ok and result.match["kind"] == "segment" and result.exit_code == 0
+
+
+def test_cli_evidence_only_results_exit_6(owner, grants, anchor):
+    env = seal(owner, make_payload(issued_at=NOW - 2 * DAY, expires_at=NOW - DAY))
+    write_grant(grants, env)
+    fresh = seal(owner, make_payload(nonce="fresh"))
+    write_grant(grants, fresh)
+
+    def run(argv, quote_text=None):
+        output = io.StringIO()
+        code = cli_mod.main(
+            ["verify", "--session", SESSION] + argv,
+            anchor=anchor,
+            uid=UID,
+            now_ms=NOW,
+            stdin=io.StringIO(quote_text or ""),
+            stdout=output,
+        )
+        return code, json.loads(output.getvalue())
+
+    code, body = run(["--grant", env.grant_id, "--audit-at", str(NOW - DAY - HOUR)])
+    assert code == 6 and body["ok"] is True and body["audit"] is True
+    code, body = run(
+        ["--quote-stdin", "--allow-fragment"], quote_text="merge until CI is green"
+    )
+    assert code == 6 and body["ok"] is True and body["match"]["kind"] == "fragment"
+    code, body = run(["--quote-stdin"], quote_text="merge until CI is green")
+    assert code == 1 and body["reason"] == "quote_fragment"
+    code, body = run(["--grant", fresh.grant_id])
+    assert code == 0 and body["ok"] is True and body["audit"] is False

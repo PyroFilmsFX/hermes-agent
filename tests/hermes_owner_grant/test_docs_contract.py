@@ -25,8 +25,16 @@ def test_owner_grants_doc_exit_codes_match_cli():
         verify.EXIT_ANCHOR: "anchor",
         verify.EXIT_NOT_FOUND: "not_found",
         verify.EXIT_INTERNAL: "internal",
+        verify.EXIT_EVIDENCE: "evidence",
     }
     assert rows == expected
+
+
+def test_owner_grants_doc_says_evidence_only_results_do_not_authorize():
+    text = DOC.read_text(encoding="utf-8")
+    assert verify.EXIT_EVIDENCE == 6
+    assert "--allow-fragment" in text and "--audit-at" in text
+    assert "evidence only" in text.lower()
 
 
 def test_owner_grants_doc_covers_hook_trust_boundaries_and_amendments():

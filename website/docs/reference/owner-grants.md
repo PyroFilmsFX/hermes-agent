@@ -84,8 +84,8 @@ The verifier writes one JSON object to stdout. `verify` returns the following sc
 }
 ```
 
-Treat every non-zero result as deny. `grant` and `match` are populated only after the
-corresponding verification stages pass. Exit codes are:
+Treat every non-zero result as deny, and authorize only on exit 0. `grant` and `match` are
+populated only after the corresponding verification stages pass. Exit codes are:
 
 | Code | Name | Meaning |
 | ---: | --- | --- |
@@ -95,6 +95,19 @@ corresponding verification stages pass. Exit codes are:
 | 3 | anchor | Anchor missing or untrusted; report this to the owner |
 | 4 | not_found | No matching valid grant |
 | 5 | internal | Verifier could not complete safely |
+| 6 | evidence | Evidence only, not authorizing: a pass under `--audit-at` or `--allow-fragment` |
+
+Exit 6 keeps `ok: true` and the `match.kind` (`fragment`) and `audit` fields so audit tools
+can display the evidence, but it is evidence only and never authorizes. A hook must key on
+the exit code, not on `ok`.
+
+A quote matches as `exact` (the whole owner text) or `segment` (one or more whole
+consecutive sentences, at least 12 characters). Sentences end only at `.`, `!` or `?`
+followed by whitespace and a capital or digit; a line break is whitespace inside a
+sentence, and semicolons, colons, dashes, ellipses, abbreviations and initials never end
+one. A paragraph break or list item starts a new segment only after a finished sentence,
+and a list introduced by an unfinished line (such as `Do NOT:`) stays one segment with it.
+Anything else inside the owner text is a refused fragment (`quote_fragment`).
 
 ## Conductor contract
 
