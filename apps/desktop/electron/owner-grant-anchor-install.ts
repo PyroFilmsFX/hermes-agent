@@ -5,16 +5,27 @@
  * The privileged step is ONE macOS admin prompt:
  *
  *   /usr/bin/osascript -e 'on run argv' -e '<ADMIN_APPLESCRIPT[1]>' -e 'end run' \
- *     <ANCHOR_ROOT_SCRIPT> <staged anchor file> <sha256 of its bytes>
+ *     <ANCHOR_ROOT_SCRIPT> <staged manifest.sha256> <sha256 of the manifest bytes>
  *
  * Every element of that argv is a constant in this file except the last two, and those are
  * validated (a mkdtemp path of a fixed shape, 64 lowercase hex) before anything runs. osascript
  * is exec'd directly (no shell). The AppleScript is a constant that hands its three arguments to
- * `/bin/sh -c` through `quoted form of`, so nothing is ever interpolated into a command line. The
- * anchor JSON itself travels in a file this app creates (0600 in a 0700 mkdtemp); the root script
- * copies it into a root-owned 0600 temp inside the anchor directory, checks the sha256 of THAT
- * copy (so rewriting the staged file after hashing fails closed), then chmods 0644 and renames it
- * into place. Directories are root:wheel 0755. After the runner returns, main re-reads the anchor
+ * `/bin/sh -c` through `quoted form of`, so nothing is ever interpolated into a command line.
+ *
+ * U11b: the same prompt co-installs the root-owned verifier. The app stages, in a 0700 mkdtemp
+ * with 0600 files, exactly `STAGED_PAYLOAD_FILES` (anchor.json, the launcher
+ * `hermes_owner_verify.py`, the `verifier/hermes_owner_grant/` package files) plus
+ * `manifest.sha256`, which lists the sha256 of each in a fixed order; argv pins the manifest. The
+ * root script copies the fixed file list (names are constants in the script, never read from the
+ * payload) into a root-only temp inside the anchor directory, checks the manifest's sha256 and
+ * then that the root copies hash to exactly the manifest (so rewriting any staged file after
+ * hashing fails closed and installs nothing). Only then does it swap in the package, fill the
+ * root-owned `pycache/` (/usr/bin/python3 -I -S under `-X pycache_prefix` finds the CLI's static
+ * import closure with modulefinder and py_compiles it, so the package AND the stdlib it imports
+ * are precompiled (D13) without ever executing the staged code as root), move the
+ * launcher, write the installed `manifest.sha256` (launcher, package, every .pyc) and finally
+ * rename anchor.json, whose `verifier_sha256` is the launcher's sha256. Everything is
+ * root:wheel, dirs 0755, files 0644. After the runner returns, main re-reads the anchor
  * through `readTrustedOwnerAnchor` (the StrictModes reader) and reports success only when it now
  * says exactly what was asked for, including that it pins the new key. The runner's exit code is
  * never trusted for success.
@@ -45,55 +56,174 @@ import { OwnerKeyError, type OwnerKeyLog, type OwnerKeyPublic, type OwnerKeyStor
 export const OSASCRIPT_PATH = '/usr/bin/osascript'
 const MAX_ANCHOR_KEYS = 32
 
+/** The package files co-installed under `verifier/hermes_owner_grant/`, in manifest order. Must
+ *  equal `hermes_owner_grant.install_check.PACKAGE_FILES` (a cross-language test pins it). */
+export const VERIFIER_PACKAGE_FILES: readonly string[] = Object.freeze([
+  '__init__.py',
+  'anchor.py',
+  'cli.py',
+  'ed25519_pure.py',
+  'envelope.py',
+  'install_check.py',
+  'quote.py',
+  'scopes.json',
+  'scopes.py',
+  'verify.py'
+])
+
+const VERIFIER_PACKAGE_REL = 'verifier/hermes_owner_grant'
+const MAX_VERIFIER_FILE_BYTES = 1024 * 1024
+
+/** Every staged file the manifest pins, in manifest order (`manifest.sha256` itself is pinned
+ *  by argv). */
+export const STAGED_PAYLOAD_FILES: readonly string[] = Object.freeze([
+  'anchor.json',
+  'hermes_owner_verify.py',
+  ...VERIFIER_PACKAGE_FILES.map(name => `${VERIFIER_PACKAGE_REL}/${name}`)
+])
+
+/** The root-owned launcher that `/usr/bin/python3 -I -S` runs on the hook path. Byte-identical to
+ *  `hermes_owner_grant.builder.LAUNCHER_SOURCE` (pinned by a cross-language test). */
+export const OWNER_VERIFY_LAUNCHER = String.raw`"""Hermes owner-grant verifier launcher. Installed root-owned; do not edit.
+
+Run: /usr/bin/python3 -I -S "/Library/Application Support/Hermes/owner-grant/hermes_owner_verify.py" verify ...
+It imports the verifier only from the root-owned verifier/ directory beside this file, and reads
+bytecode only from the root-owned pycache/ beside it (the installer filled it, stdlib included).
+It reads no env var and never imports from the working directory; without -I -S it
+refuses to run (exit 3).
+"""
+
+import sys
+
+
+def _load():
+    if not (sys.flags.isolated and sys.flags.no_site):
+        return None, "run it as /usr/bin/python3 -I -S <launcher>"
+    here = __file__.rpartition("/")[0]
+    if not here.startswith("/"):
+        return None, "the launcher path is not absolute"
+    root = here + "/verifier"
+    sys.pycache_prefix = here + "/pycache"
+    if sys.path[:1] != [root]:
+        sys.path.insert(0, root)
+    from hermes_owner_grant import cli
+    if not cli.__file__.startswith(root + "/hermes_owner_grant/"):
+        return None, "the verifier was not imported from " + root
+    return cli, None
+
+
+def _main():
+    cli, why = _load()
+    if cli is None:
+        import json
+        body = {"schema": "hermes-owner-verify/v1", "ok": False, "reason": "verifier_untrusted", "detail": why}
+        sys.stdout.write(json.dumps(body, sort_keys=True) + "\n")
+        return 3
+    return cli.main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
+`
+
+/** `anchor.verifier_sha256` for everything this app installs. */
+export const OWNER_VERIFY_LAUNCHER_SHA256 = createHash('sha256').update(OWNER_VERIFY_LAUNCHER, 'utf8').digest('hex')
+
 /** The AppleScript program, one `-e` per line. Its arguments are (1) the root script, (2) the
  *  staged file, (3) the sha256; each reaches sh as one word via `quoted form of`. */
 export const ADMIN_APPLESCRIPT: readonly [string, string, string] = Object.freeze([
   'on run argv',
-  'do shell script "/bin/sh -c " & quoted form of (item 1 of argv) & " hermes-owner-anchor " & quoted form of (item 2 of argv) & " " & quoted form of (item 3 of argv) with prompt "Hermes wants to pin your owner key so conductor can verify owner decisions." with administrator privileges',
+  'do shell script "/bin/sh -c " & quoted form of (item 1 of argv) & " hermes-owner-anchor " & quoted form of (item 2 of argv) & " " & quoted form of (item 3 of argv) with prompt "Hermes wants to pin your owner key and install its verifier so conductor can verify owner decisions." with administrator privileges',
   'end run'
 ]) as readonly [string, string, string]
 
-/** Runs as root: `sh -c ANCHOR_ROOT_SCRIPT hermes-owner-anchor <staged file> <sha256>`. */
-export const ANCHOR_ROOT_SCRIPT = `set -eu
+/** Runs as root: `sh -c ANCHOR_ROOT_SCRIPT hermes-owner-anchor <staged manifest> <sha256>`.
+ *  Exit 64 bad arguments, 65 a hash differs, 66 a staged path is missing or a symlink, 73 a
+ *  Hermes directory is a symlink. Nothing is installed unless every hash matched. */
+export const ANCHOR_ROOT_SCRIPT = `set -euf
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 077
-src=$1
+manifest=$1
 want=$2
 top='/Library/Application Support/Hermes'
 dir="$top/owner-grant"
-tmp="$dir/.anchor.json.$$"
+pkg=verifier/hermes_owner_grant
+code="$pkg/__init__.py $pkg/anchor.py $pkg/cli.py $pkg/ed25519_pure.py $pkg/envelope.py $pkg/install_check.py $pkg/quote.py $pkg/scopes.json $pkg/scopes.py $pkg/verify.py"
+files="anchor.json hermes_owner_verify.py $code"
 case $want in
   *[!0-9a-f]*) exit 64 ;;
 esac
 [ "\${#want}" -eq 64 ] || exit 64
-[ -f "$src" ] || exit 66
-[ ! -L "$src" ] || exit 66
+src=\${manifest%/manifest.sha256}
+[ "$src/manifest.sha256" = "$manifest" ] || exit 64
+for d in "$src" "$src/verifier" "$src/$pkg"; do
+  [ -d "$d" ] && [ ! -L "$d" ] || exit 66
+done
 for d in "$top" "$dir"; do
   [ ! -L "$d" ] || exit 73
   [ -d "$d" ] || /bin/mkdir "$d"
   /usr/sbin/chown root:wheel "$d"
   /bin/chmod 0755 "$d"
 done
-trap '/bin/rm -f "$tmp"' EXIT
-/bin/rm -f "$tmp"
-/usr/bin/head -c 65536 "$src" > "$tmp"
-/usr/sbin/chown root:wheel "$tmp"
-got=$(/usr/bin/shasum -a 256 "$tmp")
+tmp="$dir/.install.$$"
+old="$dir/.old.$$"
+trap '/bin/rm -rf "$tmp" "$old"' EXIT
+/bin/rm -rf "$tmp" "$old"
+/bin/mkdir -p "$tmp/$pkg" "$old"
+for f in manifest.sha256 $files; do
+  [ -f "$src/$f" ] && [ ! -L "$src/$f" ] || exit 66
+  /usr/bin/head -c 1048576 "$src/$f" > "$tmp/$f"
+done
+got=$(/usr/bin/shasum -a 256 "$tmp/manifest.sha256")
 got=\${got%% *}
 [ "$got" = "$want" ] || exit 65
-/bin/chmod 0644 "$tmp"
-/bin/mv -f "$tmp" "$dir/anchor.json"
+(cd "$tmp" && /usr/bin/shasum -a 256 $files) > "$tmp/.computed"
+/usr/bin/cmp -s "$tmp/.computed" "$tmp/manifest.sha256" || exit 65
+/bin/rm -f "$tmp/.computed" "$tmp/manifest.sha256"
+/usr/sbin/chown -R root:wheel "$tmp"
+/usr/bin/find "$tmp" -type d -exec /bin/chmod 0755 {} +
+/usr/bin/find "$tmp" -type f -exec /bin/chmod 0644 {} +
+[ ! -e "$dir/verifier" ] || /bin/mv -f "$dir/verifier" "$old/verifier"
+/bin/mv "$tmp/verifier" "$dir/verifier"
+[ ! -e "$dir/pycache" ] || /bin/mv -f "$dir/pycache" "$old/pycache"
+if /usr/bin/xcode-select -p >/dev/null 2>&1; then
+  /usr/bin/python3 -I -S -X pycache_prefix="$tmp/pycache" -c 'import sys, modulefinder, py_compile
+finder = modulefinder.ModuleFinder(path=[sys.argv[1]] + sys.path)
+finder.import_hook("hermes_owner_grant.cli")
+for module in finder.modules.values():
+    if (module.__file__ or "").endswith(".py"):
+        py_compile.compile(module.__file__)
+' "$dir/verifier" >/dev/null 2>&1 || /bin/rm -rf "$tmp/pycache"
+fi
+if [ -d "$tmp/pycache" ]; then
+  /usr/sbin/chown -R root:wheel "$tmp/pycache"
+  /usr/bin/find "$tmp/pycache" -type d -exec /bin/chmod 0755 {} +
+  /usr/bin/find "$tmp/pycache" -type f -exec /bin/chmod 0644 {} +
+  /bin/mv "$tmp/pycache" "$dir/pycache"
+fi
+/bin/mv -f "$tmp/hermes_owner_verify.py" "$dir/hermes_owner_verify.py"
+(
+  cd "$dir"
+  /usr/bin/shasum -a 256 hermes_owner_verify.py $code
+  if [ -d pycache ]; then
+    /usr/bin/find pycache -type f -name '*.pyc' -print0 | LC_ALL=C /usr/bin/sort -z | /usr/bin/xargs -0 /usr/bin/shasum -a 256
+  fi
+) > "$tmp/manifest.sha256"
+/bin/chmod 0644 "$tmp/manifest.sha256"
+/bin/mv -f "$tmp/manifest.sha256" "$dir/manifest.sha256"
+/bin/mv -f "$tmp/anchor.json" "$dir/anchor.json"
 `
 
-const STAGED_FILE_RE = /^\/(?:[A-Za-z0-9._+-]+\/)*hermes-owner-anchor-[A-Za-z0-9]{6}\/anchor\.json$/
+const STAGED_FILE_RE = /^\/(?:[A-Za-z0-9._+-]+\/)*hermes-owner-anchor-[A-Za-z0-9]{6}\/manifest\.sha256$/
 const SHA256_RE = /^[0-9a-f]{64}$/
 
 export class AnchorInstallError extends Error {
   readonly code = 'bad_argument'
 }
 
-/** The full osascript argv. Throws unless the two variable parts have their fixed shapes. */
+/** The full osascript argv. Throws unless the two variable parts (the staged manifest path and
+ *  its sha256) have their fixed shapes. */
 export function buildAdminArgv(stagedFile: string, sha256: string): string[] {
   if (
     typeof stagedFile !== 'string' ||
@@ -101,11 +231,11 @@ export function buildAdminArgv(stagedFile: string, sha256: string): string[] {
     path.posix.normalize(stagedFile) !== stagedFile ||
     stagedFile.split('/').some(part => part === '.' || part === '..')
   ) {
-    throw new AnchorInstallError('the staged anchor path has an unexpected shape')
+    throw new AnchorInstallError('the staged manifest path has an unexpected shape')
   }
 
   if (typeof sha256 !== 'string' || !SHA256_RE.test(sha256)) {
-    throw new AnchorInstallError('the anchor digest is not 64 lowercase hex')
+    throw new AnchorInstallError('the manifest digest is not 64 lowercase hex')
   }
 
   return ['-e', ADMIN_APPLESCRIPT[0], '-e', ADMIN_APPLESCRIPT[1], '-e', ADMIN_APPLESCRIPT[2], ANCHOR_ROOT_SCRIPT, stagedFile, sha256]
@@ -192,6 +322,9 @@ export interface OwnerGrantControllerDeps {
   confirm: (req: OwnerGrantConfirmRequest) => Promise<boolean>
   ownerUid: number
   grantsDir: string
+  /** The `hermes_owner_grant` package directory the verifier files are read from. Without it
+   *  (or with any file missing) every install is refused before a confirm or admin prompt. */
+  verifierSourceDir?: string
   tmpRoot?: string
   now?: () => number
   log?: OwnerKeyLog
@@ -213,7 +346,11 @@ interface AnchorDoc {
   owner_uid: number
   grants_dir: string
   keys: AnchorKeyDoc[]
+  verifier_sha256: string
 }
+
+/** Staged relative path -> bytes, for every package file. */
+type VerifierFiles = Map<string, Buffer>
 
 const MESSAGES: Record<Exclude<OwnerGrantState, 'ready'>, string> = {
   off: 'Off. Owner decisions are not signed.',
@@ -240,6 +377,7 @@ function sameAnchor(anchor: OwnerAnchor, doc: AnchorDoc): boolean {
   return (
     anchor.ownerUid === doc.owner_uid &&
     anchor.grantsDir === doc.grants_dir &&
+    anchor.verifierSha256 === doc.verifier_sha256 &&
     anchor.keys.length === doc.keys.length &&
     anchor.keys.every((k, i) => {
       const want = doc.keys[i]
@@ -372,17 +510,31 @@ class OwnerGrantControllerImpl {
     return Promise.resolve({ ok: false, reason: 'bad_action', status: this.status() })
   }
 
-  /** "Let conductor verify owner decisions": pin a fresh key unless the anchor already pins ours. */
+  /** "Let conductor verify owner decisions": pin a fresh key unless the anchor already pins ours.
+   *  When it does but the installed verifier is not this app's launcher (an older install, or
+   *  one from before U11b), the same keys are re-installed with the current verifier. */
   enable(): Promise<OwnerGrantActionResult> {
     return this.#exclusive(async () => {
       const read = this.#d.readAnchor()
       this.#d.store.setAnchor(read.ok ? read.anchor : null)
 
       if (read.ok && this.#d.store.anchorState() === 'match') {
-        return { ok: true, kid: this.#d.store.publicInfo()!.kid, unchanged: true }
+        const kid = this.#d.store.publicInfo()!.kid
+
+        if (read.anchor.verifierSha256 === OWNER_VERIFY_LAUNCHER_SHA256) {
+          return { ok: true, kid, unchanged: true }
+        }
+
+        return this.#refreshVerifier(read.anchor, kid)
       }
 
-      return this.#pinFreshKey('enable', read)
+      const verifier = this.#loadVerifier()
+
+      if (!verifier) {
+        return { ok: false, reason: 'verifier_unavailable' }
+      }
+
+      return this.#pinFreshKey('enable', read, verifier)
     })
   }
 
@@ -391,8 +543,13 @@ class OwnerGrantControllerImpl {
     return this.#exclusive(async () => {
       const read = this.#d.readAnchor()
       this.#d.store.setAnchor(read.ok ? read.anchor : null)
+      const verifier = this.#loadVerifier()
 
-      return this.#pinFreshKey('rotate', read)
+      if (!verifier) {
+        return { ok: false, reason: 'verifier_unavailable' }
+      }
+
+      return this.#pinFreshKey('rotate', read, verifier)
     })
   }
 
@@ -412,6 +569,12 @@ class OwnerGrantControllerImpl {
         return { ok: false, reason: 'no_active_key' }
       }
 
+      const verifier = this.#loadVerifier()
+
+      if (!verifier) {
+        return { ok: false, reason: 'verifier_unavailable' }
+      }
+
       const doc = this.#doc(
         read.anchor.keys.map(k => (k.kid === target.kid ? { ...keyDoc(k), status: 'revoked' as const } : keyDoc(k)))
       )
@@ -426,7 +589,7 @@ class OwnerGrantControllerImpl {
         return { ok: false, reason: 'cancelled' }
       }
 
-      const ran = await this.#install(doc)
+      const ran = await this.#install(doc, verifier)
       const after = this.#d.readAnchor()
       this.#d.store.setAnchor(after.ok ? after.anchor : null)
 
@@ -442,7 +605,75 @@ class OwnerGrantControllerImpl {
 
   // -- private -----------------------------------------------------------------------------------
 
-  async #pinFreshKey(mode: 'enable' | 'rotate', read: OwnerAnchorRead): Promise<ActionOutcome> {
+  /** Same keys, current verifier: one confirm, one admin prompt, then the anchor must say so. */
+  async #refreshVerifier(anchor: OwnerAnchor, kid: string): Promise<ActionOutcome> {
+    const verifier = this.#loadVerifier()
+
+    if (!verifier) {
+      return { ok: false, reason: 'verifier_unavailable' }
+    }
+
+    const doc = this.#doc(anchor.keys.map(keyDoc))
+
+    const confirmed = await this.#confirm({
+      title: 'Update the owner-grant verifier',
+      message: `Update the verifier for owner key ${kid}?`,
+      detail: `Your owner key stays the same; only the root-owned verifier conductor runs is replaced. ${ADMIN_NOTE}`
+    })
+
+    if (!confirmed) {
+      return { ok: false, reason: 'cancelled' }
+    }
+
+    const ran = await this.#install(doc, verifier)
+    const after = this.#d.readAnchor()
+    this.#d.store.setAnchor(after.ok ? after.anchor : null)
+
+    if (!after.ok || !sameAnchor(after.anchor, doc)) {
+      return { ok: false, reason: this.#runnerReason(ran) }
+    }
+
+    this.#log('info', 'owner-grant verifier updated', { kid })
+
+    return { ok: true, kid }
+  }
+
+  /** The package files, read before any confirm or key work. Null when any is missing, not a
+   *  regular file, or too large: the install then never starts. */
+  #loadVerifier(): VerifierFiles | null {
+    const dir = this.#d.verifierSourceDir
+
+    if (!dir) {
+      return null
+    }
+
+    const files: VerifierFiles = new Map()
+
+    try {
+      for (const name of VERIFIER_PACKAGE_FILES) {
+        const file = path.join(dir, name)
+        const st = this.#fs.statSync(file)
+
+        if (!st.isFile() || st.size > MAX_VERIFIER_FILE_BYTES) {
+          return null
+        }
+
+        const bytes = this.#fs.readFileSync(file)
+
+        if (bytes.length > MAX_VERIFIER_FILE_BYTES) {
+          return null
+        }
+
+        files.set(`${VERIFIER_PACKAGE_REL}/${name}`, bytes)
+      }
+    } catch {
+      return null
+    }
+
+    return files
+  }
+
+  async #pinFreshKey(mode: 'enable' | 'rotate', read: OwnerAnchorRead, verifier: VerifierFiles): Promise<ActionOutcome> {
     const store = this.#d.store
     const loaded: OwnerKeyPublic | null = store.publicInfo()
     // D20: always a brand-new key; the on-disk blob is not consulted.
@@ -509,7 +740,7 @@ class OwnerGrantControllerImpl {
       return { ok: false, reason: error instanceof OwnerKeyError ? error.code : 'key_save_failed' }
     }
 
-    const ran = await this.#install(doc)
+    const ran = await this.#install(doc, verifier)
     const after = this.#d.readAnchor()
     store.setAnchor(after.ok ? after.anchor : null)
     const active = after.ok ? after.anchor.keys.find(k => k.status === 'active') : undefined
@@ -539,7 +770,13 @@ class OwnerGrantControllerImpl {
   }
 
   #doc(keys: AnchorKeyDoc[]): AnchorDoc {
-    return { format: OWNER_ANCHOR_FORMAT, owner_uid: this.#d.ownerUid, grants_dir: this.#d.grantsDir, keys }
+    return {
+      format: OWNER_ANCHOR_FORMAT,
+      owner_uid: this.#d.ownerUid,
+      grants_dir: this.#d.grantsDir,
+      keys,
+      verifier_sha256: OWNER_VERIFY_LAUNCHER_SHA256
+    }
   }
 
   async #confirm(req: OwnerGrantConfirmRequest): Promise<boolean> {
@@ -550,27 +787,44 @@ class OwnerGrantControllerImpl {
     }
   }
 
-  /** Stage the anchor bytes privately, run the ONE admin command, and always clean up. */
-  async #install(doc: AnchorDoc): Promise<AdminRunResult & { error?: string }> {
+  /** Stage the payload privately (0700 dirs, 0600 files), run the ONE admin command, and always
+   *  clean up. The manifest pins every staged file; argv pins the manifest. */
+  async #install(doc: AnchorDoc, verifier: VerifierFiles): Promise<AdminRunResult & { error?: string }> {
     const fs = this.#fs
-    const bytes = Buffer.from(JSON.stringify(doc), 'utf8')
-    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const payload = new Map<string, Buffer>([
+      ['anchor.json', Buffer.from(JSON.stringify(doc), 'utf8')],
+      ['hermes_owner_verify.py', Buffer.from(OWNER_VERIFY_LAUNCHER, 'utf8')],
+      ...verifier
+    ])
+    const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
     let dir: string | null = null
 
     try {
-      dir = fs.mkdtempSync(path.join(this.#d.tmpRoot ?? os.tmpdir(), 'hermes-owner-anchor-'))
-      fs.chmodSync(dir, 0o700)
-      const file = path.join(dir, 'anchor.json')
-      const fd = fs.openSync(file, 'wx', 0o600)
-
-      try {
-        fs.writeSync(fd, bytes)
-        fs.fsyncSync(fd)
-      } finally {
-        fs.closeSync(fd)
+      if (STAGED_PAYLOAD_FILES.some(rel => !payload.has(rel)) || payload.size !== STAGED_PAYLOAD_FILES.length) {
+        throw new AnchorInstallError('the verifier payload is incomplete')
       }
 
-      return await this.#d.adminRunner.run(buildAdminArgv(file, sha256))
+      const manifest = Buffer.from(STAGED_PAYLOAD_FILES.map(rel => `${sha(payload.get(rel)!)}  ${rel}\n`).join(''), 'ascii')
+      dir = fs.mkdtempSync(path.join(this.#d.tmpRoot ?? os.tmpdir(), 'hermes-owner-anchor-'))
+      fs.chmodSync(dir, 0o700)
+
+      for (const sub of ['verifier', VERIFIER_PACKAGE_REL]) {
+        fs.mkdirSync(path.join(dir, sub), { mode: 0o700 })
+        fs.chmodSync(path.join(dir, sub), 0o700)
+      }
+
+      for (const [rel, bytes] of [...payload, ['manifest.sha256', manifest] as const]) {
+        const fd = fs.openSync(path.join(dir, rel), 'wx', 0o600)
+
+        try {
+          fs.writeSync(fd, bytes)
+          fs.fsyncSync(fd)
+        } finally {
+          fs.closeSync(fd)
+        }
+      }
+
+      return await this.#d.adminRunner.run(buildAdminArgv(path.join(dir, 'manifest.sha256'), sha(manifest)))
     } catch (error) {
       return { code: 1, cancelled: false, error: error instanceof AnchorInstallError ? error.code : 'stage_failed' }
     } finally {

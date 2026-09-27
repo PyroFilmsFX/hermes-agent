@@ -122,10 +122,14 @@ class Anchor:
 
 
 class OsFileSystem:
-    """The real filesystem. Tests substitute an object with the same two methods."""
+    """The real filesystem. Tests substitute an object with the same methods (``listdir`` is
+    needed only by the installed-verifier check)."""
 
     def lstat(self, path: str) -> Any:
         return os.lstat(path)
+
+    def listdir(self, path: str) -> list:
+        return os.listdir(path)
 
     def read_nofollow(self, path: str, limit: int) -> Tuple[Any, bytes]:
         """Open without following a final symlink or blocking on a FIFO; return the
@@ -201,9 +205,10 @@ def _check_dir_chain(directory: str, fs: Any) -> None:
         _require_root_owned(st, path)
 
 
-def _load_anchor_at(path: str, fs: Any) -> Anchor:
-    """Load and trust-check the anchor at ``path``. Private: production code only ever calls
-    it with ``ANCHOR_PATH`` (through ``load_trusted_anchor``)."""
+def read_root_owned_file(path: str, fs: Any, limit: int) -> bytes:
+    """Return the bytes of ``path`` after the StrictModes checks on it and on every directory
+    from ``/`` down to it (see the module docstring). Raises ``AnchorError``: missing, or
+    untrusted (including a file larger than ``limit`` bytes)."""
     _check_dir_chain(posixpath.dirname(path), fs)
     st = _lstat(fs, path)
     if stat.S_ISLNK(st.st_mode):
@@ -212,7 +217,7 @@ def _load_anchor_at(path: str, fs: Any) -> Anchor:
         raise _untrusted("%s is not a regular file" % path)
     _require_root_owned(st, path)
     try:
-        opened, data = fs.read_nofollow(path, MAX_ANCHOR_BYTES + 1)
+        opened, data = fs.read_nofollow(path, limit + 1)
     except FileNotFoundError:
         raise AnchorError(
             REASON_ANCHOR_MISSING, "%s disappeared before open" % path
@@ -224,9 +229,15 @@ def _load_anchor_at(path: str, fs: Any) -> Anchor:
     if not stat.S_ISREG(opened.st_mode):
         raise _untrusted("%s is not a regular file" % path)
     _require_root_owned(opened, path)
-    if len(data) > MAX_ANCHOR_BYTES:
-        raise _untrusted("%s exceeds %d bytes" % (path, MAX_ANCHOR_BYTES))
-    return parse_anchor(data)
+    if len(data) > limit:
+        raise _untrusted("%s exceeds %d bytes" % (path, limit))
+    return data
+
+
+def _load_anchor_at(path: str, fs: Any) -> Anchor:
+    """Load and trust-check the anchor at ``path``. Private: production code only ever calls
+    it with ``ANCHOR_PATH`` (through ``load_trusted_anchor``)."""
+    return parse_anchor(read_root_owned_file(path, fs, MAX_ANCHOR_BYTES))
 
 
 def load_trusted_anchor(*, fs: Any = None) -> Anchor:

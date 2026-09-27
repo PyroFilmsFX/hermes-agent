@@ -45,6 +45,8 @@ export interface OwnerAnchor {
   ownerUid: number
   grantsDir: string
   keys: OwnerAnchorKey[]
+  /** sha256 of the co-installed root-owned launcher `hermes_owner_verify.py` (U11b), or null. */
+  verifierSha256: string | null
 }
 
 export type OwnerAnchorRead =
@@ -233,7 +235,7 @@ export function parseOwnerAnchor(data: Buffer): OwnerAnchor {
     throw untrusted('more than one active key')
   }
 
-  return { ownerUid: obj.owner_uid, grantsDir, keys }
+  return { ownerUid: obj.owner_uid, grantsDir, keys, verifierSha256: obj.verifier_sha256 ?? null }
 }
 
 function loadAt(fs: OwnerAnchorFs): OwnerAnchor {

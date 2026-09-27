@@ -8009,6 +8009,7 @@ function setSecretStoragePolicy(next: SecretStoragePolicy) {
 // #60 U11: the settings action "Let conductor verify owner decisions" (and rotate / revoke) runs
 // through ownerGrantController: a fresh key, a native confirm showing its kid, ONE macOS admin
 // prompt running a fixed script (owner-grant-anchor-install.ts), then a re-read of the anchor.
+// U11b: that prompt also installs the root-owned verifier the hook path runs.
 const ownerGrantKeyStore = createOwnerKeyStore({
   safeStorage,
   keyDir: defaultOwnerKeyDir(),
@@ -8041,6 +8042,12 @@ const ownerGrantController = createOwnerGrantController({
   confirm: confirmOwnerGrantStep,
   ownerUid: process.getuid?.() ?? -1,
   grantsDir: defaultOwnerGrantsDir(),
+  // #60 U11b: the same admin step co-installs the root-owned verifier (launcher + package) read
+  // from the Hermes source this app runs: the repo checkout in dev, the managed install packaged.
+  verifierSourceDir: path.join(
+    !IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT) ? SOURCE_REPO_ROOT : ACTIVE_HERMES_ROOT,
+    'hermes_owner_grant'
+  ),
   log: (level, message, meta) =>
     rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
 })

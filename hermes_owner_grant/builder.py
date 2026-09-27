@@ -1,13 +1,31 @@
-"""Build the isolated, single-file owner-grant verifier."""
+"""Build the owner-grant verifier: the single-file bundle, and the root-owned install tree.
+
+The anchor install (U11b) ships the verifier as a package plus a tiny launcher; the root script
+precompiles the package, so the hook path never compiles 113 KB of source per run (D13).
+``build_install_tree`` writes the same layout (for tests, timing and doctor fixtures).
+"""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import marshal
+import os
 from pathlib import Path
+import subprocess
 import sys
+from typing import Optional
 import zlib
+
+from .install_check import (
+    LAUNCHER_NAME,
+    MANIFEST_NAME,
+    PACKAGE_FILES,
+    PACKAGE_REL,
+    PYCACHE_DIRNAME,
+    VERIFIER_DIRNAME,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODULES = (
@@ -15,10 +33,57 @@ MODULES = (
     "ed25519_pure",
     "scopes",
     "anchor",
+    "install_check",
     "quote",
     "verify",
     "cli",
 )
+
+# The root-owned launcher, byte-identical to OWNER_VERIFY_LAUNCHER in
+# apps/desktop/electron/owner-grant-anchor-install.ts (a cross-language test pins that). It reads
+# no environment variable, never imports from the working directory, adds ONLY the verifier dir
+# beside itself to sys.path, and refuses to run unless the interpreter was started with -I -S.
+LAUNCHER_SOURCE = '''"""Hermes owner-grant verifier launcher. Installed root-owned; do not edit.
+
+Run: /usr/bin/python3 -I -S "/Library/Application Support/Hermes/owner-grant/hermes_owner_verify.py" verify ...
+It imports the verifier only from the root-owned verifier/ directory beside this file, and reads
+bytecode only from the root-owned pycache/ beside it (the installer filled it, stdlib included).
+It reads no env var and never imports from the working directory; without -I -S it
+refuses to run (exit 3).
+"""
+
+import sys
+
+
+def _load():
+    if not (sys.flags.isolated and sys.flags.no_site):
+        return None, "run it as /usr/bin/python3 -I -S <launcher>"
+    here = __file__.rpartition("/")[0]
+    if not here.startswith("/"):
+        return None, "the launcher path is not absolute"
+    root = here + "/verifier"
+    sys.pycache_prefix = here + "/pycache"
+    if sys.path[:1] != [root]:
+        sys.path.insert(0, root)
+    from hermes_owner_grant import cli
+    if not cli.__file__.startswith(root + "/hermes_owner_grant/"):
+        return None, "the verifier was not imported from " + root
+    return cli, None
+
+
+def _main():
+    cli, why = _load()
+    if cli is None:
+        import json
+        body = {"schema": "hermes-owner-verify/v1", "ok": False, "reason": "verifier_untrusted", "detail": why}
+        sys.stdout.write(json.dumps(body, sort_keys=True) + "\\n")
+        return 3
+    return cli.main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
+'''
 
 
 def _pack(data: bytes) -> str:
@@ -81,4 +146,64 @@ def build(output: Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
     output.chmod(0o755)
+    return output
+
+
+# What the root script runs (as root, under -X pycache_prefix) to fill pycache/. It never imports
+# the verifier: modulefinder only compiles and scans bytecode for the CLI's static import closure,
+# and py_compile writes each module's .pyc. So no code from the (agent-writable) source tree runs
+# as root. Byte-identical to the -c program in ANCHOR_ROOT_SCRIPT (a cross-language test pins it).
+WARM_PROGRAM = (
+    "import sys, modulefinder, py_compile\n"
+    "finder = modulefinder.ModuleFinder(path=[sys.argv[1]] + sys.path)\n"
+    'finder.import_hook("hermes_owner_grant.cli")\n'
+    "for module in finder.modules.values():\n"
+    '    if (module.__file__ or "").endswith(".py"):\n'
+    "        py_compile.compile(module.__file__)\n"
+)
+
+
+def _sha256_line(root: Path, rel: str) -> str:
+    return "%s  %s\n" % (hashlib.sha256((root / rel).read_bytes()).hexdigest(), rel)
+
+
+def build_install_tree(output: Path, *, compile_python: Optional[str] = None) -> Path:
+    """Write the installed layout under ``output``: the launcher, ``verifier/hermes_owner_grant``
+    and ``manifest.sha256``, as the root script leaves it (minus ownership and ``anchor.json``).
+    With ``compile_python`` the ``pycache/`` prefix is filled the way the root script does it:
+    ``WARM_PROGRAM`` under ``-X pycache_prefix`` (the package plus the stdlib it imports)."""
+    output = Path(output)
+    package = output / PACKAGE_REL
+    package.mkdir(parents=True)
+    (output / LAUNCHER_NAME).write_text(LAUNCHER_SOURCE, encoding="utf-8")
+    for name in PACKAGE_FILES:
+        (package / name).write_bytes((PACKAGE_DIR / name).read_bytes())
+    pycs = []
+    if compile_python:
+        subprocess.run(
+            [
+                compile_python,
+                "-I",
+                "-S",
+                "-X",
+                "pycache_prefix=" + str(output / PYCACHE_DIRNAME),
+                "-c",
+                WARM_PROGRAM,
+                str(output / VERIFIER_DIRNAME),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+            cwd="/",
+        )
+        pycs = sorted(
+            p.relative_to(output).as_posix()
+            for p in (output / PYCACHE_DIRNAME).rglob("*.pyc")
+        )
+    rels = [LAUNCHER_NAME] + [PACKAGE_REL + "/" + name for name in PACKAGE_FILES] + pycs
+    (output / MANIFEST_NAME).write_text(
+        "".join(_sha256_line(output, rel) for rel in rels), encoding="ascii"
+    )
+    for path in [output, *output.rglob("*")]:
+        os.chmod(path, 0o755 if path.is_dir() else 0o644)
     return output

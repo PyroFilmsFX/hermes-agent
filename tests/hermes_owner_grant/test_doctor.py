@@ -30,6 +30,11 @@ def test_doctor_reports_anchor_key_verifier_grants_and_reproducible_bundle(
     monkeypatch.setattr(doctor.anchor_mod, "load_trusted_anchor", lambda: anchor)
     monkeypatch.setattr(doctor, "VERIFIER_PATH", str(verifier))
     monkeypatch.setattr(doctor, "build_reproducible", lambda: (True, "same"))
+    monkeypatch.setattr(
+        doctor.install_check,
+        "check_installed_verifier",
+        lambda _anchor: {"state": "match", "mismatched": []},
+    )
 
     result = doctor.run_doctor()
 
@@ -38,6 +43,7 @@ def test_doctor_reports_anchor_key_verifier_grants_and_reproducible_bundle(
         "anchor": "trusted",
         "keys": [{"kid": "key-1", "status": "active"}],
         "verifier_sha256": "match",
+        "verifier_install": "match",
         "grants_dir": "readable",
         "bundle": "reproducible",
     }

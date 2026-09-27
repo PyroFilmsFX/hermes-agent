@@ -11,6 +11,7 @@ from typing import Any, Optional, Sequence, TextIO
 
 from . import anchor as anchor_mod
 from . import envelope as envelope_mod
+from . import install_check
 from . import scopes as scopes_mod
 from . import verify as verify_mod
 
@@ -194,6 +195,13 @@ def main(
                 "reason": None,
                 "owner_uid": loaded.owner_uid,
                 "anchor_sha256": loaded.sha256,
+                # U11b: the co-installed launcher + package against the root-written manifest
+                # (diagnostic only; `hermes owner doctor` fails on anything but "match").
+                "verifier_install": (
+                    install_check.check_installed_verifier(loaded)["state"]
+                    if anchor is None
+                    else "not_checked"
+                ),
             },
         )
         return verify_mod.EXIT_OK

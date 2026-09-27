@@ -10,9 +10,10 @@ import tempfile
 from typing import Any
 
 from . import anchor as anchor_mod
+from . import install_check
 from .builder import build
 
-VERIFIER_PATH = "/Library/Application Support/Hermes/owner-grant/hermes_owner_verify.py"
+VERIFIER_PATH = install_check.LAUNCHER_PATH
 
 
 def build_reproducible() -> tuple[bool, str]:
@@ -50,6 +51,7 @@ def run_doctor() -> dict[str, Any]:
             else "unavailable"
         ),
         "verifier_sha256": "not_set",
+        "verifier_install": "unavailable",
         "grants_dir": "unavailable",
         "bundle": "unavailable",
     }
@@ -63,6 +65,12 @@ def run_doctor() -> dict[str, Any]:
                 matches = False
             checks["verifier_sha256"] = "match" if matches else "mismatch"
             ok = ok and matches
+        # U11b: the launcher, package and .pyc files against the root-written manifest.
+        installed = install_check.check_installed_verifier(trusted)
+        checks["verifier_install"] = installed["state"]
+        if installed["mismatched"]:
+            checks["verifier_mismatched"] = installed["mismatched"]
+        ok = ok and installed["state"] == install_check.STATE_MATCH
         try:
             os.listdir(trusted.grants_dir)
             checks["grants_dir"] = "readable"
