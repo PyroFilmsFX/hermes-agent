@@ -62,6 +62,12 @@ _POLL_STALL_FACTOR = 5.0
 _COMPACTION_MAX_SUSPEND = 600.0
 
 
+# A background agent can outlive its Task tool result, so its lifecycle
+# suspends the foreground turn watchdog. Bound that suspension so a lost
+# terminal Task message cannot keep the turn alive indefinitely.
+_TASK_MAX_SUSPEND = 4 * 60 * 60.0
+
+
 class _TurnWatch:
     """Activity evidence for one in-flight turn.
 
@@ -93,6 +99,8 @@ class _TurnWatch:
         self.approvals_pending = 0
         self.compaction_active = 0
         self.compaction_started = 0.0
+        self.active_tasks: dict[str, float] = {}
+        self.task_gate_started = 0.0
 
     # -- loop-thread writers --
 
@@ -106,6 +114,22 @@ class _TurnWatch:
     def note_tools_resolved(self, count: int) -> None:
         if count > 0:
             self.outstanding_tools = max(0, self.outstanding_tools - count)
+
+    def note_task_started(self, task_id: str) -> None:
+        if task_id:
+            started = time.monotonic()
+            self.active_tasks[task_id] = started
+            if len(self.active_tasks) == 1:
+                self.task_gate_started = started
+
+    def note_task_terminal(self, task_id: str) -> None:
+        started = self.active_tasks.pop(task_id, None)
+        if started == self.task_gate_started:
+            self.task_gate_started = min(self.active_tasks.values(), default=0.0)
+
+    def clear_tasks(self) -> None:
+        self.active_tasks.clear()
+        self.task_gate_started = 0.0
 
     def arm_post_tool(self) -> None:
         self.post_tool_armed = True
@@ -152,9 +176,11 @@ class _TurnWatch:
 
     def check(self, *, budget: float, quiet: float) -> Optional[str]:
         """Returns None (keep waiting), "post_tool_quiet", or "budget"."""
+        now = time.monotonic()
         if self.outstanding_tools > 0 or self.approvals_pending > 0:
             return None
-        now = time.monotonic()
+        if self.task_gate_started and now - self.task_gate_started < _TASK_MAX_SUSPEND:
+            return None
         # A compacting CLI is indistinguishable from a wedged one: between
         # PreCompact and compact_boundary it emits nothing at all. Without this
         # gate the post_tool_quiet rule reads that silence as a wedge and

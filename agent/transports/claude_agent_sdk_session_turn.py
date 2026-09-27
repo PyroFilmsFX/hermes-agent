@@ -616,6 +616,8 @@ class ClaudeSdkTurnMixin:
                 result.fatal_reason = "auth"
             return result
         finally:
+            watch.clear_tasks()
+            self._finalize_sdk_tasks(status="interrupted")
             self._turn_watch = None
 
         if turn_data is None:

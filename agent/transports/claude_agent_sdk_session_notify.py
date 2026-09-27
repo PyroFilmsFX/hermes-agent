@@ -392,6 +392,9 @@ class ClaudeSdkNotifyMixin:
                 "meta": meta,
             }
             tasks[task_id] = record
+            watch = getattr(self, "_turn_watch", None)
+            if watch is not None:
+                watch.note_task_started(task_id)
             self._emit_sdk_subagent(
                 "subagent.start", task_id, "Agent", goal, None,
                 parent_tool_id=record["parent_tool_id"],
@@ -434,6 +437,9 @@ class ClaudeSdkNotifyMixin:
             parent_tool_id=record.get("parent_tool_id"), status=status, summary=summary,
         )
         tasks.pop(task_id, None)
+        watch = getattr(self, "_turn_watch", None)
+        if watch is not None:
+            watch.note_task_terminal(task_id)
 
     def _observe_sdk_lifecycle(self, message: Any) -> None:
         """Observe every SDK message before turn-specific interrupt gates."""

@@ -742,6 +742,66 @@ class TestTurnLifetime:
         assert turn.error is None
         assert turn.final_text == "tool finished"
 
+    def test_live_background_task_suspends_budget_after_tool_result(self, monkeypatch):
+        from agent.transports import claude_agent_sdk_session_watchdog as session_mod
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(
+            session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        watch = session_mod._TurnWatch()
+        watch.note_tools_issued(1)
+        watch.note_tools_resolved(1)
+        watch.note_task_started("task-1")
+
+        clock["now"] += 601.0
+        assert watch.check(budget=600.0, quiet=0.0) is None
+
+    def test_terminal_background_task_releases_budget_gate(self, monkeypatch):
+        from agent.transports import claude_agent_sdk_session_watchdog as session_mod
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(
+            session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        watch = session_mod._TurnWatch()
+        watch.note_task_started("task-1")
+        clock["now"] += 601.0
+        assert watch.check(budget=600.0, quiet=0.0) is None
+
+        watch.note_task_terminal("task-1")
+        assert watch.check(budget=600.0, quiet=0.0) == "budget"
+
+    def test_live_background_task_has_a_hard_watchdog_bound(self, monkeypatch):
+        from agent.transports import claude_agent_sdk_session_watchdog as session_mod
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(
+            session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        watch = session_mod._TurnWatch()
+        watch.note_task_started("task-1")
+        clock["now"] += session_mod._TASK_MAX_SUSPEND + 1.0
+
+        assert watch.check(budget=600.0, quiet=0.0) == "budget"
+
+    def test_orphaned_sdk_task_records_are_cleared_at_turn_end(self):
+        session, _holder = _make_session(script=[ResultMessage(result="done")])
+        session._sdk_task_records = {
+            "orphan": {
+                "goal": "background work",
+                "parent_tool_id": None,
+                "child_session_id": None,
+            }
+        }
+        try:
+            turn = session.run_turn("finish", turn_timeout=30.0)
+            assert session._sdk_task_records == {}
+        finally:
+            _close_promptly(session)
+
+        assert turn.error is None
+
     def test_post_tool_quiet_trips_on_wedge_clean_ack(self):
         # Wedge signature: a tool result lands, then the stream goes silent
         # (alive, no _EOS). The quiet watchdog trips fast, the CLI acks the
