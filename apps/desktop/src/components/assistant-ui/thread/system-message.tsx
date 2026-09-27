@@ -4,6 +4,7 @@ import { type FC, useState } from 'react'
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
+import { ForwardMessageButton } from '@/components/owner-forward/forward-message-button'
 import { SCAFFOLD_GLYPH_CLASS, SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
 import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
@@ -65,9 +66,10 @@ interface BackgroundResultProps {
   report: string
   process?: boolean
   peerMetadata?: PeerMetadata
+  rowId?: number
 }
 
-export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, process, peerMetadata }) => {
+export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, process, peerMetadata, rowId }) => {
   const [open, setOpen] = useState(false)
 
   return (
@@ -81,6 +83,7 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
           open={open}
           trailing={
             <>
+              {peerMetadata && <ForwardMessageButton getText={() => report} role="peer" rowId={rowId} />}
               {' '}
               <MessageTimelineTimestamp />
             </>
@@ -114,6 +117,11 @@ export const SystemMessage: FC = () => {
   const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult ?? s.message.metadata.custom?.peerMessage)
   const processResult = useAuiState(s => s.message.metadata.custom?.asyncResultKind === 'process')
   const peerMetadata = useAuiState(s => s.message.metadata.custom?.peerMetadata as PeerMetadata | undefined)
+  const rowId = useAuiState(s => {
+    const custom = (s.message.metadata?.custom ?? {}) as { rowId?: number }
+
+    return custom.rowId
+  })
 
   if (!text) {
     return null
@@ -130,6 +138,7 @@ export const SystemMessage: FC = () => {
           peerMetadata={peerMetadata}
           process={processResult}
           report={typeof asyncResult === 'string' ? asyncResult : ''}
+          rowId={rowId}
           text={text}
         />
       </MessagePrimitive.Root>

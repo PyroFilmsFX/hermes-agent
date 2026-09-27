@@ -15,6 +15,7 @@ import { $activeGatewayProfile } from '@/store/profile'
 import { $sessions } from '@/store/session'
 
 import type { ForwardCandidate } from './parse-to'
+import { scopeTtlPolicy } from './scopes'
 import { isTrustedGesture } from './trusted'
 
 export const FORWARD_MAX_CHARS = 8000
@@ -51,6 +52,7 @@ export interface ForwardSheetState {
   origin: ForwardOrigin
   targets: ForwardTarget[]
   scope: string[]
+  ttlMs: number
   subject: string
   proposalId?: string
 }
@@ -61,6 +63,7 @@ export interface ForwardSheetInit {
   origin: ForwardOrigin
   targets?: ForwardTarget[]
   scope?: string[]
+  ttlMs?: number
   subject?: null | string
   proposalId?: string
 }
@@ -71,12 +74,16 @@ export const $forwardSheet = atom<ForwardSheetState | null>(null)
 export const $forwardReceipts = atom<Record<string, ForwardOutcome>>({})
 
 function sheetState(init: ForwardSheetInit): ForwardSheetState {
+  const scope = [...(init.scope ?? [])]
+  const ttlPolicy = scopeTtlPolicy(scope)
+
   return {
     text: init.text,
     gesture: init.gesture,
     origin: { ...init.origin },
     targets: (init.targets ?? []).slice(0, 5).map(t => ({ ...t })),
-    scope: [...(init.scope ?? [])],
+    scope,
+    ttlMs: Math.min(init.ttlMs ?? ttlPolicy.defaultTtlMs, ttlPolicy.maxTtlMs),
     subject: init.subject ?? '',
     ...(init.proposalId ? { proposalId: init.proposalId } : {})
   }
@@ -143,6 +150,7 @@ export interface SendForwardInput {
   origin: ForwardOrigin
   targets: ForwardTarget[]
   scope?: string[]
+  ttlMs?: number
   subject?: null | string
   proposalId?: string
 }
@@ -181,6 +189,7 @@ export async function sendOwnerForward(
       // Ids only: main resolves the titles the owner sees.
       targets: input.targets.map(t => ({ profile: t.profile, session_id: t.session_id })),
       scope: [...(input.scope ?? [])],
+      ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
       ...(subject ? { subject } : {})
     })
   } catch (error) {

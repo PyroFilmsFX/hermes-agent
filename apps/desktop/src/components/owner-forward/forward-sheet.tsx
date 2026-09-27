@@ -24,7 +24,15 @@ import {
   sendOwnerForward
 } from '@/lib/owner-forward/client'
 import { MAX_FORWARD_TARGETS } from '@/lib/owner-forward/parse-to'
-import { needsSubject, SCOPE_CATALOG, SCOPE_RE, scopeClassOf, scopeLabel } from '@/lib/owner-forward/scopes'
+import {
+  needsSubject,
+  SCOPE_CATALOG,
+  SCOPE_RE,
+  scopeClassOf,
+  scopeLabel,
+  scopeTtlOptions,
+  scopeTtlPolicy
+} from '@/lib/owner-forward/scopes'
 import { isTrustedGesture } from '@/lib/owner-forward/trusted'
 import { cn } from '@/lib/utils'
 import { $sessions } from '@/store/session'
@@ -90,8 +98,11 @@ export function ForwardSheet() {
     }
   }
 
-  const toggleScope = (value: string) =>
-    update({ scope: sheet.scope.includes(value) ? sheet.scope.filter(s => s !== value) : [...sheet.scope, value] })
+  const toggleScope = (value: string) => {
+    const scope = sheet.scope.includes(value) ? sheet.scope.filter(s => s !== value) : [...sheet.scope, value]
+
+    update({ scope, ttlMs: scopeTtlPolicy(scope).defaultTtlMs })
+  }
 
   const addCustomScope = () => {
     const value = customScope.trim()
@@ -106,7 +117,8 @@ export function ForwardSheet() {
     setCustomScope('')
 
     if (!sheet.scope.includes(value)) {
-      update({ scope: [...sheet.scope, value] })
+      const scope = [...sheet.scope, value]
+      update({ scope, ttlMs: scopeTtlPolicy(scope).defaultTtlMs })
     }
   }
 
@@ -118,6 +130,23 @@ export function ForwardSheet() {
 
   const subjectNeeded = needsSubject(sheet.scope)
   const textLength = sheet.text.length
+  const ttlPolicy = scopeTtlPolicy(sheet.scope)
+  const ttlMs = Math.min(sheet.ttlMs ?? ttlPolicy.defaultTtlMs, ttlPolicy.maxTtlMs)
+  const ttlLabel = (value: number) => {
+    const minutes = value / 60_000
+
+    if (minutes < 60) {
+      return copy.ttlOption(minutes, 'minutes')
+    }
+
+    const hours = minutes / 60
+
+    if (hours < 24) {
+      return copy.ttlOption(hours, 'hours')
+    }
+
+    return copy.ttlOption(hours / 24, 'days')
+  }
 
   const canSend =
     phase === 'edit' &&
@@ -140,6 +169,7 @@ export function ForwardSheet() {
       origin: sheet.origin,
       targets: sheet.targets,
       scope: sheet.scope,
+      ttlMs,
       subject: subjectNeeded ? sheet.subject : null,
       proposalId: sheet.proposalId
     })
@@ -237,6 +267,25 @@ export function ForwardSheet() {
           </div>
           {scopeError && <p className="text-xs text-destructive">{copy.badScope}</p>}
         </fieldset>
+
+        <div className="grid gap-1.5">
+          <label className="text-xs font-medium" htmlFor={`${ids}-ttl`}>
+            {copy.ttl}
+          </label>
+          <select
+            className="desktop-input-chrome w-full rounded-md border px-2.5 py-1.5 text-xs"
+            disabled={phase !== 'edit'}
+            id={`${ids}-ttl`}
+            onChange={event => update({ ttlMs: Number(event.target.value) })}
+            value={String(ttlMs)}
+          >
+            {scopeTtlOptions(sheet.scope).map(value => (
+              <option key={value} value={value}>
+                {ttlLabel(value)}
+              </option>
+            ))}
+          </select>
+        </div>
 
         {subjectNeeded && (
           <div className="grid gap-1.5">

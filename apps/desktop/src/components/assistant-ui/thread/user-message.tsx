@@ -15,6 +15,7 @@ import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timel
 import { type RestoreMessageTarget } from '@/components/assistant-ui/thread/types'
 import { useMessageReactions } from '@/components/assistant-ui/thread/use-message-reactions'
 import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
+import { ForwardMessageButton } from '@/components/owner-forward/forward-message-button'
 import { OwnerForwardChip } from '@/components/owner-forward/owner-forward-chip'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
@@ -290,6 +291,11 @@ export const UserMessage: FC<{
   )
 
   const viewStoredId = useStore(useSessionView().$storedId)
+  const rowId = useAuiState(s => {
+    const custom = (s.message.metadata?.custom ?? {}) as { rowId?: number }
+
+    return custom.rowId
+  })
 
   const attachmentRefs = useAuiState(s => {
     const custom = (s.message.metadata?.custom ?? {}) as { attachmentRefs?: unknown }
@@ -575,6 +581,7 @@ export const UserMessage: FC<{
               onRetract={() => react(null)}
               reactions={shownReactions}
             />
+            <ForwardMessageButton getText={() => messageText} role="user" rowId={rowId} />
             <MessageTimelineTimestamp className="self-end pr-1.5" />
             <BranchPickerPrimitive.Root
               className={cn(

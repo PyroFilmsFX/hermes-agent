@@ -3641,6 +3641,8 @@ export const en: Translations = {
     maxTargets: 'Up to 5 chats',
     noTargets: 'No other chats',
     text: 'Message',
+    ttl: 'Expires after',
+    ttlOption: (count, unit) => `${count} ${unit.replace(/s$/, '')}${count === 1 ? '' : 's'}`,
     charCount: (count, max) => `${count} / ${max}`,
     scopes: 'Also allow',
     scopeNone: 'Nothing extra: the worker can quote this decision',

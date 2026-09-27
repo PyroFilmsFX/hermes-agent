@@ -10,6 +10,8 @@ import { createHash } from 'node:crypto'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ThreadRuntime, createdAt, stubThreadEnvironment, stubThreadViewportSize } from '@/components/assistant-ui/test-utils'
+import { Thread } from '@/components/assistant-ui/thread'
 import { toChatMessages } from '@/lib/chat-messages/hydration'
 import {
   $forwardSheet,
@@ -19,7 +21,7 @@ import {
 import { sha256Hex } from '@/lib/owner-forward/sha256'
 import { refuseForwardInSubmitText } from '@/lib/owner-forward/submit-guard'
 import { $activeGatewayProfile } from '@/store/profile'
-import { $sessions } from '@/store/session'
+import { $selectedStoredSessionId, $sessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
 import { ForwardSheet } from './forward-sheet'
@@ -55,6 +57,8 @@ function session(id: string, title: string): SessionInfo {
 }
 
 beforeEach(() => {
+  stubThreadEnvironment()
+  stubThreadViewportSize()
   trust.on = false
   confirm.mockReset()
   verify.mockReset()
@@ -62,6 +66,7 @@ beforeEach(() => {
   ;(window as any).hermesDesktop = { ownerForward: { confirm }, ownerGrant: { verify } }
   setForwardGatewayRequestForTests(gatewayRequest)
   $sessions.set([session('mgr', 'manager'), session('w1', 'worker-one'), session('w2', 'worker-two')])
+  $selectedStoredSessionId.set('mgr')
   $activeGatewayProfile.set('default')
   $forwardSheet.set(null)
 })
@@ -93,6 +98,55 @@ describe('openForwardSheet needs a trusted gesture', () => {
     expect(openForwardSheet({ text: 'x', gesture: 'menu', origin }, new MouseEvent('click'))).toBe(false)
     expect(openForwardSheet({ text: 'x', gesture: 'menu', origin }, null)).toBe(false)
     expect($forwardSheet.get()).toBeNull()
+  })
+})
+
+describe('Forward to… on transcript messages', () => {
+  it('opens from a user bubble with the durable row id and user role', () => {
+    trust.on = true
+    const message = {
+      id: 'user-message',
+      role: 'user',
+      content: [{ type: 'text', text: 'Question from the owner.' }],
+      createdAt,
+      metadata: { custom: { rowId: 42 } }
+    } as any
+
+    render(<ThreadRuntime messages={[message]}><Thread /></ThreadRuntime>)
+    fireEvent.click(screen.getByRole('button', { name: /forward to/i }))
+
+    expect($forwardSheet.get()).toMatchObject({
+      text: 'Question from the owner.',
+      origin: { message_id: '42', role: 'user' }
+    })
+  })
+
+  it('prefills peer forwards from the peer body metadata and carries the durable row id', () => {
+    trust.on = true
+    const body = 'The worker message body.'
+    const envelope = '↘ from worker · 14:30'
+    const message = {
+      id: 'peer-message',
+      role: 'system',
+      content: [{ type: 'text', text: envelope }],
+      createdAt,
+      metadata: {
+        custom: {
+          asyncResult: body,
+          peerMetadata: { direction: 'in', peer: 'worker' },
+          rowId: 43
+        }
+      }
+    } as any
+
+    render(<ThreadRuntime messages={[message]}><Thread /></ThreadRuntime>)
+    fireEvent.click(screen.getByRole('button', { name: /forward to/i }))
+
+    expect($forwardSheet.get()).toMatchObject({
+      text: body,
+      origin: { message_id: '43', role: 'peer' }
+    })
+    expect(($forwardSheet.get() as any).text).not.toBe(envelope)
   })
 })
 
@@ -147,6 +201,29 @@ describe('Forward sheet', () => {
     fireEvent.change(screen.getByLabelText(/other scope/i), { target: { value: 'conductor:root:everything' } })
     fireEvent.click(screen.getByRole('button', { name: /add scope/i }))
     expect(screen.getByText(/not a valid scope/i)).toBeTruthy()
+  })
+
+  it('offers only TTLs within the selected scope class cap and sends the chosen TTL', async () => {
+    trust.on = true
+    confirm.mockResolvedValue({
+      ok: true,
+      decisionId: 'od',
+      grantId: 'og',
+      envelope: { format: 'hermes-owner-grant/v1', kid: 'k', payload: 'p', sig: 's' },
+      targets: ['default:w1']
+    })
+    gatewayRequest.mockResolvedValue({ results: [{ target_session_id: 'w1', status: 'queued', detail: null }] })
+    openSheet({ scope: ['conductor:marker:bypass'] })
+
+    const ttl = screen.getByLabelText(/expires after/i) as HTMLSelectElement
+
+    expect([...ttl.options].map(option => Number(option.value)).every(value => value <= 14_400_000)).toBe(true)
+    expect(ttl.value).toBe('3600000')
+    fireEvent.change(ttl, { target: { value: '14400000' } })
+    fireEvent.click(screen.getByRole('button', { name: /^send/i }))
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled())
+    expect(confirm.mock.calls[0][0].ttlMs).toBe(14_400_000)
   })
 
   it('a prod scope needs a subject before Send is enabled', () => {

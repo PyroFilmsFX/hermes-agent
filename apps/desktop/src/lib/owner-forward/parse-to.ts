@@ -46,7 +46,17 @@ export function parseToDraft(text: string): ParsedTo | null {
   const tokens: ToToken[] = []
 
   for (;;) {
-    if (rest[i] === '"') {
+    if (rest.startsWith('hermes:"', i)) {
+      const valueStart = i + 'hermes:"'.length
+      const close = rest.indexOf('"', valueStart)
+
+      if (close < 0 || close === valueStart) {
+        return { ok: false, error: 'grammar' }
+      }
+
+      tokens.push({ kind: 'peer', value: rest.slice(valueStart, close) })
+      i = close + 1
+    } else if (rest[i] === '"') {
       const close = rest.indexOf('"', i + 1)
 
       if (close < 0 || close === i + 1) {

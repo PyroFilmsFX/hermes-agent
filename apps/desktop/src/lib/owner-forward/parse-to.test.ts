@@ -28,6 +28,13 @@ describe('/to grammar', () => {
     })
   })
 
+  it('parses quoted peer names with spaces', () => {
+    const parsed = parseToDraft('/to hermes:"My Session" send this')
+
+    expect(parsed).toEqual({ ok: true, tokens: [{ kind: 'peer', value: 'My Session' }], body: 'send this' })
+    expect(parsed?.ok && resolveToTokens(parsed.tokens, candidates)).toEqual({ status: 'exact', targets: [candidates[1]] })
+  })
+
   it('refuses a draft with no text or no target', () => {
     expect(parseToDraft('/to')).toEqual({ ok: false, error: 'grammar' })
     expect(parseToDraft('/to review')).toEqual({ ok: false, error: 'grammar' })

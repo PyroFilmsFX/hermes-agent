@@ -16,9 +16,10 @@ import {
   rankSkillCommands,
   slashCompletionGroup
 } from '@/lib/desktop-slash-commands'
+import { forwardCandidates } from '@/lib/owner-forward/client'
 import { $slashCompletionsEpoch, cachedSlashCompletion, hasCachedSlashCompletion } from '@/lib/slash-completion-cache'
 import { normalize } from '@/lib/text'
-import { $sessions } from '@/store/session'
+import { $selectedStoredSessionId, $sessions } from '@/store/session'
 
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
 import { useLiveCompletionAdapter } from './use-live-completion-adapter'
@@ -71,7 +72,7 @@ export function useSlashCompletions(options: {
   loading: boolean
 } {
   const { gateway, sessionId, skinThemes, activeSkin } = options
-  const { locale } = useI18n()
+  const { locale, t } = useI18n()
   const enabled = Boolean(gateway)
   const epoch = useStore($slashCompletionsEpoch)
   const sessionParams = useMemo(() => (sessionId ? { session_id: sessionId } : {}), [sessionId])
@@ -96,11 +97,54 @@ export function useSlashCompletions(options: {
 
   const fetcher = useCallback(
     async (query: string): Promise<CompletionPayload> => {
+      const text = `/${query}`
+
+      // /to is a composer directive, not a desktop command. Keep it out of
+      // slash dispatch and offer it only as an insertion plus local targets.
+      if (/^\/to$/i.test(text)) {
+        return {
+          items: [{ text: '/to ', display: '/to', meta: t.ownerForward.grammar, group: 'Commands' }],
+          query
+        }
+      }
+
+      const toArg = /^\/to\s+(.*)$/is.exec(text)
+
+      if (toArg) {
+        const needle = normalize(toArg[1])
+        const candidates = forwardCandidates($selectedStoredSessionId.get()).filter(candidate => {
+          const title = candidate.title ?? ''
+          const peerName = candidate.title ? `hermes:${candidate.title}` : candidate.session_id
+
+          return (
+            !needle ||
+            normalize(title).includes(needle) ||
+            normalize(peerName).includes(needle) ||
+            candidate.session_id.toLowerCase().includes(needle)
+          )
+        })
+
+        return {
+          items: candidates.slice(0, SESSION_INLINE_LIMIT).map(candidate => {
+            const title = candidate.title || candidate.session_id
+            const target = candidate.title
+              ? `hermes:${/\s/.test(candidate.title) ? `"${candidate.title}"` : candidate.title}`
+              : candidate.session_id
+
+            return {
+              text: `/to ${target} `,
+              display: title,
+              meta: `${candidate.profile !== 'default' ? `${candidate.profile} · ` : ''}${candidate.session_id.slice(0, 8)}`,
+              group: 'Sessions'
+            }
+          }),
+          query
+        }
+      }
+
       if (!gateway) {
         return { items: [], query }
       }
-
-      const text = `/${query}`
 
       // The desktop owns /skin entirely (client-side theme context). Surface its
       // theme list inside this single popover instead of a bespoke one, and skip
@@ -266,7 +310,7 @@ export function useSlashCompletions(options: {
         return { items: [], query }
       }
     },
-    [gateway, skinThemes, activeSkin, sessionId, catalogKey, sessionParams]
+    [gateway, skinThemes, activeSkin, sessionId, catalogKey, sessionParams, t.ownerForward.grammar]
   )
 
   const toItem = useCallback((entry: CompletionEntry, index: number): Unstable_TriggerItem => {
@@ -304,7 +348,11 @@ export function useSlashCompletions(options: {
     (query: string) => {
       const text = `/${query}`
 
-      if ((skinThemes && /^\/skin\s+/is.test(text)) || /^\/(?:resume|sessions|switch)\s+/is.test(text)) {
+      if (
+        (skinThemes && /^\/skin\s+/is.test(text)) ||
+        /^\/(?:resume|sessions|switch)\s+/is.test(text) ||
+        /^\/to(?:\s|$)/is.test(text)
+      ) {
         return true
       }
 

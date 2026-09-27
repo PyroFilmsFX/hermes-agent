@@ -3080,6 +3080,8 @@ export interface Translations {
     maxTargets: string
     noTargets: string
     text: string
+    ttl: string
+    ttlOption: (count: number, unit: 'minutes' | 'hours' | 'days') => string
     charCount: (count: number, max: number) => string
     scopes: string
     scopeNone: string
