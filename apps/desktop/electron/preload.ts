@@ -280,6 +280,12 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   // see secret-storage-policy.ts). get never touches the OS keychain.
   getSecretStorageEncryption: () => ipcRenderer.invoke('hermes:secret-storage:get'),
   setSecretStorageEncryption: (on: boolean) => ipcRenderer.invoke('hermes:secret-storage:set', on),
+  // #60 U11: owner-grant anchor status + enable / rotate / revoke. Main shows the native confirm
+  // and the one macOS admin prompt; no key material ever crosses this bridge.
+  ownerGrant: {
+    status: () => ipcRenderer.invoke('hermes:owner-grant:status'),
+    action: (action: 'enable' | 'revoke' | 'rotate') => ipcRenderer.invoke('hermes:owner-grant:action', action)
+  },
   // v2 multi-connection registry: named agent sources (local / remote / cloud / ssh).
   connections: {
     list: () => ipcRenderer.invoke('hermes:connections:list'),

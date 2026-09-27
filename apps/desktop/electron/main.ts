@@ -358,7 +358,12 @@ import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { wireOauthSessionResponse } from './oauth-session-response'
 import { readTrustedOwnerAnchor } from './owner-grant-anchor'
-import { createOwnerKeyStore, defaultOwnerKeyDir, OwnerKeyError } from './owner-grant-key'
+import {
+  createOsascriptAdminRunner,
+  createOwnerGrantController,
+  type OwnerGrantConfirmRequest
+} from './owner-grant-anchor-install'
+import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -8000,12 +8005,42 @@ function setSecretStoragePolicy(next: SecretStoragePolicy) {
 // #60 U10 (VERIFY addendum §1.2): the owner-grant Ed25519 key. Its private half exists only in
 // this process (owner-grant-key.ts). Launch loads it only when the owner already enrolled (a
 // wrapped blob exists) AND the root-owned anchor pins it as the active key, so a machine that
-// never enabled owner grants gets no Keychain touch, and a swapped blob is never adopted. No
-// IPC or renderer surface yet: the signing core (owner-grant-sign.ts) and the enable flow (U11)
-// use it here.
+// never enabled owner grants gets no Keychain touch, and a swapped blob is never adopted.
+// #60 U11: the settings action "Let conductor verify owner decisions" (and rotate / revoke) runs
+// through ownerGrantController: a fresh key, a native confirm showing its kid, ONE macOS admin
+// prompt running a fixed script (owner-grant-anchor-install.ts), then a re-read of the anchor.
 const ownerGrantKeyStore = createOwnerKeyStore({
   safeStorage,
   keyDir: defaultOwnerKeyDir(),
+  log: (level, message, meta) =>
+    rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
+})
+
+async function confirmOwnerGrantStep(req: OwnerGrantConfirmRequest): Promise<boolean> {
+  const options = {
+    type: 'warning' as const,
+    title: req.title,
+    message: req.message,
+    detail: req.detail,
+    buttons: ['Continue', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  }
+
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options)
+
+  return response === 0
+}
+
+const ownerGrantController = createOwnerGrantController({
+  store: ownerGrantKeyStore,
+  readAnchor: () => readTrustedOwnerAnchor(),
+  adminRunner: createOsascriptAdminRunner(),
+  confirm: confirmOwnerGrantStep,
+  ownerUid: process.getuid?.() ?? -1,
+  grantsDir: defaultOwnerGrantsDir(),
   log: (level, message, meta) =>
     rememberLog(`[owner-grant] ${level} ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`)
 })
@@ -8019,21 +8054,13 @@ function ownerGrantBackendSpawnEnv() {
 }
 
 function loadOwnerGrantKeyAtLaunch(): void {
-  // The root-owned anchor is the trust root: set it first, so loadIfEnrolled() adopts only the
-  // key it pins, and signing (quote-only included) stays off without it.
-  const anchor = readTrustedOwnerAnchor()
+  // The root-owned anchor is the trust root: the controller reads it, sets it on the store, and
+  // only then loads the blob it pins. On a mismatch (T-3/T-4) it refuses to sign and records why
+  // for the status IPC; it never generates or re-enrolls a key here.
+  const status = ownerGrantController.launch()
 
-  if (anchor.ok === false && anchor.reason !== 'anchor_missing') {
-    rememberLog(`[owner-grant] anchor not trusted: ${anchor.detail}`)
-  }
-
-  ownerGrantKeyStore.setAnchor(anchor.ok ? anchor.anchor : null)
-
-  try {
-    ownerGrantKeyStore.loadIfEnrolled()
-  } catch (error) {
-    // Fail closed: no key means no owner-grant signing this run. Only the code is logged.
-    rememberLog(`[owner-grant] key not loaded: ${error instanceof OwnerKeyError ? error.code : 'unexpected error'}`)
+  if (status.state !== 'off' && status.state !== 'ready' && status.state !== 'unsupported') {
+    rememberLog(`[owner-grant] signing off at launch: ${status.state}${status.refusal ? ` (${status.refusal})` : ''}`)
   }
 }
 
@@ -15341,6 +15368,10 @@ ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testD
 // and re-encodes every stored secret (see applySecretStorageEncryption).
 ipcMain.handle('hermes:secret-storage:get', async () => ({ on: secretStoragePolicy().on }))
 ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => applySecretStorageEncryption(on === true))
+// #60 U11: owner-grant anchor status and the enable / rotate / revoke actions. The renderer only
+// asks; main shows the native confirm (with the new kid) before the one macOS admin prompt.
+ipcMain.handle('hermes:owner-grant:status', async () => ownerGrantController.status())
+ipcMain.handle('hermes:owner-grant:action', async (_event: any, action: any) => ownerGrantController.runAction(action))
 
 // ── v2 connection registry IPC (multi-source) ───────────────────────────────
 // Storage-level CRUD for named agent sources. Routing/pooling consumption of

@@ -217,13 +217,23 @@ describe('E-5: the owner key persists across restarts and refuses signing on an 
   })
 
   test('E-5n main.ts reads the root anchor and calls setAnchor() before loadIfEnrolled() at launch', () => {
+    // U11 moved the sequence into the controller (owner-grant-anchor-install.ts), whose launch()
+    // order (readAnchor -> setAnchor -> loadIfEnrolled) is proven behaviourally by T-4c. Here:
+    // main's launch goes through it, the controller reads the real anchor, and main itself never
+    // loads or creates a key outside it.
     const main = fs.readFileSync(path.join(__dirname, 'main.ts'), 'utf8')
     const start = main.indexOf('function loadOwnerGrantKeyAtLaunch')
     expect(start).toBeGreaterThan(0)
     const body = main.slice(start, main.indexOf('\n}\n', start))
-    const read = body.indexOf('readTrustedOwnerAnchor(')
-    const set = body.indexOf('ownerGrantKeyStore.setAnchor(')
-    const load = body.indexOf('ownerGrantKeyStore.loadIfEnrolled(')
+    expect(body).toContain('ownerGrantController.launch()')
+    expect(main).toMatch(/readAnchor: \(\) => readTrustedOwnerAnchor\(\)/)
+    expect(main).not.toContain('ownerGrantKeyStore.loadIfEnrolled(')
+    expect(main).not.toContain('ownerGrantKeyStore.ensure(')
+    const installer = fs.readFileSync(path.join(__dirname, 'owner-grant-anchor-install.ts'), 'utf8')
+    const launch = installer.slice(installer.indexOf('  launch(): OwnerGrantStatus {'))
+    const read = launch.indexOf('this.#d.readAnchor()')
+    const set = launch.indexOf('this.#d.store.setAnchor(')
+    const load = launch.indexOf('this.#d.store.loadIfEnrolled(')
     expect(read).toBeGreaterThan(0)
     expect(set).toBeGreaterThan(read)
     expect(load).toBeGreaterThan(set)

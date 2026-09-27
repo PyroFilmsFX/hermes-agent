@@ -208,6 +208,11 @@ declare global {
       // secrets and can throw when the keychain is unusable.
       getSecretStorageEncryption: () => Promise<{ on: boolean }>
       setSecretStorageEncryption: (on: boolean) => Promise<{ on: boolean }>
+      // #60 U11: owner-grant anchor ("Let conductor verify owner decisions"). Public status only.
+      ownerGrant?: {
+        status: () => Promise<DesktopOwnerGrantStatus>
+        action: (action: 'enable' | 'revoke' | 'rotate') => Promise<DesktopOwnerGrantActionResult>
+      }
       // v2 multi-connection registry: named agent sources, all persisted
       // together (local + any number of remote/cloud/ssh instances).
       connections: {
@@ -628,6 +633,25 @@ declare global {
       onOpenFindBarRequested: (callback: () => void) => () => void
     }
   }
+}
+
+/** #60 U11: mirrors OwnerGrantStatus in electron/owner-grant-anchor-install.ts. */
+export interface DesktopOwnerGrantStatus {
+  state: 'mismatch' | 'off' | 'ready' | 'revoked' | 'unsupported' | 'untrusted'
+  canSign: boolean
+  kid: null | string
+  anchorKid: null | string
+  refusal: null | string
+  message: string
+  busy: boolean
+}
+
+export interface DesktopOwnerGrantActionResult {
+  ok: boolean
+  reason?: string
+  kid?: string
+  unchanged?: boolean
+  status: DesktopOwnerGrantStatus
 }
 
 export interface DesktopMarketplaceSearchItem {

@@ -47,6 +47,7 @@ import { cloudTeamChanged, reconnectMovedCloudAgent } from './cloud-team-change'
 import { ConnectionsRegistrySection } from './connections-registry'
 import { CONTROL_TEXT } from './constants'
 import { ManagedUpdatesSection } from './managed-updates-section'
+import { OwnerGrantRow } from './owner-grant-row'
 import { EmptyState, ListRow, Pill, SettingsContent, SettingsSkeleton, ToggleRow } from './primitives'
 import { SETTING_IDS, settingElementId } from './settings-manifest'
 import { enrichSelectedSshHost, selectSshHost } from './ssh-host-selection'
@@ -1473,6 +1474,7 @@ function GatewayConnectionSettings({ embedded, standalone }: { embedded: boolean
             label={g.keychainEncryptionTitle}
             onChange={on => void setKeychainEncryption(on)}
           />
+          <OwnerGrantRow />
           <ListRow
             action={
               <Button onClick={() => void window.hermesDesktop?.revealLogs()} size="sm" variant="textStrong">

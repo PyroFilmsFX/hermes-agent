@@ -26,8 +26,11 @@
  *   owner-grant-anchor.ts) pins exactly its kid and public key as the active key, and checks that
  *   before any Keychain touch. On load the unwrapped private key must also derive the recorded
  *   public key, which catches a blob stitched together from two keys; a wholesale swapped blob is
- *   an anchor mismatch (T-4). `ensure()` (the enable path) adopts an unanchored blob only while
- *   no anchor exists at all, i.e. before the one-time enable pinned a key.
+ *   an anchor mismatch (T-4).
+ * - The enable / rotate path (U11, decision D20) is `beginFreshKey()` → `stagePendingKey()` →
+ *   `commitPendingKey()`: ALWAYS a brand-new key, never an on-disk blob, and it replaces the blob
+ *   only once the anchor pins it. `ensure()` is not used by main; it remains for tests and adopts
+ *   an unanchored blob only while no anchor exists at all.
  */
 
 import {
@@ -200,6 +203,7 @@ class OwnerKeyStoreImpl {
   #privateKey: KeyObject | null = null
   #public: OwnerKeyPublic | null = null
   #anchor: AnchorView | null = null
+  #pending: { privateKey: KeyObject; kid: string; pub: string; stagedPath: string | null } | null = null
 
   constructor(opts: OwnerKeyStoreOptions) {
     this.#safeStorage = opts.safeStorage
@@ -303,6 +307,99 @@ class OwnerKeyStoreImpl {
     return { kid, pub }
   }
 
+  // -- the enable / rotate path (#60 U11, decision D20) ------------------------------------------
+  //
+  // A brand-new key that lives only in memory until the root-owned anchor pins it. It never reads,
+  // adopts or overwrites the on-disk blob before then (a blob planted before enable is never
+  // trusted), and it touches neither disk nor Keychain until `stagePendingKey()`, which the flow
+  // calls only after the owner confirmed. `commitPendingKey()` swaps it in, and only when the
+  // anchor (set with `setAnchor()`) now lists it as the active key.
+
+  /** Generate a fresh key pair in memory (no disk, no Keychain). Replaces any earlier pending key. */
+  beginFreshKey(): OwnerKeyPublic {
+    this.discardPendingKey()
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+    const pub = rawPublicKeyB64url(publicKey)
+    const kid = kidForPub(Buffer.from(pub, 'base64url'))
+    this.#pending = { privateKey, kid, pub, stagedPath: null }
+
+    return { kid, pub }
+  }
+
+  pendingKey(): OwnerKeyPublic | null {
+    return this.#pending ? { kid: this.#pending.kid, pub: this.#pending.pub } : null
+  }
+
+  /** Wrap the pending key with safeStorage and write it to a private staged file (0600, O_EXCL)
+   *  beside the blob, so a Keychain or disk failure surfaces BEFORE the admin prompt. */
+  stagePendingKey(): void {
+    const pending = this.#pending ?? this.#fail('no_key', 'no pending owner key to stage')
+
+    if (pending.stagedPath) {
+      return
+    }
+
+    if (!this.#encryptionAvailable()) {
+      this.#fail('keychain_unavailable', 'Keychain encryption is unavailable; the owner key is not created')
+    }
+
+    const der = pending.privateKey.export({ format: 'der', type: 'pkcs8' }) as Buffer
+    let wrapped: Buffer
+
+    try {
+      wrapped = this.#safeStorage.encryptString(der.toString('base64'))
+    } catch {
+      return this.#fail('keychain_unavailable', 'Keychain encryption failed; the owner key is not created')
+    } finally {
+      der.fill(0)
+    }
+
+    const doc: BlobDoc = {
+      format: OWNER_KEY_BLOB_FORMAT,
+      kid: pending.kid,
+      pub: pending.pub,
+      created_at: Date.now(),
+      wrapped: Buffer.from(wrapped).toString('base64')
+    }
+
+    pending.stagedPath = this.#writePrivateTemp(JSON.stringify(doc), 'staged')
+  }
+
+  /** Make the pending key THE key: only when the anchor now pins it as the active key. The staged
+   *  file is renamed over the blob path, which atomically replaces an old or planted blob. */
+  commitPendingKey(): OwnerKeyPublic {
+    const pending = this.#pending ?? this.#fail('no_key', 'no pending owner key to commit')
+
+    if (!pending.stagedPath) {
+      this.#fail('no_key', 'the pending owner key was never staged')
+    }
+
+    this.#requireAnchored(pending)
+    this.#fs.renameSync(pending.stagedPath, this.blobPath)
+    this.#privateKey = pending.privateKey
+    this.#public = { kid: pending.kid, pub: pending.pub }
+    this.#pending = null
+    this.#log('info', 'owner-grant key pinned', { kid: pending.kid })
+
+    return { ...this.#public }
+  }
+
+  /** Forget the pending key and remove its staged file (if any). Safe to call at any time. */
+  discardPendingKey(): void {
+    const staged = this.#pending?.stagedPath
+    this.#pending = null
+
+    if (staged) {
+      try {
+        this.#fs.unlinkSync(staged)
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') {
+          this.#log('warn', 'owner-grant staged key could not be removed', { code: error?.code ?? 'unknown' })
+        }
+      }
+    }
+  }
+
   publicInfo(): OwnerKeyPublic | null {
     return this.#public ? { ...this.#public } : null
   }
@@ -391,7 +488,7 @@ class OwnerKeyStoreImpl {
   }
 
   /** The anchor must list exactly this blob's kid AND public key as its one active key. */
-  #requireAnchored(doc: BlobDoc): void {
+  #requireAnchored(doc: { kid: string; pub: string }): void {
     if (!this.#anchor) {
       this.#fail('anchor_missing', 'the owner key is not loaded: no owner-grant anchor pins it')
     }
@@ -526,23 +623,7 @@ class OwnerKeyStoreImpl {
    *  name (fails if it exists) → drop the temp name. Returns false when the final name exists. */
   #writeBlobExclusive(text: string): boolean {
     const fs = this.#fs
-    fs.mkdirSync(this.#keyDir, { recursive: true, mode: 0o700 })
-    const dirStat = fs.lstatSync(this.#keyDir)
-
-    if (!dirStat.isDirectory() || (this.#uid !== null && dirStat.uid !== this.#uid)) {
-      this.#fail('key_blob_untrusted', 'the owner key directory is not a directory owned by this user')
-    }
-
-    fs.chmodSync(this.#keyDir, 0o700)
-    const tmp = path.join(this.#keyDir, `.${OWNER_KEY_FILE}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`)
-    const fd = fs.openSync(tmp, 'wx', 0o600)
-
-    try {
-      fs.writeSync(fd, text)
-      fs.fsyncSync(fd)
-    } finally {
-      fs.closeSync(fd)
-    }
+    const tmp = this.#writePrivateTemp(text, 'tmp')
 
     try {
       fs.linkSync(tmp, this.blobPath)
@@ -557,6 +638,35 @@ class OwnerKeyStoreImpl {
     } finally {
       fs.unlinkSync(tmp)
     }
+  }
+
+  /** A new private file (0600, O_EXCL) in the owner key dir (0700, owned by this user). */
+  #writePrivateTemp(text: string, suffix: 'staged' | 'tmp'): string {
+    const fs = this.#fs
+    fs.mkdirSync(this.#keyDir, { recursive: true, mode: 0o700 })
+    const dirStat = fs.lstatSync(this.#keyDir)
+
+    if (!dirStat.isDirectory() || (this.#uid !== null && dirStat.uid !== this.#uid)) {
+      this.#fail('key_blob_untrusted', 'the owner key directory is not a directory owned by this user')
+    }
+
+    fs.chmodSync(this.#keyDir, 0o700)
+    const tmp = path.join(this.#keyDir, `.${OWNER_KEY_FILE}.${process.pid}.${randomBytes(6).toString('hex')}.${suffix}`)
+    const fd = fs.openSync(tmp, 'wx', 0o600)
+
+    try {
+      fs.writeSync(fd, text)
+      fs.fsyncSync(fd)
+    } catch (error) {
+      fs.closeSync(fd)
+      fs.unlinkSync(tmp)
+
+      throw error
+    }
+
+    fs.closeSync(fd)
+
+    return tmp
   }
 }
 
