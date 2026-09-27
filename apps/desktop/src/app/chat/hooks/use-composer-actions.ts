@@ -611,7 +611,17 @@ export function useComposerActions({
       }
 
       try {
-        const savedPath = await save(text)
+        const masked = await requestGateway<{ text: string }>('secrets.mask', {
+          session_id: activeSessionId,
+          text
+        })
+
+        if (typeof masked?.text !== 'string') {
+          return false
+        }
+
+        const safeText = masked.text
+        const savedPath = await save(safeText)
 
         if (!savedPath) {
           return false
@@ -620,11 +630,11 @@ export function useComposerActions({
         attachToMain({
           id: attachmentId('file', savedPath),
           kind: 'file',
-          label: `${copy.pastedContent} (${pasteSizeLabel(text)})`,
+          label: `${copy.pastedContent} (${pasteSizeLabel(safeText)})`,
           detail: contextPath(savedPath, currentCwd),
           refText: `@file:${formatRefValue(savedPath)}`,
           path: savedPath,
-          titlePreview: text.slice(0, LARGE_PASTE_TITLE_PREVIEW_CHARS)
+          titlePreview: safeText.slice(0, LARGE_PASTE_TITLE_PREVIEW_CHARS)
         })
 
         return true
@@ -634,7 +644,7 @@ export function useComposerActions({
         return false
       }
     },
-    [attachToMain, copy.pasteAttachFailed, copy.pastedContent, currentCwd]
+    [activeSessionId, attachToMain, copy.pasteAttachFailed, copy.pastedContent, currentCwd, requestGateway]
   )
 
   const attachContextFolderPath = useCallback(

@@ -423,6 +423,15 @@ def test_config_defaults_registered():
     assert block["entropy"]["min_bits_per_char"] == 4.0
 
 
+def test_optout_default_is_disabled_in_config_and_loader(monkeypatch):
+    import agent.secret_hygiene as sh
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["security"]["secret_hygiene"]["optout"]["allowed"] is False
+    monkeypatch.setattr(sh, "_load_security_section", lambda: {})
+    assert sh.load_secret_hygiene_config().optout_allowed is False
+
+
 # ---------------------------------------------------------------------------
 # Structured JSON: ids are not secrets (security review P1-6)
 # ---------------------------------------------------------------------------

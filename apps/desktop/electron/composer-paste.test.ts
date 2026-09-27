@@ -23,5 +23,6 @@ describe('writeComposerPaste', () => {
 
     expect(path.dirname(filePath)).toBe(path.join(hermesHome, COMPOSER_PASTES_DIRNAME))
     expect(fs.readFileSync(filePath, 'utf8')).toBe('pasted body')
+    expect(fs.statSync(filePath).mode & 0o777).toBe(0o600)
   })
 })

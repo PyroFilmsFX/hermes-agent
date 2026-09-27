@@ -21,7 +21,7 @@ export async function writeComposerPaste(hermesHome: string, text: string): Prom
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '')
   const random = crypto.randomBytes(3).toString('hex')
   const filePath = path.join(dir, `pasted_content_${stamp}_${random}.txt`)
-  await fs.promises.writeFile(filePath, text, 'utf8')
+  await fs.promises.writeFile(filePath, text, { encoding: 'utf8', mode: 0o600 })
 
   return filePath
 }

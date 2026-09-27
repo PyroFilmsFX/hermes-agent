@@ -99,6 +99,23 @@ def test_idle_live_claude_target_uses_native_peer_injection(gw):
     assert row["status"] == "delivered" and row["delivered_via"] == "native"
 
 
+def test_session_send_masks_secret_in_mailbox_and_native_envelope(gw):
+    from agent.secret_hygiene import PLACEHOLDER_RE
+    from tests.agent.test_secret_hygiene_turn import _gh
+
+    received = []
+    gw.sessions["live-claude"] = _claude_live_session(
+        lambda body, origin: received.append((body, origin)) or True)
+    token = _gh(23)
+    result = _send(gw, body=f"deploy using {token}")
+
+    row = gw.db.peer_mailbox_get(result["message_id"])
+    ((envelope, origin),) = received
+    assert token not in row["body"] and PLACEHOLDER_RE.search(row["body"])
+    assert token not in envelope and "[REDACTED:github-token:" in envelope
+    assert token not in origin["body"] and "[REDACTED:github-token:" in origin["body"]
+
+
 def test_busy_live_claude_target_uses_sdk_boundary_queue_once(gw):
     received = []
     gw.sessions["live-claude"] = _claude_live_session(

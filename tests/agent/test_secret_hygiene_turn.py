@@ -145,7 +145,11 @@ def test_steer_text_masked():
     assert sent and token not in sent[0]
 
 
-def test_optout_tags_apply_to_one_turn_only():
+def test_optout_tags_apply_to_one_turn_only(monkeypatch):
+    from agent import secret_hygiene
+
+    monkeypatch.setattr(secret_hygiene, "load_secret_hygiene_config",
+                        lambda: secret_hygiene.SecretHygieneConfig(optout_allowed=True))
     token = _gh(61)
     raw = f"write {token} into .env"
     tags = {t["tag"] for t in ingress_secret_tags(raw)}
@@ -169,6 +173,23 @@ def test_optout_ignored_when_config_disallows(monkeypatch):
     agent = _FakeAgent()
     agent._secret_optout_tags = frozenset(tags)
     assert token not in _build(agent, user_message=raw).messages[-1]["content"]
+
+
+def test_cli_collapsed_paste_is_masked_and_private(monkeypatch, tmp_path):
+    import stat
+
+    import cli
+    from hermes_cli.cli_tui_mixin import CLITuiMixin
+
+    token = _gh(64)
+    monkeypatch.setattr(cli, "_hermes_home", tmp_path)
+    host = types.SimpleNamespace(_tui_paste_counter=0, _tui_paste_just_collapsed=False)
+    placeholder = CLITuiMixin._tui_collapse_paste(host, f"run with {token}", 0, fallback=False)
+    paste = next((tmp_path / "pastes").glob("*.txt"))
+    assert token not in paste.read_text()
+    assert "[REDACTED:github-token:" in paste.read_text()
+    assert stat.S_IMODE(paste.stat().st_mode) == 0o600
+    assert str(paste) in placeholder
 
 
 def test_mask_ingress_off_leaves_turn_raw(monkeypatch):

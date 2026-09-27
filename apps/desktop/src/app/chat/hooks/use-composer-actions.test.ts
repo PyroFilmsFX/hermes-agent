@@ -416,6 +416,8 @@ describe('useComposerActions generated paste title metadata', () => {
 
   it('marks only a Hermes-generated large paste with a bounded title preview', async () => {
     const savePastedText = vi.fn(async () => '/tmp/composer-pastes/pasted-content.txt')
+    const requestGateway = vi.fn(async <T>(_method: string, _params?: Record<string, unknown>) =>
+      ({ text: 'masked paste body' } as T))
     const add = vi.fn<(attachment: ComposerAttachment) => void>()
     Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { savePastedText } })
 
@@ -423,7 +425,10 @@ describe('useComposerActions generated paste title metadata', () => {
       useComposerActions({
         activeSessionId: null,
         currentCwd: '/test',
-        requestGateway: vi.fn(),
+        requestGateway: requestGateway as unknown as <T>(
+          method: string,
+          params?: Record<string, unknown>
+        ) => Promise<T>,
         scope: {
           add,
           remove: vi.fn(() => null),
@@ -437,14 +442,33 @@ describe('useComposerActions generated paste title metadata', () => {
     const pasted = `Database migration incident\n${'x'.repeat(1_500)}`
     await expect(result.current.attachPastedText(pasted)).resolves.toBe(true)
 
+    expect(requestGateway).toHaveBeenCalledWith('secrets.mask', { session_id: null, text: pasted })
+    expect(savePastedText).toHaveBeenCalledWith('masked paste body')
+
     expect(add).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'file',
         path: '/tmp/composer-pastes/pasted-content.txt',
         refText: '@file:/tmp/composer-pastes/pasted-content.txt',
-        titlePreview: pasted.slice(0, 1_000)
+        titlePreview: 'masked paste body'.slice(0, 1_000)
       })
     )
+  })
+
+  it('keeps the paste inline when secrets.mask is unavailable', async () => {
+    const savePastedText = vi.fn(async () => '/tmp/composer-pastes/pasted-content.txt')
+    const add = vi.fn<(attachment: ComposerAttachment) => void>()
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { savePastedText } })
+    const { result } = renderHook(() => useComposerActions({
+      activeSessionId: 'session-1', currentCwd: '/test',
+      requestGateway: vi.fn().mockRejectedValue(new Error('RPC unavailable')),
+      scope: { add, remove: vi.fn(() => null), target: 'main', update: vi.fn(() => true),
+        updateIfCurrent: vi.fn(() => true) }
+    }))
+
+    await expect(result.current.attachPastedText('raw fake secret')).resolves.toBe(false)
+    expect(savePastedText).not.toHaveBeenCalled()
+    expect(add).not.toHaveBeenCalled()
   })
 })
 

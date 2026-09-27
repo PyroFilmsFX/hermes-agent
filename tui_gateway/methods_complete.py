@@ -44,13 +44,24 @@ def _(rid, params: dict) -> dict:
     text = params.get("text", "")
     if not text:
         return _err(rid, 4004, "empty paste")
+    from agent.secret_hygiene import mask_ingress_text
+    text, _ = mask_ingress_text(text)
     _paste_counter += 1
     line_count = text.count("\n") + 1
     paste_dir = _hermes_home / "pastes"
     paste_dir.mkdir(parents=True, exist_ok=True)
     from datetime import datetime
     paste_file = paste_dir / f"paste_{_paste_counter}_{datetime.now().strftime('%H%M%S')}.txt"
-    paste_file.write_text(text, encoding="utf-8")
+    import os
+    fd = os.open(paste_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(paste_file, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(text)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     placeholder = f"[Pasted text #{_paste_counter}: {line_count} lines \u2192 {paste_file}]"
     return _ok(rid, {"placeholder": placeholder, "path": str(paste_file), "lines": line_count})
 

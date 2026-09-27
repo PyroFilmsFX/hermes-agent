@@ -1,9 +1,9 @@
 """Secret-hygiene JSON-RPC surface (HE-SECRET-HYGIENE S2): ``secrets.mask`` plus the submit helpers.
 
 - ``secrets.mask`` masks composer text as ``[REDACTED:<kind>:<tag>]`` (the paste edge, E1) and
-  returns per-kind counts and tags, never a value. With ``optout_tags`` (sent only after the
-  client's explicit confirm modal) it mints a single-use nonce bound to this session, the exact
-  text (sha256) and the tag set.
+  returns per-kind counts and tags, never a value. With ``optout_tags`` it can mint a single-use
+  nonce bound to this session, the exact text (sha256) and the tag set. Enabling opt-out by default
+  requires a trusted-gesture confirm; a client-asserted nonce alone does not provide one.
 - ``_consume_secret_optout`` is how ``prompt.submit`` spends that nonce: a missing, unknown,
   expired, reused or mismatched nonce yields no opt-out, so the message stays fully masked.
 - ``_mask_submit_text`` is the E2 edge shared by ``prompt.submit`` / ``prompt.btw`` /
