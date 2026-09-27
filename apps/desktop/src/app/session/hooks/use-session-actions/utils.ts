@@ -1031,9 +1031,9 @@ type ReconciledSessionResumeResult = SessionResumeResult & {
 }
 
 export function appendLiveSessionProjection(messages: ChatMessage[], projection: LiveSessionProjection): ChatMessage[] {
-  const inflightUser = projection.inflight?.user?.trim() ?? ''
-  const inflightAssistant = projection.inflight?.assistant ?? ''
-  const inflightStreaming = Boolean(projection.inflight?.streaming)
+  const snapshotUser = projection.inflight?.user?.trim() ?? ''
+  const snapshotAssistant = projection.inflight?.assistant ?? ''
+  const snapshotStreaming = Boolean(projection.inflight?.streaming)
 
   // Mid-turn redirect corrections. They are additional user bubbles belonging
   // to this same turn, ordered by arrival: after the output that had already
@@ -1056,8 +1056,33 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // A retained failed turn (the gateway keeps error snapshots replayable when
   // the terminal frame may have been lost to a disconnect) — surface the
   // failure on the projected row instead of rendering the partial as healthy.
-  const inflightError = projection.inflight?.error?.trim() ?? ''
-  const inflightErrorSurface = parseErrorSurface(projection.inflight?.error_surface)
+  const snapshotError = projection.inflight?.error?.trim() ?? ''
+  const snapshotErrorSurface = parseErrorSurface(projection.inflight?.error_surface)
+  const latestUserIndex = messages.findLastIndex(message => message.role === 'user')
+  const latestUserText = latestUserIndex >= 0 ? textWithoutReferenceLines(chatMessageText(messages[latestUserIndex])) : ''
+  const hasSuccessfulTurnAfterLatestUser = messages.slice(latestUserIndex + 1).some(
+    message => message.role === 'assistant' && !message.error && message.pending !== true
+  )
+  const failedPromptIsStored = messages.some(
+    message =>
+      message.role === 'user' &&
+      textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(snapshotUser)
+  )
+  // A reconnect can replay the last retained failure after another turn has
+  // already succeeded. It is no longer the transcript tail, so do not project
+  // its old prompt/error a second time underneath that newer reply. An error
+  // for the latest prompt still follows the normal projection and keeps Retry.
+  const retainedErrorIsOlder = Boolean(
+    snapshotError &&
+    failedPromptIsStored &&
+    latestUserText !== textWithoutReferenceLines(snapshotUser) &&
+    hasSuccessfulTurnAfterLatestUser
+  )
+  const inflightUser = retainedErrorIsOlder ? '' : snapshotUser
+  const inflightAssistant = retainedErrorIsOlder ? '' : snapshotAssistant
+  const inflightStreaming = retainedErrorIsOlder ? false : snapshotStreaming
+  const inflightError = retainedErrorIsOlder ? '' : snapshotError
+  const inflightErrorSurface = retainedErrorIsOlder ? null : snapshotErrorSurface
   const queuedUser = projection.queued?.user?.trim() ?? ''
 
   if (
@@ -1083,7 +1108,6 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // rows (#73793), so collect the run by walking back over the live tail:
   // user rows count, live-tail assistant rows are skipped, and a committed
   // assistant reply ends the turn.
-  const latestUserIndex = messages.map(message => message.role).lastIndexOf('user')
   const latestUserRun: ChatMessage[] = []
 
   for (let index = latestUserIndex; index >= 0; index -= 1) {

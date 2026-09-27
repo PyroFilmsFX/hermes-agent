@@ -1432,6 +1432,34 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('does not project a retained failure after a later turn completed successfully', () => {
+    const stored = [
+      msg('failed-user', 'user', 'first request'),
+      msg('failed-reply', 'assistant', ''),
+      msg('later-user', 'user', 'second request'),
+      msg('later-reply', 'assistant', 'second request completed')
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      inflight: { user: 'first request', assistant: '', streaming: false, error: 'turn timed out' }
+    })
+
+    expect(restored).toEqual(stored)
+  })
+
+  it('keeps the retained error projection when the failed turn is still latest', () => {
+    const stored = [msg('failed-user', 'user', 'latest request')]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      inflight: { user: 'latest request', assistant: '', streaming: false, error: 'turn timed out' }
+    })
+
+    expect(restored).toHaveLength(2)
+    expect(restored.at(-1)).toMatchObject({ role: 'assistant', error: 'turn timed out' })
+  })
+
   // A synthetic starting prompt keeps the display typing its persisted row
   // will get: on reconnect it renders as the same timeline event as history,
   // never as a user bubble; a real user quoting the marker text stays a user
