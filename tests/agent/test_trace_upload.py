@@ -91,11 +91,12 @@ def test_upload_blocks_when_redactor_fails(monkeypatch):
     upload_mock.assert_not_called()
 
 
-def test_converter_keeps_secrets_when_redact_disabled():
+def test_converter_masks_egress_secrets_when_redact_disabled():
     secret = "sk-abc123def456ghi789jklmno"
     msgs = [{"role": "user", "content": f"key OPENAI_API_KEY={secret} end"}]
     jsonl = build_trace_jsonl(msgs, session_id="s1", redact=False)
-    assert secret in jsonl
+    assert secret not in jsonl
+    assert "[REDACTED:openai-key:" in jsonl
 
 
 def test_load_session_messages_closes_database_on_failure(monkeypatch):
@@ -171,8 +172,6 @@ def test_upload_happy_path_mocked(monkeypatch):
     first = json.loads(body.strip().split("\n")[0])
     assert first["type"] in ("user", "assistant")
     assert first["sessionId"] == "20260531_abc"
-
-
 
 
 

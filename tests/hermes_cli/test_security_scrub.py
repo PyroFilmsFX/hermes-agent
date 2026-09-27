@@ -600,6 +600,7 @@ def test_file_with_an_open_writer_is_deferred(home):
 
 
 @pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not installed")
+@pytest.mark.live_system_guard_bypass
 def test_open_writer_probe_sees_a_real_writer(tmp_path):
     import subprocess
     import sys
@@ -875,9 +876,14 @@ def _hold_open(path: Path, tmp_path: Path, how: str = "sqlite"):
     import sys
 
     ready = tmp_path / f"ready-{path.name}"
-    code = ("import sqlite3,sys,time,pathlib;c=sqlite3.connect(sys.argv[1]);"
-            "c.execute('SELECT count(*) FROM messages').fetchone();"
-            if how == "sqlite" else "import sys,time,pathlib;f=open(sys.argv[1],'ab');")
+    code = {
+        "sqlite": ("import sqlite3,sys,time,pathlib;c=sqlite3.connect(sys.argv[1]);"
+                   "c.execute('SELECT count(*) FROM messages').fetchone();"),
+        "sqlite-wal": ("import sqlite3,sys,time,pathlib;c=sqlite3.connect(sys.argv[1]);"
+                       "assert c.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal';"
+                       "c.execute('BEGIN IMMEDIATE');"
+                       "c.execute(\"UPDATE messages SET content=content || ' ' WHERE id=1\");"),
+    }.get(how, "import sys,time,pathlib;f=open(sys.argv[1],'ab');")
     child = subprocess.Popen([sys.executable, "-c", code + "pathlib.Path(sys.argv[2]).write_text('1');time.sleep(60)",
                               str(path), str(ready)])
     deadline = time.time() + 10
@@ -890,10 +896,12 @@ def _hold_open(path: Path, tmp_path: Path, how: str = "sqlite"):
 # A: --apply refuses while any other process holds state.db / -wal / -shm, or a backend owns the home.
 
 @pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not installed")
+@pytest.mark.live_system_guard_bypass
 @pytest.mark.parametrize("which", ["state.db", "state.db-wal"])
 def test_apply_refuses_while_another_process_holds_state_db(home, tmp_path, which):
     target = home.db.parent / which
-    child = _hold_open(target, tmp_path, "sqlite" if which == "state.db" else "file")
+    child = _hold_open(target if which == "state.db" else home.db, tmp_path,
+                       "sqlite" if which == "state.db" else "sqlite-wal")
     try:
         before = _snapshot(home)
         report = run(home, apply=True)
@@ -942,7 +950,10 @@ def test_apply_refuses_while_a_backend_owns_the_home(home):
     assert run(home, backend_probe=lambda _r, _p: ["x"]).exit_code == 0  # dry run allowed
 
 
-def test_backend_probe_finds_nothing_for_an_idle_temp_home(tmp_path):
+def test_backend_probe_finds_nothing_for_an_idle_temp_home(tmp_path, monkeypatch):
+    import psutil
+
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: [psutil.Process(os.getpid())])
     root = tmp_path / "idle-root"
     (root / "profiles" / "zz-scrub-idle").mkdir(parents=True)
     assert scrub._backend_owners(root, [("default", root),
