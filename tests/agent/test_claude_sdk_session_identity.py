@@ -1169,6 +1169,307 @@ class TestContinuity:
         db.update_claude_sdk_session_id.assert_not_called()
 
 
+class TestPostQueryDeathRecovery:
+    """U8.2: the CLI dies AFTER the query was submitted.
+
+    Contract: the resumable Claude session id is never cleared; the turn is
+    replayed once, on the SAME session, only when the failed attempt left no
+    trace (no tool_use / tool effect, no streamed or projected text, no stop);
+    otherwise the error says the session is intact and the next message
+    continues it. A death during the replay is final (bounded to one).
+    """
+
+    _DEATH_ERROR = "SDK message stream ended before this turn's result"
+
+    @classmethod
+    def _death(cls, **overrides):
+        base = dict(
+            should_retire=True,
+            stream_ended=True,
+            api_call_made=True,
+            error=cls._DEATH_ERROR,
+            thread_id="sdk-live-1",
+            projected_messages=[],
+            tool_iterations=0,
+            final_text="",
+            token_usage_last=None,
+        )
+        base.update(overrides)
+        return _make_turn(**base)
+
+    @staticmethod
+    def _answer(text="recovered answer"):
+        return _make_turn(
+            final_text=text,
+            thread_id="sdk-live-1",
+            tool_iterations=0,
+            projected_messages=[{"role": "assistant", "content": text}],
+        )
+
+    @staticmethod
+    def _pinned(agent, turn_or_fn):
+        """A live, pinned SDK session in the current workspace."""
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        class PinnedLive:
+            def __init__(self):
+                self._cwd = str(resolve_agent_cwd())
+                # Bound to the agent's model, so no model-switch rotation.
+                self._model = agent.model
+                self.inputs = []
+                self.closed = 0
+
+            def run_turn(self, user_input):
+                self.inputs.append(user_input)
+                return turn_or_fn() if callable(turn_or_fn) else turn_or_fn
+
+            def close(self):
+                self.closed += 1
+
+            def set_turn_visibility_callbacks(self, **_kwargs):
+                pass
+
+            def set_unsolicited_result_callback(self, _callback):
+                pass
+
+            def consume_interrupt(self):
+                pass
+
+        live = PinnedLive()
+        agent._claude_sdk_session = live
+        return live
+
+    @staticmethod
+    def _run(agent, text="hi", messages=None):
+        return run_claude_agent_sdk_turn(
+            agent,
+            user_message=text,
+            original_user_message=text,
+            messages=messages or [{"role": "user", "content": text}],
+            effective_task_id="t",
+        )
+
+    @staticmethod
+    def _id_cleared(db):
+        return any(
+            call.args == ("sess-1", None)
+            for call in db.update_claude_sdk_session_id.call_args_list
+        )
+
+    # ---- (1)+(2) replay-safe death: keep the id, replay once ----
+
+    def test_pinned_death_without_effects_keeps_id_and_replays_once(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        live = self._pinned(agent, self._death())
+        instances = TestContinuity._spy_sessions(monkeypatch, [self._answer()])
+
+        result = self._run(agent)
+
+        assert live.inputs == ["hi"]
+        assert len(instances) == 1, "exactly one replay"
+        assert instances[0].kwargs["resume_session_id"] == "sdk-live-1"
+        assert instances[0].inputs == ["hi"], "a resumed replay carries no digest"
+        assert result["final_response"] == "recovered answer"
+        assert not result.get("failed")
+        assert not self._id_cleared(db)
+
+    def test_resumed_death_without_effects_replays_on_the_same_session(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        instances = TestContinuity._spy_sessions(
+            monkeypatch, [self._death(), self._answer()]
+        )
+        messages = [
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+            {"role": "user", "content": "current question"},
+        ]
+
+        result = self._run(agent, "current question", messages)
+
+        assert len(instances) == 2
+        assert [i.kwargs["resume_session_id"] for i in instances] == [
+            "sdk-live-1",
+            "sdk-live-1",
+        ]
+        assert instances[1].inputs == ["current question"]
+        assert result["final_response"] == "recovered answer"
+        assert not self._id_cleared(db)
+
+    # ---- (2) effects happened: no replay, id kept, error names the session ----
+
+    @pytest.mark.parametrize("effect", ["tool_use", "tool_started", "streamed_text"])
+    def test_pinned_death_after_effects_keeps_id_and_does_not_replay(
+        self, monkeypatch, effect
+    ):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+
+        def dying_turn():
+            if effect == "tool_use":
+                return self._death(
+                    tool_iterations=1,
+                    projected_messages=[{
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "toolu_1",
+                            "type": "function",
+                            "function": {"name": "Bash", "arguments": "{}"},
+                        }],
+                    }],
+                )
+            if effect == "tool_started":
+                agent._sdk_issued_tool_effect = True
+            else:
+                agent._current_streamed_assistant_text = "partial answer"
+            return self._death()
+
+        self._pinned(agent, dying_turn)
+        instances = TestContinuity._spy_sessions(monkeypatch, [self._answer()])
+
+        result = self._run(agent)
+
+        assert instances == [], "tool effects / shown output are never replayed"
+        assert result["failed"] is True
+        assert "session is intact" in result["error"]
+        assert "next message continues it" in result["error"]
+        assert not self._id_cleared(db)
+
+    def test_resumed_death_after_tool_use_is_not_replayed_fresh(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        instances = TestContinuity._spy_sessions(
+            monkeypatch,
+            [
+                self._death(
+                    tool_iterations=1,
+                    projected_messages=[{"role": "assistant", "content": "ran it"}],
+                ),
+                self._answer(),
+            ],
+        )
+
+        result = self._run(agent)
+
+        assert len(instances) == 1
+        assert "session is intact" in result["error"]
+        assert not self._id_cleared(db)
+
+    # ---- (3) interrupts are never replayed ----
+
+    @pytest.mark.parametrize("stop", ["turn_flag", "agent_flag"])
+    def test_interrupted_death_is_not_replayed_and_keeps_id(self, monkeypatch, stop):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+
+        def dying_turn():
+            # A user /stop: the transport honored it (turn flag) or it landed
+            # after the transport's last snapshot (agent flag only).
+            agent._interrupt_requested = True
+            return self._death(interrupted=stop == "turn_flag")
+
+        self._pinned(agent, dying_turn)
+        instances = TestContinuity._spy_sessions(monkeypatch, [self._answer()])
+
+        result = self._run(agent)
+
+        assert instances == []
+        assert result["interrupted"] is True
+        assert result["failed"] is False
+        assert agent._interrupt_requested is False
+        assert not self._id_cleared(db)
+
+    def test_resumed_interrupted_death_is_not_replayed_and_keeps_id(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        # A turn-level stop with no user flag (a watchdog trip) is still a stop.
+        instances = TestContinuity._spy_sessions(
+            monkeypatch, [self._death(interrupted=True), self._answer()]
+        )
+
+        result = self._run(agent)
+
+        assert len(instances) == 1
+        assert result["failed"] is False
+        assert "session is intact" not in (result["error"] or "")
+        assert not self._id_cleared(db)
+
+    # ---- bounded: a death during the replay is final ----
+
+    def test_pinned_death_during_replay_is_bounded_to_one(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        self._pinned(agent, self._death())
+        instances = TestContinuity._spy_sessions(
+            monkeypatch, [self._death(), self._answer(), self._answer()]
+        )
+
+        result = self._run(agent)
+
+        assert len(instances) == 1, "one replay, never a loop"
+        assert result["failed"] is True
+        assert "session is intact" in result["error"]
+        assert not self._id_cleared(db)
+
+    def test_resumed_death_during_replay_is_bounded_to_one(self, monkeypatch):
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        instances = TestContinuity._spy_sessions(
+            monkeypatch, [self._death(), self._death(), self._answer()]
+        )
+
+        result = self._run(agent)
+
+        assert len(instances) == 2
+        assert result["failed"] is True
+        assert "session is intact" in result["error"]
+        assert not self._id_cleared(db)
+
+    # ---- real transport: the death signal reaches the runtime ----
+
+    def test_real_turn_result_reports_post_query_stream_death(self):
+        # No ResultMessage in the script: the fake CLI echoes the prompt, then
+        # its stream ends — a CLI that died after the query was submitted.
+        session, _holder = _make_session(script=[])
+        try:
+            turn = session.run_turn("hi", watch_poll_interval=0.02)
+        finally:
+            _close_promptly(session)
+        assert turn.should_retire is True
+        assert getattr(turn, "stream_ended", False) is True
+        assert turn.api_call_made is True
+
+    def test_real_pinned_session_death_is_replayed_on_the_same_session(self, monkeypatch):
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        agent, db = TestContinuity._db_agent(
+            persisted_sdk_id=TestContinuity._bound_id("sdk-live-1")
+        )
+        session, _holder = _make_session(script=[])
+        session._cwd = str(resolve_agent_cwd())
+        agent._claude_sdk_session = session
+        instances = TestContinuity._spy_sessions(monkeypatch, [self._answer()])
+        try:
+            result = self._run(agent)
+        finally:
+            _close_promptly(session)
+
+        assert len(instances) == 1
+        assert instances[0].kwargs["resume_session_id"] == "sdk-live-1"
+        assert result["final_response"] == "recovered answer"
+        assert not self._id_cleared(db)
+
+
 class TestSessionResumeField:
     def test_resume_rides_options_when_set(self):
         session, holder = _make_session(

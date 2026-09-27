@@ -110,6 +110,7 @@ def run_claude_agent_sdk_turn(
     # failure may happen before a model call and must not inherit prior output.
     agent._current_streamed_assistant_text = ""
     agent._sdk_issued_tool_effect = False
+    agent._sdk_interim_delivered = False
     state = _SdkTurnState(
         user_input=user_input,
         original_user_message=original_user_message,

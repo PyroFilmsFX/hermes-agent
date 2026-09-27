@@ -616,8 +616,11 @@ class ClaudeSdkTurnMixin:
                 result.fatal_reason = "auth"
             return result
         finally:
+            # Detach only this turn's watchdog gate. A background Agent Task
+            # can outlive the foreground turn and report later, so its
+            # record is NOT finalized here: the stream teardown and close()
+            # finalize whatever is still live on a real retire/close.
             watch.clear_tasks()
-            self._finalize_sdk_tasks(status="interrupted")
             self._turn_watch = None
 
         if turn_data is None:
@@ -664,6 +667,10 @@ class ClaudeSdkTurnMixin:
         result.retired_before_query = bool(
             turn_data.get("retired_before_query", False)
         )
+        # The runtime tells a CLI death before the query (api_call_made False)
+        # from one after it by this marker; without it neither stream-death
+        # recovery path in _run_sdk_attempts can see that the stream died.
+        result.stream_ended = bool(turn_data.get("stream_ended", False))
         result.interrupted = bool(turn_data.get("interrupt_observed", False))
         # A non-terminal turn can spend time releasing foreground ownership
         # after the stream consumer's last snapshot. Restore the live read for
@@ -1412,20 +1419,32 @@ class ClaudeSdkTurnMixin:
             # projector resolves them inside their own assistant
             # message). A turn with a tool in flight is suspended
             # from BOTH watchdog rules.
+            issued_ids = [
+                call.get("id")
+                for m in projection.messages
+                if m.get("role") == "assistant"
+                for call in (m.get("tool_calls") or [])
+                if isinstance(call, dict)
+            ]
             issued = sum(
                 len(m.get("tool_calls") or [])
                 for m in projection.messages
                 if m.get("role") == "assistant"
             )
             if issued:
-                watch.note_tools_issued(issued)
+                watch.note_tools_issued(issued, ids=issued_ids)
             if projection.is_tool_iteration:
                 watch.note_tools_resolved(
                     sum(
                         1
                         for m in projection.messages
                         if m.get("role") == "tool"
-                    )
+                    ),
+                    ids=[
+                        m.get("tool_call_id")
+                        for m in projection.messages
+                        if m.get("role") == "tool"
+                    ],
                 )
                 # Codex-parity arm point: a tool result just landed;
                 # silence from here on is the wedge signature.

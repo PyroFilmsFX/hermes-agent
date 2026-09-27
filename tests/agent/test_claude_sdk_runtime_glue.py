@@ -215,6 +215,275 @@ class TestRuntimeGlue:
             "api_error_kind": state.turn.api_error_kind,
         })[:2] == ("transient", "server_error")
 
+    # ---- ONE replay budget per user turn: #31 transient retry x U8.2 replay ----
+
+    @staticmethod
+    def _transient_503():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            interrupted=False, error="Claude API error (server_error): HTTP 503",
+            thread_id="sdk-session-1", turn_id="turn-1", projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            api_error_status=503, api_error_kind="server_error",
+            api_retries=None, rate_limit_rejected=None,
+        )
+
+    @staticmethod
+    def _post_query_death():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            interrupted=False,
+            error="SDK message stream ended before this turn's result",
+            thread_id="sdk-session-1", turn_id=None, projected_messages=[],
+            tool_iterations=0, final_text="", should_retire=True,
+            stream_ended=True, api_call_made=True, fatal_reason=None,
+        )
+
+    @staticmethod
+    def _answer():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            interrupted=False, error=None, thread_id="sdk-session-1",
+            turn_id="turn-2", projected_messages=[], tool_iterations=0,
+            final_text="answer", should_retire=False,
+        )
+
+    def test_post_query_death_during_transient_retry_is_not_replayed(self, monkeypatch):
+        agent = _make_agent()
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent,
+            [self._transient_503(), self._post_query_death(), self._answer()],
+        )
+        state = self._state()
+
+        result = mod._run_sdk_attempts(agent, state)
+
+        assert result is None
+        assert len(sessions) == 2, "the transient retry spent the budget"
+        assert "session is intact" in state.turn.error
+        assert "next message continues it" in state.turn.error
+        assert "retry of a transient API error" in state.turn.error
+        agent._emit_status.assert_called_once_with("Retrying (1/2)…")
+
+    def test_transient_failure_during_post_query_replay_is_not_retried(self, monkeypatch):
+        agent = _make_agent()
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent,
+            [self._post_query_death(), self._transient_503(), self._answer()],
+        )
+        state = self._state()
+
+        result = mod._run_sdk_attempts(agent, state)
+
+        assert result is None
+        assert len(sessions) == 2, "the post-query-death replay spent the budget"
+        assert state.turn.error == "Claude API error (server_error): HTTP 503"
+        agent._emit_status.assert_not_called()
+
+    @pytest.mark.parametrize("max_retries", [0, 1, 2, 3])
+    def test_replay_budget_is_shared_and_bounded(self, monkeypatch, max_retries):
+        """Re-sends of an attempt that reached the API total at most
+        max(1, N): N transient retries OR one post-query-death replay."""
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg, "load_config_readonly",
+            lambda *args, **kwargs: {"agent": {"claude_agent_sdk": {
+                "transient_retry_max_retries": max_retries,
+            }}},
+            raising=False,
+        )
+        # Every transient retry it allows is spent, then the CLI dies.
+        agent = _make_agent()
+        script = [self._transient_503() for _ in range(max_retries)]
+        script += [self._post_query_death(), self._answer(), self._answer()]
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, script)
+        state = self._state()
+        mod._run_sdk_attempts(agent, state)
+        if max_retries:
+            assert len(sessions) == max_retries + 1
+            assert "session is intact" in state.turn.error
+        else:
+            # N = 0 still leaves the one post-query-death replay.
+            assert len(sessions) == 2
+            assert state.turn.final_text == "answer"
+
+        # Every re-send spent on a death, then transient failures forever.
+        agent = _make_agent()
+        script = [self._post_query_death()]
+        script += [self._transient_503() for _ in range(max_retries + 2)]
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, script)
+        state = self._state()
+        mod._run_sdk_attempts(agent, state)
+        assert len(sessions) == 2
+        assert len(sessions) - 1 <= max(1, max_retries)
+
+    # ---- review P1-3: a re-sent attempt's spend stays in the turn ----
+
+    @staticmethod
+    def _with_spend(turn, *, input_tokens, output_tokens, cost):
+        turn.token_usage_last = {
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+        }
+        turn.token_usage_total = dict(turn.token_usage_last)
+        turn.total_cost_usd = cost
+        turn.billing_mode = "sdk_reported_metered"
+        turn.api_call_made = True
+        return turn
+
+    @pytest.mark.parametrize("first", ["transient", "post_query_death"])
+    def test_resent_attempt_spend_is_accumulated(self, monkeypatch, first):
+        from agent.claude_sdk_runtime_usage import _claude_sdk_billing_accounting
+
+        agent = _make_agent()
+        failed = (
+            self._transient_503() if first == "transient"
+            else self._post_query_death()
+        )
+        failed = self._with_spend(failed, input_tokens=100, output_tokens=20, cost=0.5)
+        answer = self._with_spend(
+            self._answer(), input_tokens=50, output_tokens=10, cost=0.25
+        )
+        answer.token_usage_last["iterations"] = [{"input_tokens": 50}]
+        mod, sessions = self._scripted_sessions(monkeypatch, agent, [failed, answer])
+        state = self._state()
+
+        mod._run_sdk_attempts(agent, state)
+
+        assert len(sessions) == 2
+        usage = state.turn.token_usage_last
+        assert usage["input_tokens"] == 150
+        assert usage["output_tokens"] == 30
+        # Context pressure stays the final attempt's own last iteration.
+        assert usage["iterations"] == [{"input_tokens": 50}]
+        assert state.turn.total_cost_usd == pytest.approx(0.75)
+        assert _claude_sdk_billing_accounting(state.turn)[3] == pytest.approx(0.75)
+
+    @pytest.mark.parametrize("first", ["transient", "post_query_death"])
+    def test_no_resend_when_turn_budget_would_be_exceeded(self, monkeypatch, first):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg, "load_config_readonly",
+            lambda *args, **kwargs: {"agent": {"claude_agent_sdk": {
+                "max_budget_usd": 1.0,
+            }}},
+            raising=False,
+        )
+        agent = _make_agent()
+        failed = (
+            self._transient_503() if first == "transient"
+            else self._post_query_death()
+        )
+        # Spent 0.6 of a 1.0 cap: a replay costing the same would exceed it.
+        failed = self._with_spend(failed, input_tokens=100, output_tokens=20, cost=0.6)
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent, [failed, self._answer()]
+        )
+        state = self._state()
+
+        mod._run_sdk_attempts(agent, state)
+
+        assert len(sessions) == 1
+        if first == "post_query_death":
+            assert "session is intact" in state.turn.error
+            assert "max_budget_usd" in state.turn.error
+        else:
+            assert state.turn.error == "Claude API error (server_error): HTTP 503"
+
+    def test_resend_within_turn_budget_still_runs(self, monkeypatch):
+        import hermes_cli.config as cfg
+
+        monkeypatch.setattr(
+            cfg, "load_config_readonly",
+            lambda *args, **kwargs: {"agent": {"claude_agent_sdk": {
+                "max_budget_usd": 1.0,
+            }}},
+            raising=False,
+        )
+        agent = _make_agent()
+        failed = self._with_spend(
+            self._transient_503(), input_tokens=100, output_tokens=20, cost=0.3
+        )
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent, [failed, self._answer()]
+        )
+        state = self._state()
+
+        mod._run_sdk_attempts(agent, state)
+
+        assert len(sessions) == 2
+        assert state.turn.final_text == "answer"
+
+    def test_prior_spend_is_recorded_when_the_retry_raises(self, monkeypatch):
+        agent = _make_agent()
+        failed = self._with_spend(
+            self._transient_503(), input_tokens=100, output_tokens=20, cost=0.5
+        )
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent, [failed, self._answer()]
+        )
+        recorded = []
+        monkeypatch.setattr(
+            mod, "_record_claude_sdk_usage",
+            lambda _agent, turn: recorded.append(
+                (dict(turn.token_usage_last), turn.total_cost_usd)
+            ) or {},
+        )
+        real_create = mod._create_session
+
+        def create_then_raise(agent_, **kwargs):
+            session = real_create(agent_, **kwargs)
+            if len(sessions) == 2:
+                session.run_turn.side_effect = RuntimeError("CLI crashed")
+            return session
+
+        monkeypatch.setattr(mod, "_create_session", create_then_raise)
+
+        result = mod._run_sdk_attempts(agent, self._state())
+
+        assert result is not None and result["failed"] is True
+        assert recorded == [({"input_tokens": 100, "output_tokens": 20}, 0.5)]
+
+    # ---- review P2: delivered interim prose (streaming off) is visible ----
+
+    @pytest.mark.parametrize("first", ["transient", "post_query_death"])
+    def test_delivered_interim_prose_blocks_resend(self, monkeypatch, first):
+        agent = _make_agent()
+        failed = (
+            self._transient_503() if first == "transient"
+            else self._post_query_death()
+        )
+        mod, sessions = self._scripted_sessions(
+            monkeypatch, agent, [failed, self._answer()]
+        )
+        # Streaming off: no delta text, but the interim relay showed prose.
+        agent._sdk_interim_delivered = True
+
+        mod._run_sdk_attempts(agent, self._state())
+
+        assert len(sessions) == 1
+
+    def test_interim_relay_marks_prose_as_delivered(self):
+        from agent.claude_sdk_runtime_session import _TurnVisibility
+
+        agent = _make_agent()
+        agent._current_turn_id = "turn-1"
+        agent._sdk_visibility_lock = None
+        agent._sdk_interim_delivered = False
+        agent._strip_think_blocks = lambda text: text
+        agent._interim_text_was_delivered = lambda _text: False
+        agent._interim_content_was_streamed = lambda _text: False
+        agent.interim_assistant_callback = lambda *_a, **_k: None
+        visibility = _TurnVisibility(agent)
+
+        visibility.relay_interim_assistant("Looking into it now.")
+
+        assert agent._sdk_interim_delivered is True
+
     def test_stream_ended_pre_query_retries_once_but_post_query_never_retries(self, monkeypatch):
         from types import SimpleNamespace
 

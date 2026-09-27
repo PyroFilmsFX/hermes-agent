@@ -785,22 +785,102 @@ class TestTurnLifetime:
 
         assert watch.check(budget=600.0, quiet=0.0) == "budget"
 
-    def test_orphaned_sdk_task_records_are_cleared_at_turn_end(self):
+    def test_background_task_record_survives_a_normal_turn_end(self):
+        """Review P1-1: a foreground turn may end while a background Agent
+        Task still runs. Its record must survive so the later terminal Task
+        notification completes the row (not a premature ``interrupted``)."""
         session, _holder = _make_session(script=[ResultMessage(result="done")])
+        events = []
+        session._on_subagent_event = lambda event, name, preview, args, **kw: (
+            events.append((event, kw))
+        )
         session._sdk_task_records = {
-            "orphan": {
+            "bg-task": {
                 "goal": "background work",
                 "parent_tool_id": None,
                 "child_session_id": None,
             }
         }
+
+        class TaskNotificationMessage:
+            def __init__(self, **data):
+                self.__dict__.update(data)
+
         try:
             turn = session.run_turn("finish", turn_timeout=30.0)
-            assert session._sdk_task_records == {}
+            assert "bg-task" in session._sdk_task_records
+            assert [e for e, _kw in events if e == "subagent.complete"] == []
+
+            session._notify_task_message(
+                TaskNotificationMessage(
+                    task_id="bg-task", status="completed", summary="all done"
+                )
+            )
         finally:
             _close_promptly(session)
 
         assert turn.error is None
+        completes = [kw for e, kw in events if e == "subagent.complete"]
+        assert len(completes) == 1
+        assert completes[0]["status"] == "completed"
+        assert completes[0]["summary"] == "all done"
+        assert session._sdk_task_records == {}
+
+    def test_outstanding_task_tool_does_not_bypass_the_task_cap(self, monkeypatch):
+        """Review P1-2: a Task whose ToolResult never arrives is bounded by
+        _TASK_MAX_SUSPEND like any live Task, not suspended forever."""
+        from agent.transports import claude_agent_sdk_session_watchdog as session_mod
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(
+            session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        watch = session_mod._TurnWatch()
+        watch.note_tools_issued(1, ids=["toolu_task"])
+        watch.note_task_started("task-1", parent_tool_id="toolu_task")
+
+        clock["now"] += 601.0
+        assert watch.check(budget=600.0, quiet=0.0) is None
+        clock["now"] += session_mod._TASK_MAX_SUSPEND
+        assert watch.check(budget=600.0, quiet=0.0) == "budget"
+
+    def test_ordinary_outstanding_tool_still_suspends_past_the_task_cap(
+        self, monkeypatch
+    ):
+        from agent.transports import claude_agent_sdk_session_watchdog as session_mod
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(
+            session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        watch = session_mod._TurnWatch()
+        watch.note_tools_issued(2, ids=["toolu_task", "toolu_bash"])
+        watch.note_task_started("task-1", parent_tool_id="toolu_task")
+        clock["now"] += session_mod._TASK_MAX_SUSPEND + 601.0
+        # The Bash call is still in flight: ordinary tools stay unbounded.
+        assert watch.check(budget=600.0, quiet=0.0) is None
+
+        watch.note_tools_resolved(1, ids=["toolu_bash"])
+        assert watch.check(budget=600.0, quiet=0.0) == "budget"
+
+    def test_task_tool_ids_flow_from_the_stream_into_the_watch(self):
+        from agent.transports.claude_agent_sdk_session_watchdog import _TurnWatch
+        from agent.transports.claude_sdk_event_projector import ClaudeSdkEventProjector
+
+        watch = _TurnWatch()
+        out = {"messages": [], "tool_iterations": 0, "model": None}
+        step = ClaudeAgentSdkSession._project_message_step
+        projector = ClaudeSdkEventProjector()
+        step(projector, watch, AssistantMessage(content=[
+            ToolUseBlock(id="toolu_task", name="Task", input={"prompt": "x"}),
+        ]), out)
+        assert watch.outstanding_tools == 1
+        assert watch.outstanding_tool_ids == {"toolu_task"}
+        step(projector, watch, UserMessage(content=[
+            ToolResultBlock(tool_use_id="toolu_task", content="launched"),
+        ]), out)
+        assert watch.outstanding_tools == 0
+        assert watch.outstanding_tool_ids == set()
 
     def test_post_tool_quiet_trips_on_wedge_clean_ack(self):
         # Wedge signature: a tool result lands, then the stream goes silent

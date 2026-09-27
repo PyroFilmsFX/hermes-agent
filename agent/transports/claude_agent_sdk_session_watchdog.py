@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 from agent.transports.claude_agent_sdk_session_availability import (
     _safe_sdk_error_text,
 )
@@ -101,35 +101,55 @@ class _TurnWatch:
         self.compaction_started = 0.0
         self.active_tasks: dict[str, float] = {}
         self.task_gate_started = 0.0
+        # Ids of issued-but-unresolved tool calls, and the Task tool call
+        # that launched each live task: an outstanding Task call is bounded
+        # by _TASK_MAX_SUSPEND, an ordinary outstanding tool is not.
+        self.outstanding_tool_ids: set[str] = set()
+        self.task_parent_tools: dict[str, str] = {}
 
     # -- loop-thread writers --
 
     def tick(self) -> None:
         self.last_activity = time.monotonic()
 
-    def note_tools_issued(self, count: int) -> None:
+    def note_tools_issued(self, count: int, ids: Iterable[Any] = ()) -> None:
         if count > 0:
             self.outstanding_tools += count
+            self.outstanding_tool_ids.update(i for i in ids if i)
 
-    def note_tools_resolved(self, count: int) -> None:
+    def note_tools_resolved(self, count: int, ids: Iterable[Any] = ()) -> None:
         if count > 0:
             self.outstanding_tools = max(0, self.outstanding_tools - count)
+            self.outstanding_tool_ids.difference_update(ids)
+            if self.outstanding_tools == 0:
+                self.outstanding_tool_ids.clear()
 
-    def note_task_started(self, task_id: str) -> None:
+    def note_task_started(
+        self, task_id: str, parent_tool_id: Optional[str] = None
+    ) -> None:
         if task_id:
             started = time.monotonic()
             self.active_tasks[task_id] = started
+            if parent_tool_id:
+                self.task_parent_tools[task_id] = parent_tool_id
             if len(self.active_tasks) == 1:
                 self.task_gate_started = started
 
     def note_task_terminal(self, task_id: str) -> None:
         started = self.active_tasks.pop(task_id, None)
+        self.task_parent_tools.pop(task_id, None)
         if started == self.task_gate_started:
             self.task_gate_started = min(self.active_tasks.values(), default=0.0)
 
     def clear_tasks(self) -> None:
         self.active_tasks.clear()
+        self.task_parent_tools.clear()
         self.task_gate_started = 0.0
+
+    def _outstanding_tools_are_live_tasks(self) -> bool:
+        """Every outstanding tool call is the Task call of a live task."""
+        task_calls = self.outstanding_tool_ids & set(self.task_parent_tools.values())
+        return bool(task_calls) and self.outstanding_tools <= len(task_calls)
 
     def arm_post_tool(self) -> None:
         self.post_tool_armed = True
@@ -177,7 +197,13 @@ class _TurnWatch:
     def check(self, *, budget: float, quiet: float) -> Optional[str]:
         """Returns None (keep waiting), "post_tool_quiet", or "budget"."""
         now = time.monotonic()
-        if self.outstanding_tools > 0 or self.approvals_pending > 0:
+        if self.approvals_pending > 0:
+            return None
+        # An ordinary outstanding tool suspends indefinitely (documented
+        # above). When the only outstanding calls are live Tasks' own Task
+        # calls, the Task cap below bounds the suspension instead: a Task
+        # whose ToolResult never arrives must not hold the turn forever.
+        if self.outstanding_tools > 0 and not self._outstanding_tools_are_live_tasks():
             return None
         if self.task_gate_started and now - self.task_gate_started < _TASK_MAX_SUSPEND:
             return None

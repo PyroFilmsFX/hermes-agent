@@ -10,8 +10,10 @@ session-creation work. Extracted from ``claude_sdk_runtime.py``.
 
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
+import math
 import logging
 import os
 import threading
@@ -22,6 +24,7 @@ from typing import Any, Dict, Optional
 from agent.redact import redact_sensitive_text
 from agent.claude_sdk_runtime_compaction import _on_compact_boundary, _on_compaction
 from agent.claude_sdk_runtime_fallback import (
+    ClaudeSdkTurnEffects,
     _consume_agent_interrupt,
     _retire_live_sdk_session,
 )
@@ -41,7 +44,9 @@ from agent.claude_sdk_runtime_continuity import (
     _store_sdk_session_id,
 )
 from agent.claude_sdk_runtime_prompt import build_system_prompt_append
+from agent.claude_sdk_runtime_context import _coerce_usage_int
 from agent.claude_sdk_runtime_state import _SdkTurnState
+from agent.claude_sdk_runtime_usage import _record_claude_sdk_usage
 from agent.claude_sdk_runtime_tools import (
     _hybrid_bridge_enabled,
     _snapshot_agent_tools_with_mcp_refresh,
@@ -88,32 +93,155 @@ def _configured_transient_retry_policy() -> tuple[int, tuple[float, ...], float]
     return retries, tuple(backoff), cap
 
 
-def _sdk_attempt_replay_safe(agent, turn: Any) -> bool:
-    """A failed SDK turn is replayable only before any visible/effectful output."""
-    if (
-        bool(getattr(turn, "interrupted", False))
-        or bool(getattr(agent, "_interrupt_requested", False))
-        or bool(getattr(agent, "_sdk_issued_tool_effect", False))
-        or bool(getattr(agent, "_current_streamed_assistant_text", ""))
-    ):
-        return False
-    try:
-        if int(getattr(turn, "tool_iterations", 0) or 0) > 0:
-            return False
-    except (TypeError, ValueError, OverflowError):
-        return False
+def _projects_tool_use(turn: Any) -> bool:
+    """Whether the failed attempt projected a tool call in any wire shape."""
     for message in getattr(turn, "projected_messages", None) or ():
         if not isinstance(message, dict):
             continue
         if message.get("tool_calls") or message.get("tool_use"):
-            return False
+            return True
         content = message.get("content")
         if isinstance(content, list) and any(
             isinstance(block, dict) and block.get("type") == "tool_use"
             for block in content
         ):
-            return False
-    return True
+            return True
+    return False
+
+
+def _sdk_attempt_effects(
+    agent, turn: Any, state: Optional[_SdkTurnState] = None
+) -> ClaudeSdkTurnEffects:
+    """The observable effects a failed SDK attempt left behind.
+
+    This is the ONE replay-safety ledger for every same-provider re-send of a
+    turn (the transient-API retry and the post-query CLI-death replay) and the
+    same ``ClaudeSdkTurnEffects`` shape the provider hand-off uses. It is the
+    union of both former predicates: a stop (turn or agent flag), a tool
+    effect / tool iteration / projected tool_use, streamed or final assistant
+    text, interim assistant prose a surface already accepted (the only trace
+    of shown prose with streaming off), any projected row, and a transcript
+    mutation all make it unsafe.
+    """
+    try:
+        tool_iterations = int(getattr(turn, "tool_iterations", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        # An unreadable counter cannot prove that no tool ran.
+        tool_iterations = 1
+    return ClaudeSdkTurnEffects(
+        tool=(
+            bool(getattr(agent, "_sdk_issued_tool_effect", False))
+            or tool_iterations > 0
+            or _projects_tool_use(turn)
+        ),
+        streamed=(
+            bool(getattr(agent, "_current_streamed_assistant_text", ""))
+            or getattr(agent, "_sdk_interim_delivered", False) is True
+            or bool(getattr(turn, "final_text", ""))
+        ),
+        projected=bool(getattr(turn, "projected_messages", None)),
+        interrupted=bool(
+            getattr(turn, "interrupted", False)
+            or getattr(agent, "_interrupt_requested", False)
+        ),
+        mutated=(
+            state is not None and state.messages != state.messages_before_attempt
+        ),
+    )
+
+
+def _sdk_attempt_replay_safe(
+    agent, turn: Any, state: Optional[_SdkTurnState] = None
+) -> bool:
+    """A failed SDK attempt may be re-sent only if it left no trace at all."""
+    return _sdk_attempt_effects(agent, turn, state).replay_safe
+
+
+# Anthropic-shaped usage keys that add up across the attempts of one turn.
+_SUMMED_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _attempt_cost_usd(turn: Any) -> Optional[float]:
+    """The SDK-reported cost of one attempt, or None when absent/invalid."""
+    raw = getattr(turn, "total_cost_usd", None)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        cost = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return cost if cost >= 0 and math.isfinite(cost) else None
+
+
+def _spent_cost_usd(attempts: list) -> float:
+    return sum(_attempt_cost_usd(t) or 0.0 for t in attempts)
+
+
+def _resend_exceeds_budget(spent_attempts: list, turn: Any) -> bool:
+    """Whether re-sending ``turn`` would take the TURN past max_budget_usd.
+
+    The CLI enforces the cap per query, and a retry rebuilds the session, so
+    the cap would silently reset per attempt. A re-send is predicted to cost
+    what the failed attempt cost; skip it when that would cross the cap.
+    """
+    cap = _configured_max_budget_usd()
+    if cap is None:
+        return False
+    spent = _spent_cost_usd([*spent_attempts, turn])
+    return spent + (_attempt_cost_usd(turn) or 0.0) > cap
+
+
+def _fold_attempt_spend(prior: list, turn: Any) -> None:
+    """Fold the usage and cost of re-sent attempts into ``turn``.
+
+    Post-turn accounting records one TurnResult, so without this a retried
+    turn would bill only its last attempt. Token counts and cost are summed;
+    context pressure (``iterations``) stays the final attempt's own.
+    """
+    if not prior or turn is None:
+        return
+    attempts = [*prior, turn]
+    usages = [
+        u for u in (getattr(t, "token_usage_last", None) for t in attempts)
+        if isinstance(u, dict) and u
+    ]
+    if usages:
+        final = getattr(turn, "token_usage_last", None)
+        merged = dict(final) if isinstance(final, dict) else {}
+        for key in _SUMMED_USAGE_KEYS:
+            if any(key in u for u in usages):
+                merged[key] = sum(_coerce_usage_int(u.get(key)) for u in usages)
+        if "iterations" not in merged and isinstance(final, dict) and final:
+            # Keep the context-pressure read on the final attempt instead of
+            # letting it fall back to the (now summed) aggregate.
+            merged["iterations"] = [{
+                key: final[key] for key in _SUMMED_USAGE_KEYS if key in final
+            }]
+        turn.token_usage_last = merged
+        turn.token_usage_total = dict(merged)
+    costs = [c for c in (_attempt_cost_usd(t) for t in attempts) if c is not None]
+    if costs:
+        turn.total_cost_usd = sum(costs)
+    if any(getattr(t, "api_call_made", True) for t in prior):
+        turn.api_call_made = True
+
+
+def _record_spent_attempts(agent, spent_attempts: list) -> None:
+    """Account re-sent attempts when the turn ends without a TurnResult."""
+    if not spent_attempts:
+        return
+    try:
+        carrier = copy.copy(spent_attempts[-1])
+        _fold_attempt_spend(spent_attempts[:-1], carrier)
+        if getattr(carrier, "api_call_made", True):
+            _record_claude_sdk_usage(agent, carrier)
+    except Exception:
+        logger.debug("claude-sdk re-sent attempt accounting failed", exc_info=True)
 
 
 class _TurnVisibility:
@@ -189,6 +317,9 @@ class _TurnVisibility:
         ) and agent._interim_content_was_streamed(visible)
         try:
             callback(visible, already_streamed=already_streamed)
+            # Shown prose is a replay guard even with streaming off, where
+            # no delta text ever reaches _current_streamed_assistant_text.
+            agent._sdk_interim_delivered = True
             agent._record_delivered_interim_text(visible)
         except Exception:
             logger.debug("interim assistant relay raised", exc_info=True)
@@ -869,6 +1000,36 @@ def _refresh_turn_visibility(agent, state: _SdkTurnState) -> None:
             logger.debug("claude-sdk visibility callback refresh failed", exc_info=True)
 
 
+def _intact_session_error(
+    error: Any,
+    *,
+    replayed: bool,
+    after_transient_retry: bool = False,
+    over_budget: bool = False,
+) -> str:
+    """The user-facing error for a post-query CLI death that is not replayed.
+
+    ``replayed``: the turn's one automatic re-send already ran (so the replay
+    budget is spent); ``after_transient_retry``: that re-send was a
+    transient-API retry; ``over_budget``: a replay would cross the turn's
+    max_budget_usd. The recovery facts lead: gateways truncate the error
+    near 200 chars.
+    """
+    if over_budget:
+        why = "exited mid-turn and max_budget_usd leaves no room to replay it"
+    elif not replayed:
+        why = "exited mid-turn after tools ran or output was shown, so the turn was not replayed"
+    elif after_transient_retry:
+        why = "exited during the automatic retry of a transient API error"
+    else:
+        why = "exited again during the automatic retry"
+    cause = str(error or "SDK message stream ended unexpectedly")
+    return (
+        f"Claude CLI {why}. The Claude session is intact and your next message "
+        f"continues it. ({cause})"
+    )
+
+
 def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     """Drive the turn through the session: resume when an id is persisted,
     retire and retry ONCE with the continuity digest on a failed or stale
@@ -885,6 +1046,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     send_input = user_input
     retry_retired_before_query = False
     recovering_dead_turn = False
+    # A replay-safe post-query CLI death re-sends the turn ONCE on the same
+    # Claude session: the id it resumes (None = the persisted one).
+    replaying_post_query_death = False
+    replay_resume_id: Optional[str] = None
 
     def _emit_child_exited(session, reason: Any, turn: Any = None) -> None:
         sink = _background_result_sink(agent)
@@ -917,8 +1082,25 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     transient_retries = 0
     total_retry_wait = 0.0
     force_fresh_retry = False
-    # One legacy dead-session recovery plus the independent transient budget.
+    # Every attempt a later attempt superseded: its spend is folded into the
+    # turn's accounting, and max_budget_usd applies to the turn's total.
+    spent_attempts: list = []
+    # ONE replay budget per user turn. A failed attempt that already reached
+    # the API is re-sent by exactly ONE mechanism, never both:
+    #   * a post-query CLI death: ONE replay on the same Claude session, only
+    #     from attempt 0 (so never after a transient retry or any recovery);
+    #   * a transient API failure: up to N retries (N =
+    #     transient_retry_max_retries, clamped 0..10, default 2), never after a
+    #     post-query-death replay.
+    # So such re-sends total at most max(1, N). Both re-send only a
+    # replay-safe attempt (_sdk_attempt_replay_safe). The only other re-send is
+    # at most ONE legacy recovery (a pre-query retirement / stream end, or a
+    # failed resume retried fresh), all gated on attempt 0. run_turn therefore
+    # runs at most max(2, N + 2) times per user turn: the loop bound below.
     for attempt in range(max(2, max_transient_retries + 2)):
+        if turn is not None:
+            spent_attempts.append(turn)
+            turn = None
         if getattr(agent, "_claude_sdk_rename_pending", False) is True:
             # A title change landed while a turn was live; apply it now by rebuilding the CLI
             # with the new --name (the resume id is kept, so the conversation continues).
@@ -967,14 +1149,24 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                     "error": None,
                 }
             live_session = None
+        attempt_resume_id: Optional[str] = None
         if live_session is None:
-            resume_id = (
-                _persisted_sdk_session_id(agent)
-                if not force_fresh_retry
-                and (attempt == 0 or retry_retired_before_query)
-                else None
-            )
+            if replaying_post_query_death:
+                # The post-query-death replay resumes the dead attempt's own
+                # Claude session (None = the persisted id).
+                resume_id = replay_resume_id or _persisted_sdk_session_id(agent)
+            elif force_fresh_retry:
+                # A transient-API retry starts fresh (with the digest): the
+                # failed attempt's id was cleared before the backoff.
+                resume_id = None
+            else:
+                resume_id = (
+                    _persisted_sdk_session_id(agent)
+                    if attempt == 0 or retry_retired_before_query
+                    else None
+                )
             force_fresh_retry = False
+            attempt_resume_id = resume_id
             resumed = bool(resume_id)
             send_input = user_input
             if not resume_id and len(messages) > 1:
@@ -1086,6 +1278,9 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 _store_sdk_session_id(agent, None)
                 resumed = False
                 continue
+            # No TurnResult reaches post-turn accounting on this path: record
+            # what the superseded attempts already spent.
+            _record_spent_attempts(agent, spent_attempts)
             return {
                 "final_response": f"claude-agent-sdk turn failed: {safe_exc}",
                 "messages": messages,
@@ -1133,6 +1328,13 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 getattr(turn, "stream_ended", False)
                 and getattr(turn, "api_call_made", None) is False
             )
+            # The CLI died after the query was submitted. Its Claude session
+            # is on disk and resumable (auth failures stay terminal).
+            post_query_death = bool(
+                getattr(turn, "stream_ended", False)
+                and not stream_ended_before_query
+                and getattr(turn, "fatal_reason", None) is None
+            )
             _emit_child_exited(session, getattr(turn, "error", None), turn)
             recovering_dead_turn = True
             logger.warning(
@@ -1144,6 +1346,49 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
             _clear_claude_sdk_session_if_current(agent, session)
+            if post_query_death:
+                # Never clear a resumable session on a CLI death: keep the id
+                # (refreshing it from the dead turn when it announced one) so
+                # the replay, or the user's next message, resumes it.
+                dead_turn_id = getattr(turn, "thread_id", None)
+                if isinstance(dead_turn_id, str) and dead_turn_id:
+                    _store_sdk_session_id(
+                        agent, dead_turn_id, cwd=state.turn_session_cwd
+                    )
+                else:
+                    dead_turn_id = attempt_resume_id
+                interrupted = bool(
+                    getattr(turn, "interrupted", False)
+                    or getattr(agent, "_interrupt_requested", False)
+                )
+                replay_safe = _sdk_attempt_replay_safe(agent, turn, state)
+                # The shared budget is untouched only on the first attempt:
+                # a transient retry, a legacy recovery, or this replay itself
+                # all advance ``attempt``.
+                budget_untouched = attempt == 0 and transient_retries == 0
+                over_budget = (
+                    budget_untouched
+                    and replay_safe
+                    and _resend_exceeds_budget(spent_attempts, turn)
+                )
+                if (
+                    budget_untouched
+                    and not interrupted
+                    and replay_safe
+                    and not over_budget
+                ):
+                    replaying_post_query_death = True
+                    replay_resume_id = dead_turn_id
+                    resumed = False
+                    continue
+                if not interrupted:
+                    turn.error = _intact_session_error(
+                        turn.error,
+                        replayed=replay_safe,
+                        after_transient_retry=transient_retries > 0,
+                        over_budget=over_budget,
+                    )
+                break
             # A pre-query stream end did not touch the remote conversation, so
             # its persisted id remains valid for the replacement adapter.
             if not stream_ended_before_query:
@@ -1175,8 +1420,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         # output is still safe to replay; the transcript and prompt stay intact.
         if (
             getattr(turn, "error", None)
+            # The shared budget: a post-query-death replay already spent it.
+            and not replaying_post_query_death
             and transient_retries < max_transient_retries
-            and _sdk_attempt_replay_safe(agent, turn)
+            and _sdk_attempt_replay_safe(agent, turn, state)
         ):
             api_signals = {
                 "api_error_kind": getattr(turn, "api_error_kind", None),
@@ -1196,6 +1443,15 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 "result_text": getattr(turn, "result_text", None) or turn.error,
                 **api_signals,
             })
+            if verdict == "transient" and _resend_exceeds_budget(
+                spent_attempts, turn
+            ):
+                logger.warning(
+                    "claude-agent-sdk: not retrying transient %s failure: the "
+                    "turn's max_budget_usd leaves no room for another attempt",
+                    error_class,
+                )
+                break
             if verdict == "transient":
                 if getattr(agent, "_claude_sdk_session", None) is session:
                     try:
@@ -1236,6 +1492,7 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 continue
         break
 
+    _fold_attempt_spend(spent_attempts, turn)
     state.turn = turn
     state.resumed = resumed
     return None

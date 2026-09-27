@@ -394,7 +394,9 @@ class ClaudeSdkNotifyMixin:
             tasks[task_id] = record
             watch = getattr(self, "_turn_watch", None)
             if watch is not None:
-                watch.note_task_started(task_id)
+                watch.note_task_started(
+                    task_id, parent_tool_id=record["parent_tool_id"]
+                )
             self._emit_sdk_subagent(
                 "subagent.start", task_id, "Agent", goal, None,
                 parent_tool_id=record["parent_tool_id"],
