@@ -3,7 +3,7 @@ import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import type * as React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
 import type { SessionInfo } from '@/hermes'
@@ -15,6 +15,7 @@ import type * as ComposerStatusStore from '@/store/composer-status'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
+import { clearAllBackendTurnStartedAt, resetTurnTimerForTest, setBackendTurnStartedAt } from '@/store/turn-timing'
 import type * as WindowsStore from '@/store/windows'
 
 import { ReorderableList, useSortableBindings } from './reorderable-list'
@@ -427,5 +428,57 @@ describe('SidebarSessionRow pinned chip', () => {
 
     const chip = container.querySelector('[data-slot="session-pinned-chip"]')
     expect(chip).toBeTruthy()
+  })
+})
+
+describe('SidebarSessionRow role badge and turn elapsed time', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    clearAllSessionStates()
+    clearAllBackendTurnStartedAt()
+    resetTurnTimerForTest()
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    clearAllBackendTurnStartedAt()
+    resetTurnTimerForTest()
+    vi.useRealTimers()
+  })
+
+  it.each([
+    ['hermes:worker-manager', 'manager'],
+    ['manager', 'manager'],
+    ['task-orchestrator', 'orchestrator'],
+    ['hermes:log-stream', 'stream']
+  ])('shows the %s role badge', (title, role) => {
+    const { container } = renderRow(makeSession({ title }))
+    expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe(role)
+  })
+
+  it('does not show a role badge for a regular title', () => {
+    const { container } = renderRow(makeSession({ title: 'My Regular Chat' }))
+    expect(container.querySelector('[data-slot="badge"]')).toBeNull()
+  })
+
+  it('shows live elapsed time for an unopened busy session and advances', () => {
+    const nowSec = 1_774_436_400
+    vi.setSystemTime(new Date(nowSec * 1000))
+    publishSessionState('rt-unopened', { ...createClientSessionState('s-unopened'), busy: true })
+    setBackendTurnStartedAt('s-unopened', nowSec - 120)
+
+    renderRow(makeSession({ id: 's-unopened', title: 'Background Session' }))
+    expect(screen.getByText('2m')).toBeTruthy()
+
+    act(() => vi.advanceTimersByTime(60_000))
+    expect(screen.getByText('3m')).toBeTruthy()
+  })
+
+  it('does not show a working indicator from a leftover timestamp alone', () => {
+    act(() => setBackendTurnStartedAt('s-idle', 1_700_000_000))
+
+    const { container } = renderRow(makeSession({ id: 's-idle', title: 'Idle Session' }))
+
+    expect(container.querySelector('.arc-row')).toBeNull()
   })
 })

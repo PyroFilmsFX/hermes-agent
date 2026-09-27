@@ -9,6 +9,7 @@ import { startSessionDrag } from '@/app/chat/session-drag'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { openSession } from '@/app/open-session'
 import { formatMessageTimestamp } from '@/components/assistant-ui/thread/timestamp'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { OverflowTip, Tip } from '@/components/ui/tooltip'
@@ -20,9 +21,11 @@ import { triggerHaptic } from '@/lib/haptics'
 import { middleClickHandlers } from '@/lib/middle-click'
 import { displayModelName } from '@/lib/model-status-label'
 import { sessionProjectLabel } from '@/lib/session-project-label'
+import { sessionRole } from '@/lib/session-role'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
+import { formatTurnElapsed } from '@/lib/turn-elapsed'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $sidebarRowMeta } from '@/store/layout'
@@ -35,6 +38,7 @@ import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
 import { $todoProgressBySession } from '@/store/todos'
+import { $turnStartedAtByStoredId, $turnTimerNow } from '@/store/turn-timing'
 
 import { SessionStatusDot } from '../session-status-dot'
 
@@ -150,6 +154,7 @@ function SidebarSessionRowImpl({
   const r = t.sidebar.row
   const { cancelPrewarm, notePointerMove, startPrewarm } = useProfilePrewarm(session.profile)
   const title = sessionTitle(session)
+  const role = sessionRole(title)
   const density = useStore($sessionListDensity)
   const fmt = t.sidebar
 
@@ -162,6 +167,12 @@ function SidebarSessionRowImpl({
   const age = formatAge(timestamp, r)
   const timestampDate = new Date(timestamp * 1000)
   const absoluteAge = formatMessageTimestamp(timestampDate, t.assistant.thread)
+  const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
+  const liveTurn = hasLiveTurn(dotState)
+  const turnStartedAt = useStoreSelector($turnStartedAtByStoredId, starts => starts[session.id])
+  const now = useStoreSelector($turnTimerNow, value => (liveTurn && turnStartedAt ? value : 0))
+  const isElapsed = liveTurn && typeof turnStartedAt === 'number' && turnStartedAt > 0
+  const displayAge = isElapsed ? formatTurnElapsed(turnStartedAt, now || Date.now()) : age
   const handleLabel = `Reorder ${title}`
   // Opt-in row metadata from the sidebar's filter menu. Read from the store
   // rather than threaded as props: the subscription re-renders past the memo
@@ -236,7 +247,7 @@ function SidebarSessionRowImpl({
     })
   }
 
-  const showAge = pinnedAge || card
+  const showAge = pinnedAge || card || isElapsed
 
   if (figures.length || showAge) {
     // The card's meta lines separate by spacing alone, so its header figures
@@ -256,12 +267,12 @@ function SidebarSessionRowImpl({
             {showAge ? (
               <Tip label={absoluteAge} side="top">
                 <time
-                  aria-label={`${age}, ${absoluteAge}`}
+                  aria-label={`${displayAge}, ${absoluteAge}`}
                   className="pointer-events-auto focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sidebar-ring"
                   dateTime={timestampDate.toISOString()}
                   tabIndex={0}
                 >
-                  {age}
+                  {displayAge}
                 </time>
               </Tip>
             ) : (
@@ -280,12 +291,6 @@ function SidebarSessionRowImpl({
   // Telegram thread continued here still reads as Telegram.
   const handoffSource = handoffOriginSource(session.handoff_state, session.handoff_platform)
   const handoffLabel = handoffSource ? (sessionSourceLabel(handoffSource) ?? handoffSource) : null
-  // The same resolved state the row's dot paints, so the arc and the dot cannot
-  // contradict each other. A selector, not a plain useStore: the map is rebuilt
-  // whenever any session's status changes, but a row only repaints on its own.
-  const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
-  const liveTurn = hasLiveTurn(dotState)
-
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
   // a worktree reports its repo, not the scratch dir it sits in), else the
@@ -529,15 +534,18 @@ function SidebarSessionRowImpl({
                   <SessionRowSlot area={SESSION_ROW_AREAS.leading} sessionId={sessionPinId(session)} />
                   {handoffBadge}
                   <span className="min-w-0 flex-1 self-center">
-                    <OverflowTip label={title} placement="row">
-                      <SidebarRowLabel
-                        className="hover-marquee block font-normal group-hover:text-foreground group-data-[working=true]:text-foreground/90"
-                        onPointerEnter={armMarquee}
-                        onPointerLeave={disarmMarquee}
-                      >
-                        <span className="hover-marquee-inner">{title}</span>
-                      </SidebarRowLabel>
-                    </OverflowTip>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <OverflowTip label={title} placement="row">
+                        <SidebarRowLabel
+                          className="hover-marquee block font-normal group-hover:text-foreground group-data-[working=true]:text-foreground/90"
+                          onPointerEnter={armMarquee}
+                          onPointerLeave={disarmMarquee}
+                        >
+                          <span className="hover-marquee-inner">{title}</span>
+                        </SidebarRowLabel>
+                      </OverflowTip>
+                      {role && <Badge className="text-[0.6rem] font-medium capitalize text-muted-foreground" size="xs" variant="outline">{role}</Badge>}
+                    </div>
                     {/* Session-list density (#68119): comfortable adds one
                         deterministic metadata line; detailed adds the initial
                         request preview. Compact keeps today's one-line row. */}
@@ -592,18 +600,21 @@ function SidebarSessionRowImpl({
                 {/* Title + preview: ONE grouped cell with its own tight
                     internal gap — it does not inherit the card's rhythm. */}
                 <div className="flex min-w-0 flex-col gap-[0.15rem]">
-                  <OverflowTip label={title} placement="row">
-                    <SidebarRowLabel
-                      className={cn(
-                        'hover-marquee text-[0.8125rem] font-medium text-(--ui-text-primary) group-data-[working=true]:text-foreground',
-                        SIDEBAR_TRUNCATED_LEADING
-                      )}
-                      onPointerEnter={armMarquee}
-                      onPointerLeave={disarmMarquee}
-                    >
-                      <span className="hover-marquee-inner">{title}</span>
-                    </SidebarRowLabel>
-                  </OverflowTip>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <OverflowTip label={title} placement="row">
+                      <SidebarRowLabel
+                        className={cn(
+                          'hover-marquee text-[0.8125rem] font-medium text-(--ui-text-primary) group-data-[working=true]:text-foreground',
+                          SIDEBAR_TRUNCATED_LEADING
+                        )}
+                        onPointerEnter={armMarquee}
+                        onPointerLeave={disarmMarquee}
+                      >
+                        <span className="hover-marquee-inner">{title}</span>
+                      </SidebarRowLabel>
+                    </OverflowTip>
+                    {role && <Badge className="text-[0.6rem] font-medium capitalize text-muted-foreground" size="xs" variant="outline">{role}</Badge>}
+                  </div>
                   {session.preview && rowMeta.includes('preview') ? (
                     <span
                       className={cn(

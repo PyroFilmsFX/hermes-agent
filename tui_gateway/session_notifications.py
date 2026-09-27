@@ -176,6 +176,7 @@ _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
 def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
         session["running"] = False
+        session["turn_started_at"] = None
 
 
 def _notif_claim_turn(session: dict) -> bool:
@@ -184,6 +185,7 @@ def _notif_claim_turn(session: dict) -> bool:
         if not admitted or session.get("running"):
             return False
         session["running"] = True
+        session["turn_started_at"] = time.time()
         return True
 
 
@@ -1130,6 +1132,7 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         if claimed is None:
             return False
         session["running"] = True
+        session["turn_started_at"] = time.time()
 
     delivery_id = str(claimed["id"])
 

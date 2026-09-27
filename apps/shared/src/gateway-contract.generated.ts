@@ -3127,6 +3127,7 @@ export interface SessionActiveItem {
   started_at: number
   status: LiveSessionStatus
   title: string
+  turn_started_at?: number | null
 }
 export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working' | 'streaming' | 'resuming'
 /** Owner-scoped spawn from an SDK session; the socket injects the capability token. */
@@ -4583,6 +4584,7 @@ export interface MessageStartPayload {
   delivery_id?: string | null
   user_message?: string | null
   turn_author?: string | null
+  turn_started_at?: number | null
 }
 /** ``prompt_turn._invoke_agent._stream`` (message.delta: ``text`` + optional ``rendered``), ``agent_callbacks._agent_cbs`` (reasoning.delta / thinking.delta), ``tool_progress._progress_reasoning`` (reasoning.available). ``verbose`` rides only when the session's verbose reasoning mode is on. */
 export interface StreamDeltaPayload {

@@ -17,6 +17,7 @@ import {
 } from '@/store/session'
 import {
   $attentionSessionIds,
+  $backendTurnStartedAtByStoredId,
   $sessionTiles,
   $stalledSessionIds,
   $workingSessionIds,
@@ -32,6 +33,7 @@ import {
   reconcileActiveTranscript,
   reconcileTileTranscripts as reconcileTileTranscriptsForTest,
   rehydrateLiveSessionStatuses,
+  resetLiveRuntimeTracking,
   resetTypingActivityTracking,
   resolveActiveTranscriptSession,
   useBackgroundSync
@@ -998,6 +1000,32 @@ describe('rehydrateLiveSessionStatuses', () => {
     expect($workingSessionIds.get()).toEqual([])
     expect($attentionSessionIds.get()).toEqual([])
     expect($stalledSessionIds.get()).toEqual([])
+  })
+
+  it('clears a turn timestamp when a previously live runtime disappears', () => {
+    resetLiveRuntimeTracking()
+    clearAllSessionStates()
+    const now = 1_800_000_000_000
+
+    rehydrateLiveSessionStatuses(
+      {
+        sessions: [
+          {
+            id: 'runtime-drop',
+            session_key: 'stored-drop',
+            status: 'working',
+            turn_started_at: 1_700_000_000,
+            last_active: now / 1000
+          }
+        ]
+      },
+      now
+    )
+    expect($backendTurnStartedAtByStoredId.get()['stored-drop']).toBe(1_700_000_000_000)
+
+    rehydrateLiveSessionStatuses({ sessions: [] }, now)
+
+    expect($backendTurnStartedAtByStoredId.get()['stored-drop']).toBeUndefined()
   })
 })
 

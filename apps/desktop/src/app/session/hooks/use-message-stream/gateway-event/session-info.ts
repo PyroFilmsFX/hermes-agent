@@ -26,6 +26,7 @@ import {
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
+import { clearBackendTurnStartedAt, setBackendTurnStartedAt } from '@/store/session-states'
 import { reportInstallMethodWarning } from '@/store/updates'
 
 import { finalizeInterruptedMessages } from '../../use-prompt-actions/rewind'
@@ -161,11 +162,27 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     const providerChanged = typeof payload?.provider === 'string'
     const runningChanged = typeof payload?.running === 'boolean'
 
+    const gatewayTurnStartedAt =
+      typeof payload?.turn_started_at === 'number' && payload.turn_started_at > 0
+        ? payload.turn_started_at * 1000
+        : null
+
+    const storedSessionId = payload?.stored_session_id || sessionId
+
+    if (payload?.running && gatewayTurnStartedAt && storedSessionId) {
+      setBackendTurnStartedAt(storedSessionId, gatewayTurnStartedAt)
+    }
+
     // Reconnect can miss the structured `compacted` edge. A gateway-authored
     // running=false is a terminal fact; a running heartbeat is intentionally
     // not used as a timeout-like guess, so genuine compaction stays visible.
     if (sessionId && payload?.running === false) {
       reconcileSessionCompacting(sessionId, 'terminal')
+      clearBackendTurnStartedAt(payload?.stored_session_id || sessionId)
+
+      if (payload?.stored_session_id && payload.stored_session_id !== sessionId) {
+        clearBackendTurnStartedAt(sessionId)
+      }
     }
 
     // The backend stamps model/provider (as strings) on EVERY session.info,
@@ -307,11 +324,6 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
 
             // Prefer the gateway-reported turn_started_at so the timer
             // survives session switches and session.info heartbeats.
-            const gatewayTurnStartedAt =
-              typeof payload!.turn_started_at === 'number' && payload!.turn_started_at > 0
-                ? payload!.turn_started_at * 1000
-                : null
-
             return {
               ...state,
               busy,

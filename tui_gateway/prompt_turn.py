@@ -1134,6 +1134,17 @@ def _run_prompt_submit(
     if admitted is None:
         return False
     images, agent = admitted
+    now = time.time()
+    history_lock = session.get("history_lock")
+    if history_lock:
+        with history_lock:
+            session["running"] = True
+            if not session.get("turn_started_at"):
+                session["turn_started_at"] = now
+    else:
+        session["running"] = True
+        if not session.get("turn_started_at"):
+            session["turn_started_at"] = now
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):
@@ -1202,6 +1213,7 @@ def _run_prompt_submit(
             st.agent.interim_assistant_callback = None
             with session["history_lock"]:
                 session["running"] = False
+                session["turn_started_at"] = None
                 session["last_active"] = time.time()
                 if not st.error_retained:
                     _clear_inflight_turn(session)

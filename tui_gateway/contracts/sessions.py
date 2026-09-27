@@ -270,6 +270,7 @@ class SessionActiveItem(Result):
     started_at: float
     status: LiveSessionStatus
     title: str
+    turn_started_at: float | None = None
 
 
 class SessionActiveListResult(Result):

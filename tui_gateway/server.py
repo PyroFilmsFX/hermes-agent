@@ -2416,6 +2416,11 @@ def _project_info_for_cwd(cwd: str) -> dict | None:
 
 def _turn_started_at(session: dict | None) -> float | None:
     """Epoch seconds the current turn started, or None when idle (desktop keeps the elapsed timer across switches)."""
+    if not (session or {}).get("running"):
+        return None
+    val = (session or {}).get("turn_started_at")
+    if isinstance(val, (int, float)) and val > 0:
+        return float(val)
     inflight = (session or {}).get("inflight_turn")
     return float(inflight["started_at"]) if isinstance(inflight, dict) and inflight.get("started_at") else None
 
@@ -3129,6 +3134,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         "model": str(getattr(agent, "model", "") or _resolve_model()), "preview": preview,
         "session_key": key, "started_at": float(session.get("created_at") or now), "status": status,
         "title": _session_live_title(session, key),
+        "turn_started_at": _turn_started_at(session),
     }
 
 

@@ -114,6 +114,7 @@ class MessageStartPayload(Payload):
     delivery_id: str | None = None
     user_message: str | None = None
     turn_author: str | None = None
+    turn_started_at: float | None = None
 
 
 event("message.start", MessageStartPayload, doc="A turn began streaming; background-lane rows carry identity.")

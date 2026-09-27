@@ -52,6 +52,7 @@ import {
   $sessions,
   clearReadBaseline,
   getSessionOwnerHint,
+  idsShareLineage,
   knownSessionOwner,
   lineageAliases,
   markSessionRead,
@@ -876,6 +877,69 @@ export function clearAllSessionStates() {
   sessionOwnerByRuntimeId.clear()
   $stalledSessionIds.set([])
   $sessionStates.set({})
+  clearAllBackendTurnStartedAt()
+}
+
+/** Backend-reported turn start timestamps (epoch ms) keyed by stored session id. */
+export const $backendTurnStartedAtByStoredId = atom<Record<string, number>>({})
+
+export function setBackendTurnStartedAt(
+  storedId: string,
+  startedAtSecondsOrMs: number | null | undefined
+): void {
+  if (!storedId) {return}
+
+  if (typeof startedAtSecondsOrMs !== 'number' || startedAtSecondsOrMs <= 0) {
+    clearBackendTurnStartedAt(storedId)
+
+    return
+  }
+
+  const ms = startedAtSecondsOrMs > 1e11 ? startedAtSecondsOrMs : startedAtSecondsOrMs * 1000
+  const current = $backendTurnStartedAtByStoredId.get()
+
+  if (current[storedId] === ms) {return}
+  $backendTurnStartedAtByStoredId.set({ ...current, [storedId]: ms })
+}
+
+export function clearBackendTurnStartedAt(storedId: string): void {
+  if (!storedId) {return}
+  const current = $backendTurnStartedAtByStoredId.get()
+  const sessions = $sessions.get()
+  const aliases = new Set(lineageAliases(storedId, sessions))
+
+  for (const alias of [...aliases]) {
+    for (const transitive of lineageAliases(alias, sessions)) {
+      aliases.add(transitive)
+    }
+  }
+
+  aliases.add(storedId)
+
+  let changed = false
+  const rest = { ...current }
+
+  for (const id of aliases) {
+    if (id in rest) {
+      delete rest[id]
+      changed = true
+    }
+  }
+
+  for (const key of Object.keys(rest)) {
+    if (idsShareLineage(key, storedId, sessions)) {
+      delete rest[key]
+      changed = true
+    }
+  }
+
+  if (changed) {
+    $backendTurnStartedAtByStoredId.set(rest)
+  }
+}
+
+export function clearAllBackendTurnStartedAt(): void {
+  $backendTurnStartedAtByStoredId.set({})
 }
 
 /** Downgrade cached busy/awaiting states after a gateway reconnect.

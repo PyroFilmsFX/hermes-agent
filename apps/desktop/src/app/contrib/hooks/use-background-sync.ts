@@ -30,10 +30,12 @@ import type { SessionOwnerRoute } from '@/store/session-request-router'
 import {
   $sessionStates,
   $sessionTiles,
+  clearBackendTurnStartedAt,
   confirmReconnectSettlesExcept,
   noteSessionEvent,
   publishSessionState,
   SESSION_WATCHDOG_TIMEOUT_MS,
+  setBackendTurnStartedAt,
   setSessionStalled
 } from '@/store/session-states'
 import { loadArchivedSessions } from '@/store/sidebar-archive'
@@ -591,6 +593,7 @@ interface LiveSessionStatusItem {
   last_active?: number
   session_key?: string
   status?: 'idle' | 'starting' | 'waiting' | 'working'
+  turn_started_at?: null | number
 }
 
 interface LiveSessionStatusResponse {
@@ -669,12 +672,23 @@ export function rehydrateLiveSessionStatuses(
 
     const existing = $sessionStates.get()[runtimeSessionId]
 
+    const gatewayTurnStartedAt =
+      typeof session.turn_started_at === 'number' && session.turn_started_at > 0
+        ? session.turn_started_at * 1000
+        : undefined
+
     // The active-list response is an async snapshot. Stream events can start
     // or finish this turn after the request begins but before its response is
     // applied. In that case the event state is newer: an old idle row must not
     // finish a live turn, and an old working row must not revive a terminal one.
     if (existing !== stateAtRequest[runtimeSessionId]) {
       continue
+    }
+
+    if (working && gatewayTurnStartedAt) {
+      setBackendTurnStartedAt(storedSessionId, gatewayTurnStartedAt)
+    } else if (!working) {
+      clearBackendTurnStartedAt(storedSessionId)
     }
 
     // A turn we just submitted is not yet running as far as the backend is
@@ -692,13 +706,15 @@ export function rehydrateLiveSessionStatuses(
       !existing ||
       existing.storedSessionId !== storedSessionId ||
       existing.busy !== busy ||
-      existing.needsInput !== needsInput
+      existing.needsInput !== needsInput ||
+      (gatewayTurnStartedAt && existing.turnStartedAt !== gatewayTurnStartedAt)
     ) {
       publishSessionState(runtimeSessionId, {
         ...(existing ?? createClientSessionState(storedSessionId)),
         busy,
         needsInput,
-        storedSessionId
+        storedSessionId,
+        turnStartedAt: gatewayTurnStartedAt ?? existing?.turnStartedAt
       })
     }
 
@@ -741,11 +757,18 @@ export function rehydrateLiveSessionStatuses(
       }
 
       const existing = $sessionStates.get()[runtimeSessionId]
+      const storedSessionId = existing?.storedSessionId ?? runtimeSessionId
 
       if (existing !== stateAtRequest[runtimeSessionId]) {
         seen.add(runtimeSessionId)
 
         continue
+      }
+
+      clearBackendTurnStartedAt(storedSessionId)
+
+      if (storedSessionId !== runtimeSessionId) {
+        clearBackendTurnStartedAt(runtimeSessionId)
       }
 
       if (existing?.busy || existing?.needsInput || existing?.awaitingResponse) {
