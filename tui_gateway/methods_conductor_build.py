@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import OrderedDict
 
 from .method_ctx import HandlerRegistry, bind_module
@@ -18,89 +19,159 @@ _MARKER_CACHE_LIMIT = 128
 _MARKER_CACHE: OrderedDict[tuple[str, int, int], dict | None] = OrderedDict()
 
 
-def _read_marker(workspace: Path) -> tuple[dict | None, bool]:
-    """Read the active marker without following the state directory or marker symlinks."""
+def _read_json_file(directory: Path, name: str, max_bytes: int = _MARKER_MAX_BYTES) -> tuple[dict | None, float | None, bool]:
+    """``(record, mtime, unreadable)`` for ``directory/name`` without following the directory or file symlinks.
+    A missing file is ``(None, None, False)``; a file that is not a regular JSON object is unreadable."""
     import json
     import os
     import stat
-    from datetime import datetime, timezone
 
-    state = workspace / ".claude" / "state"
-    marker_name = "tb-build-active.json"
     try:
-        if state.is_symlink() or state.resolve() != state:
-            return None, False
+        if directory.is_symlink() or directory.resolve() != directory:
+            return None, None, False
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        directory_fd = os.open(state, directory_flags)
+        directory_fd = os.open(directory, directory_flags)
     except FileNotFoundError:
-        return None, False
+        return None, None, False
     except (OSError, RuntimeError):
-        return None, False
+        return None, None, False
 
     try:
         try:
-            before = os.stat(marker_name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return None, False
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except OSError:
-            return None, False
-        if not stat.S_ISREG(before.st_mode) or before.st_size > _MARKER_MAX_BYTES:
-            return None, False
+            return None, None, False
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            return None, None, False
 
-        path = state / marker_name
-        cache_key = (str(path), before.st_mtime_ns, before.st_size)
+        cache_key = (str(directory / name), before.st_mtime_ns, before.st_size)
         if cache_key in _MARKER_CACHE:
             record = _MARKER_CACHE[cache_key]
             _MARKER_CACHE.move_to_end(cache_key)
         else:
             try:
                 file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-                marker_fd = os.open(marker_name, file_flags, dir_fd=directory_fd)
+                file_fd = os.open(name, file_flags, dir_fd=directory_fd)
                 try:
-                    after = os.fstat(marker_fd)
+                    after = os.fstat(file_fd)
                     if (not stat.S_ISREG(after.st_mode) or after.st_mtime_ns != before.st_mtime_ns
-                            or after.st_size != before.st_size or after.st_size > _MARKER_MAX_BYTES):
-                        return None, False
+                            or after.st_size != before.st_size or after.st_size > max_bytes):
+                        return None, None, False
                     chunks = []
-                    remaining = _MARKER_MAX_BYTES + 1
+                    remaining = max_bytes + 1
                     while remaining:
-                        chunk = os.read(marker_fd, min(64 * 1024, remaining))
+                        chunk = os.read(file_fd, min(64 * 1024, remaining))
                         if not chunk:
                             break
                         chunks.append(chunk)
                         remaining -= len(chunk)
                     content = b"".join(chunks)
-                    final = os.fstat(marker_fd)
-                    if (len(content) > _MARKER_MAX_BYTES or final.st_mtime_ns != before.st_mtime_ns
+                    final = os.fstat(file_fd)
+                    if (len(content) > max_bytes or final.st_mtime_ns != before.st_mtime_ns
                             or final.st_size != before.st_size or len(content) != before.st_size):
-                        return None, False
+                        return None, None, False
                 finally:
-                    os.close(marker_fd)
+                    os.close(file_fd)
                 record = json.loads(content.decode("utf-8"))
-                if not isinstance(record, dict):
-                    return None, True
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                return None, True
+                return None, None, True
             _MARKER_CACHE[cache_key] = record
             _MARKER_CACHE.move_to_end(cache_key)
             while len(_MARKER_CACHE) > _MARKER_CACHE_LIMIT:
                 _MARKER_CACHE.popitem(last=False)
-
         if not isinstance(record, dict):
-            return None, True
-        if record.get("done") is True:
-            return None, False
-        age = datetime.now(timezone.utc).timestamp() - before.st_mtime
-        if age > _MARKER_MAX_AGE_SECONDS:
-            # A never-finished build stays visible, muted, instead of vanishing (D32). A private key,
-            # so a marker field can never collide with it.
-            record = dict(record)
-            record[_STALE_KEY] = True
-            return record, False
-        return record, False
+            return None, None, True
+        return record, before.st_mtime, False
     finally:
         os.close(directory_fd)
 
+
+def _marker_view(record: dict | None, mtime: float | None) -> dict | None:
+    """A finished build shows nothing; an unfinished one past 12 h stays visible, muted (D32). A private
+    key, so a marker field can never collide with it."""
+    from datetime import datetime, timezone
+
+    if record is None or record.get("done") is True:
+        return None
+    if mtime is not None and datetime.now(timezone.utc).timestamp() - mtime > _MARKER_MAX_AGE_SECONDS:
+        record = dict(record)
+        record[_STALE_KEY] = True
+    return record
+
+
+_BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _indexed_marker(state: Path, claude_sid: str | None) -> tuple[dict | None, bool, bool]:
+    """Conductor 3.62's ``tb-builds-index.json`` (schema ``tb-builds-index/v1``): ``(record, unreadable,
+    decided)``. ``decided`` is False when there's no index or it names no build for this session, so the
+    caller falls back to the flat marker. A row is trusted only for a namespaced marker inside this state
+    dir (``builds/<build_id>/tb-build-active.json``) or the flat file itself, and only after the marker is
+    re-read (the index is a derived view that can lag a deleted marker)."""
+    index, _mtime, unreadable = _read_json_file(state, "tb-builds-index.json", 1024 * 1024)
+    if index is None or index.get("schema") != "tb-builds-index/v1" or not isinstance(index.get("builds"), list):
+        return None, unreadable, False
+    rows = [row for row in index["builds"]
+            if isinstance(row, dict) and row.get("status") in ("open", "blocked")]
+    if claude_sid:
+        mine = [row for row in rows if row.get("session_id") == claude_sid]
+    else:
+        mine = []
+    # Only this session's own build, or the checkout's single live build; several builds and none of them
+    # ours is ambiguous (conductor refuses to guess too), so the flat marker's first-armed build shows.
+    candidates = mine or (rows if len(rows) == 1 else [])
+    for row in reversed(candidates):  # sorted by (armed_at, build_id): newest last
+        build_id, legacy = row.get("build_id"), row.get("legacy_flat") is True
+        if legacy or build_id is None:
+            directory = state
+        elif isinstance(build_id, str) and _BUILD_ID_RE.fullmatch(build_id):
+            directory = state / "builds" / build_id
+        else:
+            continue
+        expected = directory / "tb-build-active.json"
+        if str(row.get("marker_path") or "") not in ("", str(expected)):
+            continue
+        record, mtime, bad = _read_json_file(directory, "tb-build-active.json")
+        if bad:
+            return None, True, True
+        if record is not None and (not claude_sid or not mine or record.get("session_id") == claude_sid):
+            return _marker_view(record, mtime), False, True
+    return None, False, False
+
+
+def _read_marker(workspace: Path, claude_sid: str | None = None) -> tuple[dict | None, bool]:
+    """The build to show for this workspace: the 3.62 builds index (this session's own row), else the
+    flat ``tb-build-active.json`` (pre-3.62 installs, and 3.62's dual-written first build)."""
+    state = workspace / ".claude" / "state"
+    record, unreadable, decided = _indexed_marker(state, claude_sid)
+    if decided:
+        return record, unreadable
+    flat, mtime, flat_unreadable = _read_json_file(state, "tb-build-active.json")
+    return _marker_view(flat, mtime), flat_unreadable or (unreadable and flat is None)
+
+
+def _session_claude_sid(session: dict) -> str | None:
+    """The Claude Code session id conductor stamps on its markers, for an SDK-lane Hermes session."""
+    import json
+
+    agent = session.get("agent") if isinstance(session, dict) else None
+    db, sid = getattr(agent, "_session_db", None), getattr(agent, "session_id", None)
+    if not db or not sid:
+        return None
+    try:
+        raw = (db.get_session(sid) or {}).get("claude_sdk_session_id")
+    except Exception:  # noqa: BLE001 - a panel read never fails on the session row
+        return None
+    if not isinstance(raw, str) or not raw:
+        return None
+    from agent.claude_sdk_runtime_continuity import _SDK_RESUME_BINDING_PREFIX as prefix
+
+    if raw.startswith(prefix):
+        try:
+            raw = json.loads(raw[len(prefix):]).get("id")
+        except (ValueError, AttributeError):
+            return None
+    return raw if isinstance(raw, str) and raw else None
 
 def _clean_waiting_on(value) -> str:
     import unicodedata
@@ -110,7 +181,7 @@ def _clean_waiting_on(value) -> str:
     return "".join(char for char in value if unicodedata.category(char) != "Cc")[:80]
 
 
-def _build_snapshot(session_cwd: str) -> tuple[dict | None, bool]:
+def _build_snapshot(session_cwd: str, claude_sid: str | None = None) -> tuple[dict | None, bool]:
     from datetime import datetime, timezone
     from pathlib import Path
 
@@ -119,7 +190,7 @@ def _build_snapshot(session_cwd: str) -> tuple[dict | None, bool]:
     resolved_cwd = Path(session_cwd).expanduser().resolve()
     top = git_probe.repo_root(str(resolved_cwd))
     workspace = Path(top).resolve() if top else resolved_cwd
-    marker, unreadable = _read_marker(workspace)
+    marker, unreadable = _read_marker(workspace, claude_sid)
     if marker is None:
         return None, unreadable
 
@@ -205,7 +276,7 @@ def _conductor_build_get(rid, params):
     session_cwd = session.get("cwd")
     if not isinstance(session_cwd, str) or not session_cwd:
         return _ok(rid, {"build": None, "unreadable": False})
-    build, unreadable = _build_snapshot(session_cwd)
+    build, unreadable = _build_snapshot(session_cwd, _session_claude_sid(session))
     return _ok(rid, {"build": build, "unreadable": unreadable})
 
 
