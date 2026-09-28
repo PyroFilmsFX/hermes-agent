@@ -124,7 +124,7 @@ def test_initial_connect_failure_revives_same_registered_server(monkeypatch, tmp
     mock_registry = ToolRegistry()
 
     class _Session:
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, **_kw):
             state["tool_calls"] += 1
             return SimpleNamespace(
                 isError=False,
