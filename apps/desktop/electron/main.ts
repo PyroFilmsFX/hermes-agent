@@ -444,6 +444,7 @@ import { createQuitFinalization } from './quit-finalization'
 import { type ActiveWork, backendOwnedByApp, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
 import { backendQuitNeedsWait, createQuitTeardownCoordinator, type QuitTeardownTask } from './quit-teardown'
 import * as remoteLifecycle from './remote-lifecycle'
+import * as sshAttach from './ssh-attach-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
   ensureHealthyPooledRemoteBackendForDispatch,
@@ -9122,7 +9123,8 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
   // 'cloud' and 'remote' both persist a remote-shaped block; 'cloud' is
   // remembered as its own provenance (Q6) and resolves to remote downstream.
   // Anything else collapses to local.
-  const mode = input.mode === 'ssh' ? 'ssh' : modeIsRemoteLike(input.mode) ? input.mode : 'local'
+  const mode =
+    input.mode === 'ssh' || input.mode === 'ssh-attach' ? input.mode : modeIsRemoteLike(input.mode) ? input.mode : 'local'
   const remoteLike = modeIsRemoteLike(mode)
 
   // The block being edited: a per-profile entry or the global remote block.
@@ -9135,7 +9137,11 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
   // block. (remote↔local toggles still preserve a real remote URL as before.)
   const existingMode = key ? existing.profiles?.[key]?.mode : existing.mode
   const leavingCloud = existingMode === 'cloud' && mode !== 'cloud'
-  const leavingSsh = rawExistingBlock.mode === 'ssh' && mode !== 'ssh' && mode !== 'local'
+  const leavingSsh =
+    (rawExistingBlock.mode === 'ssh' || rawExistingBlock.mode === 'ssh-attach') &&
+    mode !== 'ssh' &&
+    mode !== 'ssh-attach' &&
+    mode !== 'local'
   const existingBlock = leavingCloud || leavingSsh ? {} : rawExistingBlock
   const remoteUrl = String(input.remoteUrl ?? existingBlock.url ?? '').trim()
   // authMode: explicit input wins; otherwise inherit the saved value, default 'token'.
@@ -9175,20 +9181,23 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
     encryptSecret: encryptDesktopSecret
   })
 
-  if (mode === 'ssh') {
+  if (mode === 'ssh' || mode === 'ssh-attach') {
     const sshBlock = buildSshBlock(input, savedProfileSsh(existing, key) || rawExistingBlock)
 
     if (key) {
       const profiles = { ...(existing.profiles || {}), [key]: sshBlock }
 
       return {
-        mode: existing.mode === 'ssh' || modeIsRemoteLike(existing.mode) ? existing.mode : 'local',
+        mode:
+          existing.mode === 'ssh' || existing.mode === 'ssh-attach' || modeIsRemoteLike(existing.mode)
+            ? existing.mode
+            : 'local',
         remote: existing.remote || {},
         profiles
       }
     }
 
-    return { mode: 'ssh', remote: sshBlock, profiles: existing.profiles || {} }
+    return { mode, remote: sshBlock, profiles: existing.profiles || {} }
   }
 
   if (key) {
@@ -9213,7 +9222,10 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
     }
 
     return {
-      mode: existing.mode === 'ssh' || modeIsRemoteLike(existing.mode) ? existing.mode : 'local',
+      mode:
+        existing.mode === 'ssh' || existing.mode === 'ssh-attach' || modeIsRemoteLike(existing.mode)
+          ? existing.mode
+          : 'local',
       remote: existing.remote || {},
       profiles
     }
@@ -9221,7 +9233,7 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
 
   const nextRemote = remoteLike
     ? buildRemoteBlock(remoteUrl, authMode, nextToken, cloudOrg, remoteHeaders, cloudName)
-    : existingMode === 'ssh'
+    : existingMode === 'ssh' || existingMode === 'ssh-attach'
       ? rawExistingBlock
       : { url: remoteUrl ? normalizeRemoteBaseUrl(remoteUrl) : remoteUrl, authMode, token: nextToken }
 
@@ -9572,14 +9584,18 @@ async function teardownSshConnection(profile) {
       },
       {
         cleanupRemote:
-          state.remotePlatform === 'Windows'
-            ? async () => {
-                // connectWindowsRemote does not share POSIX lock/kill. Stay
-                // silent on the kill path, but leave a log so quit is not a
-                // mysterious no-op on Windows remotes.
-                sshRememberLog('[ssh] skip remote serve teardown on Windows remotes; POSIX disconnect does not apply')
+          state.kind === 'ssh-attach'
+            ? async (ssh: any) => {
+                await sshAttach.detach(ssh, state)
               }
-            : remoteLifecycle.disconnect
+            : state.remotePlatform === 'Windows'
+              ? async () => {
+                  // connectWindowsRemote does not share POSIX lock/kill. Stay
+                  // silent on the kill path, but leave a log so quit is not a
+                  // mysterious no-op on Windows remotes.
+                  sshRememberLog('[ssh] skip remote serve teardown on Windows remotes; POSIX disconnect does not apply')
+                }
+              : remoteLifecycle.disconnect
       }
     )
   )
@@ -9628,7 +9644,7 @@ function activeSshTerminalTarget(webContentsId?: number) {
     registry: readDesktopConnectionsRegistry()
   })
 
-  if (!route || route.kind !== 'ssh') {
+  if (!route || (route.kind !== 'ssh' && route.kind !== 'ssh-attach')) {
     return null
   }
 
@@ -9794,7 +9810,9 @@ async function rollbackSshBootstrapResult(ssh, result, profile, sshConfig, bound
       creationTime: result.creationTime
     }
 
-    if (result.platform?.os === 'Windows') {
+    if (result.attachOnly || (result as any).kind === 'ssh-attach') {
+      // attach-only never terminates a remote process
+    } else if (result.platform?.os === 'Windows') {
       await terminateOwnedWindowsDashboardForUpdate(
         ssh,
         { hermesPath: result.hermesPath, hermesHome: result.hermesHome, python: result.pythonPath },
@@ -9880,31 +9898,48 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
   }
 
   let result: any
+  let isAttach = false
 
   try {
     if (metadata.registryConnectionId) {
       managedConnectionUpdateGate.assertCanDial(metadata.registryConnectionId, metadata.managedUpdateCorrelation || '')
     }
 
-    const platform = await detectRemotePlatform(ssh, sshConfig.remoteHermesPath || '')
-    const lifecycle = platform.os === 'Windows' ? connectWindowsRemote : remoteLifecycle.connect
-    result = await lifecycle({
-      ssh,
-      platform,
-      profile: resolveRemoteSshDashboardProfile(sshConfig.remoteProfile, profile),
-      remoteHermesPath: sshConfig.remoteHermesPath || '',
-      ownershipId: sshOwnershipKey(profile),
-      reuseToken: reuseToken || '',
-      forward: (localPort, remotePort) => ssh.forward(localPort, remotePort),
-      cancelForward: (localPort, remotePort) => ssh.cancelForward(localPort, remotePort),
-      pickLocalPort,
-      waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
-      probeReuseProof: sshProbeReuseProof,
-      adoptServedToken: adoptServedDashboardToken,
-      rememberLog: sshRememberLog,
-      guestOnboarding: GUEST_ONBOARDING,
-      signal: lease.signal
-    })
+    isAttach =
+      metadata?.connectionKind === 'ssh-attach' ||
+      sshConfig?.mode === 'ssh-attach' ||
+      (metadata?.registryConnectionId
+        ? readDesktopConnectionsRegistry().connections.find(c => c.id === metadata.registryConnectionId)?.kind ===
+          'ssh-attach'
+        : false)
+
+    if (isAttach) {
+      result = await sshAttach.attach(ssh, {
+        pickLocalPort,
+        waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
+        signal: lease.signal
+      })
+    } else {
+      const platform = await detectRemotePlatform(ssh, sshConfig.remoteHermesPath || '')
+      const lifecycle = platform.os === 'Windows' ? connectWindowsRemote : remoteLifecycle.connect
+      result = await lifecycle({
+        ssh,
+        platform,
+        profile: resolveRemoteSshDashboardProfile(sshConfig.remoteProfile, profile),
+        remoteHermesPath: sshConfig.remoteHermesPath || '',
+        ownershipId: sshOwnershipKey(profile),
+        reuseToken: reuseToken || '',
+        forward: (localPort, remotePort) => ssh.forward(localPort, remotePort),
+        cancelForward: (localPort, remotePort) => ssh.cancelForward(localPort, remotePort),
+        pickLocalPort,
+        waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
+        probeReuseProof: sshProbeReuseProof,
+        adoptServedToken: adoptServedDashboardToken,
+        rememberLog: sshRememberLog,
+        guestOnboarding: GUEST_ONBOARDING,
+        signal: lease.signal
+      })
+    }
   } catch (error: any) {
     if (created) {
       try {
@@ -9956,6 +9991,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       sshConnections.set(scope, {
         ssh,
         fingerprint,
+        kind: isAttach ? 'ssh-attach' : 'ssh',
         ownershipId: result.ownershipId || sshOwnershipKey(profile),
         localPort: result.localPort,
         remotePort: result.remotePort,
@@ -9981,7 +10017,9 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
         // site may label a registry-qualified SSH scope as the primary backend.
         primaryRegistryScope: metadata.primaryRegistryScope === true
       })
-      sshIsolatedKeepalives.start(scope, { baseUrl: result.baseUrl, token: result.token })
+      if (!isAttach) {
+        sshIsolatedKeepalives.start(scope, { baseUrl: result.baseUrl, token: result.token })
+      }
     },
     rollback: error => rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error)
   })
@@ -10029,7 +10067,7 @@ function persistSshConnectionToken(profile, source, token, registryConnectionId 
       const registry = readDesktopConnectionsRegistry()
       const entry = registry.connections.find(c => c.id === id)
 
-      if (entry && entry.kind === 'ssh') {
+      if (entry && (entry.kind === 'ssh' || entry.kind === 'ssh-attach')) {
         writeDesktopConnectionsRegistry(upsertConnection(registry, { ...entry, token: encrypted }))
       }
     }
@@ -10043,11 +10081,11 @@ function persistSshConnectionToken(profile, source, token, registryConnectionId 
     if (persistence.legacySource === 'profile') {
       const key = connectionScopeKey(profile)
 
-      if (key && config.profiles?.[key]?.mode === 'ssh') {
+      if (key && (config.profiles?.[key]?.mode === 'ssh' || config.profiles?.[key]?.mode === 'ssh-attach')) {
         config.profiles[key].token = encrypted
         writeDesktopConnectionConfig(config)
       }
-    } else if (config.mode === 'ssh' && config.remote) {
+    } else if ((config.mode === 'ssh' || config.mode === 'ssh-attach') && config.remote) {
       config.remote.token = encrypted
       writeDesktopConnectionConfig(config)
     }
@@ -10093,7 +10131,7 @@ async function resolveRemoteBackend(profile, options: { poolKey?: string; primar
     })
 
     const persistenceSource =
-      currentRoute?.kind === 'ssh' && currentRoute.connectionId === source.id
+      (currentRoute?.kind === 'ssh' || currentRoute?.kind === 'ssh-attach') && currentRoute.connectionId === source.id
         ? currentRoute.source
         : `registry:${source.id}`
 
@@ -10104,6 +10142,7 @@ async function resolveRemoteBackend(profile, options: { poolKey?: string; primar
       persistenceSource,
       undefined,
       {
+        connectionKind: source.kind,
         managedScope: 'primary',
         managedUpdateCorrelation: managedPrimary.correlationId,
         primaryRegistryScope: true,
@@ -10132,7 +10171,7 @@ async function resolveRemoteBackend(profile, options: { poolKey?: string; primar
 
   let connection
 
-  if (route.kind === 'ssh') {
+  if (route.kind === 'ssh' || route.kind === 'ssh-attach') {
     if (route.connectionId) {
       managedConnectionUpdateGate.assertCanDial(route.connectionId)
     }
@@ -10144,6 +10183,7 @@ async function resolveRemoteBackend(profile, options: { poolKey?: string; primar
       route.source,
       undefined,
       {
+        connectionKind: route.kind,
         managedScope: options.primary ? 'primary' : options.poolKey ? 'pool' : 'transient',
         poolKey: options.poolKey || '',
         primaryRegistryScope: options.primary === true && Boolean(route.connectionId),
@@ -10194,7 +10234,7 @@ function globalRemoteActive() {
 
   const mode = readDesktopConnectionConfig().mode
 
-  if (modeIsRemoteLike(mode) || mode === 'ssh') {
+  if (modeIsRemoteLike(mode) || mode === 'ssh' || mode === 'ssh-attach') {
     return true
   }
 
@@ -10215,7 +10255,9 @@ function registryPrimaryIsRemote() {
     const registry = readDesktopConnectionsRegistry()
     const entry = registry.connections.find(c => c.id === registry.primary)
 
-    return Boolean(entry && (entry.kind === 'remote' || entry.kind === 'cloud' || entry.kind === 'ssh'))
+    return Boolean(
+      entry && (entry.kind === 'remote' || entry.kind === 'cloud' || entry.kind === 'ssh' || entry.kind === 'ssh-attach')
+    )
   } catch {
     return false
   }
@@ -10325,7 +10367,7 @@ async function probeRemoteAuthMode(rawUrl) {
 }
 
 async function testDesktopConnectionConfig(input: any = {}) {
-  if (input.mode === 'ssh') {
+  if (input.mode === 'ssh' || input.mode === 'ssh-attach') {
     const sshConfig = normalizeSshConfig({
       mode: 'ssh',
       host: input.sshHost,
@@ -10750,7 +10792,7 @@ async function ensureRegistryBackend(
     throw new Error(`No connection with id "${id}".`)
   }
 
-  if (source.kind === 'ssh') {
+  if (source.kind === 'ssh' || source.kind === 'ssh-attach') {
     managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
   }
 
@@ -10759,7 +10801,7 @@ async function ensureRegistryBackend(
   let registryEffectiveFingerprintPromise: null | Promise<string> = null
 
   const resolveRegistrySshConfig = () => {
-    if (source.kind !== 'ssh') {
+    if (source.kind !== 'ssh' && source.kind !== 'ssh-attach') {
       return null
     }
 
@@ -10944,7 +10986,7 @@ async function ensureRegistryBackend(
           )
           await stopPoolBackend(key)
 
-          if (source.kind === 'ssh') {
+          if (source.kind === 'ssh' || source.kind === 'ssh-attach') {
             await sshBootstrapCoordinator.cancelAndWait(key)
             await teardownSshConnection(key)
           }
@@ -10971,7 +11013,7 @@ async function ensureRegistryBackend(
     key,
     entry,
     resolveRegistrySshConfig(),
-    source.kind === 'ssh' ? resolveRegistryEffectiveFingerprint() : null,
+    (source.kind === 'ssh' || source.kind === 'ssh-attach') ? resolveRegistryEffectiveFingerprint() : null,
     managedUpdateCorrelation
   ).catch(error => {
     if (backendPool.get(key) === entry) {
@@ -11001,7 +11043,7 @@ async function connectRegistryBackend(
 ) {
   const profileKey = String(profile ?? '').trim() || 'default'
 
-  if (source.kind === 'ssh') {
+  if (source.kind === 'ssh' || source.kind === 'ssh-attach') {
     // The composite key doubles as the ssh scope so each (connection, profile)
     // pair owns its own tunnel + remote dashboard; the profile that re-homes
     // the REMOTE process is the entry's remoteProfile or the requested one —
@@ -11019,6 +11061,7 @@ async function connectRegistryBackend(
       tokenPersistenceSource || `registry:${source.id}`,
       resolvedEffectiveFingerprint ? await resolvedEffectiveFingerprint : undefined,
       {
+        connectionKind: source.kind,
         managedScope: 'pool',
         managedUpdateCorrelation,
         poolKey: key,
@@ -11192,7 +11235,7 @@ async function captureManagedSshScopes(source) {
           connectionId: source.id,
           key: String(key),
           prefix,
-          routeConnectionId: route?.kind === 'ssh' ? route.connectionId : '',
+          routeConnectionId: (route?.kind === 'ssh' || route?.kind === 'ssh-attach') ? route.connectionId : '',
           state
         }) === 'pool'
       )
@@ -11236,7 +11279,7 @@ async function captureManagedSshScopes(source) {
   if (
     primary.length === 0 &&
     primaryPromise &&
-    primaryRoute?.kind === 'ssh' &&
+    (primaryRoute?.kind === 'ssh' || primaryRoute?.kind === 'ssh-attach') &&
     primaryRoute.connectionId === source.id
   ) {
     primary.push({
@@ -15575,7 +15618,7 @@ ipcMain.handle('hermes:connections:test', async (_event, id) => {
 
   // The ssh probe path in testDesktopConnectionConfig never consults v1
   // connection state, so mapping the entry onto it is safe.
-  if (entry.kind === 'ssh') {
+  if (entry.kind === 'ssh' || entry.kind === 'ssh-attach') {
     const result = await testDesktopConnectionConfig({
       mode: 'ssh',
       sshHost: entry.host,
@@ -15805,7 +15848,7 @@ async function enumerateRegistryAgentSources(registry = readDesktopConnectionsRe
         // sshConnections key used to fall into ensureRegistryBackend and
         // respawn Spark/Mini every Bot Mode poll (~5s), then the mux died
         // (ECONNRESET / liveness probe drop).
-        if (connection.kind === 'ssh') {
+        if (connection.kind === 'ssh' || connection.kind === 'ssh-attach') {
           await probeSshProfileInventory(connection)
           // The inventory probe learns the backend's install id on its own session; carrying it
           // here is what lets two ssh addresses for one machine collapse to one row.
@@ -16703,7 +16746,7 @@ async function pooledRegistrySessionSources(): Promise<RegistrySessionSource[]> 
 
     const backends: Array<{ descriptor: unknown; profileLabel: null | string }> = []
 
-    for (const [key, entry] of connection.kind === 'ssh' ? pooled : pooled.slice(0, 1)) {
+    for (const [key, entry] of connection.kind === 'ssh' || connection.kind === 'ssh-attach' ? pooled : pooled.slice(0, 1)) {
       try {
         // Already-resolved for a connected backend; a still-dialing entry is
         // skipped via the timeout guard rather than blocking the sidebar.
@@ -16714,7 +16757,7 @@ async function pooledRegistrySessionSources(): Promise<RegistrySessionSource[]> 
 
         backends.push({
           descriptor,
-          profileLabel: connection.kind === 'ssh' ? key.slice(prefix.length) || 'default' : null
+          profileLabel: connection.kind === 'ssh' || connection.kind === 'ssh-attach' ? key.slice(prefix.length) || 'default' : null
         })
       } catch {
         // Dead or still-connecting backend — contributes nothing this refresh.
@@ -18547,16 +18590,16 @@ function quitStopsBackendWork(): boolean {
   let primaryRouteKind: 'cloud' | 'remote' | 'ssh' | null
 
   try {
-    primaryRouteKind =
-      resolveDesktopRemoteRoute({
-        config: readDesktopConnectionConfig(),
-        env: {
-          token: process.env.HERMES_DESKTOP_REMOTE_TOKEN,
-          url: process.env.HERMES_DESKTOP_REMOTE_URL
-        },
-        profile: primaryProfileKey(),
-        registry: readDesktopConnectionsRegistry()
-      })?.kind ?? null
+    const route = resolveDesktopRemoteRoute({
+      config: readDesktopConnectionConfig(),
+      env: {
+        token: process.env.HERMES_DESKTOP_REMOTE_TOKEN,
+        url: process.env.HERMES_DESKTOP_REMOTE_URL
+      },
+      profile: primaryProfileKey(),
+      registry: readDesktopConnectionsRegistry()
+    })
+    primaryRouteKind = route?.kind === 'ssh-attach' ? 'remote' : (route?.kind ?? null)
   } catch {
     return true
   }
@@ -18564,7 +18607,7 @@ function quitStopsBackendWork(): boolean {
   const ownedBackendCount =
     (backendConnectionState.getProcess() ? 1 : 0) +
     [...backendPool.values()].filter(entry => entry?.process).length +
-    sshConnections.size
+    [...sshConnections.values()].filter(state => state.kind !== 'ssh-attach').length
 
   return backendOwnedByApp({ ownedBackendCount, primaryRouteKind })
 }
