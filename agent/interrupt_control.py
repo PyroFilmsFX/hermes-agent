@@ -304,7 +304,8 @@ class InterruptControlMixin:
         """Redirect the active turn without converting it into a new task: during a model request only that
         request is cancelled (completed messages kept, partial reasoning becomes assistant context, the
         correction is appended as a real user message, the loop retries); during tool execution it degrades
-        to ``steer()``; Codex app-server uses native ``turn/steer``. False when no live turn / empty text."""
+        to ``steer()``; Codex app-server uses native ``turn/steer``, the Claude Agent SDK its streaming-input
+        steer. False when no live turn / empty text."""
         if not text or not text.strip():
             return False
         cleaned = _ic_mask_user_text(text.strip())
@@ -318,6 +319,22 @@ class InterruptControlMixin:
                 return bool(_native_steer(cleaned))
             except Exception:
                 logger.debug("Codex app-server turn/steer failed", exc_info=True)
+                return False
+
+        # The Claude Agent SDK runs the whole turn itself: Hermes never enters the ``_model_request_active``
+        # bracket or ``_executing_tools`` on this lane, so the generic path below always answered False and a
+        # typed correction to a busy SDK worker fell back to a client-only queue for the whole turn. The SDK's
+        # streaming-input steer IS this lane's redirect (honored at its next boundary). No stash fallback:
+        # False lets the surface queue the text as the next turn instead.
+        _native_sdk_steer = _ic_claude_sdk_method(self, "steer")
+        if _native_sdk_steer is not None:
+            with _ic_lock(self, "_pending_redirect_lock"):
+                if getattr(self, "_interrupt_requested", False):
+                    return False
+            try:
+                return bool(_native_sdk_steer(cleaned))
+            except Exception:
+                logger.debug("Claude Agent SDK redirect-as-steer failed", exc_info=True)
                 return False
 
         # Never kill a tool to deliver guidance; the steer drain puts it on the final tool result.

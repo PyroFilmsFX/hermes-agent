@@ -2387,7 +2387,18 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
         # row (#64578). 'rejected' makes the client queue it as a normal next prompt.
         if verb == "steer" and not session.get("running"):
             return _ok(rid, {"status": "rejected", "text": text})
-        return _apply_correction(rid, session, verb, text, accepted_status)
+        response = _apply_correction(rid, session, verb, text, accepted_status)
+        if verb == "redirect" and (response.get("result") or {}).get("status") == "rejected":
+            # A live turn the agent could not correct in place (not at a redirectable point, a stop already
+            # pending) still owns THIS ui_session: queue the text here as its next turn, so it drains when this
+            # runtime settles whichever client or peer wake started the turn. "rejected" parked it in the
+            # desktop's client-only queue, which waits on that tab's own view of the turn.
+            with session["history_lock"]:
+                if session.get("running"):
+                    _enqueue_prompt(session, text, current_transport() or _stdio_transport)
+                    session["last_active"] = time.time()
+                    return _ok(rid, {"status": "queued", "text": text})
+        return response
 
 
 # Inject text into the next tool result without interrupting (AIAgent.steer(): no new user turn, no role
