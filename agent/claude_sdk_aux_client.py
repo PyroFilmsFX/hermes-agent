@@ -58,7 +58,7 @@ from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_TIMEOUT = 600.0
 # Advisory bound: asyncio's timeout cancellation must still be serviced by
 # aclose(), so a cancellation-hostile SDK teardown can exceed this interval.
@@ -626,7 +626,7 @@ def resolve_auto_route(main_model: str) -> tuple[Any | None, str | None, str]:
     facade is unavailable aux features simply no-op.
     """
     try:
-        sdk_aux_model = main_model or "claude-sonnet-5"
+        sdk_aux_model = main_model or "claude-sonnet-5-5"
         sdk_aux_client = ClaudeSdkAuxClient(default_model=sdk_aux_model)
         _tag_effective_provider(sdk_aux_client, "claude-agent-sdk")
         logger.debug("aux auto-detect: routing to claude-agent-sdk one-shot (subscription lane, model=%s)",
@@ -653,5 +653,5 @@ def resolve_branch(req: Any) -> Any:
     """Explicit ``provider: claude-agent-sdk`` branch: the subscription-owned Agent SDK facade."""
     from agent.auxiliary_client import _normalize_resolved_model, _route_client
 
-    final_model = _normalize_resolved_model(req.model or "claude-sonnet-5", req.provider)
+    final_model = _normalize_resolved_model(req.model or "claude-sonnet-5-5", req.provider)
     return _route_client(req, ClaudeSdkAuxClient(default_model=final_model), final_model)

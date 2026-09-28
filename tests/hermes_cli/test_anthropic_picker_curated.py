@@ -34,6 +34,7 @@ def test_anthropic_native_list_keeps_aggregator_flagships():
         assert slug in native
     assert native.index("claude-fable-5-1") < native.index("claude-fable-5")
     assert native.index("claude-opus-5-5") < native.index("claude-opus-5")
+    assert native.index("claude-sonnet-5-5") < native.index("claude-sonnet-5")
     assert native.index("claude-opus-5") < native.index("claude-opus-4-8")
 
 
@@ -43,7 +44,8 @@ def test_anthropic_curated_alias_survives_when_live_omits_it():
     assert "claude-fable-5-1" in curated  # sanity: newest Fable alias is curated (API id)
     assert "claude-fable-5" in curated  # sanity: the alias is curated
     assert "claude-opus-5" in curated  # sanity: native flagship matches aggregators
-    assert "claude-sonnet-5" in curated  # newest Sonnet alias is curated
+    assert "claude-sonnet-5-5" in curated  # newest Sonnet alias is curated
+    assert "claude-sonnet-5" in curated
 
     # Live catalog the API would actually return — no fable-5.1 / opus-5.
     live = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
@@ -53,6 +55,7 @@ def test_anthropic_curated_alias_survives_when_live_omits_it():
     assert "claude-fable-5-1" in result
     assert "claude-fable-5" in result
     assert "claude-opus-5" in result
+    assert "claude-sonnet-5-5" in result
     assert "claude-sonnet-5" in result
     # Curated order is preserved at the front.
     assert result[:len(curated)] == list(curated)
@@ -86,3 +89,4 @@ def test_anthropic_falls_back_to_curated_when_live_unavailable():
     assert "claude-fable-5-1" in result
     assert "claude-opus-5" in result
     assert "claude-fable-5" in result
+    assert "claude-sonnet-5-5" in result

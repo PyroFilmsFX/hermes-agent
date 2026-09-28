@@ -12,6 +12,8 @@ describe('model-status-label', () => {
   it('formats Claude family model labels with dotted versions for Claude and non-prefixed Claude ids', () => {
     expect(displayModelName('claude-opus-5-5')).toBe('Opus 5.5')
     expect(displayModelName('opus-5-5')).toBe('Opus 5.5')
+    expect(displayModelName('claude-sonnet-5-5')).toBe('Sonnet 5.5')
+    expect(displayModelName('sonnet-5-5')).toBe('Sonnet 5.5')
     expect(displayModelName('claude-sonnet-5')).toBe('Sonnet 5')
     expect(displayModelName('sonnet-5')).toBe('Sonnet 5')
     expect(displayModelName('claude-haiku-4-5')).toBe('Haiku 4.5')

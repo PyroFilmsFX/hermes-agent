@@ -185,8 +185,7 @@ _SNAPSHOTS: tuple[tuple[str, Optional[str], str, dict], ...] = (
     ("anthropic", "https://openrouter.ai/anthropic/claude-opus-4.8-fast", "anthropic-pricing-2026-05", {
         "claude-opus-4-8-fast": ("10.00", "50.00", "1.00", "12.50"),
     }),
-    # Claude Sonnet 5: introductory $2/$10 through 2026-08-31, then $3/$15
-    # (matching Sonnet 4.6). Update this entry when the intro window closes.
+    # Claude Sonnet 5: $2/$10 intro price became standard (planned move to $3/$15 cancelled).
     ("anthropic", _ANTHROPIC_URL, "anthropic-pricing-2026-06-intro", {
         "claude-sonnet-5": ("2.00", "10.00", "0.20", "2.50"),
     }),
@@ -194,6 +193,7 @@ _SNAPSHOTS: tuple[tuple[str, Optional[str], str, dict], ...] = (
     ("anthropic", _ANTHROPIC_URL, "anthropic-pricing-2026-09", {
         "claude-opus-5": _OPUS,
         "claude-opus-5-5": ("4.00", "20.00", "0.20", "5.00"),
+        "claude-sonnet-5-5": ("2.00", "10.00", "0.20", "2.50"),
     }),
     ("openai", "https://openai.com/api/pricing/", "openai-pricing-2026-03-16", {
         "gpt-4o": ("2.50", "10.00", "1.25"), "gpt-4o-mini": ("0.15", "0.60", "0.075"),
