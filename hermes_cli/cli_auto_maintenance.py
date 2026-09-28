@@ -47,10 +47,16 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.
-        if cfg.get("auto_archive", False):
+        auto_archive = bool(cfg.get("auto_archive", False))
+        auto_archive_lanes = bool(cfg.get("auto_archive_lanes", True))
+        if auto_archive or auto_archive_lanes:
             session_db.maybe_auto_archive(
                 idle_days=float(cfg.get("auto_archive_days", 3)),
                 min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+                auto_archive=auto_archive,
+                auto_archive_lanes=auto_archive_lanes,
+                lane_archive_hours=float(cfg.get("lane_archive_hours", 6)),
+                lane_min_interval_hours=1,
             )
 
         if not cfg.get("auto_prune", False):

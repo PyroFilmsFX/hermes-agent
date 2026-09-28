@@ -1456,6 +1456,11 @@ export const ja = defineLocale({
       autoArchiveDaysLabel: 'アーカイブまでの日数',
       autoArchiveDaysUnit: '日間操作なし',
       autoArchiveFailed: '自動アーカイブを更新できませんでした',
+      autoArchiveLanesTitle: '終了したレーンを自動アーカイブ',
+      autoArchiveLanesDesc:
+        'ターンが終了し設定時間を経過したConductorレーンセッションを自動的にアーカイブします。ピン留めされたセッションはアーカイブされません。',
+      autoArchiveLanesHoursLabel: 'レーンアーカイブまでの時間',
+      autoArchiveLanesHoursUnit: '時間経過後',
       defaultDirTitle: 'デフォルトのプロジェクトディレクトリ',
       defaultDirDesc:
         '別のフォルダーを選択しない限り、新しいセッションはこのフォルダーで開始します。未設定の場合はホームディレクトリが使用されます。',

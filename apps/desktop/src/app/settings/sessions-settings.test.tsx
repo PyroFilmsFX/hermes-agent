@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { listAllProfileSessions, setSessionArchived } from '@/hermes'
+import { getHermesConfigRecord, listAllProfileSessions, saveHermesConfig, setSessionArchived } from '@/hermes'
 import { en } from '@/i18n/en'
 import { $messagingSessions, $sessions, setMessagingSessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
@@ -13,7 +13,8 @@ vi.mock('@/i18n', () => ({ useI18n: () => ({ t: en }) }))
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  getHermesConfigRecord: vi.fn().mockResolvedValue({ config: {} }),
+  getHermesConfigRecord: vi.fn().mockResolvedValue({ config: {}, sessions: {} }),
+  saveHermesConfig: vi.fn().mockResolvedValue(undefined),
   listAllProfileSessions: vi.fn(),
   setSessionArchived: vi.fn().mockResolvedValue(undefined)
 }))
@@ -39,6 +40,7 @@ beforeEach(() => {
   setSessions([])
   setMessagingSessions([])
   vi.mocked(listAllProfileSessions).mockResolvedValue({ sessions: [archivedMatrixSession], total: 1 } as never)
+  vi.mocked(saveHermesConfig).mockClear()
 })
 
 afterEach(() => {
@@ -56,5 +58,78 @@ describe('SessionsSettings unarchive', () => {
     expect($messagingSessions.get().map(session => session.id)).toEqual(['matrix-1'])
     expect($messagingSessions.get()[0]?.archived).toBe(false)
     expect($sessions.get()).toEqual([])
+  })
+})
+
+describe('SessionsSettings auto-archive lanes', () => {
+  beforeEach(() => {
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {}
+  })
+
+  afterEach(() => {
+    delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+  })
+
+  it('toggles auto_archive_lanes and persists setting', async () => {
+    vi.mocked(getHermesConfigRecord).mockResolvedValueOnce({
+      config: {},
+      sessions: {
+        auto_archive: false,
+        auto_archive_days: 3,
+        auto_archive_lanes: true,
+        lane_archive_hours: 6
+      }
+    } as never)
+
+    render(<SessionsSettings />)
+
+    const laneToggle = await screen.findByRole('switch', {
+      name: en.settings.sessions.autoArchiveLanesTitle
+    })
+    expect(laneToggle).toBeDefined()
+
+    await act(async () => {
+      fireEvent.click(laneToggle)
+    })
+
+    expect(saveHermesConfig).toHaveBeenCalledWith(
+      {
+        sessions: {
+          auto_archive_lanes: false,
+          lane_archive_hours: 6
+        }
+      },
+      undefined
+    )
+  })
+
+  it('updates lane_archive_hours on blur and persists setting', async () => {
+    vi.mocked(getHermesConfigRecord).mockResolvedValueOnce({
+      config: {},
+      sessions: {
+        auto_archive: false,
+        auto_archive_days: 3,
+        auto_archive_lanes: true,
+        lane_archive_hours: 6
+      }
+    } as never)
+
+    render(<SessionsSettings />)
+
+    const hoursInput = await screen.findByLabelText(en.settings.sessions.autoArchiveLanesHoursLabel)
+    expect((hoursInput as HTMLInputElement).value).toBe('6')
+
+    fireEvent.change(hoursInput, { target: { value: '12' } })
+    fireEvent.blur(hoursInput)
+
+    expect(saveHermesConfig).toHaveBeenCalledWith(
+      {
+        sessions: {
+          auto_archive_lanes: true,
+          lane_archive_hours: 12
+        }
+      },
+      undefined
+    )
   })
 })

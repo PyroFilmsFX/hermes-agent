@@ -1184,6 +1184,17 @@ export const ar = defineLocale({
       messages: count => `${count} ${count === 1 ? 'رسالة' : 'رسائل'}`,
       restored: 'تمت الاستعادة',
       deleteConfirm: title => `حذف "${title}" نهائياً؟ لا يمكن التراجع عن هذا.`,
+      autoArchiveTitle: 'أرشفة المحادثات القديمة تلقائياً',
+      autoArchiveDesc:
+        'أرشفة المحادثات التي لم تستخدمها لفترة تلقائياً. لا يتم أرشفة المحادثات المثبتة أبداً ولا يُحذف أي شيء.',
+      autoArchiveDaysLabel: 'أرشفة بعد',
+      autoArchiveDaysUnit: 'أيام من عدم النشاط',
+      autoArchiveFailed: 'تعذر تحديث الأرشفة التلقائية',
+      autoArchiveLanesTitle: 'أرشفة المسارات المنتهية تلقائياً',
+      autoArchiveLanesDesc:
+        'أرشفة جلسات Conductor المنتهية التي مضى عليها أكثر من الساعات المحددة تلقائياً. لا يتم أرشفة الجلسات المثبتة.',
+      autoArchiveLanesHoursLabel: 'أرشفة المسارات بعد',
+      autoArchiveLanesHoursUnit: 'ساعات بعد انتهاء الجلسة',
       defaultDirTitle: 'مجلد المشروع الافتراضي',
       defaultDirDesc: 'تبدأ الجلسات الجديدة في هذا المجلد ما لم تختر غيره. اتركه غير مضبوط لاستخدام مجلدك الرئيسي.',
       defaultDirUpdated: 'تم تحديث مجلد المشروع الافتراضي، ابدأ محادثة جديدة (Ctrl/⌘+N) ليطبق التغيير',

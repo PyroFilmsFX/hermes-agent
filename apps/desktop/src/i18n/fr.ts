@@ -2568,6 +2568,11 @@ export const frOverrides = {
       autoArchiveDaysLabel: 'Archiver après',
       autoArchiveDaysUnit: "jours d'inactivité",
       autoArchiveFailed: "Impossible de mettre à jour l'auto-archivage",
+      autoArchiveLanesTitle: 'Auto-archiver les lanes terminés',
+      autoArchiveLanesDesc:
+        'Archiver automatiquement les sessions de conductor lane dont le tour est terminé et plus ancien que le nombre d’heures configuré. Les sessions épinglées ne sont jamais auto-archivées.',
+      autoArchiveLanesHoursLabel: 'Archiver les lanes après',
+      autoArchiveLanesHoursUnit: 'heures après la fin',
       defaultDirTitle: 'Répertoire de projet par défaut',
       defaultDirDesc:
         'Les nouvelles sessions commencent dans ce dossier sauf si vous en choisissez un autre. Laissez-le non défini pour utiliser votre répertoire personnel.',

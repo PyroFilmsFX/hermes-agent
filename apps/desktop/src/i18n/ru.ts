@@ -1507,6 +1507,11 @@ export const ru = defineLocale({
       autoArchiveDaysLabel: 'Архивировать через',
       autoArchiveDaysUnit: 'дн. бездействия',
       autoArchiveFailed: 'Не удалось обновить авто-архивацию',
+      autoArchiveLanesTitle: 'Авто-архивация завершённых веток',
+      autoArchiveLanesDesc:
+        'Автоматически архивировать сеансы conductor lane, чей ход завершен и старше указанного количества часов. Закрепленные сеансы не архивируются.',
+      autoArchiveLanesHoursLabel: 'Архивировать ветки через',
+      autoArchiveLanesHoursUnit: 'ч после завершения хода',
       defaultDirTitle: 'Папка проекта по умолчанию',
       defaultDirDesc:
         'Новые сеансы начинаются в этой папке, если вы не выбрали другую. Оставьте пустым, чтобы использовать домашнюю директорию.',

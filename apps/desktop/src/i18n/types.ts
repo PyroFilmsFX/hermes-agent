@@ -1845,6 +1845,10 @@ export interface Translations {
       autoArchiveDaysLabel: string
       autoArchiveDaysUnit: string
       autoArchiveFailed: string
+      autoArchiveLanesTitle: string
+      autoArchiveLanesDesc: string
+      autoArchiveLanesHoursLabel: string
+      autoArchiveLanesHoursUnit: string
       defaultDirTitle: string
       defaultDirDesc: string
       defaultDirUpdated: string

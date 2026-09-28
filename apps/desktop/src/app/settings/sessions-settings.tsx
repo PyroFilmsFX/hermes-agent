@@ -31,6 +31,7 @@ import { useDeepLinkHighlight } from './use-deep-link-highlight'
 import { useSettingDeepLink } from './use-setting-deep-link'
 
 const DEFAULT_AUTO_ARCHIVE_DAYS = 3
+const DEFAULT_LANE_ARCHIVE_HOURS = 6
 
 const ARCHIVED_FETCH_LIMIT = 200
 
@@ -215,6 +216,8 @@ function AutoArchiveSetting() {
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
   const [enabled, setEnabled] = useState(false)
   const [days, setDays] = useState(DEFAULT_AUTO_ARCHIVE_DAYS)
+  const [lanesEnabled, setLanesEnabled] = useState(true)
+  const [laneHours, setLaneHours] = useState(DEFAULT_LANE_ARCHIVE_HOURS)
 
   useEffect(() => {
     // Config REST is only reachable through the Electron bridge; skip in
@@ -233,9 +236,12 @@ function AutoArchiveSetting() {
 
         const sessions = (record.sessions ?? {}) as Record<string, unknown>
         const parsedDays = Number(sessions.auto_archive_days)
+        const parsedHours = Number(sessions.lane_archive_hours)
         setConfig(record)
         setEnabled(Boolean(sessions.auto_archive))
         setDays(Number.isFinite(parsedDays) && parsedDays > 0 ? Math.round(parsedDays) : DEFAULT_AUTO_ARCHIVE_DAYS)
+        setLanesEnabled(sessions.auto_archive_lanes !== undefined ? Boolean(sessions.auto_archive_lanes) : true)
+        setLaneHours(Number.isFinite(parsedHours) && parsedHours > 0 ? Math.round(parsedHours) : DEFAULT_LANE_ARCHIVE_HOURS)
       })
       .catch(() => {
         // Leave the control unmounted if config can't be read.
@@ -247,15 +253,19 @@ function AutoArchiveSetting() {
   }, [])
 
   const persist = useCallback(
-    async (autoArchive: boolean, archiveDays: number) => {
+    async (patch: {
+      auto_archive?: boolean
+      auto_archive_days?: number
+      auto_archive_lanes?: boolean
+      lane_archive_hours?: number
+    }) => {
       if (!config) {
         return
       }
 
       const sessions = {
         ...((config.sessions ?? {}) as Record<string, unknown>),
-        auto_archive: autoArchive,
-        auto_archive_days: archiveDays
+        ...patch
       }
 
       // Read the route at save time from the record itself, and carry it onto
@@ -268,7 +278,7 @@ function AutoArchiveSetting() {
       try {
         // Sparse patch: PUT /api/config deep-merges, and echoing the cached
         // snapshot would overwrite keys other surfaces changed since it loaded.
-        await saveHermesConfig({ sessions: { auto_archive: autoArchive, auto_archive_days: archiveDays } }, writeScope)
+        await saveHermesConfig({ sessions: patch }, writeScope)
       } catch (err) {
         notifyError(err, s.autoArchiveFailed)
       }
@@ -289,7 +299,7 @@ function AutoArchiveSetting() {
         label={s.autoArchiveTitle}
         onChange={on => {
           setEnabled(on)
-          void persist(on, days)
+          void persist({ auto_archive: on, auto_archive_days: days })
         }}
       />
       {enabled && (
@@ -300,7 +310,7 @@ function AutoArchiveSetting() {
                 aria-label={s.autoArchiveDaysLabel}
                 className="w-20"
                 min={1}
-                onBlur={() => void persist(true, days)}
+                onBlur={() => void persist({ auto_archive: true, auto_archive_days: days })}
                 onChange={e => setDays(Math.max(1, Math.round(Number(e.target.value) || 1)))}
                 type="number"
                 value={days}
@@ -311,6 +321,37 @@ function AutoArchiveSetting() {
             </div>
           }
           title={s.autoArchiveDaysLabel}
+        />
+      )}
+      <ToggleRow
+        checked={lanesEnabled}
+        description={s.autoArchiveLanesDesc}
+        id={settingElementId(SETTING_IDS.sessions.autoArchiveLanes)}
+        label={s.autoArchiveLanesTitle}
+        onChange={on => {
+          setLanesEnabled(on)
+          void persist({ auto_archive_lanes: on, lane_archive_hours: laneHours })
+        }}
+      />
+      {lanesEnabled && (
+        <ListRow
+          action={
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label={s.autoArchiveLanesHoursLabel}
+                className="w-20"
+                min={1}
+                onBlur={() => void persist({ auto_archive_lanes: true, lane_archive_hours: laneHours })}
+                onChange={e => setLaneHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                type="number"
+                value={laneHours}
+              />
+              <span className="text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                {s.autoArchiveLanesHoursUnit}
+              </span>
+            </div>
+          }
+          title={s.autoArchiveLanesHoursLabel}
         />
       )}
     </div>

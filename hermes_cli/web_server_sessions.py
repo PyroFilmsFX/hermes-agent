@@ -240,7 +240,9 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
             cfg = (_load_full_config().get("sessions") or {})
         finally:
             reset_hermes_home_override(_home_token)
-        if not cfg.get("auto_archive", False):
+        auto_archive = bool(cfg.get("auto_archive", False))
+        auto_archive_lanes = bool(cfg.get("auto_archive_lanes", True))
+        if not auto_archive and not auto_archive_lanes:
             return
         from hermes_cli.profiles import _check_gateway_running
 
@@ -258,7 +260,11 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
         try:
             db.maybe_auto_archive(
                 idle_days=float(cfg.get("auto_archive_days", 3)),
-                min_interval_hours=int(cfg.get("min_interval_hours", 24)))
+                min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+                auto_archive=auto_archive,
+                auto_archive_lanes=auto_archive_lanes,
+                lane_archive_hours=float(cfg.get("lane_archive_hours", 6)),
+                lane_min_interval_hours=1)
         finally:
             db.close()
     except Exception as exc:

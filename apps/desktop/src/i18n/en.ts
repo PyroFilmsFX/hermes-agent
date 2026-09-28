@@ -2199,6 +2199,11 @@ export const en: Translations = {
       autoArchiveDaysLabel: 'Archive after',
       autoArchiveDaysUnit: 'days of inactivity',
       autoArchiveFailed: 'Could not update auto-archive',
+      autoArchiveLanesTitle: 'Auto-archive ended lanes',
+      autoArchiveLanesDesc:
+        'Automatically archive conductor lane sessions whose turn has ended and is older than the configured hours. Pinned sessions are never auto-archived.',
+      autoArchiveLanesHoursLabel: 'Archive lanes after',
+      autoArchiveLanesHoursUnit: 'hours after turn ends',
       defaultDirTitle: 'Default project directory',
       defaultDirDesc:
         'New sessions start in this folder unless you pick another. Leave it unset to use your home directory.',
