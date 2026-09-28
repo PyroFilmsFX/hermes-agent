@@ -19,9 +19,12 @@ _MARKER_CACHE_LIMIT = 128
 _MARKER_CACHE: OrderedDict[tuple[str, int, int], dict | None] = OrderedDict()
 
 
-def _read_json_file(directory: Path, name: str, max_bytes: int = _MARKER_MAX_BYTES) -> tuple[dict | None, float | None, bool]:
-    """``(record, mtime, unreadable)`` for ``directory/name`` without following the directory or file symlinks.
-    A missing file is ``(None, None, False)``; a file that is not a regular JSON object is unreadable."""
+def _read_json_file(directory: Path, name: str, max_bytes: int = _MARKER_MAX_BYTES, *,
+                    subdirs: tuple[str, ...] = ()) -> tuple[dict | None, float | None, bool]:
+    """``(record, mtime, unreadable)`` for ``directory/<subdirs...>/name`` without following any symlink below
+    ``directory``: each subdir is opened relative to its parent's descriptor with O_NOFOLLOW, so swapping a
+    component for a symlink mid-read can't redirect the open. A missing file is ``(None, None, False)``; a file
+    that is not a regular JSON object is unreadable."""
     import json
     import os
     import stat
@@ -35,6 +38,15 @@ def _read_json_file(directory: Path, name: str, max_bytes: int = _MARKER_MAX_BYT
         return None, None, False
     except (OSError, RuntimeError):
         return None, None, False
+    for part in subdirs:
+        try:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+        except OSError:  # missing, not a directory, or a symlink (ELOOP): never followed
+            os.close(directory_fd)
+            return None, None, False
+        os.close(directory_fd)
+        directory_fd = child_fd
+    directory = directory.joinpath(*subdirs)
 
     try:
         try:
@@ -123,15 +135,15 @@ def _indexed_marker(state: Path, claude_sid: str | None) -> tuple[dict | None, b
     for row in reversed(candidates):  # sorted by (armed_at, build_id): newest last
         build_id, legacy = row.get("build_id"), row.get("legacy_flat") is True
         if legacy or build_id is None:
-            directory = state
-        elif isinstance(build_id, str) and _BUILD_ID_RE.fullmatch(build_id):
-            directory = state / "builds" / build_id
+            subdirs: tuple[str, ...] = ()
+        elif isinstance(build_id, str) and _BUILD_ID_RE.fullmatch(build_id) and build_id not in (".", ".."):
+            subdirs = ("builds", build_id)
         else:
             continue
-        expected = directory / "tb-build-active.json"
+        expected = state.joinpath(*subdirs, "tb-build-active.json")
         if str(row.get("marker_path") or "") not in ("", str(expected)):
             continue
-        record, mtime, bad = _read_json_file(directory, "tb-build-active.json")
+        record, mtime, bad = _read_json_file(state, "tb-build-active.json", subdirs=subdirs)
         if bad:
             return None, True, True
         if record is not None and (not claude_sid or not mine or record.get("session_id") == claude_sid):
