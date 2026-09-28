@@ -644,7 +644,8 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        env.pop("TB_STATE_ROOT", None)  # the per-session hook state root is independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR"):  # per-session, independent of this
+            env.pop(per_session, None)
         assert env == {}
 
     def test_allow_metered_key_disables_the_scrub(self, monkeypatch):
@@ -666,7 +667,8 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        env.pop("TB_STATE_ROOT", None)  # the per-session hook state root is independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR"):  # per-session, independent of this
+            env.pop(per_session, None)
         assert env == {}
 
     def test_metered_key_refuses_startup_fail_closed(self, monkeypatch):

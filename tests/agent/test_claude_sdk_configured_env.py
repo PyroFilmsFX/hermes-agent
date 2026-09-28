@@ -102,6 +102,28 @@ def test_sdk_state_root_is_distinct_for_different_cwds(env_config, monkeypatch, 
     assert state_a != state_b
 
 
+def test_sdk_session_exports_its_launch_cwd_as_claude_project_dir(env_config, monkeypatch, tmp_path):
+    """Conductor resolves its state root and marker ownership from CLAUDE_PROJECT_DIR, which Claude
+    Code sets to its launch dir; an SDK session must set the same, beating a parent session's value."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/some/parent/session/project")
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    env_config()
+
+    env = M._sdk_env_overrides(sdk_cwd=str(repo / "sub" / ".."), hermes_session_id="s")
+    assert env["CLAUDE_PROJECT_DIR"] == str(repo.resolve())
+    # No session cwd (aux one-shots, bare process): not a project, nothing exported.
+    assert "CLAUDE_PROJECT_DIR" not in M._sdk_env_overrides(hermes_session_id="s")
+
+
+def test_operator_configured_claude_project_dir_wins(env_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    env_config(env={"CLAUDE_PROJECT_DIR": "/pinned/project"})
+    env = M._sdk_env_overrides(sdk_cwd=str(tmp_path), hermes_session_id="s")
+    assert env["CLAUDE_PROJECT_DIR"] == "/pinned/project"
+
+
 def test_native_task_tools_inject_defaults_and_keep_operator_overrides(env_config):
     env_config(task_tools=True)
 
