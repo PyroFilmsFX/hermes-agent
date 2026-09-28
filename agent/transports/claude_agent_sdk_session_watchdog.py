@@ -68,6 +68,13 @@ _COMPACTION_MAX_SUSPEND = 600.0
 _TASK_MAX_SUSPEND = 4 * 60 * 60.0
 
 
+# An ordinary outstanding tool suspends the idle rule for at most this long
+# (agent.claude_agent_sdk.turn_tool_max_suspend) from the moment the
+# outstanding count went 0 -> 1: a tool whose result never arrives must not
+# hold the turn forever; after the cap the normal idle rule applies.
+_TOOL_MAX_SUSPEND = 4 * 60 * 60.0
+
+
 class _TurnWatch:
     """Activity evidence for one in-flight turn.
 
@@ -87,8 +94,12 @@ class _TurnWatch:
     they resolve inside their own assistant message) or an approval prompt
     awaiting a human tap is PROVABLY working/waiting and is never tripped.
     If the CLI never resolves an issued tool id (interrupted mid-tool), the
-    suspension persists and the gateway's 1800s inactivity ceiling remains
-    the backstop — documented, deliberate."""
+    suspension ends after tool_max_suspend (default _TOOL_MAX_SUSPEND) and
+    the idle rule applies again.
+
+    on_activity (optional, set by run_turn) is called on every tick() so the
+    agent-level liveness watchdog's abort claim is voided by SDK activity
+    (see ActivityTrackingMixin._note_transport_activity)."""
 
     def __init__(self) -> None:
         now = time.monotonic()
@@ -109,14 +120,27 @@ class _TurnWatch:
         # The idle limit run_turn enforces, published for liveness() readers
         # (agent/turn_liveness.py keeps its own limit above it). 0 = unset.
         self.idle_limit = 0.0
+        # When the outstanding-tool count last went 0 -> 1 (0.0 = none), and
+        # how long an ordinary outstanding tool may suspend the idle rule.
+        self.tool_gate_started = 0.0
+        self.tool_max_suspend = _TOOL_MAX_SUSPEND
+        self.on_activity: Optional[Any] = None
 
     # -- loop-thread writers --
 
     def tick(self) -> None:
         self.last_activity = time.monotonic()
+        on_activity = self.on_activity
+        if on_activity is not None:
+            try:
+                on_activity()
+            except Exception:
+                logger.debug("turn-watch activity hook failed", exc_info=True)
 
     def note_tools_issued(self, count: int, ids: Iterable[Any] = ()) -> None:
         if count > 0:
+            if self.outstanding_tools == 0:
+                self.tool_gate_started = time.monotonic()
             self.outstanding_tools += count
             self.outstanding_tool_ids.update(i for i in ids if i)
 
@@ -126,6 +150,7 @@ class _TurnWatch:
             self.outstanding_tool_ids.difference_update(ids)
             if self.outstanding_tools == 0:
                 self.outstanding_tool_ids.clear()
+                self.tool_gate_started = 0.0
 
     def note_task_started(
         self, task_id: str, parent_tool_id: Optional[str] = None
@@ -203,11 +228,15 @@ class _TurnWatch:
         compaction is in progress. No idle rule may fire meanwhile."""
         if self.approvals_pending > 0:
             return True
-        # An ordinary outstanding tool suspends indefinitely (documented
-        # above). When the only outstanding calls are live Tasks' own Task
-        # calls, the Task cap below bounds the suspension instead: a Task
-        # whose ToolResult never arrives must not hold the turn forever.
-        if self.outstanding_tools > 0 and not self._outstanding_tools_are_live_tasks():
+        # An ordinary outstanding tool suspends for up to tool_max_suspend
+        # (documented above). When the only outstanding calls are live Tasks'
+        # own Task calls, the Task cap below bounds the suspension instead: a
+        # Task whose ToolResult never arrives must not hold the turn forever.
+        if (
+            self.outstanding_tools > 0
+            and not self._outstanding_tools_are_live_tasks()
+            and now - self.tool_gate_started < self.tool_max_suspend
+        ):
             return True
         if self.task_gate_started and now - self.task_gate_started < _TASK_MAX_SUSPEND:
             return True

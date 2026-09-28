@@ -214,3 +214,17 @@ def test_liveness_keeps_its_own_limit_off_the_sdk_lane(monkeypatch):
     clock.now += 601.0
     assert watchdog._tick() is False
     abort.assert_called_once()
+
+
+def test_sdk_lane_wedged_tool_is_bounded_by_the_tool_cap(monkeypatch):
+    # Review P1-1: past turn_tool_max_suspend (4 h) a never-resolving tool stops suspending, so
+    # this watchdog regains its backstop instead of deferring forever.
+    from agent.turn_liveness import _TRANSPORT_IDLE_MARGIN_S
+
+    clock, watch, watchdog, abort = _sdk_lane(monkeypatch)
+    watch.note_tools_issued(1, ids=["toolu_wedged"])
+    clock.now += 4 * 3600.0 - 15.0
+    assert watchdog._tick() is None
+    clock.now += 900.0 + _TRANSPORT_IDLE_MARGIN_S + 30.0
+    assert watchdog._tick() is False
+    abort.assert_called_once()

@@ -68,6 +68,7 @@ All keys live under `agent.claude_agent_sdk` in `config.yaml` (see `cli-config.y
 | `max_buffer_size` | `null` | Maximum size of one CLI NDJSON message. `null` uses Hermes' 10 MiB limit rather than the SDK's 1 MiB default, which can terminate a turn on a large tool result. Positive integer overrides are accepted; invalid values warn and fall back. The pinned SDK currently measures Unicode code points despite documenting bytes. |
 | `turn_idle_timeout` | `null` | Turn idle limit in seconds. `null` uses 900. A turn is retired only after this long with no SDK output (stream and thinking deltas, system/status messages) and nothing outstanding (tool call, live background Task, approval, compaction). Turn length alone never retires a turn. |
 | `turn_timeout` | `null` | Deprecated alias of `turn_idle_timeout`, read with the same idle semantics when `turn_idle_timeout` is unset. |
+| `turn_tool_max_suspend` | `null` | Longest one outstanding tool call suspends the idle rule, in seconds. `null` uses 14400 (4 hours); after it a tool whose result never arrives counts as silence. |
 | `turn_max_seconds` | `0` | Optional absolute wall-clock cap on one turn in seconds. `0` = off. |
 | `post_tool_quiet_timeout` | `null` | Post-tool silence watchdog. `null` uses 300 seconds with streaming enabled and disables it without streaming; `0` disables it explicitly. |
 | `deliver_background_results` | `false` | Proactively deliver completed background Agent-task answers through the gateway completion lane. |

@@ -11,6 +11,7 @@ the runtime and the auxiliary client.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import secrets
 import stat
@@ -694,6 +695,10 @@ def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float
     try:
         value = float(raw)
     except (TypeError, ValueError):
+        value = math.nan
+    if not math.isfinite(value):
+        # NaN would pass every range check below and silently disable the
+        # rule it feeds (`idle >= nan` is never true); Inf would too.
         logger.warning(
             "agent.claude_agent_sdk.%s=%r is not a number of seconds — "
             "ignoring it (using the built-in default).", key, raw,
@@ -721,6 +726,12 @@ def _configured_turn_idle_timeout() -> Optional[float]:
     there is deliberately no `0 = unlimited`: an unbounded idle rule would let
     a wedged CLI hold the session until an outer ceiling notices."""
     return _configured_timeout_seconds("turn_idle_timeout", allow_zero=False)
+
+
+def _configured_turn_tool_max_suspend() -> Optional[float]:
+    """agent.claude_agent_sdk.turn_tool_max_suspend (seconds): how long one
+    outstanding ordinary tool may suspend the idle rule. Positive only."""
+    return _configured_timeout_seconds("turn_tool_max_suspend", allow_zero=False)
 
 
 def _configured_turn_max_seconds() -> Optional[float]:

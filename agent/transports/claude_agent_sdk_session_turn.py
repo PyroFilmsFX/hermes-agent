@@ -39,6 +39,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_turn_idle_timeout,
     _configured_turn_max_seconds,
     _configured_turn_timeout,
+    _configured_turn_tool_max_suspend,
 )
 from agent.transports.claude_sdk_peer_envelope import effective_origin
 from agent.transports.claude_agent_sdk_session_child import SdkShuttingDownError
@@ -48,6 +49,7 @@ from agent.transports.claude_agent_sdk_session_watchdog import (
     _DEFAULT_TURN_IDLE_TIMEOUT,
     _POLL_STALL_FACTOR,
     _StreamEnd,
+    _TOOL_MAX_SUSPEND,
     _TURN_ABORT_GRACE,
     _TurnWatch,
 )
@@ -340,6 +342,7 @@ class ClaudeSdkTurnMixin:
             )
         )
         max_seconds = _configured_turn_max_seconds() or 0.0
+        tool_max_suspend = _configured_turn_tool_max_suspend() or _TOOL_MAX_SUSPEND
         if post_tool_quiet_timeout is not None:
             quiet = float(post_tool_quiet_timeout)
         else:
@@ -443,6 +446,10 @@ class ClaudeSdkTurnMixin:
                 return self._retired_before_query_result()
             watch = _TurnWatch()
             watch.idle_limit = budget
+            watch.tool_max_suspend = tool_max_suspend
+            # The runtime's agent-side hook (activity generation bump): SDK
+            # activity voids a pending turn_liveness abort claim.
+            watch.on_activity = getattr(self, "_turn_activity_hook", None)
             self._turn_watch = watch
             trip: Optional[str] = None
             trip_elapsed = trip_idle = 0.0

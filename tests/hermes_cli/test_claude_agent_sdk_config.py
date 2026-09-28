@@ -64,6 +64,8 @@ class TestClaudeAgentSdkDefaults:
         assert block["turn_idle_timeout"] is None
         # Deprecated alias: null so a legacy value is still honoured.
         assert block["turn_timeout"] is None
+        # null = the built-in 4 h cap on one outstanding tool's suspension.
+        assert block["turn_tool_max_suspend"] is None
         # 0 = no absolute wall-clock cap.
         assert block["turn_max_seconds"] == 0
         # null = streaming-dependent built-in (300s with streaming on,

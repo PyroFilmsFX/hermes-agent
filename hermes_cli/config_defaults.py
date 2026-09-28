@@ -404,6 +404,10 @@ DEFAULT_CONFIG = {
             # DEPRECATED alias of turn_idle_timeout (same idle semantics; read only when
             # turn_idle_timeout is unset). It no longer bounds wall clock.
             "turn_timeout": None,
+            # Longest one outstanding ordinary tool call suspends the idle rule, in seconds;
+            # null = the built-in 14400 (4 h, matching the background-Task cap). After it, a tool
+            # whose result never arrives is treated like silence. 0/negative/NaN are ignored.
+            "turn_tool_max_suspend": None,
             # Optional absolute wall-clock cap on one turn in seconds. 0 = off (the default):
             # multi-hour orchestrator turns run as long as they show activity.
             "turn_max_seconds": 0,

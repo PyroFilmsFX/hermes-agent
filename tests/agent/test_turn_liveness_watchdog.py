@@ -753,3 +753,52 @@ def test_declined_abort_does_not_cancel_pending_compression_commit():
         "cancelled: begin_commit() refused"
     )
     fence.finish_commit()
+
+
+def _sdk_lane_lease(tick_during_surface):
+    """A real DurableTurnLease + TurnLivenessWatchdog over a stale agent clock and a stale SDK
+    turn watch whose activity hook is the agent's real one (as the SDK runtime wires it)."""
+    from types import SimpleNamespace
+
+    from agent import turn_liveness
+    from agent.transports.claude_agent_sdk_session_watchdog import _TurnWatch
+    from agent.turn_facade_lease import DurableTurnLease
+
+    agent = _agent_with_db(_DB())
+    watch = _TurnWatch()
+    watch.idle_limit = 1.0
+    watch.last_activity -= 1000.0  # the SDK stream has been silent too
+    watch.on_activity = getattr(agent, "_note_transport_activity", None)
+    agent._claude_sdk_session = SimpleNamespace(_turn_watch=watch)
+    lease = DurableTurnLease(agent, _DB(), agent.session_id, "holder-1")
+    with lease._lock:
+        lease.turn_active = True
+    watchdog = turn_liveness.TurnLivenessWatchdog(
+        agent, session_id=agent.session_id, timeout_s=0.3, poll_s=0.05,
+        stop_event=lease.stop, activity_lock=agent._liveness_activity_lock(),
+        is_turn_active=lease.is_turn_active, commit_abort=lease.commit_liveness_abort,
+        deactivate_turn=lease.stop_refresher,
+    )
+    # The stall surface runs between the sample and the commit: an SDK stream message
+    # landing there is exactly the review P1-2 window.
+    agent._emit_warning = (lambda _text: watch.tick()) if tick_during_surface else (lambda _t: None)
+    return agent, lease, watchdog
+
+
+def test_sdk_tick_between_sample_and_commit_declines_the_real_abort():
+    """Review P1-2: SDK activity after a stale sample must stop the hard interrupt. The SDK
+    watch's tick bumps the agent activity generation under the activity lock, so the lease's
+    real commit_liveness_abort revalidation (and interrupt(require_generation=...)) declines."""
+    agent, lease, watchdog = _sdk_lane_lease(tick_during_surface=True)
+    assert watchdog._tick() is None  # stall surfaced, abort declined
+    assert agent._interrupt_requested is False
+    assert not lease.stop.is_set()
+    assert lease.is_turn_active()
+
+
+def test_sdk_lane_real_commit_still_aborts_a_silent_turn():
+    # Vacuity guard for the test above: with no SDK tick in the window the same real path aborts.
+    agent, lease, watchdog = _sdk_lane_lease(tick_during_surface=False)
+    assert watchdog._tick() is False
+    assert agent._interrupt_requested is True
+    assert lease.stop.is_set()

@@ -82,6 +82,24 @@ class ActivityTrackingMixin:
             reset_session_activity_persist_window(self)
         self._persist_session_activity_if_due()
 
+    def _note_transport_activity(self) -> None:
+        """Per-message liveness from a transport watchdog (the Claude Agent SDK turn watch).
+
+        Bumps the activity generation and voids a reserved abort claim under the activity lock,
+        exactly like ``_touch_activity`` does for those two fields, so the liveness watchdog's
+        commit (and ``interrupt(require_generation=...)``) declines once the SDK shows life after
+        a stale sample. Deliberately cheap — no timestamp, description, persistence or heartbeat
+        work — because it runs for every SDK stream message on the SDK loop thread. Lock order:
+        holders of the activity lock take no Hermes/SDK lock inside it (only logging and an
+        Event's internals in interrupt publication), and the loop thread holds none when it
+        ticks, so taking it here cannot deadlock.
+        """
+        with _activity_lock(self):
+            self._turn_liveness_activity_generation = (
+                getattr(self, "_turn_liveness_activity_generation", 0) + 1
+            )
+            self._turn_liveness_abort_claim = None
+
     def _persist_session_activity_if_due(self) -> None:
         """Best-effort durable activity heartbeat for SessionDB consumers.
 

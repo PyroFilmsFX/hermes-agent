@@ -854,10 +854,14 @@ class TestTurnLifetime:
             session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
         )
         watch = session_mod._TurnWatch()
+        # Ordinary tools have their OWN cap (turn_tool_max_suspend, 2026-09-28
+        # review P1-1); widen it so this still proves the Task cap never
+        # releases an ordinary in-flight tool.
+        watch.tool_max_suspend = 2 * session_mod._TASK_MAX_SUSPEND
         watch.note_tools_issued(2, ids=["toolu_task", "toolu_bash"])
         watch.note_task_started("task-1", parent_tool_id="toolu_task")
         clock["now"] += session_mod._TASK_MAX_SUSPEND + 601.0
-        # The Bash call is still in flight: ordinary tools stay unbounded.
+        # The Bash call is still in flight: the Task cap does not release it.
         assert watch.check(budget=600.0, quiet=0.0) is None
 
         watch.note_tools_resolved(1, ids=["toolu_bash"])
@@ -1982,25 +1986,83 @@ class TestIdleTurnLifetime:
 
     def test_injected_burst_messages_tick_the_turn_watch(self):
         # Any CLI output is liveness, including messages the reader routes
-        # AWAY from the claimed turn (injected task-notification/peer bursts,
-        # status SystemMessages) — _consume_turn's own tick never sees those.
-        from agent.transports.claude_agent_sdk_session_watchdog import _TurnWatch
+        # AWAY from the claimed turn: while an injected burst (task
+        # notification / peer turn) is open, the reader hands its messages to
+        # _handle_unsolicited, so _consume_turn's own tick never sees them.
+        session, holder = _make_hold_open_session(script=[])
+        routed = []
+        original = session._handle_unsolicited
 
-        session, holder = _make_session(script=[])
-        watch = _TurnWatch()
-        watch.last_activity -= 10_000.0
-        stale = watch.last_activity
+        def spy_unsolicited(message):
+            routed.append(message)
+            return original(message)
+
+        session._handle_unsolicited = spy_unsolicited
+        turn_box = {}
+        runner = threading.Thread(
+            target=lambda: turn_box.setdefault(
+                "turn", session.run_turn("hold", turn_timeout=600.0)
+            ),
+            daemon=True,
+        )
         try:
-            session.ensure_started()
-            session._turn_watch = watch
-            holder["client"].feed(SystemMessage(subtype="status", data={}))
+            runner.start()
             deadline = time.monotonic() + 5.0
-            while watch.last_activity == stale and time.monotonic() < deadline:
+            while (
+                session._turn_inbox is None or session._turn_watch is None
+            ) and time.monotonic() < deadline:
                 time.sleep(0.01)
+            watch = session._turn_watch
+            assert watch is not None and session._turn_inbox is not None
+            session._unsolicited_burst_open = True  # an injected turn is mid-burst
+            watch.last_activity -= 10_000.0
+            stale = watch.last_activity
+            burst_message = SystemMessage(subtype="status", data={})
+            holder["client"].feed(burst_message)
+            while not routed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert routed and routed[0] is burst_message  # really took the burst path
             assert watch.last_activity > stale
         finally:
-            session._turn_watch = None
             _close_promptly(session)
+            runner.join(timeout=10.0)
+        assert not runner.is_alive()
+
+    def test_tool_outstanding_just_under_the_tool_cap_is_not_retired(
+        self, monkeypatch
+    ):
+        # Review P1-1: a long tool suspends the idle rule up to the cap.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        watch.note_tools_issued(1, ids=["toolu_bash"])
+        assert _advance(
+            watch, clock, 3 * 3600.0 + 59 * 60.0, budget=900.0, quiet=300.0
+        ) is None
+
+    def test_silent_tool_stuck_past_the_tool_cap_is_retired(self, monkeypatch):
+        # Review P1-1: a tool whose result never arrives no longer holds the
+        # turn forever — past the 4 h cap the idle rule applies again.
+        from agent.transports import claude_agent_sdk_session_watchdog as wd
+
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        assert watch.tool_max_suspend == wd._TOOL_MAX_SUSPEND == 4 * 3600.0
+        watch.note_tools_issued(1, ids=["toolu_wedged"])
+        verdict = _advance(
+            watch, clock, 4 * 3600.0 + 900.0 + 5.0, budget=900.0, quiet=0.0
+        )
+        assert verdict == "budget"
+        assert watch.liveness()[0] > 900.0  # turn_liveness sees it too
+        # A resolved-then-reissued tool restarts its own cap (0 -> 1 stamp).
+        watch.note_tools_resolved(1, ids=["toolu_wedged"])
+        watch.tick()
+        watch.note_tools_issued(1, ids=["toolu_next"])
+        assert _advance(watch, clock, 3600.0, budget=900.0, quiet=0.0) is None
+
+    def test_configured_tool_cap_is_honoured_by_the_watch(self, monkeypatch):
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        watch.tool_max_suspend = 600.0
+        watch.note_tools_issued(1, ids=["toolu_bash"])
+        assert _advance(watch, clock, 595.0, budget=900.0, quiet=0.0) is None
+        assert _advance(watch, clock, 400.0, budget=900.0, quiet=0.0) == "budget"
 
 
 class TestIdleTurnLifetimeConfig:
@@ -2016,7 +2078,11 @@ class TestIdleTurnLifetimeConfig:
         seen = {}
 
         def spy_check(watch, **kwargs):
-            seen.update(kwargs, idle_limit=watch.idle_limit)
+            seen.update(
+                kwargs,
+                idle_limit=watch.idle_limit,
+                tool_max_suspend=watch.tool_max_suspend,
+            )
             return "budget"  # trip at once: no real waiting on the limits
 
         monkeypatch.setattr(wd._TurnWatch, "check", spy_check)
@@ -2032,8 +2098,14 @@ class TestIdleTurnLifetimeConfig:
 
     def test_turn_idle_timeout_and_max_seconds_are_honoured(self, monkeypatch):
         seen, turn = self._captured_limits(
-            monkeypatch, {"turn_idle_timeout": 1234, "turn_max_seconds": 7200}
+            monkeypatch,
+            {
+                "turn_idle_timeout": 1234,
+                "turn_max_seconds": 7200,
+                "turn_tool_max_suspend": 5400,
+            },
         )
+        assert seen["tool_max_suspend"] == 5400.0
         assert seen["budget"] == 1234.0 and seen["idle_limit"] == 1234.0
         assert seen["max_seconds"] == 7200.0
         assert "idle limit 1234s" in turn.error
@@ -2054,6 +2126,7 @@ class TestIdleTurnLifetimeConfig:
         assert seen["budget"] == 900.0
         assert seen["max_seconds"] == 0.0
         assert seen["quiet"] == 300.0
+        assert seen["tool_max_suspend"] == 4 * 3600.0
 
     def test_configured_quiet_is_honoured(self, monkeypatch):
         seen, _turn = self._captured_limits(
@@ -2079,3 +2152,24 @@ class TestIdleTurnLifetimeConfig:
         for bad in (-1, True, "forever"):
             self._patch_block(monkeypatch, {"turn_max_seconds": bad})
             assert _configured_turn_max_seconds() is None
+
+    def test_non_finite_values_are_rejected(self, monkeypatch):
+        # Review P2: NaN passes every range check and would silently disable
+        # the rule it feeds (`idle >= nan` is never true); Inf likewise.
+        from agent.transports import claude_agent_sdk_session_config as cfg_mod
+
+        readers = (
+            ("turn_idle_timeout", cfg_mod._configured_turn_idle_timeout),
+            ("turn_timeout", cfg_mod._configured_turn_timeout),
+            ("turn_max_seconds", cfg_mod._configured_turn_max_seconds),
+            ("turn_tool_max_suspend", cfg_mod._configured_turn_tool_max_suspend),
+            ("post_tool_quiet_timeout", cfg_mod._configured_post_tool_quiet_timeout),
+        )
+        for key, reader in readers:
+            for bad in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+                self._patch_block(monkeypatch, {key: bad})
+                assert reader() is None, (key, bad)
+        self._patch_block(monkeypatch, {"turn_tool_max_suspend": 7200})
+        assert cfg_mod._configured_turn_tool_max_suspend() == 7200.0
+        self._patch_block(monkeypatch, {"turn_tool_max_suspend": 0})
+        assert cfg_mod._configured_turn_tool_max_suspend() is None

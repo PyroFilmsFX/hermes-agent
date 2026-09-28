@@ -1230,6 +1230,13 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 )
                 turn_session_cwd = None
         state.turn_session_cwd = turn_session_cwd
+        hook = getattr(agent, "_note_transport_activity", None)
+        if callable(hook):
+            try:
+                # SDK stream activity reaches the agent's liveness generation (turn_liveness race).
+                session._turn_activity_hook = hook
+            except Exception:
+                pass
         try:
             turn = session.run_turn(user_input=send_input)
         except Exception as exc:
