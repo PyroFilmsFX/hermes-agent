@@ -922,3 +922,27 @@ def test_anthropic_fast_response_without_a_fast_rate_is_unknown():
     result = estimate_usage_cost("claude-sonnet-4-6", _anthropic_usage("fast"), provider="anthropic")
     assert result.amount_usd is None
     assert result.status == "unknown"
+
+
+def test_claude_sonnet_5_5_cost_matches_sonnet_5():
+    usage = CanonicalUsage(input_tokens=100_000, output_tokens=10_000, cache_read_tokens=200_000, cache_write_tokens=50_000)
+    cost_5_5 = estimate_usage_cost("claude-sonnet-5-5", usage, provider="anthropic")
+    cost_5 = estimate_usage_cost("claude-sonnet-5", usage, provider="anthropic")
+    assert cost_5_5.status == "estimated"
+    assert cost_5.status == "estimated"
+    assert cost_5_5.amount_usd == cost_5.amount_usd
+    assert cost_5_5.pricing_version == "anthropic-pricing-2026-09"
+
+
+def test_claude_sonnet_5_5_not_priced_at_fast_rates():
+    fast_resp = estimate_usage_cost("claude-sonnet-5-5", _anthropic_usage("fast"), provider="anthropic")
+    assert fast_resp.amount_usd is None
+    assert fast_resp.status == "unknown"
+
+
+def test_claude_sonnet_5_5_context_and_output_limits():
+    from agent.model_metadata import get_model_context_length
+    from agent.anthropic_adapter import _get_anthropic_max_output
+
+    assert get_model_context_length("claude-sonnet-5-5", provider="anthropic") == 1_000_000
+    assert _get_anthropic_max_output("claude-sonnet-5-5") == 128_000

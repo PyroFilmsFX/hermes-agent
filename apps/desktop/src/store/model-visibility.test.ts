@@ -370,6 +370,15 @@ describe('seen-set newest model leads', () => {
     expect(families.map(f => f.id)).toEqual(['claude-opus-5-5', 'claude-opus-4-5'])
   })
 
+  it('sorts an unseen claude-sonnet-5-5 ahead of claude-sonnet-5 in the sonnet family', () => {
+    setSeenModels(new Set(['claude-sonnet-5']))
+
+    const models = ['claude-sonnet-5', 'claude-sonnet-5-5']
+    const families = collapseModelFamilies(models)
+
+    expect(families.map(f => f.id)).toEqual(['claude-sonnet-5-5', 'claude-sonnet-5'])
+  })
+
   it('preserves the family relative position among other families while promoting unseen within the family', () => {
     setSeenModels(new Set(['claude-sonnet-4-6', 'claude-opus-4-5', 'claude-haiku-4-5']))
 

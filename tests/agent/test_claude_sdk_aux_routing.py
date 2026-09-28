@@ -1718,3 +1718,15 @@ def test_sdk_exception_is_redacted_at_openai_facade(monkeypatch):
         )
 
     assert secret not in str(raised.value)
+
+
+def test_sdk_aux_default_is_the_newest_curated_sonnet():
+    """With no main model, the subscription aux lane defaults to the first Sonnet in the curated
+    Anthropic list (newest-first), so a new Sonnet release moves both together."""
+    from agent import claude_sdk_aux_client as sdk_aux
+    from hermes_cli.models_catalog_static import _PROVIDER_MODELS
+
+    newest_sonnet = next(m for m in _PROVIDER_MODELS["anthropic"] if "sonnet" in m)
+    assert sdk_aux.DEFAULT_MODEL == newest_sonnet
+    _client, model, label = sdk_aux.resolve_auto_route("")
+    assert (model, label) == (newest_sonnet, "claude-agent-sdk")
