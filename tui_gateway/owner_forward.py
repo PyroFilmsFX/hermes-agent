@@ -572,6 +572,20 @@ def _resolve_targets(requested: Any, claims: Mapping[str, Any], pol: Mapping[str
     return resolved, origin_title, None
 
 
+def _refused(rid: Any, code: int, tag: str, message: str) -> dict:
+    """The JSON-RPC error for a refused forward, logged as one line (live RCA 2026-09-28: a refused
+    forward left no trace). Codes and short tags only: never the text, the envelope or a key."""
+    from tui_gateway import server
+
+    logger.warning("owner.forward refused: code=%s reason=%s", code, tag)
+    return server._err(rid, code, message)
+
+
+def _reason_tag(reason: Any) -> str:
+    tag = str(reason or "invalid")
+    return tag if len(tag) <= 64 and all(c.isalnum() or c in "_-:." for c in tag) else "invalid"
+
+
 def forward_rpc(rid: Any, params: dict) -> dict:
     from tui_gateway import server
     from tui_gateway.transport import current_transport
@@ -579,23 +593,25 @@ def forward_rpc(rid: Any, params: dict) -> dict:
     # 1. Only a connected client. No transport = the mailbox, the resume path, a relay: in-process code.
     transport = current_transport()
     if transport is None:
-        return server._err(rid, ERR_CALLER, "owner.forward is refused to in-process callers")
+        return _refused(rid, ERR_CALLER, "in_process", "owner.forward is refused to in-process callers")
     # 2. Never a scoped session-spawn connection (ws.py already refuses the method there; defense in depth).
     if getattr(transport, "session_spawn_capability", None) is not None or "_session_spawn_capability" in params:
-        return server._err(rid, ERR_CALLER, "owner.forward is refused on a session-spawn connection")
+        return _refused(rid, ERR_CALLER, "session_spawn", "owner.forward is refused on a session-spawn connection")
     # 3. The grant: the root-owned anchor (re-read now), its active key, signature, claims, time; then
-    #    the nonce, burned before delivery starts.
+    #    the nonce, burned before delivery starts. The anchor is read per call, never from the spawn
+    #    env, so a key enrolled after this backend started verifies without a restart.
     pol = policy()
     verifier = _verifier
     if verifier is None or not pol["enabled"]:
-        return server._err(rid, ERR_DISABLED, "owner forward is disabled: this backend has no owner-grant binding")
+        return _refused(rid, ERR_DISABLED, "no_binding" if verifier is None else "disabled",
+                        "owner forward is disabled: this backend has no owner-grant binding")
     try:
         trusted_anchor = verifier.load_anchor()
     except AnchorUnavailable as exc:
-        return server._err(rid, ERR_DISABLED, f"{ANCHOR_REQUIRED_MESSAGE} ({exc.reason})")
+        return _refused(rid, ERR_DISABLED, _reason_tag(exc.reason), f"{ANCHOR_REQUIRED_MESSAGE} ({exc.reason})")
     except Exception:  # noqa: BLE001 - fail closed
         logger.warning("owner.forward anchor check raised", exc_info=True)
-        return server._err(rid, ERR_DISABLED, f"{ANCHOR_REQUIRED_MESSAGE} (anchor_error)")
+        return _refused(rid, ERR_DISABLED, "anchor_error", f"{ANCHOR_REQUIRED_MESSAGE} (anchor_error)")
     text = params.get("text")
     try:
         result = verifier.verify(params.get("envelope"), text, anchor=trusted_anchor)
@@ -603,21 +619,23 @@ def forward_rpc(rid: Any, params: dict) -> dict:
         logger.warning("owner.forward verifier raised", exc_info=True)
         result = VerifyResult(False, "verifier_error")
     if not result.ok or result.claims is None:
-        return server._err(rid, ERR_GRANT, f"owner grant refused ({result.reason or 'invalid'}); send again")
+        return _refused(rid, ERR_GRANT, _reason_tag(result.reason),
+                        f"owner grant refused ({result.reason or 'invalid'}); send again")
     claims = result.claims
     if not _NONCES.claim(str(claims["nonce"]), int(claims["deliver_by"]), int(time.time() * 1000)):
-        return server._err(rid, ERR_GRANT, "owner grant refused (nonce already used); send again")
+        return _refused(rid, ERR_GRANT, "nonce_used", "owner grant refused (nonce already used); send again")
     # 4. Content.
     if (refusal := _content_refusal(text, pol)) is not None:
-        return server._err(rid, ERR_CONTENT, refusal)
+        return _refused(rid, ERR_CONTENT, "content", refusal)
     # 5. Targets are bound to a served profile as well as a stored session id.
     targets, origin_title, refusal = _resolve_targets(params.get("targets"), claims, pol, None)
     if refusal is not None:
-        return server._err(rid, ERR_TARGET, refusal)
+        return _refused(rid, ERR_TARGET, "targets", refusal)
     # 6. Rate.
     if not _RATE.allow(int(pol["per_minute"]), time.monotonic()):
-        return server._err(rid, ERR_RATE, "too many forwards this minute; wait and send again")
+        return _refused(rid, ERR_RATE, "rate", "too many forwards this minute; wait and send again")
     results = deliver(claims, text, targets, origin_title=origin_title)
+    logger.info("owner.forward delivered: %s", ", ".join(str(r.get("status")) for r in results))
     return server._ok(rid, {"nonce": str(claims["nonce"]), "results": results})
 
 

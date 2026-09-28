@@ -430,14 +430,21 @@ export interface OwnerForwardConfirmDeps {
   /** The `HERMES_OWNER_GRANT_BACKEND` main handed the backend serving this profile, or null. */
   backendIdForProfile: (profile: string) => string | null
   /** Main's own lookup (`/api/sessions/{id}` with main's token, through the delivering backend's
-   *  profile). null = no such session. With `messageId`, also the stored row's role. */
+   *  profile). null = no such session (a 404). Any other failure (timeout, 5xx, unreachable backend)
+   *  throws an `OwnerForwardLookupError`, so an unreachable backend never reads as a missing session.
+   *  With `messageId`, also the stored row's role. */
   resolveSession: (
     profile: string,
     sessionId: string,
     backendProfile: string,
     opts?: { messageId: string | null }
   ) => Promise<ResolvedSession | null>
-  showMessageBox: (options: ConfirmDialogOptions) => Promise<{ response: number; checkboxChecked?: boolean }>
+  /** Shows the native confirm. `event` is the IPC event of the request, so main can parent the dialog
+   *  to the window that asked (a sheet on a hidden or other window is never seen and never settles). */
+  showMessageBox: (
+    options: ConfirmDialogOptions,
+    event?: unknown
+  ) => Promise<{ response: number; checkboxChecked?: boolean }>
   /** App-owned directory for "View full text" copies (created 0700). */
   fullTextDir?: string
   /** `shell.openPath`: opens the file in the owner's default app, outside any webContents. Resolves
@@ -451,7 +458,19 @@ export interface OwnerForwardConfirmDeps {
   formatTime?: (ms: number) => string
   randomBytes?: SignPorts['randomBytes']
   fs?: SignPorts['fs']
+  /** Receives one line per outcome: codes only, never the text, a title, an envelope or a key. */
   log?: (message: string) => void
+}
+
+/** A session lookup that failed for a reason other than "no such session". `kind` is a short code
+ *  (`http_503`, `timeout`, `unreachable`, …) that is safe to log and show. */
+export class OwnerForwardLookupError extends Error {
+  readonly kind: string
+
+  constructor(kind: string) {
+    super(`session lookup failed (${kind})`)
+    this.kind = /^[a-z0-9_]{1,40}$/.test(kind) ? kind : 'error'
+  }
 }
 
 export type OwnerForwardConfirmResult =
@@ -588,17 +607,23 @@ function parseRequest(raw: unknown): ParsedRequest | string {
 export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) {
   const gate = createConfirmRateGate(deps.now)
 
+  // Every outcome leaves one line in desktop.log (live RCA 2026-09-28: a refused forward left no
+  // trace anywhere). Codes only: never the text, a title, an envelope or key material.
+  const refused = (code: string, error: string): OwnerForwardConfirmResult => {
+    deps.log?.(`[owner-forward] confirm refused: ${code}`)
+
+    return refuse(code, error)
+  }
+
   return async function handleOwnerForwardConfirm(event: unknown, raw: unknown): Promise<OwnerForwardConfirmResult> {
     if (!deps.isTrustedSender(event)) {
-      deps.log?.('[owner-forward] confirm refused: not the app main frame')
-
-      return refuse('untrusted_sender', 'owner forward is only available from the app window')
+      return refused('untrusted_sender', 'owner forward is only available from the app window')
     }
 
     const req = parseRequest(raw)
 
     if (typeof req === 'string') {
-      return refuse('bad_request', req)
+      return refused('bad_request', req)
     }
 
     const slot = gate.tryOpen()
@@ -611,7 +636,7 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
             ? 'wait a moment before sending again'
             : 'too many confirms this minute'
 
-      return refuse(slot.reason, message)
+      return refused(slot.reason, message)
     }
 
     let cancelled = false
@@ -621,7 +646,10 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
       const backend = deps.backendIdForProfile(req.profile)
 
       if (!backend) {
-        return refuse('no_backend', 'this backend was not started by the app, so it cannot take signed forwards')
+        return refused(
+          'no_backend',
+          `the ${req.profile} backend was not started by the app, so it cannot take signed forwards`
+        )
       }
 
       // The origin, looked up by main: its title for the dialog and, for a message id, the stored
@@ -631,7 +659,7 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
       })
 
       if (!source) {
-        return refuse('source_missing', `no session ${req.origin.session_id} in profile ${req.profile}`)
+        return refused('source_missing', `no session ${req.origin.session_id} in profile ${req.profile}`)
       }
 
       const origin: SignRequest['sourceSession'] = {
@@ -647,7 +675,7 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
         const resolved = await deps.resolveSession(t.profile, t.session_id, req.profile)
 
         if (!resolved) {
-          return refuse('target_missing', `no session ${t.session_id} in profile ${t.profile}`)
+          return refused('target_missing', `no session ${t.session_id} in profile ${t.profile}`)
         }
 
         const claudeId =
@@ -723,7 +751,7 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
                 checkboxChecked: checkbox
               })
 
-              const answer = await deps.showMessageBox(options)
+              const answer = await deps.showMessageBox(options, event)
               checkbox = answer?.checkboxChecked === true
               const choice = typeof answer?.response === 'number' ? options.buttons[answer.response] : undefined
 
@@ -744,12 +772,15 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
 
       if (outcome.cancelled === true) {
         cancelled = true
+        const reason = (outcome as { reason: 'dialog' | 'touch_id' | 'unrecognized_scope' }).reason
+        deps.log?.(`[owner-forward] confirm cancelled: ${reason}`)
 
-        return { ok: false, cancelled: true, reason: (outcome as { reason: 'dialog' | 'touch_id' | 'unrecognized_scope' }).reason }
+        return { ok: false, cancelled: true, reason }
       }
 
       const signed = outcome as SignedOutcome
       const grant = signed.grants[0]
+      deps.log?.(`[owner-forward] confirm signed: ${signed.grants.length} grant(s), ${targets.length} target(s)`)
 
       return {
         ok: true,
@@ -760,17 +791,26 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
       }
     } catch (error) {
       if (error instanceof OwnerGrantSignError) {
-        return refuse(error.code, error.message)
+        return refused(error.code, error.message)
       }
 
       if (error instanceof FullTextViewError) {
-        deps.log?.(`[owner-forward] ${error.message}`)
-
-        return refuse('view_failed', error.message)
+        return refused('view_failed', error.message)
       }
 
+      if (error instanceof OwnerForwardLookupError) {
+        return refused(
+          'lookup_failed',
+          `main could not reach the ${req.profile} backend to look up the sessions (${error.kind}); try again`
+        )
+      }
+
+      // The key store's refusals (no_key, anchor_missing, anchor_mismatch, …) carry a code; only
+      // that code is logged (never the message, which may quote a path).
+      const code = (error as { code?: unknown })?.code
+      const detail = typeof code === 'string' && /^[a-z0-9_]{1,40}$/.test(code) ? code : 'error'
       const message = error instanceof Error ? error.message : String(error)
-      deps.log?.(`[owner-forward] confirm failed: ${message}`)
+      deps.log?.(`[owner-forward] confirm failed: sign_failed (${detail})`)
 
       return refuse('sign_failed', message)
     } finally {

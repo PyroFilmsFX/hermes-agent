@@ -364,7 +364,12 @@ import {
   type OwnerGrantConfirmRequest
 } from './owner-grant-anchor-install'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
-import { createOwnerForwardConfirmHandler, createOwnerGrantActionHandler, isAppChromeSender } from './owner-forward-confirm'
+import {
+  createOwnerForwardConfirmHandler,
+  createOwnerGrantActionHandler,
+  isAppChromeSender,
+  OwnerForwardLookupError
+} from './owner-forward-confirm'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
@@ -15443,8 +15448,24 @@ const handleOwnerForwardConfirm = createOwnerForwardConfirmHandler({
             : 'unknown',
         message_role: OWNER_SOURCE_ROLES.has(row.message_role) ? row.message_role : null
       }
-    } catch {
-      return null
+    } catch (error) {
+      // Only a 404 means "no such session". A timeout, a 5xx or an unreachable backend is a lookup
+      // failure the owner can retry, never reported as a missing session (live RCA 2026-09-28).
+      const status = Number((error as { statusCode?: unknown })?.statusCode)
+
+      if (status === 404) {
+        return null
+      }
+
+      const message = error instanceof Error ? error.message : ''
+
+      throw new OwnerForwardLookupError(
+        Number.isInteger(status) && status > 0
+          ? `http_${status}`
+          : /timed? ?out/i.test(message)
+            ? 'timeout'
+            : 'unreachable'
+      )
     }
   },
   // "View full text": an app-owned 0700 dir under userData, opened by the OS default app (never a
@@ -15454,8 +15475,18 @@ const handleOwnerForwardConfirm = createOwnerForwardConfirmHandler({
     return path.join(app.getPath('userData'), 'owner-forward-view')
   },
   openPath: file => shell.openPath(file),
-  showMessageBox: async options => {
-    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  // Parented to the window that asked (the sender's), not always mainWindow: a sheet attached to a
+  // hidden or other window is never seen, so the confirm would never settle.
+  showMessageBox: async (options, event) => {
+    const sender = (event as { sender?: unknown } | null | undefined)?.sender
+    const asking = sender ? BrowserWindow.fromWebContents(sender as Electron.WebContents) : null
+
+    const parent =
+      asking && !asking.isDestroyed() && asking.isVisible()
+        ? asking
+        : mainWindow && !mainWindow.isDestroyed()
+          ? mainWindow
+          : null
 
     return parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options)
   },

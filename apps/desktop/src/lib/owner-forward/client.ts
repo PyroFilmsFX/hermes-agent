@@ -43,7 +43,7 @@ export interface ForwardResultLine {
 
 export type ForwardOutcome =
   | { kind: 'cancelled' }
-  | { kind: 'error'; message: string }
+  | { kind: 'error'; message: string; code?: string }
   | { kind: 'sent'; decisionId: string; results: ForwardResultLine[] }
 
 export interface ForwardSheetState {
@@ -128,6 +128,20 @@ export function forwardCandidates(originSessionId: null | string): ForwardCandid
 
 type GatewayRequest = (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>
 
+/** One console line per failed forward (live RCA 2026-09-28: a refusal left no trace anywhere).
+ *  Codes only: never the text or the envelope. */
+function forwardFailed(stage: 'confirm' | 'deliver' | 'setup', code: string, message: string): ForwardOutcome {
+  console.warn(`[owner-forward] ${stage} failed: ${code}`)
+
+  return { kind: 'error', message, code }
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+
+  return typeof code === 'string' || typeof code === 'number' ? String(code) : 'error'
+}
+
 let gatewayOverride: GatewayRequest | null = null
 
 export function setForwardGatewayRequestForTests(request: GatewayRequest | null): void {
@@ -173,14 +187,14 @@ export async function sendOwnerForward(
   const bridge = window.hermesDesktop?.ownerForward
 
   if (!bridge) {
-    return { kind: 'error', message: 'Forwarding needs the desktop app.' }
+    return forwardFailed('setup', 'no_bridge', 'Forwarding needs the desktop app.')
   }
 
   const subject = input.subject?.trim()
   const request = gatewayRequest()
 
   if (!request) {
-    return { kind: 'error', message: 'Hermes gateway unavailable' }
+    return forwardFailed('setup', 'no_gateway', 'Hermes gateway unavailable')
   }
 
   let textToSign = input.text
@@ -194,8 +208,9 @@ export async function sendOwnerForward(
     if (typeof masked?.text === 'string') {
       textToSign = masked.text
     }
-  } catch {
+  } catch (error) {
     // If secrets.mask fails or is unavailable, keep textToSign as input.text
+    console.warn(`[owner-forward] secrets.mask failed: ${errorCode(error)}; signing the text as shown`)
   }
 
   let confirmed: Awaited<ReturnType<typeof bridge.confirm>>
@@ -213,11 +228,19 @@ export async function sendOwnerForward(
       ...(subject ? { subject } : {})
     })
   } catch (error) {
-    return { kind: 'error', message: error instanceof Error ? error.message : String(error) }
+    return forwardFailed('confirm', 'ipc_error', error instanceof Error ? error.message : String(error))
+  }
+
+  if (!confirmed || typeof confirmed !== 'object') {
+    return forwardFailed('confirm', 'no_answer', 'The app did not answer the confirm request.')
   }
 
   if (!confirmed.ok) {
-    return confirmed.cancelled ? { kind: 'cancelled' } : { kind: 'error', message: confirmed.error }
+    if (confirmed.cancelled) {
+      return { kind: 'cancelled' }
+    }
+
+    return forwardFailed('confirm', confirmed.code || 'refused', confirmed.error || 'The forward was refused.')
   }
 
   hooks.onConfirmed?.()
@@ -239,7 +262,7 @@ export async function sendOwnerForward(
 
     outcome = { kind: 'sent', decisionId: confirmed.decisionId, results }
   } catch (error) {
-    outcome = { kind: 'error', message: error instanceof Error ? error.message : String(error) }
+    outcome = forwardFailed('deliver', errorCode(error), error instanceof Error ? error.message : String(error))
   }
 
   if (input.proposalId) {

@@ -305,8 +305,13 @@ export function ForwardSheet() {
         {phase === 'sending' && <p className="text-xs text-muted-foreground">{copy.sending}</p>}
         {outcome?.kind === 'cancelled' && <p className="text-xs text-muted-foreground">{copy.cancelled}</p>}
         {outcome?.kind === 'error' && (
-          <p className="text-xs text-destructive">
+          <p
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs font-medium text-destructive"
+            data-slot="owner-forward-error"
+            role="alert"
+          >
             {copy.failed}: {outcome.message}
+            {outcome.code && <span className="ml-1 font-mono text-[0.6875rem] opacity-80">({outcome.code})</span>}
           </p>
         )}
         {outcome?.kind === 'sent' && (
