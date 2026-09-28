@@ -7,14 +7,11 @@ import {
   useMessagePartText
 } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type ComponentProps, type FC, type ReactNode, useEffect, useRef, useState } from 'react'
+import { type ComponentProps, type FC, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { CatalogInstallTool } from '@/components/assistant-ui/catalog-install-tool'
 import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
-import {
-  isOwnerForwardProposeName,
-  OwnerForwardProposalTool
-} from '@/components/owner-forward/owner-forward-proposal-tool'
 import { ConnectorExecution, ConnectorTool } from '@/components/assistant-ui/connector-tool'
 import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { McpSetupTool } from '@/components/assistant-ui/mcp-setup-tool'
@@ -27,6 +24,11 @@ import { ActivityTimerText } from '@/components/chat/activity-timer-text'
 import { GeneratedImage } from '@/components/chat/generated-image-result'
 import { SCAFFOLD_LABEL_CLASS, SCAFFOLD_META_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
 import { useOnboardingChatActive } from '@/components/onboarding-chat/assembly'
+import {
+  isOwnerForwardProposeName,
+  OwnerForwardProposalTool
+} from '@/components/owner-forward/owner-forward-proposal-tool'
+import { type SendToOrigin, SendToOriginProvider } from '@/components/owner-forward/send-to-block'
 import { useI18n } from '@/i18n'
 import { mcpTargets, toolLabels } from '@/lib/connector-tools'
 import { generatedImageFromResult } from '@/lib/generated-images'
@@ -159,6 +161,18 @@ type TimelineTextPartProps = TextMessagePartProps & { completedAt?: number; time
 
 const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestamp }) => {
   const { text } = useMessagePartText()
+  const messageId = useAuiState(s => s.message.id)
+  const isAssistant = useAuiState(s => s.message.role === 'assistant')
+  const storedId = useStore(useSessionView().$storedId)
+
+  // D33: `:::send-to` blocks are live in the model's own text. An assistant
+  // turn spans several stored rows, so it carries no single row id (same as
+  // "Forward to…"); main signs the gesture's role.
+  const sendToOrigin = useMemo<null | SendToOrigin>(
+    () =>
+      isAssistant ? { session_id: storedId ?? null, message_id: null, role: 'assistant', messageKey: messageId } : null,
+    [isAssistant, messageId, storedId]
+  )
 
   // assistant-ui adds an empty continuation after a tool starts. It is not
   // prose yet and must not create paragraph spacing above pending approvals.
@@ -167,10 +181,10 @@ const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestam
   }
 
   return (
-    <>
+    <SendToOriginProvider value={sendToOrigin}>
       <TimelineTimestamp className="mb-0.5 block" completedAt={completedAt} timestamp={timestamp} />
       <MarkdownText />
-    </>
+    </SendToOriginProvider>
   )
 }
 

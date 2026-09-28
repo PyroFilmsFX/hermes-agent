@@ -3134,6 +3134,20 @@ export interface Translations {
     composerPlaceholder: (title: string) => string
     commandRefused: string
     tooLong: (max: number) => string
+    /** D33 `:::send-to` block. */
+    sendToButton: (target: string) => string
+    sendToSent: string
+    sendToFor: (target: string) => string
+    sendToNoTarget: string
+    sendToNoSession: (name: string) => string
+    sendToManySessions: (count: number, name: string) => string
+    sendToEmpty: string
+    sendToStreaming: string
+    sendToUnclosed: string
+    sendToUnsaved: string
+    sendToChecking: string
+    sendToServiceOff: string
+    sendToServiceUnavailable: string
   }
   composer: {
     message: string

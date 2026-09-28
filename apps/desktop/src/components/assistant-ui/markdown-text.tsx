@@ -16,6 +16,7 @@ import { chunkByLines, SyntaxHighlighter } from '@/components/chat/shiki-highlig
 import { TranscriptVideo } from '@/components/chat/transcript-video'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
+import { SendToBlock, SendToSourceProvider } from '@/components/owner-forward/send-to-block'
 import { useMediaImage } from '@/hooks/use-media-image'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { renderMediaTags } from '@/lib/chat-messages/parts'
@@ -36,6 +37,7 @@ import {
   validImageDimensions
 } from '@/lib/media'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
+import { sendToFences, sendToIndexFromLanguage, sendToPlaceholders } from '@/lib/owner-forward/send-to-directive'
 import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { sessionRefFromMarkdownHref } from '@/lib/session-refs'
 import { isDirectiveInProgress } from '@/lib/transcript-directives'
@@ -102,9 +104,13 @@ function useCodePlugin(): CodePlugin | null {
 // Replaces Streamdown's `parseIncompleteMarkdown` (full-text remend per
 // flush) with a tail-bounded repair. Must stay module-scope so the prop
 // identity is stable across renders.
+//
+// `:::send-to` blocks (D33) are lifted out before the prose rewrites can touch
+// them and come back as fenced placeholders the SyntaxHighlighter override
+// claims; the block itself reads the raw text (SendToSourceProvider).
 function preprocessWithTailRepair(text: string): string {
   try {
-    return tailBoundedRemend(preprocessMarkdown(text))
+    return tailBoundedRemend(sendToFences(preprocessMarkdown(sendToPlaceholders(text))))
   } catch {
     return text
   }
@@ -714,6 +720,19 @@ function MarkdownTextSurface({
         // right rail; every other language falls back to the Shiki-highlighted
         // code block.
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => {
+          const sendToIndex = sendToIndexFromLanguage(props.language)
+
+          if (sendToIndex !== null) {
+            return (
+              <SendToBlock
+                index={sendToIndex}
+                inert={scratchpad}
+                previewOnly={previewOnly}
+                streaming={isStreaming}
+              />
+            )
+          }
+
           const artifact =
             disableArtifacts || previewOnly || scratchpad ? null : detectArtifact(props.language, props.code)
 
@@ -761,23 +780,25 @@ function MarkdownTextSurface({
       fallback={() => <HugeTextFallback containerClassName={containerClassName} text={text} />}
       label="markdown-render"
     >
-      <StreamdownTextPrimitive
-        components={components}
-        containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
-        containerProps={surfaceContainerProps}
-        defer={defer}
-        lineNumbers={false}
-        mode="streaming"
-        // Incomplete-markdown repair runs in preprocessWithTailRepair on the
-        // full accumulated text; the built-in tail-bounded remend is disabled
-        // because a custom parseMarkdownIntoBlocksFn is supplied, and
-        // parseIncompleteMarkdown stays false to avoid a second full-text
-        // remend pass.
-        parseIncompleteMarkdown={false}
-        parseMarkdownIntoBlocksFn={parseMarkdownIntoBlocksCached}
-        plugins={plugins}
-        preprocess={preprocessWithTailRepair}
-      />
+      <SendToSourceProvider value={text}>
+        <StreamdownTextPrimitive
+          components={components}
+          containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
+          containerProps={surfaceContainerProps}
+          defer={defer}
+          lineNumbers={false}
+          mode="streaming"
+          // Incomplete-markdown repair runs in preprocessWithTailRepair on the
+          // full accumulated text; the built-in tail-bounded remend is disabled
+          // because a custom parseMarkdownIntoBlocksFn is supplied, and
+          // parseIncompleteMarkdown stays false to avoid a second full-text
+          // remend pass.
+          parseIncompleteMarkdown={false}
+          parseMarkdownIntoBlocksFn={parseMarkdownIntoBlocksCached}
+          plugins={plugins}
+          preprocess={preprocessWithTailRepair}
+        />
+      </SendToSourceProvider>
     </ErrorBoundary>
   )
 }

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { DesktopOwnerGrantStatus } from '@/global'
 import { Loader2 } from '@/lib/icons'
+import { setOwnerGrantStatus } from '@/lib/owner-forward/service'
 import { notifyError } from '@/store/notifications'
 
 import { ListRow } from './primitives'
@@ -24,6 +25,8 @@ export function OwnerGrantRow() {
     void window.hermesDesktop?.ownerGrant
       ?.status()
       .then(next => {
+        setOwnerGrantStatus(next)
+
         if (!cancelled) {
           setStatus(next)
         }
@@ -45,6 +48,7 @@ export function OwnerGrantRow() {
     try {
       const res = await window.hermesDesktop.ownerGrant!.action(action)
       setStatus(res.status)
+      setOwnerGrantStatus(res.status)
 
       if (!res.ok && res.reason !== 'cancelled') {
         notifyError(new Error(res.reason ?? 'failed'), 'Owner key change did not finish')

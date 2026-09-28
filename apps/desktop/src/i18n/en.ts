@@ -3701,7 +3701,20 @@ export const en: Translations = {
     ttlSummary: ttl => `Expires after ${ttl}`,
     composerPlaceholder: title => `Message for ${title}`,
     commandRefused: 'Commands run in this chat. Clear the send-to target first.',
-    tooLong: max => `A forward is at most ${max} characters.`
+    tooLong: max => `A forward is at most ${max} characters.`,
+    sendToButton: target => `Send to ${target}`,
+    sendToSent: 'Sent ✓',
+    sendToFor: target => `For ${target}`,
+    sendToNoTarget: 'This block names no session. Add session="…".',
+    sendToNoSession: name => `No session named ${name}`,
+    sendToManySessions: (count, name) => `${count} sessions match ${name}`,
+    sendToEmpty: 'Nothing to send.',
+    sendToStreaming: 'Waiting for the message to finish.',
+    sendToUnclosed: 'This block has no closing ::: line.',
+    sendToUnsaved: "This chat isn't saved yet.",
+    sendToChecking: 'Checking owner forwarding…',
+    sendToServiceOff: 'Owner forwarding is off. Turn on "Let conductor verify owner decisions" in Settings → Gateways.',
+    sendToServiceUnavailable: 'Owner forwarding is unavailable here. See Settings → Gateways.'
   },
   composer: {
     message: 'Message',

@@ -55,6 +55,8 @@ export interface ForwardSheetState {
   ttlMs: number
   subject: string
   proposalId?: string
+  /** Where the settled outcome lands in `$forwardReceipts` (a `:::send-to` block's key). */
+  receiptKey?: string
 }
 
 export interface ForwardSheetInit {
@@ -66,11 +68,13 @@ export interface ForwardSheetInit {
   ttlMs?: number
   subject?: null | string
   proposalId?: string
+  receiptKey?: string
 }
 
 export const $forwardSheet = atom<ForwardSheetState | null>(null)
 
-/** Settled outcomes by proposal id, so a proposal card goes inert after its forward. */
+/** Settled outcomes by proposal id (or a `:::send-to` receipt key), so a proposal card or send-to
+ *  block goes inert after its forward. Session-local: it lives as long as the renderer. */
 export const $forwardReceipts = atom<Record<string, ForwardOutcome>>({})
 
 function sheetState(init: ForwardSheetInit): ForwardSheetState {
@@ -85,7 +89,8 @@ function sheetState(init: ForwardSheetInit): ForwardSheetState {
     scope,
     ttlMs: Math.min(init.ttlMs ?? ttlPolicy.defaultTtlMs, ttlPolicy.maxTtlMs),
     subject: init.subject ?? '',
-    ...(init.proposalId ? { proposalId: init.proposalId } : {})
+    ...(init.proposalId ? { proposalId: init.proposalId } : {}),
+    ...(init.receiptKey ? { receiptKey: init.receiptKey } : {})
   }
 }
 
@@ -167,6 +172,7 @@ export interface SendForwardInput {
   ttlMs?: number
   subject?: null | string
   proposalId?: string
+  receiptKey?: string
 }
 
 function titleFor(id: string, targets: ForwardTarget[]): string {
@@ -265,8 +271,10 @@ export async function sendOwnerForward(
     outcome = forwardFailed('deliver', errorCode(error), error instanceof Error ? error.message : String(error))
   }
 
-  if (input.proposalId) {
-    $forwardReceipts.set({ ...$forwardReceipts.get(), [input.proposalId]: outcome })
+  for (const key of [input.proposalId, input.receiptKey]) {
+    if (key) {
+      $forwardReceipts.set({ ...$forwardReceipts.get(), [key]: outcome })
+    }
   }
 
   return outcome

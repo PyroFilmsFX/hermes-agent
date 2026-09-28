@@ -1,11 +1,14 @@
 import { MessagePrimitive, useAuiState } from '@assistant-ui/react'
-import { type FC, useState } from 'react'
+import { useStore } from '@nanostores/react'
+import { type FC, useMemo, useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
-import { ForwardMessageButton } from '@/components/owner-forward/forward-message-button'
 import { SCAFFOLD_GLYPH_CLASS, SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
+import { ForwardMessageButton } from '@/components/owner-forward/forward-message-button'
+import { type SendToOrigin, SendToOriginProvider } from '@/components/owner-forward/send-to-block'
 import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
@@ -71,6 +74,20 @@ interface BackgroundResultProps {
 
 export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, process, peerMetadata, rowId }) => {
   const [open, setOpen] = useState(false)
+  const messageId = useAuiState(s => s.message.id)
+  const storedId = useStore(useSessionView().$storedId)
+
+  // D33: a peer's or a background task's report may carry `:::send-to` blocks.
+  // The row id (when there is one) lets main sign the stored row's role.
+  const sendToOrigin = useMemo<SendToOrigin>(
+    () => ({
+      session_id: storedId ?? null,
+      message_id: rowId !== undefined ? String(rowId) : null,
+      role: peerMetadata ? 'peer' : null,
+      messageKey: rowId !== undefined ? `row:${rowId}` : messageId
+    }),
+    [messageId, peerMetadata, rowId, storedId]
+  )
 
   return (
     <div
@@ -105,7 +122,9 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
           <LogView className="mt-2 max-h-80 overscroll-x-contain overscroll-y-auto">{report}</LogView>
         ) : (
           <div className="mt-2 max-h-80 min-w-0 max-w-full overflow-auto overscroll-x-contain overscroll-y-auto wrap-anywhere">
-            <MarkdownTextContent isRunning={false} text={report} />
+            <SendToOriginProvider value={sendToOrigin}>
+              <MarkdownTextContent isRunning={false} text={report} />
+            </SendToOriginProvider>
           </div>
         ))}
     </div>

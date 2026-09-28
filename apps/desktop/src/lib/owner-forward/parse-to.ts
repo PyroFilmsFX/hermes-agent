@@ -117,7 +117,8 @@ export function parseToDraft(text: string): ParsedTo | null {
   return { ok: true, tokens, body }
 }
 
-function matchesFor(token: ToToken, candidates: readonly ForwardCandidate[]): ForwardCandidate[] {
+/** Every candidate one token matches. Shared with the `:::send-to` directive target resolution. */
+export function matchesFor(token: ToToken, candidates: readonly ForwardCandidate[]): ForwardCandidate[] {
   const byTitle = candidates.filter(c => c.title === token.value)
   const titles = byTitle.length ? byTitle : candidates.filter(c => c.title?.toLowerCase() === token.value.toLowerCase())
 

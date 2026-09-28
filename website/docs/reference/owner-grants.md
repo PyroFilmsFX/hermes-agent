@@ -4,6 +4,9 @@ Owner grants are signed, session-bound evidence for a specific owner decision. T
 conductor hook verify a decision without carrying signing keys or implementing cryptography.
 The quote records evidence; only the signed scopes grant authority.
 
+Sessions can hand the owner a decision to deliver with a [`:::send-to` block](./send-to-directive.md);
+the owner's click and confirm produce the grant.
+
 ## Grant format
 
 A grant file is named `<issued_at_ms>-<grant_id>.json` in the anchor-pinned grants directory.

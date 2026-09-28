@@ -171,7 +171,8 @@ export function ForwardSheet() {
       scope: sheet.scope,
       ttlMs,
       subject: subjectNeeded ? sheet.subject : null,
-      proposalId: sheet.proposalId
+      proposalId: sheet.proposalId,
+      receiptKey: sheet.receiptKey
     })
 
     setOutcome(result)
