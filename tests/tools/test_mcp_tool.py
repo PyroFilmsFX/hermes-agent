@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -822,7 +822,8 @@ class TestToolHandler:
             with self._patch_mcp_loop():
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "hello world"
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            mock_session.call_tool.assert_called_once_with(
+                "greet", arguments={"name": "world"}, progress_callback=ANY, meta=ANY)
         finally:
             _servers.pop("test_srv", None)
 
@@ -854,7 +855,8 @@ class TestToolHandler:
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "reconnected"
             reconnect.assert_called_once()
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            mock_session.call_tool.assert_called_once_with(
+                "greet", arguments={"name": "world"}, progress_callback=ANY, meta=ANY)
         finally:
             _servers.pop("test_srv", None)
 
