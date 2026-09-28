@@ -3362,7 +3362,9 @@ export const zh = defineLocale({
     },
     newSessionIn: label => `在 ${label} 中新建会话`,
     showMoreIn: (count, label) => `在 ${label} 中再显示 ${count} 个`,
-    laneRollup: (count, running) => `${count} 个工作树${running && running > 0 ? ` · ${running} 个运行中` : ''}`,
+    laneRollup: (active, done, running) =>
+      `${active} 个进行中 · ${done} 个已完成${running && running > 0 ? ` · ${running} 个运行中` : ''}`,
+    laneRollupDone: count => `已完成 (${count})`,
     loading: '加载中…',
     loadMore: '加载更多',
     loadCount: step => `再加载 ${step} 个`,

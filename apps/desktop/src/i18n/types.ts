@@ -3007,7 +3007,8 @@ export interface Translations {
     }
     newSessionIn: (label: string) => string
     showMoreIn: (count: number, label: string) => string
-    laneRollup: (count: number, running?: number) => string
+    laneRollup: (active: number, done: number, running?: number) => string
+    laneRollupDone: (count: number) => string
     loading: string
     loadMore: string
     loadCount: (step: number) => string

@@ -143,6 +143,184 @@ test('listWorktrees reports no merged branches when no default branch resolves',
   }
 })
 
+// A throwaway repo with an identity, and a helper that runs git in any of its
+// directories (the main checkout by default).
+function tempRepo(prefix: string, initArgs: string[] = ['init', '-b', 'main']) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' }).toString().trim()
+
+  const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' }).toString().trim()
+
+  git(...initArgs)
+  git('config', 'user.name', 'Hermes Test')
+  git('config', 'user.email', 'hermes@example.test')
+  git('config', 'commit.gpgsign', 'false')
+
+  const commitFile = (cwd: string, name: string, body = `${name}\n`) => {
+    fs.writeFileSync(path.join(cwd, name), body)
+    gitIn(cwd, 'add', name)
+    gitIn(cwd, 'commit', '-m', `add ${name}`)
+
+    return gitIn(cwd, 'rev-parse', 'HEAD')
+  }
+
+  return { commitFile, dir, git, gitIn }
+}
+
+test('listWorktrees resolves a trunk that exists only as origin/<trunk> (no local trunk branch)', async () => {
+  const upstream = tempRepo('hermes-wt-upstream-')
+  const cloneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-wt-clone-'))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: cloneDir, stdio: 'pipe' }).toString().trim()
+
+  try {
+    upstream.commitFile(upstream.dir, 'README')
+    upstream.git('switch', '-c', 'feature/merged')
+    upstream.commitFile(upstream.dir, 'merged.txt')
+    upstream.git('switch', 'main')
+    upstream.git('merge', '--ff-only', 'feature/merged')
+
+    execFileSync('git', ['clone', '--quiet', upstream.dir, cloneDir], { stdio: 'pipe' })
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    git('config', 'commit.gpgsign', 'false')
+
+    // The main checkout sits on a topic branch and the local trunk is gone:
+    // trunk now exists ONLY as origin/main.
+    git('switch', '-c', 'topic')
+    git('branch', '-D', 'main')
+    git('branch', 'feature/merged', 'origin/feature/merged')
+    git('worktree', 'add', path.join(cloneDir, 'merged-wt'), 'feature/merged')
+    git('worktree', 'add', '-b', 'feature/unmerged', path.join(cloneDir, 'unmerged-wt'), 'origin/main')
+    fs.writeFileSync(path.join(cloneDir, 'unmerged-wt', 'pending.txt'), 'pending\n')
+    execFileSync('git', ['add', 'pending.txt'], { cwd: path.join(cloneDir, 'unmerged-wt') })
+    execFileSync('git', ['commit', '-m', 'pending'], { cwd: path.join(cloneDir, 'unmerged-wt') })
+
+    const byBranch = Object.fromEntries((await listWorktrees(cloneDir, 'git')).map(tree => [tree.branch, tree]))
+
+    assert.equal(byBranch['feature/merged'].merged, true)
+    assert.equal(byBranch['feature/merged'].mergedVia, 'merged-ancestor')
+    assert.equal(byBranch['feature/unmerged'].merged, false)
+    assert.equal(byBranch['feature/unmerged'].mergedVia, null)
+  } finally {
+    fs.rmSync(upstream.dir, { recursive: true, force: true })
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees treats a branch merged into origin/<trunk> as merged while the local trunk is stale', async () => {
+  const upstream = tempRepo('hermes-wt-upstream-stale-')
+  const cloneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-wt-clone-stale-'))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: cloneDir, stdio: 'pipe' }).toString().trim()
+
+  try {
+    upstream.commitFile(upstream.dir, 'README')
+    execFileSync('git', ['clone', '--quiet', upstream.dir, cloneDir], { stdio: 'pipe' })
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    git('config', 'commit.gpgsign', 'false')
+
+    // Work lands upstream (the PR merged on the remote); the clone fetches, but
+    // its local main is never fast-forwarded.
+    upstream.git('switch', '-c', 'feature/landed')
+    upstream.commitFile(upstream.dir, 'landed.txt')
+    upstream.git('switch', 'main')
+    upstream.git('merge', '--ff-only', 'feature/landed')
+    git('fetch', '--quiet', 'origin')
+    git('branch', 'feature/landed', 'origin/feature/landed')
+    git('worktree', 'add', path.join(cloneDir, 'landed-wt'), 'feature/landed')
+
+    const landed = (await listWorktrees(cloneDir, 'git')).find(tree => tree.branch === 'feature/landed')
+
+    assert.equal(landed?.merged, true)
+    assert.equal(landed?.mergedVia, 'merged-ancestor')
+  } finally {
+    fs.rmSync(upstream.dir, { recursive: true, force: true })
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees proves squash/rebase merges with git cherry and fails safe on partial ones', async () => {
+  const { commitFile, dir, git, gitIn } = tempRepo('hermes-wt-cherry-')
+
+  try {
+    commitFile(dir, 'README')
+
+    // One-commit branch, squash-merged into main.
+    const squashWt = path.join(dir, 'squash-wt')
+    git('worktree', 'add', '-b', 'feature/squash', squashWt, 'main')
+    commitFile(squashWt, 'squash.txt')
+    git('merge', '--squash', 'feature/squash')
+    git('commit', '-m', 'Squash feature/squash (#1)')
+
+    // Two-commit branch, rebase-merged (each commit replayed onto main).
+    const rebaseWt = path.join(dir, 'rebase-wt')
+    git('worktree', 'add', '-b', 'feature/rebased', rebaseWt, 'main~1')
+    const r1 = commitFile(rebaseWt, 'r1.txt')
+    const r2 = commitFile(rebaseWt, 'r2.txt')
+    git('cherry-pick', r1, r2)
+
+    // Two-commit branch with only ONE commit landed: not accounted for.
+    const partialWt = path.join(dir, 'partial-wt')
+    git('worktree', 'add', '-b', 'feature/partial', partialWt, 'main')
+    const p1 = commitFile(partialWt, 'p1.txt')
+    commitFile(partialWt, 'p2.txt')
+    git('cherry-pick', p1)
+
+    // Never landed.
+    const openWt = path.join(dir, 'open-wt')
+    git('worktree', 'add', '-b', 'feature/open', openWt, 'main')
+    commitFile(openWt, 'open.txt')
+
+    const byBranch = Object.fromEntries((await listWorktrees(dir, 'git')).map(tree => [tree.branch, tree]))
+
+    assert.equal(byBranch['feature/squash'].mergedVia, 'merged-squash')
+    assert.equal(byBranch['feature/squash'].merged, true)
+    assert.equal(byBranch['feature/rebased'].mergedVia, 'merged-squash')
+    assert.equal(byBranch['feature/partial'].mergedVia, null)
+    assert.equal(byBranch['feature/partial'].merged, false)
+    assert.equal(byBranch['feature/open'].mergedVia, null)
+    assert.equal(byBranch['feature/open'].merged, false)
+    // The trunk itself is never reported as merged into itself.
+    assert.equal(byBranch.main.merged, false)
+    // A second pass (served from the cherry cache) gives the same answer.
+    const again = (await listWorktrees(dir, 'git')).find(tree => tree.branch === 'feature/squash')
+    assert.equal(again?.mergedVia, 'merged-squash')
+    assert.ok(gitIn(squashWt, 'status', '--porcelain') === '')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees reports whether each linked worktree is clean, and unknown when it cannot tell', async () => {
+  const { commitFile, dir, git } = tempRepo('hermes-wt-clean-')
+
+  try {
+    commitFile(dir, 'README')
+    const cleanWt = path.join(dir, 'clean-wt')
+    const untrackedWt = path.join(dir, 'untracked-wt')
+    const modifiedWt = path.join(dir, 'modified-wt')
+    const goneWt = path.join(dir, 'gone-wt')
+
+    git('worktree', 'add', '-b', 'lane/clean', cleanWt, 'main')
+    git('worktree', 'add', '-b', 'lane/untracked', untrackedWt, 'main')
+    git('worktree', 'add', '-b', 'lane/modified', modifiedWt, 'main')
+    git('worktree', 'add', '-b', 'lane/gone', goneWt, 'main')
+    fs.writeFileSync(path.join(untrackedWt, 'scratch.txt'), 'scratch\n')
+    fs.writeFileSync(path.join(modifiedWt, 'README'), 'edited\n')
+    // The directory vanished without `git worktree remove`: status cannot run.
+    fs.rmSync(goneWt, { recursive: true, force: true })
+
+    const byBranch = Object.fromEntries((await listWorktrees(dir, 'git')).map(tree => [tree.branch, tree]))
+
+    assert.equal(byBranch['lane/clean'].clean, true)
+    assert.equal(byBranch['lane/untracked'].clean, false)
+    assert.equal(byBranch['lane/modified'].clean, false)
+    assert.equal(byBranch['lane/gone'].clean, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('ensureGitRepo: inits a plain dir with a root commit so worktrees branch', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-wt-'))
   const git = (...args) => execFileSync('git', args, { cwd: dir }).toString().trim()

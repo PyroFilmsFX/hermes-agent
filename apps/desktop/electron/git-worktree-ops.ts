@@ -39,9 +39,11 @@ function parseWorktrees(out) {
         trees.push(cur)
       }
 
-      cur = { path: line.slice(9).trim(), branch: null, detached: false, bare: false, locked: false }
+      cur = { path: line.slice(9).trim(), branch: null, head: null, detached: false, bare: false, locked: false }
     } else if (!cur) {
       continue
+    } else if (line.startsWith('HEAD ')) {
+      cur.head = line.slice(5).trim() || null
     } else if (line.startsWith('branch ')) {
       cur.branch = line
         .slice(7)
@@ -63,6 +65,139 @@ function parseWorktrees(out) {
   return trees
 }
 
+// The trunk as refs that actually exist: the local branch, `origin/<trunk>`, or
+// both. `defaultBranch` accepts a trunk that exists only on the remote, and a
+// bare `git branch --merged main` resolves nothing there, so every lane read as
+// unmerged. Refs that point at the same commit collapse into one.
+async function resolveTrunkRefs(gitBin, cwd, trunk) {
+  const refs = []
+  const seen = new Set()
+
+  for (const ref of [`refs/heads/${trunk}`, `refs/remotes/origin/${trunk}`]) {
+    const sha = await gitLine(gitBin, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], cwd)
+
+    if (sha && !seen.has(sha)) {
+      seen.add(sha)
+      refs.push({ ref, sha })
+    }
+  }
+
+  return refs
+}
+
+// Local branches reachable from any trunk ref (merged by ancestry). A failed
+// probe adds nothing, so a branch is never reported merged on missing evidence.
+async function ancestorMergedBranches(gitBin, cwd, trunkRefs) {
+  const merged = new Set()
+
+  for (const { ref } of trunkRefs) {
+    const out = await gitLine(gitBin, ['for-each-ref', '--format=%(refname:short)', '--merged', ref, 'refs/heads'], cwd)
+
+    for (const name of out.split('\n')) {
+      if (name.trim()) {
+        merged.add(name.trim())
+      }
+    }
+  }
+
+  return merged
+}
+
+// `git cherry` verdicts keyed by (repo, branch sha, trunk sha): exactly what the
+// command consumes, so a hit is always still true. Only definite answers are
+// stored; an errored probe is retried on the next pass.
+const CHERRY_CACHE_MAX = 4096
+const cherryCache = new Map()
+
+// True when every commit the branch has over the trunk is patch-equivalent to
+// one already in the trunk (a squash of a one-commit branch, or a rebase merge),
+// and there is at least one such commit. False when any commit is unique. Null
+// when git could not answer.
+async function cherryMerged(gitBin, cwd, branch, branchSha, trunkSha) {
+  const key = branchSha ? `${cwd}\0${branchSha}\0${trunkSha}` : ''
+
+  if (key && cherryCache.has(key)) {
+    return cherryCache.get(key)
+  }
+
+  let out
+
+  try {
+    out = await runGit(gitBin, ['cherry', trunkSha, `refs/heads/${branch}`], cwd)
+  } catch {
+    return null
+  }
+
+  const lines = out
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  const verdict = lines.length > 0 && lines.every(line => line.startsWith('-'))
+
+  if (key) {
+    if (cherryCache.size >= CHERRY_CACHE_MAX) {
+      cherryCache.delete(cherryCache.keys().next().value)
+    }
+
+    cherryCache.set(key, verdict)
+  }
+
+  return verdict
+}
+
+// Whether a worktree has no uncommitted changes (tracked or untracked). Null
+// when status cannot run: the directory is gone, locked, or git failed.
+// `--no-optional-locks` keeps this a pure read: no index refresh is written.
+async function worktreeClean(gitBin, worktreePath) {
+  try {
+    const out = await runGit(gitBin, ['--no-optional-locks', 'status', '--porcelain'], worktreePath)
+
+    return out.trim() === ''
+  } catch {
+    return null
+  }
+}
+
+// Bounded parallel map: with ~200 worktrees an unbounded fan-out would spawn
+// ~400 git processes at once.
+const ACCOUNTING_CONCURRENCY = 8
+
+async function mapBounded(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await fn(items[index], index)
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+
+  return results
+}
+
+// The cheap listing: `git worktree list` only. Callers that need a root or a
+// branch-to-path map use this and skip the per-lane accounting below.
+async function listWorktreeRecords(resolved, gitBin) {
+  try {
+    return parseWorktrees(await runGit(gitBin, ['worktree', 'list', '--porcelain'], resolved))
+  } catch {
+    return []
+  }
+}
+
+// List worktrees for the sidebar, with the evidence the lane rollup needs to
+// call a lane "done" (see src/app/chat/sidebar/projects/lane-accounting.ts):
+//  - `mergedVia`: 'merged-ancestor' when the branch is an ancestor of the
+//    local trunk or origin/<trunk>; 'merged-squash' when `git cherry` shows
+//    every one of its commits already in the trunk; null when neither is
+//    proven; absent for the main checkout, the trunk itself and detached trees.
+//  - `clean`: `git status --porcelain` is empty; null when it could not run.
+// `merged` stays the boolean the "merged" badge reads (either proof).
+// Every probe fails toward "not merged" / "unknown", never toward done.
 async function listWorktrees(repoPath, gitBin) {
   let resolved
 
@@ -76,13 +211,33 @@ async function listWorktrees(repoPath, gitBin) {
     const out = await runGit(gitBin, ['worktree', 'list', '--porcelain'], resolved)
     const trees = parseWorktrees(out)
     const trunk = await defaultBranch(gitBin, resolved)
-    const mergedBranches = trunk
-      ? (await gitLine(gitBin, ['branch', '--merged', trunk], resolved))
-          .split('\n')
-          .map(branch => branch.replace(/^[*+]\s*/, '').trim())
-          .filter(Boolean)
-      : []
-    const mergedSet = new Set(mergedBranches)
+    const trunkRefs = trunk ? await resolveTrunkRefs(gitBin, resolved, trunk) : []
+    const ancestorMerged = await ancestorMergedBranches(gitBin, resolved, trunkRefs)
+
+    const evidence = await mapBounded(trees, ACCOUNTING_CONCURRENCY, async (tree, index) => {
+      const lane = index > 0 && !tree.bare && tree.branch && !tree.detached && tree.branch !== trunk
+
+      if (!lane) {
+        return {}
+      }
+
+      let mergedVia = null
+
+      if (ancestorMerged.has(tree.branch)) {
+        mergedVia = 'merged-ancestor'
+      } else {
+        // Only lanes git did not already prove merged pay for `git cherry`.
+        for (const { sha } of trunkRefs) {
+          if (await cherryMerged(gitBin, resolved, tree.branch, tree.head, sha)) {
+            mergedVia = 'merged-squash'
+
+            break
+          }
+        }
+      }
+
+      return { mergedVia, clean: await worktreeClean(gitBin, tree.path) }
+    })
 
     return trees.map((tree, index) => ({
       path: tree.path,
@@ -90,7 +245,8 @@ async function listWorktrees(repoPath, gitBin) {
       isMain: index === 0,
       detached: tree.detached,
       locked: tree.locked,
-      merged: Boolean(tree.branch && tree.branch !== trunk && mergedSet.has(tree.branch))
+      merged: Boolean(evidence[index].mergedVia),
+      ...evidence[index]
     }))
   } catch {
     return []
@@ -241,8 +397,7 @@ async function ensureGitRepo(gitBin, dir) {
 // Resolve the repo's MAIN worktree root, so `.worktrees/` always nests under the
 // primary checkout even when called from a linked worktree.
 async function mainRoot(gitBin, cwd) {
-  const list = await listWorktrees(cwd, gitBin)
-  const main = list.find(tree => tree.isMain)
+  const [main] = await listWorktreeRecords(cwd, gitBin)
 
   return main ? main.path : cwd
 }
@@ -413,7 +568,7 @@ async function listBranches(repoPath, gitBin) {
 
     const [localOut, remoteOut] = [local.value, remote.value]
 
-    const trees = await listWorktrees(resolved, gitBin)
+    const trees = await listWorktreeRecords(resolved, gitBin)
     const pathByBranch = new Map(trees.filter(tree => tree.branch).map(tree => [tree.branch, tree.path]))
     const trunk = await defaultBranch(gitBin, resolved)
 

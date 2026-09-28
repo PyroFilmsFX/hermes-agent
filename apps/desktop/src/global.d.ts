@@ -1525,6 +1525,13 @@ export interface HermesGitWorktree {
   detached: boolean
   locked: boolean
   merged?: boolean
+  /** How git proved the branch is in trunk: an ancestor of the local trunk or
+   *  origin/<trunk>, or every commit patch-equivalent (`git cherry`). `null` =
+   *  probed and not proven; absent = not probed (main checkout, trunk, detached,
+   *  or a backend that does not report it). See lane-accounting.ts. */
+  mergedVia?: 'merged-ancestor' | 'merged-squash' | null
+  /** `git status --porcelain` is empty. `null` = the probe failed; absent = not probed. */
+  clean?: boolean | null
 }
 
 // A branch that the "convert a branch into a worktree" picker offers: the local

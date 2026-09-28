@@ -30,6 +30,12 @@ export interface SidebarSessionGroup {
   isKanban?: boolean
   // True when git reports this linked worktree's branch merged into the repo default.
   merged?: boolean
+  // Done-lane evidence copied from the live `git worktree list` probe (absent
+  // when no probe ran). Read only by lane-accounting.ts, which fails safe on
+  // anything missing.
+  branch?: null | string
+  mergedVia?: HermesGitWorktree['mergedVia']
+  clean?: HermesGitWorktree['clean']
   mode?: 'profile' | 'source' | 'workspace'
   sourceId?: string
   // Exact owner for gateway/profile sidebar sections; absent for workspace lanes.
@@ -416,7 +422,26 @@ export function mergeRepoWorktreeGroups(
     const worktree = byWorktreePath.get(normalizePath(group.path)) ?? byBranch.get(group.label.toLowerCase())
     const isMerged = worktree?.merged ?? group.merged
 
-    return isMerged === group.merged ? group : { ...group, merged: isMerged }
+    // Only a probe that reported evidence annotates (a remote backend reports
+    // none, and the lane then simply can't be proven done).
+    const hasEvidence = Boolean(worktree && (worktree.mergedVia !== undefined || worktree.clean !== undefined))
+
+    if (!worktree || !hasEvidence || group.isMain || group.isKanban) {
+      return isMerged === group.merged ? group : { ...group, merged: isMerged }
+    }
+
+    // Carry the done-lane evidence of the SAME worktree the lane was matched to.
+    const branch = worktree.detached ? null : (worktree.branch ?? null)
+
+    const unchanged =
+      isMerged === group.merged &&
+      branch === group.branch &&
+      worktree.mergedVia === group.mergedVia &&
+      worktree.clean === group.clean
+
+    return unchanged
+      ? group
+      : { ...group, branch, clean: worktree.clean, merged: isMerged, mergedVia: worktree.mergedVia }
   })
 
   return sortWorktreeGroups(annotated)

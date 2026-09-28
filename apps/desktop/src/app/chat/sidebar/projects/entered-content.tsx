@@ -9,12 +9,15 @@ import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
+import { useStoreSelector } from '@/lib/use-session-slice'
 import { $dismissedWorktreeIds, $removedWorktreeIds, dismissWorktree, setWorkspaceNodeOpen } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { removeWorktreePath } from '@/store/projects'
+import { $sessionDotStateById } from '@/store/session-dot-state'
 
 import { SidebarRowStack } from '../chrome'
 
+import { laneHasLiveActivity } from './lane-accounting'
 import { WorktreeLaneRollup } from './lane-rollup'
 import { PROJECT_SESSION_PAGE, useRevealedRows, useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
@@ -155,12 +158,29 @@ export function RepoFlatSection({
     [discoveredWorktrees]
   )
 
+  // D31: nothing with a live or unread session stays hidden. A dismissed lane
+  // whose session goes live or unread shows again (as a primitive key, so other
+  // dot-state edges don't re-render the section).
+  const revivedKey = useStoreSelector($sessionDotStateById, dotStates =>
+    overlaidGroups
+      .filter(
+        group =>
+          !group.isMain && dismissedWorktrees.includes(group.id) && laneHasLiveActivity(group.sessions, dotStates)
+      )
+      .map(group => group.id)
+      .join('\0')
+  )
+
+  const revivedWorktrees = useMemo(() => new Set(revivedKey ? revivedKey.split('\0') : []), [revivedKey])
+
   // Main lanes are always visible; linked worktrees can be user-dismissed.
-  // Discovery may resurrect a removed worktree, never an explicit sidebar hide.
+  // Discovery may resurrect a removed worktree, never an explicit sidebar hide
+  // (live or unread session activity does, above).
   const ordered = overlaidGroups.filter(
     group =>
       group.isMain ||
       !dismissedWorktrees.includes(group.id) ||
+      revivedWorktrees.has(group.id) ||
       (removedWorktrees.includes(group.id) && group.path && discoveredWorktreePaths.has(group.path))
   )
 

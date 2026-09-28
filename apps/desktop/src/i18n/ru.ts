@@ -2692,10 +2692,11 @@ export const ru = defineLocale({
     },
     newSessionIn: label => `Новый сеанс в ${label}`,
     showMoreIn: (count, label) => `Показать ещё ${count} в ${label}`,
-    laneRollup: (count, running) =>
-      `${count} ${RU_PLURAL(count, 'ветка', 'ветки', 'веток')}${
+    laneRollup: (active, done, running) =>
+      `${active} ${RU_PLURAL(active, 'активная', 'активные', 'активных')} · ${done} ${RU_PLURAL(done, 'завершена', 'завершены', 'завершено')}${
         running && running > 0 ? ` · ${running} ${RU_PLURAL(running, 'выполняется', 'выполняются', 'выполняются')}` : ''
       }`,
+    laneRollupDone: count => `Завершённые (${count})`,
     loading: 'Загрузка…',
     loadMore: 'Загрузить ещё',
     loadCount: step => `Загрузить ещё ${step}`,
