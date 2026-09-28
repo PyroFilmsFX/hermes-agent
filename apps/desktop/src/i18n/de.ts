@@ -2563,6 +2563,11 @@ export const deOverrides = {
       autoArchiveDaysLabel: 'Archivieren nach',
       autoArchiveDaysUnit: 'Tagen Inaktivität',
       autoArchiveFailed: 'Auto-Archivierung konnte nicht aktualisiert werden',
+      autoArchiveLanesTitle: 'Beendete Lanes automatisch archivieren',
+      autoArchiveLanesDesc:
+        'Conductor-Lane-Sitzungen automatisch archivieren, deren Durchlauf beendet ist und älter als die konfigurierten Stunden ist. Angeheftete Sitzungen werden nie archiviert.',
+      autoArchiveLanesHoursLabel: 'Lanes archivieren nach',
+      autoArchiveLanesHoursUnit: 'Stunden nach Ende',
       defaultDirTitle: 'Standard-Projektordner',
       defaultDirDesc:
         'Neue Sessions starten in diesem Ordner, sofern Sie keinen anderen wählen. Nicht festlegen, um Ihr Home-Verzeichnis zu verwenden.',

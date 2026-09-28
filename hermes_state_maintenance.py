@@ -3,17 +3,60 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state_common import (
-    AUTO_VACUUM_MIN_FREELIST_RATIO, _id_chunks, _placeholders, _sql_session_last_active, escape_like as _escape_like
+    AUTO_VACUUM_MIN_FREELIST_RATIO, _RECOVERABLE_END_REASONS_SQL, _id_chunks, _placeholders,
+    _sql_session_last_active, escape_like as _escape_like
 )
 from hermes_startup_watchdog import report_startup_progress
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
+
+_CLAUDE_WORKTREE_LANE_RE = re.compile(r"(?:^|/)\.claude/worktrees/(?:lane-|lane/)", re.IGNORECASE)
+_TMP_LANE_RE = re.compile(r"(?:^|/)(?:private/)?tmp/lane-", re.IGNORECASE)
+
+
+def is_conductor_lane(
+    target: Any = None,
+    *,
+    cwd: Optional[str] = None,
+    branch: Optional[str] = None,
+    is_main: bool = False,
+) -> bool:
+    """Predicate identifying whether a worktree or cwd represents a conductor lane.
+
+    Returns true when:
+    - the path contains a "/.claude/worktrees/lane-" or "/.claude/worktrees/lane/" segment
+    - the path is under /tmp/lane- or /private/tmp/lane-
+    - the branch starts with "lane/"
+    Never true for is_main. The sidebar treats every linked worktree as a lane; this narrower path/branch
+    test decides only which ENDED sessions the lane sweep may archive.
+    """
+    if isinstance(target, dict):
+        is_main = bool(target.get("isMain") or target.get("is_main"))
+        branch = target.get("branch") or target.get("git_branch") or branch
+        path = str(target.get("path") or target.get("cwd") or "")
+    elif isinstance(target, str):
+        path = target
+    else:
+        path = str(cwd or "")
+
+    if is_main:
+        return False
+
+    normalized = path.replace("\\", "/")
+    if _CLAUDE_WORKTREE_LANE_RE.search(normalized):
+        return True
+
+    if _TMP_LANE_RE.search(normalized):
+        return True
+
+    return (branch or "").strip().startswith("lane/")
 
 _LAST_ACTIVE_SQL = _sql_session_last_active("s")
 _TOKENS_SQL = "(COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0))"
@@ -268,6 +311,35 @@ class SessionMaintenanceMixin:
         for row in rows:
             self.set_session_archived(row[0], True)
         return len(rows)
+
+    def archive_lane_sessions(
+        self, lane_archive_hours: float = 6.0, *, exclude_pinned: bool = True
+    ) -> int:
+        """Archive ended conductor lane sessions whose turn ended >= lane_archive_hours ago."""
+        if lane_archive_hours is None or lane_archive_hours < 0:
+            return 0
+        cutoff = time.time() - float(lane_archive_hours) * 3600.0
+        pin_clause = "AND s.pinned = 0" if exclude_pinned else ""
+        rows = self._read_all(
+            f"""
+            SELECT s.id, s.cwd, s.git_branch FROM sessions s
+            WHERE s.archived = 0
+              AND s.ended_at IS NOT NULL
+              AND s.ended_at < ?
+              AND COALESCE(s.end_reason, '') <> 'compression'
+              AND COALESCE(s.end_reason, '') NOT IN ({_RECOVERABLE_END_REASONS_SQL})
+              {pin_clause}
+            ORDER BY s.ended_at ASC
+            """,
+            (cutoff,),
+        )
+        archived_count = 0
+        for row in rows:
+            sid, cwd, branch = row[0], row[1], row[2]
+            if is_conductor_lane(cwd=cwd, branch=branch):
+                self.set_session_archived(sid, True)
+                archived_count += 1
+        return archived_count
 
     def prune_sessions(self, older_than_days: Optional[float] = 90, source: str = None,
                        sessions_dir: Optional[Path] = None, exclude_active_write_guards: bool = False,

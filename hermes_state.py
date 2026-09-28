@@ -72,7 +72,7 @@ from hermes_state_wal import (
 from hermes_state_repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
 from hermes_state_titles import SessionTitlesMixin
 from hermes_state_usage import SessionUsageMixin
-from hermes_state_maintenance import SessionMaintenanceMixin
+from hermes_state_maintenance import SessionMaintenanceMixin, is_conductor_lane
 from hermes_state_gateway import SessionGatewayMixin
 from hermes_state_compression import SessionCompressionMixin
 from hermes_state_search import SessionSearchMixin

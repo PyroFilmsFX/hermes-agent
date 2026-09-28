@@ -225,6 +225,14 @@ export const SETTINGS_MANIFEST = {
       subpage: 'archived',
       keywords: ['archive', 'stale', 'cleanup', 'old chats', 'days', 'after'],
       copy: t => ({ label: t.settings.sessions.autoArchiveTitle, description: t.settings.sessions.autoArchiveDesc })
+    },
+    autoArchiveLanes: {
+      subpage: 'archived',
+      keywords: ['archive', 'lane', 'conductor', 'worktree', 'hours', 'after'],
+      copy: t => ({
+        label: t.settings.sessions.autoArchiveLanesTitle,
+        description: t.settings.sessions.autoArchiveLanesDesc
+      })
     }
   },
   gateway: {

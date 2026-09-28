@@ -2550,6 +2550,11 @@ export const esOverrides = {
       autoArchiveDaysLabel: 'Archivar después de',
       autoArchiveDaysUnit: 'días de inactividad',
       autoArchiveFailed: 'No se pudo actualizar el archivado automático',
+      autoArchiveLanesTitle: 'Archivar automáticamente los lanes finalizados',
+      autoArchiveLanesDesc:
+        'Archivar automáticamente las sesiones de conductor lane cuyo turno haya finalizado y sea más antiguo que las horas configuradas. Las sesiones fijadas nunca se archivan automáticamente.',
+      autoArchiveLanesHoursLabel: 'Archivar lanes después de',
+      autoArchiveLanesHoursUnit: 'horas tras finalizar el turno',
       defaultDirTitle: 'Directorio de proyecto predeterminado',
       defaultDirDesc:
         'Las sesiones nuevas empiezan en esta carpeta salvo que elijas otra. Déjala sin definir para usar tu directorio de inicio.',

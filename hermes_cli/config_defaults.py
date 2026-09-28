@@ -2448,6 +2448,10 @@ DEFAULT_CONFIG = {
         "auto_archive": False,
         # Idle days before auto-archive hides a session (only when auto_archive is true).
         "auto_archive_days": 3,
+        # Auto-archive conductor lane sessions whose turn has ended and is older than lane_archive_hours.
+        "auto_archive_lanes": True,
+        # Hours since lane session ended before auto-archive hides it (only when auto_archive_lanes is true).
+        "lane_archive_hours": 6,
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.

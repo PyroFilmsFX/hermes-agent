@@ -1,0 +1,219 @@
+[
+  {
+    "path": "/Users/justin/work/.claude/worktrees/lane-pf-s1",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "path contains /.claude/worktrees/lane-"
+  },
+  {
+    "path": "C:\\Users\\work\\.claude\\worktrees\\lane-pf-s1",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "Windows path contains \\.claude\\worktrees\\lane-"
+  },
+  {
+    "path": "/repo/.claude/worktrees/lane/w_20260925T114802Z_68d7",
+    "branch": "w_2026",
+    "isMain": false,
+    "expected": true,
+    "reason": "path contains /.claude/worktrees/lane/"
+  },
+  {
+    "path": "C:\\repo\\.claude\\worktrees\\lane\\w_2026",
+    "branch": "w_2026",
+    "isMain": false,
+    "expected": true,
+    "reason": "Windows path contains \\.claude\\worktrees\\lane\\"
+  },
+  {
+    "path": ".Claude\\worktrees\\lane-x",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "Windows path with .Claude\\worktrees\\lane-x (case-insensitive .claude)"
+  },
+  {
+    "path": "/tmp/lane-sb-s4",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "POSIX path starting with /tmp/lane-"
+  },
+  {
+    "path": "/private/tmp/lane-sb-s4",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "macOS path starting with /private/tmp/lane-"
+  },
+  {
+    "path": "C:\\tmp\\lane-payment",
+    "branch": "feat",
+    "isMain": false,
+    "expected": true,
+    "reason": "Windows path starting with \\tmp\\lane-"
+  },
+  {
+    "path": "/private/tmp/lane-sb-s4/.claude/worktrees/lane-w_20260928T220520Z_1896",
+    "branch": "lane/sb-s4",
+    "isMain": false,
+    "expected": true,
+    "reason": "nested worktree under conductor lane"
+  },
+  {
+    "path": "/repos/hermes/wt2",
+    "branch": "lane/20260925T0459Z_69a9",
+    "isMain": false,
+    "expected": true,
+    "reason": "branch matches ^lane/"
+  },
+  {
+    "path": "/repos/hermes/pr-base",
+    "branch": "other",
+    "isMain": false,
+    "expected": false,
+    "reason": "basename pr-base is not a conductor lane"
+  },
+  {
+    "path": "/repos/hermes/wt4",
+    "branch": "pr-base",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch pr-base is not a conductor lane"
+  },
+  {
+    "path": "/repo/.claude/worktrees/lane-pf-s1",
+    "branch": "lane-pf-s1",
+    "isMain": true,
+    "expected": false,
+    "reason": "main worktree with lane path"
+  },
+  {
+    "path": "/repos/hermes/lane-1",
+    "branch": "lane/1",
+    "isMain": true,
+    "expected": false,
+    "reason": "main worktree with lane branch"
+  },
+  {
+    "path": "/repos/hermes/pr-base",
+    "branch": "pr-base",
+    "isMain": true,
+    "expected": false,
+    "reason": "main worktree with pr-base branch"
+  },
+  {
+    "path": "/repos/hermes",
+    "branch": "main",
+    "isMain": true,
+    "expected": false,
+    "reason": "standard main worktree"
+  },
+  {
+    "path": "/repos/hermes/wt",
+    "branch": "lane-detection",
+    "isMain": false,
+    "expected": false,
+    "reason": "ordinary branch outside .claude or tmp"
+  },
+  {
+    "path": "/repos/hermes/wt1",
+    "branch": "lane-pf-s1",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch lane-pf-s1 outside .claude or tmp"
+  },
+  {
+    "path": "/repos/hermes/wt3",
+    "branch": "lane-wm-abc",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch lane-wm-abc outside .claude or tmp"
+  },
+  {
+    "path": "/repos/hermes/lane-x",
+    "branch": "feat",
+    "isMain": false,
+    "expected": false,
+    "reason": "basename lane-x outside .claude or tmp"
+  },
+  {
+    "path": "/repos/hermes/lane-worker-1",
+    "branch": "feat",
+    "isMain": false,
+    "expected": false,
+    "reason": "path basename lane-worker-1 outside .claude or tmp"
+  },
+  {
+    "path": "C:\\repos\\hermes\\lane-1",
+    "branch": "feat",
+    "isMain": false,
+    "expected": false,
+    "reason": "Windows path basename lane-1 outside .claude or tmp"
+  },
+  {
+    "path": "/repos/hermes/wt5",
+    "branch": "pr-base-auth",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch pr-base-auth does not equal pr-base"
+  },
+  {
+    "path": "/repos/hermes/pr-base-auth",
+    "branch": "other",
+    "isMain": false,
+    "expected": false,
+    "reason": "basename pr-base-auth does not equal pr-base"
+  },
+  {
+    "path": "/repos/hermes/pr-base-feature",
+    "branch": "other",
+    "isMain": false,
+    "expected": false,
+    "reason": "basename starts with pr-base- does not equal pr-base"
+  },
+  {
+    "path": "/repos/hermes/wt5",
+    "branch": "pr-base-hotfix",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch starts with pr-base- does not equal pr-base"
+  },
+  {
+    "path": "/repos/hermes/wt",
+    "branch": "feature/lane-thing",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch feature/lane-thing does not match ^lane/"
+  },
+  {
+    "path": "/repos/hermes/my-lane",
+    "branch": "my-lane",
+    "isMain": false,
+    "expected": false,
+    "reason": "path .../my-lane does not match ^lane/"
+  },
+  {
+    "path": "/repos/hermes/feature-lane",
+    "branch": "feature",
+    "isMain": false,
+    "expected": false,
+    "reason": "arbitrary feature branch"
+  },
+  {
+    "path": "/repos/hermes/wt",
+    "branch": "pr-baseline",
+    "isMain": false,
+    "expected": false,
+    "reason": "branch pr-baseline does not equal pr-base"
+  },
+  {
+    "path": "/repos/hermes/pr-baseline",
+    "branch": "feat",
+    "isMain": false,
+    "expected": false,
+    "reason": "basename pr-baseline does not equal pr-base"
+  }
+]

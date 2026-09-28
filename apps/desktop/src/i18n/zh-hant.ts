@@ -1710,6 +1710,11 @@ export const zhHant = defineLocale({
       autoArchiveDaysLabel: '封存前',
       autoArchiveDaysUnit: '天無活動',
       autoArchiveFailed: '無法更新自動封存設定',
+      autoArchiveLanesTitle: '自動封存已結束的工作樹',
+      autoArchiveLanesDesc:
+        '自動封存輪次已結束且超過設定小時數的Conductor工作樹會話。置頂會話不會自動封存。',
+      autoArchiveLanesHoursLabel: '封存工作樹前',
+      autoArchiveLanesHoursUnit: '小時結束輪次後',
       defaultDirTitle: '預設專案目錄',
       defaultDirDesc: '新工作階段預設從此資料夾開始，除非您選擇其他目錄。留空則使用您的家目錄。',
       defaultDirUpdated: '預設專案目錄已更新',

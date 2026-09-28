@@ -2075,6 +2075,11 @@ export const zh = defineLocale({
       autoArchiveDaysLabel: '归档前',
       autoArchiveDaysUnit: '天无活动',
       autoArchiveFailed: '无法更新自动归档设置',
+      autoArchiveLanesTitle: '自动归档已结束的工作树',
+      autoArchiveLanesDesc:
+        '自动归档轮次已结束且超过设定小时数的Conductor工作树会话。置顶会话不会自动归档。',
+      autoArchiveLanesHoursLabel: '归档工作树前',
+      autoArchiveLanesHoursUnit: '小时结束轮次后',
       defaultDirTitle: '默认项目目录',
       defaultDirDesc: '新会话默认从此文件夹开始，除非你选择其他目录。留空则使用你的 home 目录。',
       defaultDirUpdated: '默认项目目录已更新',

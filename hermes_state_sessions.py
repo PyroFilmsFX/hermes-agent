@@ -1722,31 +1722,74 @@ class SessionSessionsMixin:
         return len(rows)
 
     def maybe_auto_archive(
-        self, idle_days: float = 3, min_interval_hours: int = 24, exclude_pinned: bool = True,
+        self,
+        idle_days: float = 3,
+        min_interval_hours: int = 24,
+        exclude_pinned: bool = True,
+        *,
+        auto_archive: Optional[bool] = None,
+        auto_archive_lanes: Optional[bool] = None,
+        lane_archive_hours: float = 6,
+        lane_min_interval_hours: int = 1,
     ) -> Dict[str, Any]:
         """Idempotent, non-destructive auto-archive of sessions idle for ``idle_days``; state_meta
-        ``last_auto_archive`` gates runs within ``min_interval_hours``. Never raises."""
-        result: Dict[str, Any] = {"skipped": False, "archived": 0}
+        ``last_auto_archive`` gates runs within ``min_interval_hours``.
+        Also sweeps ended conductor lane sessions older than ``lane_archive_hours``
+        gated by ``last_auto_archive_lanes`` within ``lane_min_interval_hours``. Never raises."""
+        result: Dict[str, Any] = {"skipped": False, "archived": 0, "lane_archived": 0}
         try:
             now = time.time()
-            try:
-                last = float(self.get_meta("last_auto_archive") or 0.0)
-            except (TypeError, ValueError):
-                last = 0.0  # corrupt meta; treat as no prior run
-            if last and now - last < min_interval_hours * 3600:
+            ran_any = False
+            sweeps_attempted = 0
+            sweeps_skipped = 0
+
+            # 1. General days-based idle sweep
+            if auto_archive is not False:
+                sweeps_attempted += 1
+                try:
+                    last = float(self.get_meta("last_auto_archive") or 0.0)
+                except (TypeError, ValueError):
+                    last = 0.0  # corrupt meta; treat as no prior run
+                if last and now - last < min_interval_hours * 3600:
+                    sweeps_skipped += 1
+                else:
+                    report_startup_progress(900.0, phase="state_db_auto_archive")
+                    ran_any = True
+                    archived = self.archive_stale_sessions(idle_days, exclude_pinned=exclude_pinned)
+                    self.set_meta("last_auto_archive", str(now))
+                    result["archived"] += archived
+                    if archived > 0:
+                        logger.info(
+                            "state.db auto-archive: archived %d session(s) idle >= %s days", archived, idle_days,
+                        )
+
+            # 2. Conductor lane ended sessions sweep
+            if auto_archive_lanes is not False:
+                sweeps_attempted += 1
+                try:
+                    last_lane = float(self.get_meta("last_auto_archive_lanes") or 0.0)
+                except (TypeError, ValueError):
+                    last_lane = 0.0
+                if last_lane and now - last_lane < lane_min_interval_hours * 3600:
+                    sweeps_skipped += 1
+                else:
+                    if not ran_any:
+                        report_startup_progress(900.0, phase="state_db_auto_archive")
+                        ran_any = True
+                    lane_archived = self.archive_lane_sessions(
+                        lane_archive_hours=lane_archive_hours, exclude_pinned=exclude_pinned
+                    )
+                    self.set_meta("last_auto_archive_lanes", str(now))
+                    result["lane_archived"] = lane_archived
+                    result["archived"] += lane_archived
+                    if lane_archived > 0:
+                        logger.info(
+                            "state.db auto-archive: archived %d conductor lane session(s) ended >= %s hours ago",
+                            lane_archived, lane_archive_hours,
+                        )
+
+            if sweeps_attempted > 0 and sweeps_skipped == sweeps_attempted:
                 result["skipped"] = True
-                return result
-            # Startup-watchdog lease: the archive sweep is I/O-bound (near-zero CPU),
-            # which the watchdog's CPU fallback misreads as a parked deadlock.
-            # No-op when the watchdog is not armed; never raises.
-            report_startup_progress(900.0, phase="state_db_auto_archive")
-            archived = result["archived"] = self.archive_stale_sessions(idle_days, exclude_pinned=exclude_pinned)
-            # Record even a zero-archive run so we don't re-sweep every call.
-            self.set_meta("last_auto_archive", str(now))
-            if archived > 0:
-                logger.info(
-                    "state.db auto-archive: archived %d session(s) idle >= %s days", archived, idle_days,
-                )
         except Exception as exc:
             logger.warning("state.db auto-archive failed: %s", exc)
             result["error"] = str(exc)
