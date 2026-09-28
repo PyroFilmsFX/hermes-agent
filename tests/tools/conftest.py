@@ -9,6 +9,11 @@ depend on the registry being populated should use it explicitly or via
 """
 
 from unittest.mock import patch
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -163,3 +168,49 @@ def disable_lazy_stt_install():
     """
     with patch("tools.transcription_tools._try_lazy_install_stt", return_value=False):
         yield
+
+
+@pytest.fixture(params=("stdio", "http"), ids=("stdio", "streamable-http"))
+def mcp2026_server(request: pytest.FixtureRequest):
+    """Start the MCP 2026 fixture over stdio or ephemeral loopback HTTP."""
+    from mcp import StdioServerParameters
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "mcp2026_server.py"
+    if request.param == "stdio":
+        yield StdioServerParameters(command=sys.executable, args=[str(fixture), "--stdio"])
+        return
+
+    with socket.socket() as reserve:
+        try:
+            reserve.bind(("127.0.0.1", 0))
+        except PermissionError:
+            pytest.skip("local TCP binding is disabled in this test sandbox")
+        port = reserve.getsockname()[1]
+    process = subprocess.Popen(
+        [sys.executable, str(fixture), "--http", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            pytest.fail(f"MCP fixture exited with status {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.025)
+    else:
+        process.terminate()
+        process.wait(timeout=2)
+        pytest.fail("MCP fixture did not bind its ephemeral HTTP port")
+
+    try:
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
