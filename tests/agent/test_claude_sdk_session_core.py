@@ -426,6 +426,7 @@ class TestSession:
         assert "hermes-tools" in options["mcp_servers"]
         mcp = options["mcp_servers"]["hermes-tools"]
         assert mcp["args"] == [
+            "-P",  # never import the session cwd's tree (#66: a Hermes worktree cwd shadowed the install)
             "-m",
             "agent.transports.hermes_tools_mcp_server",
             "--profile",

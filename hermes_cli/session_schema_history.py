@@ -208,6 +208,7 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
         # rather than a main sha: the commit is rebased onto main continuously,
         # so no sha written here would survive to the one that lands.
         ('28 2026-09-09T00:00Z #65982', (('+', 'claude_sdk_session_id', 'system_prompt'),)),
+        ('29 2026-09-28T19:00Z c0deb07595', (('+', 'session_role', 'tool_names'),)),
         ),
     ),
     "messages": _TableHistory(
