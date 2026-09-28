@@ -4693,6 +4693,11 @@ export interface ToolCompletePayload {
   todos?: unknown[] | null
   revision?: number | null
   labels?: ToolLabel[] | null
+  is_error?: boolean | null
+  error?: unknown
+  tool_use_result?: Record<string, unknown> | null
+  truncated?: Record<string, unknown> | null
+  source?: string | null
 }
 /** ``agent_callbacks`` tool_gen_callback. */
 export interface ToolGeneratingPayload {

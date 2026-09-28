@@ -119,3 +119,23 @@ def test_native_results_keep_json_decoding(monkeypatch):
     sid, events = _capture(monkeypatch)
     server._on_tool_complete(sid, "t-native", "Bash", {}, '{"ok": true}')
     assert events[-1]["result"] == {"ok": True}
+
+
+def test_sdk_payloads_satisfy_the_wire_contract(monkeypatch):
+    """Every SDK-lane tool.complete shape the emitter builds validates against its declared contract
+    (the capture above bypasses the emit-time check, which is how five fields went undeclared)."""
+    from tui_gateway.contracts import registry
+
+    monkeypatch.setattr(registry, "STRICT", True)
+    sid, events = _capture(monkeypatch)
+    server._on_tool_complete(sid, "t-err", "Bash", {"command": "false"},
+                             _SdkResult("boom", is_error=True, error="boom"), is_error=True, error="boom")
+    server._on_tool_complete(sid, "t-ok", "Echo", {}, _SdkResult("plain text"))
+    server._on_tool_complete(sid, "t-cap", "Read", {},
+                             _SdkResult("x" * 12000, truncated={"shown": 4000, "total": 12000}),
+                             truncated={"shown": 4000, "total": 12000})
+    server._on_tool_complete(sid, "t-tur", "Bash", {"command": "ls"},
+                             _SdkResult("a\n", tool_use_result={"stdout": "a\n", "stderr": "", "interrupted": False}))
+    assert {"is_error", "error", "truncated", "tool_use_result"} <= {k for e in events for k in e}
+    for payload in [*events, {**events[-1], "todos": [], "revision": 1, "source": "sdk_tasks"}]:
+        registry.check_payload("tool.complete", payload)

@@ -305,6 +305,13 @@ class ToolCompletePayload(Payload):
     todos: list[JsonValue] | None = None
     revision: int | None = None
     labels: list[ToolLabel] | None = None
+    # Claude Agent SDK lane (``tool_progress._on_tool_complete`` with an SDK result): error flag/text,
+    # the CLI's structured ``tool_use_result``, the live-result cap, and the SDK-tasks todo source.
+    is_error: bool | None = None
+    error: JsonValue = None
+    tool_use_result: dict[str, JsonValue] | None = None
+    truncated: dict[str, JsonValue] | None = None
+    source: str | None = None
 
 
 event("tool.complete", ToolCompletePayload, doc="A tool call finished: parsed result, summary, optional diff / todo snapshot.")
