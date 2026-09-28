@@ -230,3 +230,92 @@ def test_cwd_in_subdirectory_resolves_toplevel_marker(tmp_path, monkeypatch):
     assert result["build"] is not None
     assert result["build"]["plan"] == "FAKE-PLAN"
 
+
+
+# ── conductor 3.62 builds index (tb-builds-index/v1) ────────────────────────────────────────────
+
+
+class _Db:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def get_session(self, _sid):
+        return {"claude_sdk_session_id": self.raw}
+
+
+def _two_builds(tmp_path):
+    """A 3.62 checkout: two sessions armed, the flat file dual-written by the FIRST one only."""
+    state = tmp_path / ".claude" / "state"
+    rows = []
+    for build_id, sid, plan in (("b-one", "claude-A", "/x/plans/PLAN-A.md"), ("b-two", "claude-B", "/x/plans/PLAN-B.md")):
+        directory = state / "builds" / build_id
+        directory.mkdir(parents=True)
+        (directory / "tb-build-active.json").write_text(
+            json.dumps(_marker(session_id=sid, plan=plan, build_id=build_id)), encoding="utf-8")
+        rows.append({"build_id": build_id, "marker_path": str(directory / "tb-build-active.json"),
+                     "status": "open", "session_id": sid, "run_id": f"run-{build_id}", "plan": plan,
+                     "legacy_flat": False})
+    (state / "tb-build-active.json").write_text(
+        json.dumps(_marker(session_id="claude-A", plan="/x/plans/PLAN-A.md")), encoding="utf-8")
+    (state / "tb-builds-index.json").write_text(
+        json.dumps({"schema": "tb-builds-index/v1", "state_dir": str(state), "builds": rows}), encoding="utf-8")
+    return state
+
+
+def _as_session(monkeypatch, tmp_path, raw_sid):
+    agent = type("Agent", (), {"_session_db": _Db(raw_sid), "session_id": "hermes-1"})()
+    monkeypatch.setattr(server, "_current_session_steer_authority",
+                        lambda _sid: (object(), {"cwd": str(tmp_path), "agent": agent}))
+
+
+def test_two_builds_in_one_checkout_each_session_sees_its_own(workspace, monkeypatch):
+    tmp_path, _marker_path = workspace
+    _two_builds(tmp_path)
+    _as_session(monkeypatch, tmp_path, "claude-B")
+    assert _result(workspace)["result"]["build"]["plan"] == "PLAN-B"  # not the flat file's first build
+    # The resume-binding form of the stored id resolves to the same session.
+    _as_session(monkeypatch, tmp_path, 'hermes-sdk-resume-v1:{"id": "claude-A", "cwd": "/x"}')
+    assert _result(workspace)["result"]["build"]["plan"] == "PLAN-A"
+
+
+def test_index_without_this_sessions_build_falls_back_to_flat(workspace, monkeypatch):
+    tmp_path, _ = workspace
+    _two_builds(tmp_path)
+    _as_session(monkeypatch, tmp_path, "claude-OTHER")  # two builds, neither ours: ambiguous → flat
+    assert _result(workspace)["result"]["build"]["plan"] == "PLAN-A"
+
+
+def test_single_live_build_shows_for_a_session_without_a_claude_id(workspace):
+    tmp_path, _ = workspace
+    state = _two_builds(tmp_path)
+    index = json.loads((state / "tb-builds-index.json").read_text())
+    index["builds"][0]["status"] = "done"
+    (state / "tb-builds-index.json").write_text(json.dumps(index))
+    assert _result(workspace)["result"]["build"]["plan"] == "PLAN-B"
+
+
+@pytest.mark.parametrize("change", ["outside", "traversal", "deleted"])
+def test_untrusted_or_lagging_index_rows_are_not_rendered(workspace, monkeypatch, tmp_path_factory, change):
+    tmp_path, _ = workspace
+    state = _two_builds(tmp_path)
+    index = json.loads((state / "tb-builds-index.json").read_text())
+    row = index["builds"][1]
+    if change == "outside":
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        (elsewhere / "tb-build-active.json").write_text(json.dumps(_marker(session_id="claude-B", plan="/x/EVIL.md")))
+        row["marker_path"] = str(elsewhere / "tb-build-active.json")
+    elif change == "traversal":
+        row["build_id"] = "../../elsewhere"
+    else:
+        (state / "builds" / "b-two" / "tb-build-active.json").unlink()
+    (state / "tb-builds-index.json").write_text(json.dumps(index))
+    _as_session(monkeypatch, tmp_path, "claude-B")
+    build = _result(workspace)["result"]["build"]
+    assert build is None or build["plan"] != "EVIL"
+    assert build is None or build["plan"] == "PLAN-A"  # the flat fallback, never the untrusted target
+
+
+def test_pre_362_checkout_without_index_reads_flat(workspace, monkeypatch):
+    tmp_path, _ = workspace
+    _as_session(monkeypatch, tmp_path, "claude-B")
+    assert _result(workspace)["result"]["build"]["plan"] == "FAKE-PLAN"
