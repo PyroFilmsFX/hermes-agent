@@ -96,7 +96,7 @@ def test_mcp_config_is_byte_shape_compatible_without_capability(monkeypatch):
             python_paths.append(site_packages)
     expected_env["PYTHONPATH"] = os.pathsep.join(python_paths)
     expected = {"type": "stdio", "command": sys.executable, "args": [
-        "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
+        "-P", "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
     ], "env": expected_env}
     assert actual == expected
     assert "HERMES_SESSION_SPAWN_CAPABILITY" not in json.dumps(actual)
@@ -133,7 +133,7 @@ def test_mcp_config_without_issued_capability_preserves_baseline_with_session_id
     expected_env["PYTHONPATH"] = os.pathsep.join(python_paths)
     expected_env["HERMES_SESSION_ID"] = "owner"
     expected = {"type": "stdio", "command": sys.executable, "args": [
-        "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
+        "-P", "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
     ], "env": expected_env}
     assert actual == expected, "no capability must leave the pre-spawn MCP config byte-identical"
 

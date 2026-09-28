@@ -1147,6 +1147,11 @@ def _build_hermes_tools_mcp_config(
         "type": "stdio",
         "command": sys.executable,
         "args": [
+            # -P: never put the CLI's cwd on sys.path. A session working in a
+            # Hermes checkout (a lane worktree) would otherwise import that
+            # tree's bootstrap, which re-roots dependencies onto the lane's
+            # own venv and drops these site-packages (#66).
+            "-P",
             "-m",
             "agent.transports.hermes_tools_mcp_server",
             "--profile",

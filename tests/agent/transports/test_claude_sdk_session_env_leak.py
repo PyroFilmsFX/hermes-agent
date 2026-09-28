@@ -175,7 +175,7 @@ def test_respawned_cli_rebuilds_hermes_tools_config_with_clean_env(monkeypatch, 
 
     assert replacement_mcp["command"] == first_mcp["command"] == sys.executable
     assert replacement_mcp["args"] == first_mcp["args"] == [
-        "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
+        "-P", "-m", "agent.transports.hermes_tools_mcp_server", "--profile", "claude-agent-sdk",
     ]
     assert replacement_mcp["env"]["PYTHONPATH"] == first_mcp["env"]["PYTHONPATH"]
     python_paths = ["/hermes/repo"]
@@ -247,3 +247,42 @@ def test_mcp_config_imports_from_resolved_venv_interpreter(monkeypatch, tmp_path
                 return {tool.name for tool in listed.tools}
 
     assert "read_file" in asyncio.run(list_tools())
+
+
+def test_mcp_config_ignores_a_hermes_checkout_as_cwd(monkeypatch, tmp_path):
+    """A session working inside another Hermes checkout (a lane worktree) must
+    still launch the configured tree's server, not the cwd tree's (#66)."""
+    import subprocess
+    import sys
+
+    from agent.transports import claude_agent_sdk_session_config as config
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    decoy = tmp_path / "lane-checkout"
+    server = decoy / "agent" / "transports"
+    server.mkdir(parents=True)
+    for package in (decoy / "agent", server):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (server / "hermes_tools_mcp_server.py").write_text(
+        "import sys\nsys.stderr.write('decoy tree imported')\nsys.exit(7)\n", encoding="utf-8"
+    )
+    mcp_config = config._build_hermes_tools_mcp_config()
+    child_env = dict(mcp_config["env"])
+    child_env.update({"PATH": os.defpath, "HOME": str(tmp_path), "PYTHONUTF8": "1"})
+    # The real launch, stdin closed: the server exits cleanly at EOF.
+    result = subprocess.run(
+        [mcp_config["command"], *mcp_config["args"]],
+        env=child_env,
+        cwd=str(decoy),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert "decoy tree imported" not in result.stderr
+    assert "cannot start" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
