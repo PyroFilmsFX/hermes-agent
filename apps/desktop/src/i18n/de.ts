@@ -4939,7 +4939,12 @@ export const deOverrides = {
       noModels: 'Keine Modelle gefunden',
       editModels: 'Modelle bearbeiten…',
       refreshModels: 'Modelle aktualisieren',
-      fast: 'Schnell'
+      fast: 'Schnell',
+      upgradeTo: m => `Auf ${m} upgraden`,
+      upgradeFrom: m => `von ${m}`,
+      upgradeTitle: (from, to) =>
+        `Diese Sitzung von ${from} auf ${to} umstellen. Die Unterhaltung bleibt erhalten; der Prompt-Cache beginnt neu.`,
+      dismissUpgrade: 'Upgrade-Hinweis ausblenden'
     },
     modelOptions: {
       noOptions: 'Keine Optionen für dieses Modell',

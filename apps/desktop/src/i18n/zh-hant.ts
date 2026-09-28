@@ -3439,7 +3439,11 @@ export const zhHant = defineLocale({
       noModels: '找不到模型',
       editModels: '編輯模型…',
       refreshModels: '重新整理模型',
-      fast: '快速'
+      fast: '快速',
+      upgradeTo: m => `升級到 ${m}`,
+      upgradeFrom: m => `目前 ${m}`,
+      upgradeTitle: (from, to) => `將此工作階段從 ${from} 切換到 ${to}。對話保留；提示快取將重新開始。`,
+      dismissUpgrade: '關閉升級提示'
     },
     modelOptions: {
       noOptions: '此模型沒有可用選項',

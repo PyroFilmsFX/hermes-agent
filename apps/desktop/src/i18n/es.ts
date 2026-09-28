@@ -4931,7 +4931,12 @@ export const esOverrides = {
       noModels: 'No se encontraron modelos',
       editModels: 'Editar modelos…',
       refreshModels: 'Actualizar modelos',
-      fast: 'Rápido'
+      fast: 'Rápido',
+      upgradeTo: m => `Actualizar a ${m}`,
+      upgradeFrom: m => `desde ${m}`,
+      upgradeTitle: (from, to) =>
+        `Cambiar esta sesión de ${from} a ${to}. La conversación se conserva; la caché del prompt empieza de cero.`,
+      dismissUpgrade: 'Descartar sugerencia de actualización'
     },
     modelOptions: {
       noOptions: 'No hay opciones para este modelo',

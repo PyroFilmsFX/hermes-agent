@@ -3835,6 +3835,10 @@ export interface Translations {
       editModels: string
       refreshModels: string
       fast: string
+      upgradeTo: (model: string) => string
+      upgradeFrom: (model: string) => string
+      upgradeTitle: (from: string, to: string) => string
+      dismissUpgrade: string
     }
     modelOptions: {
       noOptions: string

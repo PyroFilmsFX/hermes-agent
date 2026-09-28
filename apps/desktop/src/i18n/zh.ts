@@ -4212,7 +4212,11 @@ export const zh = defineLocale({
       noModels: '未找到模型',
       editModels: '编辑模型…',
       refreshModels: '刷新模型',
-      fast: '快速'
+      fast: '快速',
+      upgradeTo: m => `升级到 ${m}`,
+      upgradeFrom: m => `当前 ${m}`,
+      upgradeTitle: (from, to) => `将此会话从 ${from} 切换到 ${to}。对话保留；提示缓存将重新开始。`,
+      dismissUpgrade: '关闭升级提示'
     },
     modelOptions: {
       noOptions: '此模型没有可用选项',
