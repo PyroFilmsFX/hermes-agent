@@ -709,12 +709,24 @@ def _configured_timeout_seconds(key: str, *, allow_zero: bool) -> Optional[float
 
 
 def _configured_turn_timeout() -> Optional[float]:
-    """agent.claude_agent_sdk.turn_timeout (seconds). Positive only — there
-    is deliberately no `0 = unlimited`: the gateway's inactivity monitor
-    (`agent.gateway_timeout`, 1800s) is the outer ceiling for SDK turns and
-    an unlimited soft budget under it would leave the quiet watchdog as the
-    only transport-level bound."""
+    """agent.claude_agent_sdk.turn_timeout (seconds) — DEPRECATED alias of
+    turn_idle_timeout, read with the same IDLE semantics when that key is
+    unset (it no longer bounds wall clock). Positive only."""
     return _configured_timeout_seconds("turn_timeout", allow_zero=False)
+
+
+def _configured_turn_idle_timeout() -> Optional[float]:
+    """agent.claude_agent_sdk.turn_idle_timeout (seconds): retire a turn only
+    after this long with no activity and nothing outstanding. Positive only —
+    there is deliberately no `0 = unlimited`: an unbounded idle rule would let
+    a wedged CLI hold the session until an outer ceiling notices."""
+    return _configured_timeout_seconds("turn_idle_timeout", allow_zero=False)
+
+
+def _configured_turn_max_seconds() -> Optional[float]:
+    """agent.claude_agent_sdk.turn_max_seconds (seconds): optional absolute
+    wall-clock cap on one turn. `0`/absent = off (the default)."""
+    return _configured_timeout_seconds("turn_max_seconds", allow_zero=True)
 
 
 def _configured_post_tool_quiet_timeout() -> Optional[float]:

@@ -1821,7 +1821,8 @@ class TestTurnLifetimeConfig:
             session_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
         )
         watch = session_mod._TurnWatch()
-        # Budget: needs elapsed >= budget AND idle >= min(30, budget).
+        # Idle budget: fires once idle >= budget with nothing outstanding
+        # (the old `elapsed >= budget AND idle >= 30` rule was the 2026-09-28 defect).
         clock["now"] += 599.0
         assert watch.check(budget=600.0, quiet=0.0) is None
         clock["now"] += 2.0  # elapsed 601, idle 601
@@ -1853,3 +1854,228 @@ class TestTurnLifetimeConfig:
         clock["now"] += 500.0
         watch.rebaseline()
         assert watch.check(budget=60000.0, quiet=90.0) is None
+
+
+# ---------- idle-based turn lifetime (2026-09-28 hotfix) ----------
+# Production 2026-09-21..27 (thinkbot agent.log): orchestrator turns retired at
+# 654s..7978s while quiet only ~30s — the rule was `elapsed >= 600 AND idle >=
+# min(30, budget)`, so ten minutes of wall clock plus any 30s pause killed a
+# working turn. Wall clock alone must never retire a turn now: only
+# turn_idle_timeout of silence with nothing outstanding does. Fake clock, no
+# real sleeping. The literals 900/300 are the production defaults (pinned by
+# test_production_defaults) so these tests also run, and FAIL, on the old tree.
+
+_TWO_HOURS = 2 * 60 * 60.0
+
+
+def _watch_with_fake_clock(monkeypatch):
+    from agent.transports import claude_agent_sdk_session_watchdog as wd
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(wd, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    return wd._TurnWatch(), clock
+
+
+def _advance(watch, clock, seconds, *, budget, quiet, poll=5.0):
+    """Advance the fake clock in poll-sized steps, checking at each — the
+    run_turn poll loop's view. Returns the first non-None verdict."""
+    end = clock["now"] + seconds
+    while clock["now"] < end:
+        clock["now"] = min(end, clock["now"] + poll)
+        verdict = watch.check(budget=budget, quiet=quiet)
+        if verdict is not None:
+            return verdict
+    return None
+
+
+class TestIdleTurnLifetime:
+    def test_production_defaults(self):
+        from agent.transports import claude_agent_sdk_session_watchdog as wd
+
+        assert wd._DEFAULT_TURN_IDLE_TIMEOUT == 900.0
+        assert wd._DEFAULT_POST_TOOL_QUIET_STREAMING == 300.0
+        # The quiet wedge rule stays an EARLY catcher, below the idle limit.
+        assert wd._DEFAULT_POST_TOOL_QUIET_STREAMING < wd._DEFAULT_TURN_IDLE_TIMEOUT
+
+    def test_two_hour_turn_with_a_tool_every_five_minutes_is_never_retired(
+        self, monkeypatch
+    ):
+        # (a) Each 5-minute cycle: a tool runs 30s, then the model is silent
+        # for 270s (worst case: no partial messages) before the next call.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        for n in range(int(_TWO_HOURS // 300)):
+            tool_id = f"toolu_{n}"
+            watch.tick()  # the AssistantMessage carrying the ToolUseBlock
+            watch.note_tools_issued(1, ids=[tool_id])
+            watch.disarm_post_tool()
+            assert _advance(watch, clock, 30.0, budget=900.0, quiet=300.0) is None
+            watch.tick()  # the UserMessage carrying the ToolResultBlock
+            watch.note_tools_resolved(1, ids=[tool_id])
+            watch.arm_post_tool()
+            assert _advance(watch, clock, 270.0, budget=900.0, quiet=300.0) is None, (
+                f"retired at {clock['now'] - watch.started:.0f}s of a working turn"
+            )
+        assert clock["now"] - watch.started >= _TWO_HOURS
+
+    def test_two_hour_turn_streaming_a_delta_every_minute_is_never_retired(
+        self, monkeypatch
+    ):
+        # (b) Long thinking / prose with partial messages on: one StreamEvent
+        # (thinking or text delta) a minute, no tools at all.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        while clock["now"] - watch.started < _TWO_HOURS:
+            assert _advance(watch, clock, 60.0, budget=900.0, quiet=300.0) is None, (
+                f"retired at {clock['now'] - watch.started:.0f}s of a streaming turn"
+            )
+            watch.tick()  # the StreamEvent delta
+
+    def test_silence_past_the_idle_limit_with_nothing_outstanding_retires(
+        self, monkeypatch
+    ):
+        # (c) A genuinely idle turn IS retired — at the idle limit, not before.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        assert _advance(watch, clock, 895.0, budget=900.0, quiet=0.0) is None
+        assert _advance(watch, clock, 10.0, budget=900.0, quiet=0.0) == "budget"
+        # The same limit applies deep into a long turn: activity resets it.
+        clock["now"] += 5000.0
+        watch.tick()
+        assert _advance(watch, clock, 895.0, budget=900.0, quiet=0.0) is None
+        assert _advance(watch, clock, 10.0, budget=900.0, quiet=0.0) == "budget"
+
+    def test_idle_trip_message_names_idle_seconds_and_the_limit(self):
+        # (c) The retire reason names the idle time and the limit, keeps the
+        # "turn timed out" needle, and fits the gateway's 200-char cut.
+        session, _holder = _make_session(script=[])
+        message = session._format_trip_error("budget", 900.0, 300.0, 7978.4, 912.2)
+        assert message.startswith("turn timed out after 912s idle")
+        assert "idle limit 900s" in message
+        assert "turn ran 7978s" in message
+        assert "budget" not in message
+        assert len(message) <= 200
+        capped = session._format_trip_error(
+            "max_seconds", 900.0, 300.0, 3600.0, 4.0, 3600.0
+        )
+        assert "turn_max_seconds cap 3600s" in capped and len(capped) <= 200
+
+    def test_outstanding_tool_or_live_task_suspends_the_idle_rule(self, monkeypatch):
+        # (d) Hours of silence while a tool runs or a background Task lives.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        watch.note_tools_issued(1, ids=["toolu_bash"])
+        assert _advance(watch, clock, _TWO_HOURS, budget=900.0, quiet=300.0) is None
+        assert watch.liveness()[0] == 0.0
+        watch.note_tools_resolved(1, ids=["toolu_bash"])
+        watch.tick()
+        watch.note_task_started("task-1")
+        assert _advance(watch, clock, _TWO_HOURS, budget=900.0, quiet=300.0) is None
+        watch.note_task_terminal("task-1")
+        assert _advance(watch, clock, 905.0, budget=900.0, quiet=0.0) == "budget"
+
+    def test_absolute_cap_is_opt_in(self, monkeypatch):
+        # turn_max_seconds: 0 = off (a busy 2h turn survives); set, it caps
+        # even an active turn.
+        watch, clock = _watch_with_fake_clock(monkeypatch)
+        for _ in range(int(_TWO_HOURS // 60)):
+            clock["now"] += 60.0
+            watch.tick()
+            assert watch.check(budget=900.0, quiet=300.0, max_seconds=0.0) is None
+        assert watch.check(budget=900.0, quiet=300.0, max_seconds=3600.0) == "max_seconds"
+
+    def test_injected_burst_messages_tick_the_turn_watch(self):
+        # Any CLI output is liveness, including messages the reader routes
+        # AWAY from the claimed turn (injected task-notification/peer bursts,
+        # status SystemMessages) — _consume_turn's own tick never sees those.
+        from agent.transports.claude_agent_sdk_session_watchdog import _TurnWatch
+
+        session, holder = _make_session(script=[])
+        watch = _TurnWatch()
+        watch.last_activity -= 10_000.0
+        stale = watch.last_activity
+        try:
+            session.ensure_started()
+            session._turn_watch = watch
+            holder["client"].feed(SystemMessage(subtype="status", data={}))
+            deadline = time.monotonic() + 5.0
+            while watch.last_activity == stale and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert watch.last_activity > stale
+        finally:
+            session._turn_watch = None
+            _close_promptly(session)
+
+
+class TestIdleTurnLifetimeConfig:
+    """(e) config.yaml values reach the watchdog: turn_idle_timeout, the
+    deprecated turn_timeout alias, turn_max_seconds, post_tool_quiet_timeout."""
+
+    _patch_block = TestTurnLifetimeConfig._patch_block
+
+    def _captured_limits(self, monkeypatch, block, *, streaming=False):
+        from agent.transports import claude_agent_sdk_session_watchdog as wd
+
+        self._patch_block(monkeypatch, block)
+        seen = {}
+
+        def spy_check(watch, **kwargs):
+            seen.update(kwargs, idle_limit=watch.idle_limit)
+            return "budget"  # trip at once: no real waiting on the limits
+
+        monkeypatch.setattr(wd._TurnWatch, "check", spy_check)
+        session, _holder = _make_hold_open_session(
+            script=[], interrupt_ack=[_ede_interrupt_ack()]
+        )
+        session._streaming = streaming
+        try:
+            turn = session.run_turn("hi", watch_poll_interval=0.01, abort_grace=0.5)
+        finally:
+            _close_promptly(session)
+        return seen, turn
+
+    def test_turn_idle_timeout_and_max_seconds_are_honoured(self, monkeypatch):
+        seen, turn = self._captured_limits(
+            monkeypatch, {"turn_idle_timeout": 1234, "turn_max_seconds": 7200}
+        )
+        assert seen["budget"] == 1234.0 and seen["idle_limit"] == 1234.0
+        assert seen["max_seconds"] == 7200.0
+        assert "idle limit 1234s" in turn.error
+
+    def test_idle_timeout_wins_over_the_deprecated_alias(self, monkeypatch):
+        seen, _turn = self._captured_limits(
+            monkeypatch, {"turn_idle_timeout": 1800, "turn_timeout": 600}
+        )
+        assert seen["budget"] == 1800.0
+
+    def test_deprecated_turn_timeout_maps_to_the_idle_limit(self, monkeypatch):
+        seen, turn = self._captured_limits(monkeypatch, {"turn_timeout": 1500})
+        assert seen["budget"] == 1500.0
+        assert "idle limit 1500s" in turn.error
+
+    def test_defaults_without_config(self, monkeypatch):
+        seen, _turn = self._captured_limits(monkeypatch, {}, streaming=True)
+        assert seen["budget"] == 900.0
+        assert seen["max_seconds"] == 0.0
+        assert seen["quiet"] == 300.0
+
+    def test_configured_quiet_is_honoured(self, monkeypatch):
+        seen, _turn = self._captured_limits(
+            monkeypatch, {"post_tool_quiet_timeout": 45}, streaming=True
+        )
+        assert seen["quiet"] == 45.0
+
+    def test_new_key_reader_validation(self, monkeypatch):
+        from agent.transports.claude_agent_sdk_session_config import (
+            _configured_turn_idle_timeout,
+            _configured_turn_max_seconds,
+        )
+
+        self._patch_block(monkeypatch, {"turn_idle_timeout": "1200"})
+        assert _configured_turn_idle_timeout() == 1200.0
+        for bad in (0, -5, True, "plenty"):
+            self._patch_block(monkeypatch, {"turn_idle_timeout": bad})
+            assert _configured_turn_idle_timeout() is None
+        self._patch_block(monkeypatch, {"turn_max_seconds": 0})
+        assert _configured_turn_max_seconds() == 0.0
+        self._patch_block(monkeypatch, {"turn_max_seconds": 14400})
+        assert _configured_turn_max_seconds() == 14400.0
+        for bad in (-1, True, "forever"):
+            self._patch_block(monkeypatch, {"turn_max_seconds": bad})
+            assert _configured_turn_max_seconds() is None

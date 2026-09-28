@@ -137,3 +137,80 @@ def test_malformed_sections_fall_back_to_defaults(caplog):
     assert result == (DEFAULT_TURN_LIVENESS_TIMEOUT_S, DEFAULT_TURN_LIVENESS_POLL_S)
     # The malformed section itself is surfaced as a warning.
     assert len(caplog.records) >= 1
+
+
+# ---------- SDK lane: never fire before the transport's idle limit (2026-09-28) ----------
+# Production 2026-09-25/27: this watchdog aborted SDK-lane turns at ~600s ("last activity:
+# 'executing tool: Bash'") — the agent activity clock never sees stream deltas, a long-running
+# CLI tool, a live background Task or an approval. It now reads the SDK turn watch and keeps its
+# limit above the SDK idle limit, so the transport's clean unwind always gets first claim.
+
+
+def _sdk_lane(monkeypatch, *, sdk_idle_limit=900.0, liveness_timeout=600.0):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from agent import activity_tracking, turn_liveness
+    from agent.transports import claude_agent_sdk_session_watchdog as wd
+
+    clock = SimpleNamespace(now=1000.0)
+    timer = SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now)
+    monkeypatch.setattr(activity_tracking, "time", timer)
+    monkeypatch.setattr(turn_liveness, "time", timer)
+    monkeypatch.setattr(wd, "time", timer)
+    agent = activity_tracking.ActivityTrackingMixin()
+    agent.show_commentary = False
+    agent._touch_activity("executing tool: Bash")
+    watch = wd._TurnWatch()
+    watch.idle_limit = sdk_idle_limit
+    agent._claude_sdk_session = SimpleNamespace(_turn_watch=watch)
+    abort = MagicMock(return_value=True)
+    watchdog = turn_liveness.TurnLivenessWatchdog(
+        agent, session_id="sdk", timeout_s=liveness_timeout, poll_s=15,
+        stop_event=threading.Event(), activity_lock=agent._liveness_activity_lock(),
+        is_turn_active=lambda: True, commit_abort=abort, deactivate_turn=MagicMock(),
+    )
+    return clock, watch, watchdog, abort
+
+
+def test_sdk_lane_stream_activity_keeps_the_liveness_watchdog_quiet(monkeypatch):
+    clock, watch, watchdog, abort = _sdk_lane(monkeypatch)
+    for _ in range(120):  # 2h of one streamed delta a minute, agent clock untouched
+        clock.now += 60.0
+        watch.tick()
+        assert watchdog._tick() is None
+    abort.assert_not_called()
+
+
+def test_sdk_lane_outstanding_tool_keeps_the_liveness_watchdog_quiet(monkeypatch):
+    clock, watch, watchdog, abort = _sdk_lane(monkeypatch)
+    watch.note_tools_issued(1, ids=["toolu_bash"])
+    for _ in range(3 * 240):  # a 3h Bash call, polled every 15s
+        clock.now += 15.0
+        assert watchdog._tick() is None
+    abort.assert_not_called()
+
+
+def test_sdk_lane_liveness_never_fires_before_the_sdk_idle_limit(monkeypatch):
+    # (f) Total silence: the SDK watch trips at its idle limit first; this watchdog stays a
+    # backstop above it (limit + margin), even with a shorter turn_liveness.timeout_s.
+    from agent.turn_liveness import _TRANSPORT_IDLE_MARGIN_S
+
+    clock, watch, watchdog, abort = _sdk_lane(monkeypatch, sdk_idle_limit=900.0)
+    while clock.now - 1000.0 < 900.0 + _TRANSPORT_IDLE_MARGIN_S - 15.0:
+        clock.now += 15.0
+        assert watchdog._tick() is None, f"fired at {clock.now - 1000.0:.0f}s"
+    assert watch.check(budget=900.0, quiet=0.0) == "budget"  # the SDK rule tripped first
+    abort.assert_not_called()
+    clock.now += 30.0
+    assert watchdog._tick() is False  # a wedge the SDK could not unwind is still caught
+    abort.assert_called_once()
+
+
+def test_liveness_keeps_its_own_limit_off_the_sdk_lane(monkeypatch):
+    clock, _watch, watchdog, abort = _sdk_lane(monkeypatch)
+    watchdog._agent._claude_sdk_session = None
+    clock.now += 601.0
+    assert watchdog._tick() is False
+    abort.assert_called_once()

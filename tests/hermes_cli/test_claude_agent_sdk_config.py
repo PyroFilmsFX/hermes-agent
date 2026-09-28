@@ -59,10 +59,14 @@ class TestClaudeAgentSdkDefaults:
         # null = the transport's 10 MiB NDJSON message limit. The explicit
         # config key keeps the operator override in the canonical schema.
         assert block["max_buffer_size"] is None
-        # null = the built-in 600s soft budget; the value itself lives in the
-        # transport (activity-aware — see claude_agent_sdk_session.run_turn).
+        # null = the built-in 900s idle limit; the value itself lives in the
+        # transport (idle-based — see claude_agent_sdk_session.run_turn).
+        assert block["turn_idle_timeout"] is None
+        # Deprecated alias: null so a legacy value is still honoured.
         assert block["turn_timeout"] is None
-        # null = streaming-dependent built-in (90s with streaming on,
+        # 0 = no absolute wall-clock cap.
+        assert block["turn_max_seconds"] == 0
+        # null = streaming-dependent built-in (300s with streaming on,
         # disabled with streaming off); 0 = explicitly disabled.
         assert block["post_tool_quiet_timeout"] is None
         # Hybrid in-process MCP bridge off by default — the wide bridge

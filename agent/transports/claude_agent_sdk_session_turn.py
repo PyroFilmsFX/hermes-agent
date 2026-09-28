@@ -36,6 +36,8 @@ from agent.transports.claude_agent_sdk_session_input import (
 )
 from agent.transports.claude_agent_sdk_session_config import (
     _configured_post_tool_quiet_timeout,
+    _configured_turn_idle_timeout,
+    _configured_turn_max_seconds,
     _configured_turn_timeout,
 )
 from agent.transports.claude_sdk_peer_envelope import effective_origin
@@ -43,7 +45,7 @@ from agent.transports.claude_agent_sdk_session_child import SdkShuttingDownError
 from agent.transports.claude_agent_sdk_session_watchdog import (
     _is_rename_ack,
     _DEFAULT_POST_TOOL_QUIET_STREAMING,
-    _DEFAULT_TURN_TIMEOUT,
+    _DEFAULT_TURN_IDLE_TIMEOUT,
     _POLL_STALL_FACTOR,
     _StreamEnd,
     _TURN_ABORT_GRACE,
@@ -213,16 +215,17 @@ class ClaudeSdkTurnMixin:
         """Send a user message and block until the SDK's ResultMessage,
         projecting the typed stream into Hermes' messages shape.
 
-        Turn lifetime is activity-aware, not a bare wall clock (production
-        forensics: four of six 600s kills were actively-working turns).
-        `turn_timeout` (explicit arg > agent.claude_agent_sdk.turn_timeout >
-        600s) is a SOFT budget: it only fires when nothing is outstanding —
-        no tool running, no approval awaiting a human — and the stream has
-        ALSO been quiet ≥ min(30s, budget). A post-tool quiet watchdog
-        (`post_tool_quiet_timeout`; default 90s with streaming on, disabled
-        with streaming off) catches wedges early: armed when a tool result
-        arrives, cleared by any later activity. On a trip the CLI is
-        interrupted and given `abort_grace` to unwind — a clean unwind keeps
+        Turn lifetime is IDLE-based; wall clock alone never retires a turn.
+        `turn_timeout` (explicit arg > agent.claude_agent_sdk.turn_idle_timeout
+        > the deprecated turn_timeout key > 900s) is the idle limit: it fires
+        only after that long with no SDK message of any kind (stream deltas,
+        system/status included) AND nothing outstanding — no tool running, no
+        live background Task, no approval awaiting a human, no compaction.
+        turn_max_seconds (config, 0 = off) is the only absolute cap. A
+        post-tool quiet watchdog (`post_tool_quiet_timeout`; default 300s with
+        streaming on, disabled with streaming off) catches wedges early: armed
+        when a tool result arrives, cleared by any later activity. On a trip
+        the CLI is interrupted and given `abort_grace` to unwind — a clean unwind keeps
         the partial transcript and the resumable session id (no retire);
         only a grace expiry hard-cancels and retires."""
         result = TurnResult()
@@ -325,11 +328,18 @@ class ClaudeSdkTurnMixin:
 
         import concurrent.futures
 
+        # The idle limit. turn_timeout (arg and legacy config key) keeps
+        # working under the idle semantics; it never bounds wall clock.
         budget = (
             float(turn_timeout)
             if turn_timeout is not None
-            else (_configured_turn_timeout() or _DEFAULT_TURN_TIMEOUT)
+            else (
+                _configured_turn_idle_timeout()
+                or _configured_turn_timeout()
+                or _DEFAULT_TURN_IDLE_TIMEOUT
+            )
         )
+        max_seconds = _configured_turn_max_seconds() or 0.0
         if post_tool_quiet_timeout is not None:
             quiet = float(post_tool_quiet_timeout)
         else:
@@ -432,6 +442,7 @@ class ClaudeSdkTurnMixin:
                 )
                 return self._retired_before_query_result()
             watch = _TurnWatch()
+            watch.idle_limit = budget
             self._turn_watch = watch
             trip: Optional[str] = None
             trip_elapsed = trip_idle = 0.0
@@ -534,7 +545,9 @@ class ClaudeSdkTurnMixin:
                         pending_verdict = None
                         continue
                     prev_poll = now
-                    verdict = watch.check(budget=budget, quiet=quiet)
+                    verdict = watch.check(
+                        budget=budget, quiet=quiet, max_seconds=max_seconds
+                    )
                     if verdict is None:
                         pending_verdict = None
                         continue
@@ -630,7 +643,7 @@ class ClaudeSdkTurnMixin:
             self.consume_interrupt()
             result.interrupted = True
             result.error = self._format_trip_error(
-                trip, budget, quiet, trip_elapsed, trip_idle
+                trip, budget, quiet, trip_elapsed, trip_idle, max_seconds
             )
             result.should_retire = True
             return result
@@ -731,7 +744,7 @@ class ClaudeSdkTurnMixin:
             # their retire verdicts from the mapping above.
             if result.fatal_reason != "auth":
                 result.error = self._format_trip_error(
-                    trip, budget, quiet, trip_elapsed, trip_idle
+                    trip, budget, quiet, trip_elapsed, trip_idle, max_seconds
                 )
             result.interrupted = True
         return result
@@ -743,6 +756,7 @@ class ClaudeSdkTurnMixin:
         quiet: float,
         elapsed: float,
         idle: float,
+        max_seconds: float = 0.0,
     ) -> str:
         """≤200 chars (the gateway truncates at str(err)[:200]); keeps the
         literal "turn timed out" needle; names the cause."""
@@ -752,9 +766,15 @@ class ClaudeSdkTurnMixin:
                 f"tool result (turn ran {elapsed:.0f}s, quiet limit "
                 f"{quiet:.0f}s)"
             )
+        if kind == "max_seconds":
+            return (
+                f"turn timed out after {elapsed:.0f}s: turn_max_seconds cap "
+                f"{max_seconds:.0f}s reached (idle {idle:.0f}s)"
+            )
         return (
-            f"turn timed out after {elapsed:.0f}s "
-            f"(budget {budget:.0f}s, idle {idle:.0f}s)"
+            f"turn timed out after {idle:.0f}s idle: no SDK activity and no "
+            f"tool, task or approval outstanding (idle limit {budget:.0f}s, "
+            f"turn ran {elapsed:.0f}s)"
         )
 
     # ---------- internals ----------
@@ -1525,6 +1545,12 @@ class ClaudeSdkTurnMixin:
                         end = _StreamEnd(error=None)
                         break
                     self._observe_billing_evidence(message)
+                    watch = getattr(self, "_turn_watch", None)
+                    if watch is not None:
+                        # Any CLI output is liveness for the in-flight turn —
+                        # including an injected burst routed away below, which
+                        # _consume_turn's own tick never sees.
+                        watch.tick()
                     inbox = self._turn_inbox
                     if inbox is not None and self._unsolicited_burst_open:
                         # An injected turn (peer message, task notification)

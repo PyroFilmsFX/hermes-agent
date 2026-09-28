@@ -395,15 +395,20 @@ DEFAULT_CONFIG = {
             # permission allowlists) does NOT ride along. Entries without a
             # .claude-plugin/plugin.json are ignored with a warning.
             "plugins": [],
-            # Soft turn budget in seconds; null = the built-in 600. Activity-aware: fires only when
-            # no tool call is outstanding, no approval prompt awaits a human, AND the SDK stream has
-            # been quiet >= min(30s, budget) — a turn producing output or running tools is never
-            # killed at the wall. Raise it for legitimately long turns (keep under
-            # agent.gateway_timeout, the 1800s outer ceiling). 0/negative/non-numeric values are
-            # ignored with a warning.
+            # Turn IDLE limit in seconds; null = the built-in 900. A turn is retired only after this
+            # long with no SDK message at all (stream/thinking deltas, system/status included) AND
+            # nothing outstanding: no tool call running, no live background Task/subagent, no
+            # approval awaiting a human, no compaction in progress. Wall-clock turn length alone
+            # never retires a turn. 0/negative/non-numeric values are ignored with a warning.
+            "turn_idle_timeout": None,
+            # DEPRECATED alias of turn_idle_timeout (same idle semantics; read only when
+            # turn_idle_timeout is unset). It no longer bounds wall clock.
             "turn_timeout": None,
+            # Optional absolute wall-clock cap on one turn in seconds. 0 = off (the default):
+            # multi-hour orchestrator turns run as long as they show activity.
+            "turn_max_seconds": 0,
             # Post-tool quiet watchdog in seconds: how long the stream may stay silent AFTER a tool
-            # result before the turn is declared wedged (codex-parity fast-fail). null = 90 when
+            # result before the turn is declared wedged (codex-parity fast-fail). null = 300 when
             # `streaming: true` (partial deltas prove liveness), DISABLED when streaming is off (a
             # silent post-tool model call is indistinguishable from a wedge there). 0 = explicitly
             # disabled; negative/non-numeric values are ignored with a warning.
@@ -436,7 +441,10 @@ DEFAULT_CONFIG = {
         # logged, force-interrupted so the UI can retry, and its lease stops renewing so stale-turn
         # cleanup can reclaim the session even if the interrupt can't unwind a wedged frame.
         # timeout_s <= 0 disables; poll_s = sampling interval. Invalid values (NaN, Inf,
-        # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py.
+        # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py. On the
+        # Claude Agent SDK lane it also counts the SDK turn's own activity (stream deltas, running
+        # tools, live Tasks, approvals) and never fires before claude_agent_sdk.turn_idle_timeout
+        # + 60s, so the SDK's clean unwind always acts first.
         "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
     },
 

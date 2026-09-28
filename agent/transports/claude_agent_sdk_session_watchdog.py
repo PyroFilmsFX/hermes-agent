@@ -1,6 +1,6 @@
 """Turn-lifetime watchdog for the claude-agent-sdk session.
 
-The activity-aware budget/quiet rules (``_TurnWatch``), their defaults, the
+The activity-aware idle/quiet rules (``_TurnWatch``), their defaults, the
 stream-end sentinel and the future-result swallowers used by interrupt/steer.
 Extracted from ``claude_agent_sdk_session.py``.
 """
@@ -19,27 +19,27 @@ logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 
 
 # ---------- turn-lifetime defaults ----------
-# The soft turn budget. It was a hard wall-clock over the whole turn since the
-# provider's birth (transplanted verbatim from the codex twin, where a
-# post-tool quiet watchdog compensates); production forensics on six 600s
-# kills showed four were actively-working turns (tool loops, human approval
-# taps) — so the budget is now evaluated together with activity evidence
-# (see _TurnWatch) instead of alone.
-_DEFAULT_TURN_TIMEOUT = 600.0
+# The turn IDLE limit (agent.claude_agent_sdk.turn_idle_timeout; the legacy
+# turn_timeout key is read as an alias). Wall-clock elapsed never retires a
+# turn: production 2026-09-21..27 lost orchestrator turns at 654s..7978s that
+# were quiet for only ~30s (the old rule was elapsed >= 600s AND idle >= 30s).
+# A turn is idle only when NO evidence of work exists (see _TurnWatch.check).
+# 900s sits above the CLI's own per-request API timeout, so one silent model
+# call (long thinking with partial messages off) cannot read as a wedge.
+_DEFAULT_TURN_IDLE_TIMEOUT = 900.0
+# Import alias for callers of the pre-idle name.
+_DEFAULT_TURN_TIMEOUT = _DEFAULT_TURN_IDLE_TIMEOUT
 
 
-# Post-tool quiet watchdog default WHEN streaming is on (codex parity: its
-# post_tool_quiet_timeout=90 mirrors openclaw's #81697 watchdog). With
-# streaming OFF there is no liveness signal between a tool result and the
-# next complete AssistantMessage — thinking is indistinguishable from wedged
-# — so the watchdog defaults to DISABLED there (operator opt-in).
-_DEFAULT_POST_TOOL_QUIET_STREAMING = 90.0
-
-
-# The budget rule only fires when the turn has ALSO been quiet this long
-# (capped at the budget itself so tiny test budgets keep tripping at the
-# budget): an actively-producing turn is never killed mid-sentence.
-_BUDGET_GRACE_IDLE = 30.0
+# Post-tool quiet watchdog default WHEN streaming is on. It was 90s (codex
+# parity, openclaw #81697); production 2026-09-26 killed a working turn 92s
+# after a tool result (large-context time-to-first-token), so it is widened
+# to 300s — still well under the idle limit, so it remains the early wedge
+# catcher. With streaming OFF there is no liveness signal between a tool
+# result and the next complete AssistantMessage — thinking is
+# indistinguishable from wedged — so the watchdog defaults to DISABLED there
+# (operator opt-in via post_tool_quiet_timeout).
+_DEFAULT_POST_TOOL_QUIET_STREAMING = 300.0
 
 
 # After a watchdog trip we interrupt the CLI and give _consume_turn this long
@@ -106,6 +106,9 @@ class _TurnWatch:
         # by _TASK_MAX_SUSPEND, an ordinary outstanding tool is not.
         self.outstanding_tool_ids: set[str] = set()
         self.task_parent_tools: dict[str, str] = {}
+        # The idle limit run_turn enforces, published for liveness() readers
+        # (agent/turn_liveness.py keeps its own limit above it). 0 = unset.
+        self.idle_limit = 0.0
 
     # -- loop-thread writers --
 
@@ -194,19 +197,20 @@ class _TurnWatch:
         descheduled, not waiting — restamp so neither rule fires on it."""
         self.last_activity = time.monotonic()
 
-    def check(self, *, budget: float, quiet: float) -> Optional[str]:
-        """Returns None (keep waiting), "post_tool_quiet", or "budget"."""
-        now = time.monotonic()
+    def _suspended(self, now: float) -> bool:
+        """True while the turn is PROVABLY working or waiting: an approval
+        awaits a human, a tool is outstanding, a live Task runs, or a
+        compaction is in progress. No idle rule may fire meanwhile."""
         if self.approvals_pending > 0:
-            return None
+            return True
         # An ordinary outstanding tool suspends indefinitely (documented
         # above). When the only outstanding calls are live Tasks' own Task
         # calls, the Task cap below bounds the suspension instead: a Task
         # whose ToolResult never arrives must not hold the turn forever.
         if self.outstanding_tools > 0 and not self._outstanding_tools_are_live_tasks():
-            return None
+            return True
         if self.task_gate_started and now - self.task_gate_started < _TASK_MAX_SUSPEND:
-            return None
+            return True
         # A compacting CLI is indistinguishable from a wedged one: between
         # PreCompact and compact_boundary it emits nothing at all. Without this
         # gate the post_tool_quiet rule reads that silence as a wedge and
@@ -214,16 +218,37 @@ class _TurnWatch:
         # arrives -- surfacing next turn as "discarding N stale unsolicited
         # text(s)" and, to the user, as a turn that simply died. Bounded, so a
         # boundary that never arrives cannot hang the turn instead.
-        if (
+        return (
             self.compaction_active > 0
             and (now - self.compaction_started) < _COMPACTION_MAX_SUSPEND
-        ):
+        )
+
+    def liveness(self) -> tuple[float, float]:
+        """``(idle_seconds, idle_limit)`` for outside watchdogs (read-only,
+        lock-free like check()). idle is 0.0 while a gate suspends the turn."""
+        now = time.monotonic()
+        idle = 0.0 if self._suspended(now) else max(0.0, now - self.last_activity)
+        return idle, float(self.idle_limit)
+
+    def check(
+        self, *, budget: float, quiet: float, max_seconds: float = 0.0
+    ) -> Optional[str]:
+        """Returns None (keep waiting), "max_seconds", "post_tool_quiet", or
+        "budget".
+
+        ``budget`` is the IDLE budget (turn_idle_timeout): "budget" means the
+        turn went that long with no activity and nothing outstanding. Elapsed
+        wall clock never trips it; only an explicitly configured
+        ``max_seconds`` (turn_max_seconds, 0 = off) caps a turn absolutely."""
+        now = time.monotonic()
+        if max_seconds > 0 and now - self.started >= max_seconds:
+            return "max_seconds"
+        if self._suspended(now):
             return None
         idle = now - self.last_activity
         if quiet > 0 and self.post_tool_armed and idle >= quiet:
             return "post_tool_quiet"
-        elapsed = now - self.started
-        if elapsed >= budget and idle >= min(_BUDGET_GRACE_IDLE, budget):
+        if idle >= budget:
             return "budget"
         return None
 

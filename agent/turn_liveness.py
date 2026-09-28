@@ -25,14 +25,44 @@ MIN_TURN_LIVENESS_POLL_S = 0.01
 _CONFIG_TIMEOUT_KEY = "agent.turn_liveness.timeout_s"
 _CONFIG_POLL_KEY = "agent.turn_liveness.poll_s"
 
+# On the Claude Agent SDK lane the transport's own turn watchdog sees liveness the agent clock
+# never does (stream/thinking deltas, outstanding CLI tools, live background Tasks, approvals,
+# compactions) and unwinds a stalled turn cleanly. This watchdog therefore reads that evidence and
+# never fires before the transport's idle limit plus this margin (its trip debounce + abort grace).
+_TRANSPORT_IDLE_MARGIN_S = 60.0
+
 
 class ActivitySnapshot(NamedTuple):
     """One activity-clock observation; ``(generation, activity_ts)`` must be
-    revalidated by the commit callback under the shared lock."""
+    revalidated by the commit callback under the shared lock. ``timeout_s`` is the
+    effective limit for this sample (None = the configured one)."""
 
     generation: int
     activity_ts: Optional[float]
     idle_seconds: float
+    timeout_s: Optional[float] = None
+
+
+def _transport_liveness(agent: Any) -> Optional[Tuple[float, float]]:
+    """``(idle_seconds, idle_limit)`` from the in-flight Claude Agent SDK turn watch, or None
+    when no SDK turn is in flight. Duck-typed and never raises."""
+    session = getattr(agent, "_claude_sdk_session", None)
+    watch = getattr(session, "_turn_watch", None) if session is not None else None
+    liveness = getattr(watch, "liveness", None) if watch is not None else None
+    if not callable(liveness):
+        return None
+    try:
+        idle, limit = liveness()
+        idle, limit = float(idle), float(limit)
+    except RuntimeError:
+        # The watch is read lock-free while the SDK loop mutates it; a torn read skips this
+        # sample (next poll retries) rather than falling back to the shorter agent-only view.
+        return 0.0, 0.0
+    except Exception:
+        return None
+    if not (math.isfinite(idle) and math.isfinite(limit)):
+        return None
+    return max(0.0, idle), max(0.0, limit)
 
 
 def _warn_invalid_value(key: str, raw: Any, default: float) -> None:
@@ -123,7 +153,7 @@ class TurnLivenessWatchdog:
         snapshot = self._sample()
         if snapshot is None:
             return False  # turn no longer active
-        if snapshot.idle_seconds < self._timeout_s:
+        if snapshot.idle_seconds < (snapshot.timeout_s or self._timeout_s):
             return None
         # Observational only: the commit below can still veto the abort if progress
         # resumed; the definitive settlement is _surface_committed_abort.
@@ -148,7 +178,16 @@ class TurnLivenessWatchdog:
             generation = getattr(self._agent, "_turn_liveness_activity_generation", 0)
             activity_ts = getattr(self._agent, "_last_activity_ts", None)
         idle_seconds = 0.0 if activity_ts is None else max(0.0, time.time() - activity_ts)
-        return ActivitySnapshot(generation, activity_ts, idle_seconds)
+        timeout_s = self._timeout_s
+        transport = _transport_liveness(self._agent)
+        if transport is not None:
+            # Either clock showing work is progress; and the transport watchdog, which unwinds
+            # cleanly, always gets first claim on a stall.
+            transport_idle, transport_limit = transport
+            idle_seconds = min(idle_seconds, transport_idle)
+            if transport_limit > 0:
+                timeout_s = max(timeout_s, transport_limit + _TRANSPORT_IDLE_MARGIN_S)
+        return ActivitySnapshot(generation, activity_ts, idle_seconds, timeout_s)
 
     def _emit_warning(self, text: str, debug_msg: str) -> None:
         emit_warning = getattr(self._agent, "_emit_warning", None)
