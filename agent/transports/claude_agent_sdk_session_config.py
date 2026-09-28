@@ -175,6 +175,13 @@ def _sdk_env_overrides(
     from hermes_constants import get_hermes_home
 
     project_cwd = Path(sdk_cwd).expanduser().resolve()
+    # Claude Code exports CLAUDE_PROJECT_DIR (the directory it was launched in) to everything it runs;
+    # SDK-spawned CLIs don't, so conductor's state root and marker ownership fell back to whatever
+    # cwd a Bash call had (a subfolder, a lane) and split the build state. Set it to this session's
+    # launch cwd, replacing any value inherited from a parent Claude process; an explicit
+    # agent.claude_agent_sdk.env entry still wins.
+    if "CLAUDE_PROJECT_DIR" not in _configured_sdk_env():
+        overrides["CLAUDE_PROJECT_DIR"] = str(project_cwd)
     cwd_hash = hashlib.sha256(os.fsencode(project_cwd)).hexdigest()[:16]
     state_dir = get_hermes_home() / "sdk-state" / cwd_hash
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
