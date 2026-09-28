@@ -319,3 +319,19 @@ def test_pre_362_checkout_without_index_reads_flat(workspace, monkeypatch):
     tmp_path, _ = workspace
     _as_session(monkeypatch, tmp_path, "claude-B")
     assert _result(workspace)["result"]["build"]["plan"] == "FAKE-PLAN"
+
+
+def test_index_row_under_a_symlinked_builds_dir_is_never_followed(workspace, monkeypatch, tmp_path_factory):
+    """`builds` swapped for a symlink to another directory: the namespaced marker is not read through it."""
+    tmp_path, _ = workspace
+    state = _two_builds(tmp_path)
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    evil = elsewhere / "b-two"
+    evil.mkdir()
+    (evil / "tb-build-active.json").write_text(json.dumps(_marker(session_id="claude-B", plan="/x/EVIL.md")))
+    import shutil
+    shutil.rmtree(state / "builds")
+    (state / "builds").symlink_to(elsewhere, target_is_directory=True)
+    _as_session(monkeypatch, tmp_path, "claude-B")
+    build = _result(workspace)["result"]["build"]
+    assert build is None or build["plan"] != "EVIL"

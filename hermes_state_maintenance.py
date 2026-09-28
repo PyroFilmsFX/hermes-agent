@@ -335,9 +335,23 @@ class SessionMaintenanceMixin:
         )
         archived_count = 0
         for row in rows:
-            sid, cwd, branch = row[0], row[1], row[2]
-            if is_conductor_lane(cwd=cwd, branch=branch):
-                self.set_session_archived(sid, True)
+            sid, cwd = row[0], row[1]
+            # Path only: a branch name can't tell a lane worktree from a main checkout that happens to
+            # sit on a lane/ branch, so the sweep never archives on the branch alone.
+            if not is_conductor_lane(cwd=cwd):
+                continue
+            # Re-check eligibility in the same statement that claims the row: a session resumed, pinned
+            # or already archived since the SELECT above is left alone.
+            claimed = self._write_rowcount(
+                f"""
+                UPDATE sessions SET archived = 1
+                WHERE id = ? AND archived = 0 AND ended_at IS NOT NULL AND ended_at < ?
+                  {"AND pinned = 0" if exclude_pinned else ""}
+                """,
+                (sid, cutoff),
+            )
+            if claimed:
+                self.set_session_archived(sid, True)  # the rest of its compression lineage
                 archived_count += 1
         return archived_count
 

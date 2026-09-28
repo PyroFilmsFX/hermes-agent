@@ -192,3 +192,41 @@ def test_lane_auto_archive_hourly_min_interval(tmp_path, monkeypatch):
     assert res3["skipped"] is False
 
     db.close()
+
+
+def _ended(db, sid, *, cwd, branch=None, pinned=0, hours=8.0):
+    db.create_session(sid, "cli", cwd=cwd)
+    db._write_sql("UPDATE sessions SET ended_at = ?, end_reason = 'normal', pinned = ?, git_branch = ? WHERE id = ?",
+                  (time.time() - hours * 3600, pinned, branch, sid))
+
+
+def _archived(db, sid):
+    return db._read_one("SELECT archived FROM sessions WHERE id = ?", (sid,))[0] == 1
+
+
+def test_sweep_never_archives_a_main_checkout_on_a_lane_branch(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    _ended(db, "main-on-lane-branch", cwd="/Users/me/code/hermes", branch="lane/feature-x")
+    _ended(db, "real-lane", cwd="/tmp/lane-feature-x", branch="lane/feature-x")
+    assert db.archive_lane_sessions(6) == 1
+    assert not _archived(db, "main-on-lane-branch")
+    assert _archived(db, "real-lane")
+
+
+def test_sweep_rechecks_eligibility_when_claiming_each_row(tmp_path, monkeypatch):
+    """A session pinned or resumed between the candidate SELECT and the archive stays visible."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    _ended(db, "pinned-meanwhile", cwd="/tmp/lane-a")
+    _ended(db, "resumed-meanwhile", cwd="/tmp/lane-b")
+    real_read_all = db._read_all
+
+    def select_then_race(sql, params=()):
+        rows = real_read_all(sql, params)
+        db._write_sql("UPDATE sessions SET pinned = 1 WHERE id = 'pinned-meanwhile'")
+        db._write_sql("UPDATE sessions SET ended_at = NULL WHERE id = 'resumed-meanwhile'")
+        return rows
+
+    monkeypatch.setattr(db, "_read_all", select_then_race)
+    assert db.archive_lane_sessions(6) == 0
+    assert not _archived(db, "pinned-meanwhile")
+    assert not _archived(db, "resumed-meanwhile")
