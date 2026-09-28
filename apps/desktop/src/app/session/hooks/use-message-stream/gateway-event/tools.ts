@@ -78,6 +78,15 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
     return true
   }
 
+  if (event.type === 'tool.progress') {
+    if (sessionId && !sessionInterrupted(sessionId)) {
+      flushQueuedDeltas(sessionId)
+      upsertToolCall(sessionId, payload, 'running', event.type, occurredAt)
+    }
+
+    return true
+  }
+
   if (event.type === 'tool.complete') {
     if (sessionId) {
       flushQueuedDeltas(sessionId)

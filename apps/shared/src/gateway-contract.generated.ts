@@ -4675,10 +4675,20 @@ export interface ToolStartPayload {
   tool_id: string
   name: string
   context?: string | null
+  title?: string | null
   args?: Record<string, unknown> | null
   args_text?: string | null
   preview?: string | null
   labels?: ToolLabel[] | null
+}
+/** ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` via ``tool_progress_callback``. */
+export interface ToolProgressPayload {
+  tool_id: string
+  name: string
+  preview: string
+  progress: number
+  total?: number | null
+  message?: string | null
 }
 /** ``tool_progress._on_tool_complete``; ``todos``/``revision`` merged in for the todo tools. */
 export interface ToolCompletePayload {
@@ -5872,6 +5882,8 @@ export interface BackendGatewayEventMap {
   'tool.generating': ToolGeneratingPayload
   /** Tool output was classified as risky (prompt-injection / secret findings). */
   'tool.output_risk': ToolOutputRiskPayload
+  /** An active MCP tool reported progress. */
+  'tool.progress': ToolProgressPayload
   /** A tool call began (stable id + full args). */
   'tool.start': ToolStartPayload
   /** Barge-in: the spoken interjection interrupted the turn; no payload. */
@@ -5954,6 +5966,7 @@ export const GATEWAY_EVENT_TYPES = [
   'tool.complete',
   'tool.generating',
   'tool.output_risk',
+  'tool.progress',
   'tool.start',
   'voice.interrupted',
   'voice.status',

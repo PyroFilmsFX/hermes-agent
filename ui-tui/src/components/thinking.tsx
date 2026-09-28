@@ -912,6 +912,7 @@ export const ToolTrail = memo(function ToolTrail({
         <>
           <Spinner color={t.color.tool} variant="tool" /> {label}
           {tool.startedAt ? ` (${fmtElapsed(now - tool.startedAt)})` : ''}
+          {tool.progress ? ` · ${tool.progress}` : ''}
         </>
       )
     })

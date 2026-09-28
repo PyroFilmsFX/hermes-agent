@@ -482,6 +482,10 @@ _CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 # ``_tool_read_only_hints`` by the connection key (the server's own tool annotations).
 _server_trust_levels: Dict[Any, str] = {}
 _tool_read_only_hints: Dict[Any, Dict[str, bool]] = {}
+# Per-consuming-profile ``confirm_destructive`` (D56): ask before a destructiveHint tool even on a ``trust: full`` server.
+_server_confirm_destructive: Dict[Any, bool] = {}
+_tool_annotations: Dict[Any, Dict[str, Dict[str, Any]]] = {}
+_tool_raw_names: Dict[str, str] = {}
 
 _TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
 

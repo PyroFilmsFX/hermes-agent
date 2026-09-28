@@ -45,11 +45,35 @@ def _normalize_server_trust(value: Any) -> str:
     return _core._TRUST_UNTRUSTED
 
 
+def _confirm_destructive(value: Any) -> bool:
+    """``confirm_destructive`` opt-in (D56): only a real ``true`` turns it on; default off."""
+    return value is True
+
+
+def _annotation_value(mcp_tool: Any, name: str):
+    annotations = getattr(mcp_tool, "annotations", None)
+    snake = "".join(("_" + char.lower()) if char.isupper() else char for char in name)
+    return annotations.get(name, annotations.get(snake)) if isinstance(annotations, dict) else (
+        getattr(annotations, name, getattr(annotations, snake, None)))
+
+
 def _annotation_read_only_hint(mcp_tool: Any) -> bool:
     """True only when annotations (SDK object or cache dict) carry ``readOnlyHint is True``; unknown = write-capable."""
-    annotations = getattr(mcp_tool, "annotations", None)
-    hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else getattr(annotations, "readOnlyHint", None)
-    return hint is True
+    return _annotation_value(mcp_tool, "readOnlyHint") is True
+
+
+def _annotation_metadata(mcp_tool: Any) -> dict:
+    """Capture user-facing title, approval hints, and output schema at discovery."""
+    def get(name: str):
+        return _annotation_value(mcp_tool, name)
+    title = getattr(mcp_tool, "title", None) or get("title")
+    output_schema = mcp_field(mcp_tool, "output_schema", "outputSchema")
+    return {
+        "title": title if isinstance(title, str) and title.strip() else None,
+        "readOnlyHint": get("readOnlyHint") is True,
+        "destructiveHint": get("destructiveHint") if isinstance(get("destructiveHint"), bool) else None,
+        "outputSchema": output_schema if isinstance(output_schema, dict) else None,
+    }
 
 
 def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any], key=None) -> None:
@@ -61,16 +85,24 @@ def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]
         if key is None:
             key = _server_key(server_name)
         _core._server_trust_levels[key] = _normalize_server_trust((config or {}).get("trust"))
+        _core._server_confirm_destructive[key] = _confirm_destructive((config or {}).get("confirm_destructive"))
         hints = _core._tool_read_only_hints.setdefault(key, {})
         hints.update({t.name: _annotation_read_only_hint(t) for t in tools if getattr(t, "name", None)})
+        metadata = _core._tool_annotations.setdefault(key, {})
+        metadata.update({t.name: _annotation_metadata(t) for t in tools if getattr(t, "name", None)})
+        for tool in tools:
+            if getattr(tool, "name", None):
+                registry_name = _schema.mcp_prefixed_tool_name(server_name, tool.name)
+                _core._tool_raw_names[registry_name] = tool.name
 
 
 def _record_scope_trust(server_name: str, config: dict, scope: str) -> None:
     """``trust`` is the CONSUMING profile's policy, never the connection's: an ``untrusted`` profile that
     adopts a ``full`` profile's live connection must still be asked before every write-capable call."""
     with _core._lock:
-        _core._server_trust_levels[_server_key(server_name, scope, current=False)] = _normalize_server_trust(
-            (config or {}).get("trust"))
+        scope_key = _server_key(server_name, scope, current=False)
+        _core._server_trust_levels[scope_key] = _normalize_server_trust((config or {}).get("trust"))
+        _core._server_confirm_destructive[scope_key] = _confirm_destructive((config or {}).get("confirm_destructive"))
 
 
 def _track_mcp_tool_server(tool_name: str, server_name: str) -> None:
@@ -83,6 +115,7 @@ def _forget_mcp_tool_server(tool_name: str) -> None:
     """Forget MCP server provenance for a deregistered tool."""
     with _core._lock:
         _core._mcp_tool_server_names.pop(tool_name, None)
+        _core._tool_raw_names.pop(tool_name, None)
 
 
 def _server_key_for_task(server) -> object:
@@ -144,6 +177,7 @@ def _remove_server_scope(key, scope: str) -> None:
         else:
             _core._server_tool_scopes.pop(key, None)
         _core._server_trust_levels.pop(_server_key(server_name, scope, current=False), None)
+        _core._server_confirm_destructive.pop(_server_key(server_name, scope, current=False), None)
     _restore_server_toolset_alias(key)
 
 
@@ -230,6 +264,8 @@ def _cached_tools(raws: Iterable[Any]) -> List[SimpleNamespace]:
     are dropped. Missing or non-dict ``annotations`` (older cache files) fail closed to write-capable."""
     return [SimpleNamespace(name=raw["name"], description=raw.get("description") or "",
                             inputSchema=raw["inputSchema"] if isinstance(raw.get("inputSchema"), dict) else {},
+                            outputSchema=raw["outputSchema"] if isinstance(raw.get("outputSchema"), dict) else None,
+                            title=raw.get("title"),
                             annotations=raw["annotations"] if isinstance(raw.get("annotations"), dict) else None)
             for raw in raws if isinstance(raw, dict) and raw.get("name")]
 
@@ -380,7 +416,15 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
             tools_payload.append({
                 "name": t.name, "description": t.description or "",
                 "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
-                "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},  # lazy path trust-gates identically
+                "title": _annotation_metadata(t)["title"],
+                "outputSchema": _annotation_metadata(t)["outputSchema"],
+                "annotations": {
+                    "readOnlyHint": _annotation_read_only_hint(t),
+                    **({"destructiveHint": _annotation_metadata(t)["destructiveHint"]}
+                       if _annotation_metadata(t)["destructiveHint"] is not None else {}),
+                    **({"title": _annotation_metadata(t)["title"]}
+                       if _annotation_metadata(t)["title"] else {}),
+                },  # lazy path trust-gates identically
             })
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]

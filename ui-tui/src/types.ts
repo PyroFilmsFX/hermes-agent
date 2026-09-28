@@ -5,6 +5,7 @@ export interface ActiveTool {
   id: string
   labels?: ToolLabel[]
   name: string
+  progress?: string
   verboseArgs?: string
   startedAt?: number
 }

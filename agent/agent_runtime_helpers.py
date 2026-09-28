@@ -2467,6 +2467,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             dispatch_kwargs = dict(
                 tool_call_id=tool_call_id,
                 session_id=hook_ids["session_id"],
+                tool_progress_callback=agent.tool_progress_callback,
+                traceparent=getattr(agent, "_current_traceparent", None),
                 turn_id=hook_ids["turn_id"],
                 api_request_id=hook_ids["api_request_id"],
                 enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,

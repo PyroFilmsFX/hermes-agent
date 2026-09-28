@@ -931,6 +931,14 @@ class TurnController {
     patchTurnState({ toolTokens: this.toolTokenAcc, tools: this.activeTools })
   }
 
+  recordToolProgress(toolId: string, progress: string) {
+    if (this.interrupted) {
+      return
+    }
+    this.activeTools = this.activeTools.map(tool => tool.id === toolId ? { ...tool, progress } : tool)
+    this.publishToolState()
+  }
+
   reset() {
     this.clearReasoning()
     this.clearStatusTimer()

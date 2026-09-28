@@ -170,14 +170,20 @@ def disable_lazy_stt_install():
         yield
 
 
-@pytest.fixture(params=("stdio", "http"), ids=("stdio", "streamable-http"))
-def mcp2026_server(request: pytest.FixtureRequest):
-    """Start the MCP 2026 fixture over stdio or ephemeral loopback HTTP."""
+@pytest.fixture
+def mcp2026_stdio_server() -> object:
+    """MCP 2026 fixture launch parameters for handler-level stdio tests."""
     from mcp import StdioServerParameters
+    fixture = Path(__file__).parents[1] / "fixtures" / "mcp2026_server.py"
+    return StdioServerParameters(command=sys.executable, args=[str(fixture), "--stdio"])
 
+
+@pytest.fixture(params=("stdio", "http"), ids=("stdio", "streamable-http"))
+def mcp2026_server(request: pytest.FixtureRequest, mcp2026_stdio_server):
+    """Start the MCP 2026 fixture over stdio or ephemeral loopback HTTP."""
     fixture = Path(__file__).parents[1] / "fixtures" / "mcp2026_server.py"
     if request.param == "stdio":
-        yield StdioServerParameters(command=sys.executable, args=[str(fixture), "--stdio"])
+        yield mcp2026_stdio_server
         return
 
     with socket.socket() as reserve:

@@ -398,6 +398,16 @@ export function upsertToolPart(
     args: args as never,
     argsText: JSON.stringify(args),
     timestamp: prev?.timestamp ?? occurredAt,
+    ...(typeof payload?.title === 'string'
+      ? { toolTitle: payload.title }
+      : prev && 'toolTitle' in prev && prev.toolTitle
+        ? { toolTitle: prev.toolTitle }
+        : {}),
+    ...(phase === 'running' && typeof payload?.preview === 'string'
+      ? { progressPreview: payload.preview }
+      : prev && 'progressPreview' in prev && prev.progressPreview
+        ? { progressPreview: prev.progressPreview }
+        : {}),
     ...(phase === 'complete' && {
       completedAt: occurredAt,
       result: payload?.result !== undefined ? payload.result : prevResult,

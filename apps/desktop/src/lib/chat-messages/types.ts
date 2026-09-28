@@ -7,6 +7,8 @@ import type { MessageReaction, SessionMessage, UsageStats } from '@/types/hermes
 
 export interface TimelinePartMetadata {
   toolResultMetadata?: ToolResultMetadata
+  toolTitle?: string
+  progressPreview?: string
   /** Unix seconds when this visible activity segment began. Fractional values
    * preserve the millisecond precision available on live gateway events. */
   timestamp?: number
