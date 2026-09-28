@@ -3241,7 +3241,12 @@ export const ja = defineLocale({
       noModels: 'モデルが見つかりません',
       editModels: 'モデルを編集…',
       refreshModels: 'モデルを更新',
-      fast: '高速'
+      fast: '高速',
+      upgradeTo: m => `${m} にアップグレード`,
+      upgradeFrom: m => `${m} から`,
+      upgradeTitle: (from, to) =>
+        `このセッションを ${from} から ${to} に切り替えます。会話は保持され、プロンプトキャッシュは新しく始まります。`,
+      dismissUpgrade: 'アップグレードの提案を閉じる'
     },
     modelOptions: {
       noOptions: 'このモデルにはオプションがありません',

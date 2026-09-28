@@ -4951,7 +4951,12 @@ export const frOverrides = {
       noModels: 'Aucun modèle trouvé',
       editModels: 'Modifier les modèles…',
       refreshModels: 'Actualiser les modèles',
-      fast: 'Rapide'
+      fast: 'Rapide',
+      upgradeTo: m => `Passer à ${m}`,
+      upgradeFrom: m => `depuis ${m}`,
+      upgradeTitle: (from, to) =>
+        `Passer cette session de ${from} à ${to}. La conversation est conservée ; le cache du prompt repart de zéro.`,
+      dismissUpgrade: 'Ignorer la suggestion de mise à niveau'
     },
     modelOptions: {
       noOptions: 'Aucune option pour ce modèle',

@@ -34,6 +34,7 @@ import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
+import { modelUpgradeFor, modelUpgradeLabel } from '@/lib/model-upgrade'
 import { reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { foldIncludes, normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
@@ -46,6 +47,12 @@ import {
   useLocalModelsStatus,
   useLocalRuntimeJobs
 } from '@/store/local-runtime-jobs'
+import {
+  $dismissedModelUpgrades,
+  dismissModelUpgrade,
+  isModelUpgradeDismissed,
+  modelUpgradeDismissKey
+} from '@/store/model-upgrade-dismissals'
 import {
   $visibleModels,
   collapseModelFamilies,
@@ -124,6 +131,10 @@ interface ModelCatalogMenuProps {
    * across sources, so this participates in the React Query cache key. */
   ownerConnectionId?: string
   profile?: string
+  /** Opt-in stale-pin upgrade hint (D53): the durable scope (session id, or
+   *  `draft`) a dismissal is remembered under. Session surfaces pass it; a
+   *  detached picker (kanban override) omits it and never shows the hint. */
+  upgradeHintScope?: string
   /** Session whose catalog to fetch. A live session's catalog can differ from
    *  the profile-global one, and the app invalidates the SESSION-scoped query
    *  key on model changes — a surface bound to a session must pass it or its
@@ -173,7 +184,8 @@ export function ModelCatalogMenu({
   ownerConnectionId,
   profile = 'default',
   request,
-  sessionId = null
+  sessionId = null,
+  upgradeHintScope
 }: ModelCatalogMenuProps): ReactElement {
   const { t } = useI18n()
   const copy = t.shell.modelMenu
@@ -193,6 +205,7 @@ export function ModelCatalogMenu({
   // and the composer would end up disagreeing about what "my models" means.
   const visibleModels = useStore($visibleModels)
   const customModels = useStore($customModels)
+  const dismissedUpgrades = useStore($dismissedModelUpgrades)
 
   const modelOptions = useQuery({
     queryKey: modelOptionsQueryKey(profile, sessionId, ownerConnectionId),
@@ -345,6 +358,39 @@ export function ModelCatalogMenu({
     [customSlug, pickerProviders, current.provider]
   )
 
+  // Stale-pin upgrade hint (D53): the session stays on its model — no silent
+  // migration (cost, behaviour, prompt cache) — but a superseded family member
+  // gets a one-click offer of the newest listed one. Judged against the
+  // provider's curated catalog, never custom slugs.
+  const upgrade = useMemo(() => {
+    if (upgradeHintScope === undefined) {
+      return null
+    }
+
+    const provider = providers?.find(
+      row => row.slug.toLowerCase() !== 'moa' && catalogProviderMatches(row, current.provider)
+    )
+
+    return modelUpgradeFor(current.model, provider)
+  }, [upgradeHintScope, providers, current.model, current.provider])
+
+  const upgradeKey =
+    upgrade && upgradeHintScope !== undefined
+      ? modelUpgradeDismissKey(upgradeHintScope, upgrade.provider, upgrade.from, upgrade.to)
+      : null
+
+  const upgradeProvider = upgrade ? pickerProviders.find(row => row.slug === upgrade.provider) : undefined
+
+  const showUpgrade =
+    upgrade !== null &&
+    upgradeKey !== null &&
+    upgradeProvider !== undefined &&
+    !search &&
+    !slugEntry &&
+    !loading &&
+    !error &&
+    !isModelUpgradeDismissed(upgradeKey, dismissedUpgrades)
+
   const selectFamily = async (family: ModelFamily, provider: ModelOptionProvider): Promise<boolean> => {
     const caps = provider.capabilities?.[family.id]
     const preset = controller.presetFor(provider.slug, family.id)
@@ -370,6 +416,17 @@ export function ModelCatalogMenu({
     )
 
     return true
+  }
+
+  // The hint commits exactly like picking the row: the same selectFamily →
+  // controller.select path (session switch + remembered preset). The target is
+  // passed as its own family so the variant (`[1m]`, `-fast`) is kept as-is.
+  const acceptUpgrade = () => {
+    if (upgrade && upgradeProvider) {
+      void selectFamily({ fastId: null, id: upgrade.to }, upgradeProvider)
+    }
+
+    closeMenu()
   }
 
   const selectMoaPreset = async (preset: string) => {
@@ -522,6 +579,36 @@ export function ModelCatalogMenu({
       />
 
       {!hideCatalog && <DropdownMenuSeparator className="mx-0" />}
+
+      {showUpgrade && upgrade ? (
+        <>
+          <div className={cn('flex items-center', quietRows)} data-testid="model-upgrade-hint">
+            <DropdownMenuItem
+              className={cn(dropdownMenuRow, 'min-w-0 flex-1 text-(--ui-text-secondary)')}
+              onSelect={acceptUpgrade}
+              title={copy.upgradeTitle(modelUpgradeLabel(upgrade.from), modelUpgradeLabel(upgrade.to))}
+            >
+              <Codicon className="text-(--ui-accent)" name="arrow-up" size="0.75rem" />
+              <span className="min-w-0 flex-1 truncate">
+                {copy.upgradeTo(modelUpgradeLabel(upgrade.to))}
+                <span className="text-(--ui-text-tertiary)"> {copy.upgradeFrom(modelUpgradeLabel(upgrade.from))}</span>
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              aria-label={copy.dismissUpgrade}
+              className={cn(dropdownMenuRow, 'shrink-0 px-2 text-(--ui-text-tertiary)')}
+              onSelect={event => {
+                event.preventDefault()
+                dismissModelUpgrade(upgradeKey!)
+              }}
+              title={copy.dismissUpgrade}
+            >
+              <Codicon name="close" size="0.75rem" />
+            </DropdownMenuItem>
+          </div>
+          <DropdownMenuSeparator className="mx-0" />
+        </>
+      ) : null}
 
       {hideCatalog ? null : loading ? (
         <DropdownMenuGroup className="py-1">

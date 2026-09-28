@@ -18,6 +18,7 @@ import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu
 import { queryClient } from '@/lib/query-client'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { localModelsKey, localModelsOwner } from '@/store/local-runtime-jobs'
+import { $dismissedModelUpgrades } from '@/store/model-upgrade-dismissals'
 import {
   $modelVisibilityOpen,
   $seenModels,
@@ -143,7 +144,7 @@ describe('the current row effort', () => {
 
 // A minimal controller — these tests are about the CATALOG's own behaviour
 // (what it lists, what it offers), not about what any host does with a pick.
-function renderMenu(current: Partial<ModelMenuController['current']> = {}) {
+function renderMenu(current: Partial<ModelMenuController['current']> = {}, upgradeHintScope?: string) {
   const select = vi.fn()
 
   const controller: ModelMenuController = {
@@ -160,7 +161,7 @@ function renderMenu(current: Partial<ModelMenuController['current']> = {}) {
     <QueryClientProvider client={client}>
       <DropdownMenu open>
         <DropdownMenuContent>
-          <ModelCatalogMenu controller={controller} />
+          <ModelCatalogMenu controller={controller} upgradeHintScope={upgradeHintScope} />
         </DropdownMenuContent>
       </DropdownMenu>
     </QueryClientProvider>
@@ -283,5 +284,66 @@ describe('in-flight local downloads', () => {
     expect(screen.queryByText(/Qwen3\.6 27B/i)).toBeNull()
     expect(screen.queryByText('Qwen3.8 Flash Next (UD-Q4_K_XL)')).toBeNull()
     expect(screen.queryByText('Local')).toBeNull()
+  })
+})
+
+// D53: no silent migration of a pinned session — a one-click, dismissible hint.
+describe('stale-pin upgrade hint', () => {
+  const ANTHROPIC = {
+    models: ['claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+    name: 'Anthropic',
+    slug: 'anthropic'
+  }
+
+  beforeEach(() => {
+    $dismissedModelUpgrades.set([])
+    getGlobalModelOptions.mockResolvedValue({ providers: [ANTHROPIC] })
+  })
+
+  it('offers Opus 5.5 to an Opus 5 session and switches through the picker action', async () => {
+    const select = renderMenu({ model: 'claude-opus-5', provider: 'anthropic' }, 'session-a')
+
+    const hint = await screen.findByText(/Upgrade to Opus 5\.5/)
+
+    expect(screen.getByTestId('model-upgrade-hint').textContent).toContain('from Opus 5')
+
+    fireEvent.click(hint)
+
+    await waitFor(() => expect(select).toHaveBeenCalledWith('claude-opus-5-5', 'anthropic'))
+  })
+
+  it('shows no hint on the newest model, or on a picker without a session scope', async () => {
+    renderMenu({ model: 'claude-opus-5-5', provider: 'anthropic' }, 'session-a')
+    await screen.findByText(/Sonnet 5\.5/)
+    expect(screen.queryByTestId('model-upgrade-hint')).toBeNull()
+    cleanup()
+
+    // The kanban override (detached picker) never passes a scope.
+    renderMenu({ model: 'claude-opus-5', provider: 'anthropic' })
+    await screen.findByText(/Sonnet 5\.5/)
+    expect(screen.queryByTestId('model-upgrade-hint')).toBeNull()
+  })
+
+  it('dismisses per session and model, and the dismissal persists', async () => {
+    const select = renderMenu({ model: 'claude-sonnet-5', provider: 'anthropic' }, 'session-a')
+
+    await screen.findByText(/Upgrade to Sonnet 5\.5/)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Dismiss upgrade hint' }))
+
+    await waitFor(() => expect(screen.queryByTestId('model-upgrade-hint')).toBeNull())
+    expect(select).not.toHaveBeenCalled()
+    expect(window.localStorage.getItem('hermes.desktop.dismissedModelUpgrades')).toContain(
+      'session-a::anthropic::claude-sonnet-5::claude-sonnet-5-5'
+    )
+    cleanup()
+
+    // Same session reopened: still dismissed. Another session: still offered.
+    renderMenu({ model: 'claude-sonnet-5', provider: 'anthropic' }, 'session-a')
+    await screen.findByText(/Opus 5\.5/)
+    expect(screen.queryByTestId('model-upgrade-hint')).toBeNull()
+    cleanup()
+
+    renderMenu({ model: 'claude-sonnet-5', provider: 'anthropic' }, 'session-b')
+    expect(await screen.findByText(/Upgrade to Sonnet 5\.5/)).toBeDefined()
   })
 })

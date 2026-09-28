@@ -2798,7 +2798,12 @@ export const ar = defineLocale({
       noModels: 'لا توجد نماذج',
       editModels: 'تحرير النماذج',
       refreshModels: 'تحديث النماذج',
-      fast: 'سريع'
+      fast: 'سريع',
+      upgradeTo: m => `الترقية إلى ${m}`,
+      upgradeFrom: m => `من ${m}`,
+      upgradeTitle: (from, to) =>
+        `تبديل هذه الجلسة من ${from} إلى ${to}. تبقى المحادثة؛ وتبدأ ذاكرة التخزين المؤقت للموجّه من جديد.`,
+      dismissUpgrade: 'تجاهل تلميح الترقية'
     },
     modelOptions: {
       noOptions: 'لا توجد خيارات لهذا النموذج',

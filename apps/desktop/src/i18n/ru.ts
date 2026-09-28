@@ -3471,7 +3471,12 @@ export const ru = defineLocale({
       noModels: 'Модели не найдены',
       editModels: 'Изменить модели…',
       refreshModels: 'Обновить модели',
-      fast: 'Быстрая'
+      fast: 'Быстрая',
+      upgradeTo: m => `Перейти на ${m}`,
+      upgradeFrom: m => `с ${m}`,
+      upgradeTitle: (from, to) =>
+        `Переключить этот сеанс с ${from} на ${to}. Разговор сохранится; кэш промпта начнётся заново.`,
+      dismissUpgrade: 'Скрыть подсказку об обновлении'
     },
     modelOptions: {
       noOptions: 'Для этой модели нет опций',

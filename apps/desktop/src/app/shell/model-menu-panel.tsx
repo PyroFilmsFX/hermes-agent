@@ -1,7 +1,9 @@
 import type { ModelOptionsResult } from '@hermes/shared'
+import { useStore } from '@nanostores/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { Codicon } from '@/components/ui/codicon'
 import { DropdownMenuItem, dropdownMenuRow } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'
@@ -25,6 +27,11 @@ export function ModelMenuPanel(props: ModelMenuHostProps) {
   const [refreshing, setRefreshing] = useState(false)
   const queryClient = useQueryClient()
   const { activeSessionId, controller } = useModelMenuController(props)
+  // Upgrade-hint dismissals are per session: the stored (durable) id when there
+  // is one, else the live runtime id, else the draft composer.
+  const view = useSessionView()
+  const storedId = useStore(view.$storedId)
+  const upgradeHintScope = storedId || activeSessionId || 'draft'
 
   // Explicit "Refresh Models": re-fetch the catalog with refresh:true so the
   // backend busts its 1h provider-model disk cache and re-pulls each provider's
@@ -82,6 +89,7 @@ export function ModelMenuPanel(props: ModelMenuHostProps) {
       profile={profile}
       request={requestGateway}
       sessionId={activeSessionId}
+      upgradeHintScope={upgradeHintScope}
     />
   )
 }

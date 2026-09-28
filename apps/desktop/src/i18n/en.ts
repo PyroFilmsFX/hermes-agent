@@ -4567,7 +4567,12 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit models…',
       refreshModels: 'Refresh models',
-      fast: 'Fast'
+      fast: 'Fast',
+      upgradeTo: m => `Upgrade to ${m}`,
+      upgradeFrom: m => `from ${m}`,
+      upgradeTitle: (from, to) =>
+        `Switch this session from ${from} to ${to}. The conversation stays; the prompt cache starts fresh.`,
+      dismissUpgrade: 'Dismiss upgrade hint'
     },
     modelOptions: {
       noOptions: 'No options for this model',
