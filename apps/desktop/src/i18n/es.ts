@@ -3847,6 +3847,7 @@ export const esOverrides = {
   sidebar: {
     filter: {
       grouping: 'Agrupación',
+      groups: 'Grupos',
       ordering: 'Orden',
       show: 'Mostrar',
       filters: 'Filtros',
@@ -3874,10 +3875,21 @@ export const esOverrides = {
       open: 'Abierta',
       merged: 'Fusionada',
       closed: 'Cerrada',
-      noPR: 'Sin PR'
+      noPR: 'Sin PR',
+      groupFilter: 'Grupo',
+      allGroups: 'Todos los grupos',
     },
     gatewayGroups: {
       grouping: 'Gateway y perfil',
+      groups: 'Grupos',
+      moveToGroup: 'Mover al grupo',
+      newGroup: 'Nuevo grupo…',
+      ungrouped: 'Sin grupo',
+      pinGroup: 'Fijar grupo',
+      unpinGroup: 'Desfijar grupo',
+      ungroupAll: 'Quitar todos del grupo',
+      groupName: 'Nombre del grupo',
+      groupNameInvalid: 'Usa entre 1 y 64 letras, números, espacios, puntos, guiones o guiones bajos.',
       rename: 'Renombrar grupo',
       aliasLabel: 'Nombre visible',
       aliasHint: 'Solo el nombre visible; los nombres del gateway y del perfil no cambian.',

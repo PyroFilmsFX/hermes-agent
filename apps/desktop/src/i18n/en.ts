@@ -3412,6 +3412,7 @@ export const en: Translations = {
   sidebar: {
     filter: {
       grouping: 'Grouping',
+      groups: 'Groups',
       ordering: 'Ordering',
       show: 'Show',
       filters: 'Filters',
@@ -3439,10 +3440,21 @@ export const en: Translations = {
       open: 'Open',
       merged: 'Merged',
       closed: 'Closed',
-      noPR: 'No PR'
+      noPR: 'No PR',
+      groupFilter: 'Group',
+      allGroups: 'All groups',
     },
     gatewayGroups: {
       grouping: 'Gateway & profile',
+      groups: 'Groups',
+      moveToGroup: 'Move to group',
+      newGroup: 'New group…',
+      ungrouped: 'Ungrouped',
+      pinGroup: 'Pin group',
+      unpinGroup: 'Unpin group',
+      ungroupAll: 'Ungroup all',
+      groupName: 'Group name',
+      groupNameInvalid: 'Use 1–64 letters, numbers, spaces, dots, dashes, or underscores.',
       rename: 'Rename group',
       aliasLabel: 'Display name',
       aliasHint: 'Display name only; gateway and profile names stay unchanged.',

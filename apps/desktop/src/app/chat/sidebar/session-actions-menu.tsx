@@ -52,6 +52,8 @@ import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal }
 
 import type { SessionTitleResponse } from '../../types'
 
+import { $cntrlGroups, $cntrlGroupsAvailable, tagCntrlGroup } from './cntrl-groups'
+
 // Rename a session, preferring the gateway's session.title RPC over REST.
 //
 // A freshly *branched* session (and any brand-new chat) lives only in the
@@ -228,6 +230,38 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
   )
 }
 
+function MoveToCntrlGroupItems({
+  kit,
+  sessionId,
+  onNewGroup
+}: {
+  kit: MenuKit
+  sessionId: string
+  onNewGroup: () => void
+}) {
+  const { t } = useI18n()
+  const groups = useStore($cntrlGroups)
+
+  return (
+    <>
+      {groups.map(group => (
+        <kit.Item
+          key={group.name}
+          onSelect={() =>
+            void tagCntrlGroup(group.name, sessionId).catch(error =>
+              notifyError(error, t.sidebar.gatewayGroups.moveToGroup)
+            )
+          }
+        >
+          {group.name}
+        </kit.Item>
+      ))}
+      <kit.Separator />
+      <kit.Item onSelect={onNewGroup}>{t.sidebar.gatewayGroups.newGroup}</kit.Item>
+    </>
+  )
+}
+
 function useSessionActions({
   sessionId,
   title,
@@ -256,12 +290,34 @@ function useSessionActions({
   // the project menu's appearance-popover guard.
   const suppressCloseFocusRef = useRef(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [newGroupOpen, setNewGroupOpen] = useState(false)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [newGroupSaving, setNewGroupSaving] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const isRemote = useStore($connection)?.mode === 'remote'
   // The row's finished-unread dot is cleared by opening the session (main or
   // tile) — this menu item is the explicit escape hatch for the rest.
   const isUnread = useStore($unreadFinishedSessionIds).includes(sessionId)
+  // "Move to group" needs the optional cntrl_groups plugin API on this connection.
+  const groupsAvailable = useStore($cntrlGroupsAvailable) === true
+  const createGroup = async () => {
+    const name = newGroupName.trim()
+
+    if (!name || newGroupSaving) {
+      return
+    }
+
+    setNewGroupSaving(true)
+    try {
+      await tagCntrlGroup(name, sessionId)
+      setNewGroupOpen(false)
+    } catch (error) {
+      notifyError(error, t.sidebar.gatewayGroups.groupNameInvalid)
+    } finally {
+      setNewGroupSaving(false)
+    }
+  }
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
@@ -541,6 +597,24 @@ function useSessionActions({
       />
       <kit.Separator />
       {workItems.map(item => renderActionItem(kit, item))}
+      {groupsAvailable && (
+        <kit.Sub>
+          <kit.SubTrigger disabled={!sessionId}>
+            <Codicon name="tag" size="0.875rem" />
+            <span>{t.sidebar.gatewayGroups.moveToGroup}</span>
+          </kit.SubTrigger>
+          <kit.SubContent>
+            <MoveToCntrlGroupItems
+              kit={kit}
+              onNewGroup={() => {
+                setNewGroupName('')
+                setNewGroupOpen(true)
+              }}
+              sessionId={sessionId}
+            />
+          </kit.SubContent>
+        </kit.Sub>
+      )}
       <kit.Sub>
         <kit.SubTrigger disabled={!sessionId}>
           <Codicon name="folder" size="0.875rem" />
@@ -605,7 +679,31 @@ function useSessionActions({
     />
   )
 
-  return { deleteDialog, onCloseAutoFocus, renameDialog, renderItems }
+  const groupDialog = (
+    <Dialog onOpenChange={setNewGroupOpen} open={newGroupOpen}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t.sidebar.gatewayGroups.groupName}</DialogTitle>
+        </DialogHeader>
+        <Input
+          autoFocus
+          disabled={newGroupSaving}
+          onChange={event => setNewGroupName(event.target.value)}
+          value={newGroupName}
+        />
+        <DialogFooter>
+          <Button onClick={() => setNewGroupOpen(false)} variant="ghost">
+            {t.common.cancel}
+          </Button>
+          <Button disabled={newGroupSaving || !newGroupName.trim()} onClick={() => void createGroup()}>
+            {t.common.save}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+
+  return { deleteDialog, groupDialog, onCloseAutoFocus, renameDialog, renderItems }
 }
 
 interface DeleteSessionDialogProps {
@@ -646,7 +744,7 @@ interface SessionActionsMenuProps
 
 export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ...actions }: SessionActionsMenuProps) {
   const { t } = useI18n()
-  const { deleteDialog, onCloseAutoFocus, renameDialog, renderItems } = useSessionActions(actions)
+  const { deleteDialog, groupDialog, onCloseAutoFocus, renameDialog, renderItems } = useSessionActions(actions)
 
   return (
     <>
@@ -662,6 +760,7 @@ export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ..
       </ActionsMenu>
       {renameDialog}
       {deleteDialog}
+      {groupDialog}
     </>
   )
 }
@@ -672,7 +771,7 @@ interface SessionContextMenuProps extends SessionActions {
 
 export function SessionContextMenu({ children, ...actions }: SessionContextMenuProps) {
   const { t } = useI18n()
-  const { deleteDialog, onCloseAutoFocus, renameDialog, renderItems } = useSessionActions(actions)
+  const { deleteDialog, groupDialog, onCloseAutoFocus, renameDialog, renderItems } = useSessionActions(actions)
 
   return (
     <>
@@ -686,6 +785,7 @@ export function SessionContextMenu({ children, ...actions }: SessionContextMenuP
       </ActionsContextMenu>
       {renameDialog}
       {deleteDialog}
+      {groupDialog}
     </>
   )
 }

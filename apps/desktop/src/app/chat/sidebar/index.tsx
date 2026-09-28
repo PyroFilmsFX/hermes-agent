@@ -41,6 +41,7 @@ import {
   $sidebarCardRows,
   $sidebarCronOpen,
   $sidebarFiltersActive,
+  $sidebarGroupFilter,
   $sidebarGrouping,
   $sidebarMessagingOpenIds,
   $sidebarOrdering,
@@ -154,6 +155,8 @@ import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
 
 import { SidebarSectionAddButton } from './chrome'
+import { CntrlGroupRows } from './cntrl-group-sections'
+import { $cntrlGroups, $cntrlGroupsAvailable, orderedCntrlGroups, refreshCntrlGroups } from './cntrl-groups'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
@@ -456,6 +459,14 @@ export function ChatSidebar({
   const persistedProjectFilter = useStore($sidebarProjectFilter)
   const profileFilter = useStore($sidebarProfileFilter)
   const prFilter = useStore($sidebarPrFilter)
+  const persistedGroupFilter = useStore($sidebarGroupFilter)
+  const cntrlGroups = useStore($cntrlGroups)
+  const cntrlGroupsAvailable = useStore($cntrlGroupsAvailable)
+  // The cntrl_groups plugin is optional (user-enabled). Without its API the
+  // Groups grouping falls back to the plain dated list and a remembered group
+  // filter stops narrowing, instead of hiding every session behind it.
+  const groupFilter = cntrlGroupsAvailable ? persistedGroupFilter : null
+  const groupsMode = grouping === 'groups' && cntrlGroupsAvailable === true
   const prDataWanted = useStore($sidebarPrDataWanted)
   const prBranchOverrides = useStore($prBranchBySession)
   const pullRequests = useStore($pullRequestsByBranch)
@@ -493,6 +504,13 @@ export function ChatSidebar({
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
   const activeConnectionId = useStore($activeConnectionId)
+
+  useEffect(() => {
+    $cntrlGroups.set([])
+    void refreshCntrlGroups()
+  }, [activeConnectionId, profileScope])
+
+  const groupSessionIds = useMemo(() => new Set(cntrlGroups.flatMap(group => group.session_ids)), [cntrlGroups])
 
   // Toggle the persisted read-state watermark from a row menu. The row's own
   // `unread` prop mirrors what the dot paints; flip it and let the backend
@@ -635,6 +653,18 @@ export function ChatSidebar({
         }
       }
 
+      if (groupFilter === '__ungrouped__' && groupSessionIds.has(session.id)) {
+        return false
+      }
+
+      if (groupFilter && groupFilter !== '__ungrouped__') {
+        const group = cntrlGroups.find(item => item.name === groupFilter)
+
+        if (!group?.session_ids.includes(session.id)) {
+          return false
+        }
+      }
+
       // Same membership the sidebar groups and colors by (backend owner first,
       // cwd walk otherwise), so a filtered row lands in the lane the user
       // picked it from.
@@ -646,6 +676,9 @@ export function ChatSidebar({
       profileFilter,
       showAllProfiles,
       prFilter,
+      groupFilter,
+      groupSessionIds,
+      cntrlGroups,
       pullRequests,
       projects,
       projectOwners,
@@ -657,6 +690,7 @@ export function ChatSidebar({
     statusFilter.length > 0 ||
     projectFilter.length > 0 ||
     prFilter.length > 0 ||
+    groupFilter !== null ||
     (showAllProfiles && profileFilter.length > 0)
 
   const visibleSessions = useMemo(
@@ -1541,6 +1575,7 @@ export function ChatSidebar({
   // wrapper classes built for a virtualized list around a non-virtual one.
   // Entered-project content is the third prop that suppresses virtualization.
   const recentsVirtualizes =
+    !groupsMode &&
     !displayAgentGroups?.length &&
     !projectOverview?.length &&
     !(inProject && enteredProjectContent) &&
@@ -1922,7 +1957,9 @@ export function ChatSidebar({
                 // Otherwise project lanes stay chronological whatever the flat
                 // list does — only the flat list can swap its dividers for
                 // WORKING / DONE.
-                grouping={showArchived || rankedGlobally ? 'none' : grouping === 'status' ? 'status' : 'date'}
+                grouping={
+                  showArchived || rankedGlobally || groupsMode ? 'none' : grouping === 'status' ? 'status' : 'date'
+                }
                 groups={displayAgentGroups}
                 headerAction={
                   // One cluster, not a fragment: the header is justify-between,
@@ -2049,12 +2086,23 @@ export function ChatSidebar({
                 projectRepoWorktrees={inProject ? scopedRepoWorktrees : undefined}
                 projectsLoading={worktreeGroupingActive && (projectTreeLoading || (!projectTreeLoaded && gatewayReady))}
                 removedSessionIds={inProject ? removedSessionIds : undefined}
+                renderGroupedRows={
+                  groupsMode
+                    ? renderRows => (
+                        <CntrlGroupRows
+                          groups={orderedCntrlGroups(cntrlGroups)}
+                          renderRows={renderRows}
+                          sessions={displayAgentSessions}
+                        />
+                      )
+                    : undefined
+                }
                 rootClassName={cn(
                   'min-h-32 flex-1 overflow-hidden p-0',
                   !recentsVirtualizes && 'compact:min-h-0 compact:flex-none compact:overflow-visible'
                 )}
                 sessions={displayAgentSessions}
-                sortable={!showAllProfiles && agentSessions.length > 1}
+                sortable={!groupsMode && !showAllProfiles && agentSessions.length > 1}
               />
             )}
 

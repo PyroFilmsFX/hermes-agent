@@ -3216,6 +3216,7 @@ export const zh = defineLocale({
   sidebar: {
     filter: {
       grouping: '分组',
+      groups: '分组',
       ordering: '排序',
       show: '显示',
       filters: '筛选',
@@ -3243,11 +3244,22 @@ export const zh = defineLocale({
       open: '打开',
       merged: '已合并',
       closed: '已关闭',
-      noPR: '无PR'
+      noPR: '无PR',
+      groupFilter: '分组',
+      allGroups: '所有分组',
     },
     profileRail: '配置档案栏',
     gatewayGroups: {
       grouping: '网关与配置',
+      groups: '分组',
+      moveToGroup: '移至分组',
+      newGroup: '新建分组…',
+      ungrouped: '未分组',
+      pinGroup: '置顶分组',
+      unpinGroup: '取消置顶分组',
+      ungroupAll: '取消全部分组成员',
+      groupName: '分组名称',
+      groupNameInvalid: '使用 1–64 个字母、数字、空格、点、连字符或下划线。',
       rename: '重命名分组',
       aliasLabel: '显示名称',
       aliasHint: '仅更改显示名称；网关和配置档名称保持不变。',

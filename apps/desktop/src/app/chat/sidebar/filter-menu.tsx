@@ -25,6 +25,7 @@ import { $showsAdvancedChrome } from '@/store/interface-mode'
 import {
   $sidebarCardRows,
   $sidebarFiltersActive,
+  $sidebarGroupFilter,
   $sidebarGrouping,
   $sidebarListGroupIds,
   $sidebarOrdering,
@@ -39,6 +40,7 @@ import {
   $sidebarWorkspaceNodeOpen,
   resetSidebarView,
   setSidebarCardRows,
+  setSidebarGroupFilter,
   setSidebarGrouping,
   setSidebarOrdering,
   setSidebarShowAllSessions,
@@ -68,6 +70,8 @@ import type { PullRequestBucket } from '@/store/pull-requests'
 import { $unreadFinishedSessionIds, markAllSessionsRead } from '@/store/session'
 import type { SessionStatusBucket } from '@/store/session-dot-state'
 import { $sessionsHaveCost } from '@/store/sidebar-archive'
+
+import { $cntrlGroups, $cntrlGroupsAvailable } from './cntrl-groups'
 
 interface Option<T extends string = string> {
   /** A status dot's full className, from the row's own vocabulary. */
@@ -121,7 +125,8 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
     date: { icon: 'clock', label: f.updated },
     profile: { icon: 'account', label: f.profile },
     project: { icon: 'root-folder', label: f.project },
-    status: { icon: 'pulse', label: f.status }
+    status: { icon: 'pulse', label: f.status },
+    groups: { icon: 'tag', label: f.groups }
   }
 
   const GROUPINGS: Option<SidebarGrouping>[] = SIDEBAR_GROUPING_ORDER.map(id => ({ id, ...GROUPING_OPTIONS[id] }))
@@ -161,6 +166,11 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   ]
 
   const grouping = useStore($sidebarGrouping)
+  const groupFilter = useStore($sidebarGroupFilter)
+  const cntrlGroups = useStore($cntrlGroups)
+  // Groups come from the optional cntrl_groups plugin: no API, no Groups
+  // grouping and no group filter (a live choice stays visible as a way out).
+  const groupsAvailable = useStore($cntrlGroupsAvailable) === true
   const ordering = useStore($sidebarOrdering)
   const rowMeta = useStore($sidebarRowMeta)
   const cardRows = useStore($sidebarCardRows)
@@ -201,8 +211,8 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
 
   const foldCollapsed = foldIds.length > 0 && foldIds.every(id => nodeOpen[id] === false)
 
-  const groupings = GROUPINGS.map(option =>
-    option.id === 'profile' ? { ...option, label: t.sidebar.gatewayGroups.grouping } : option
+  const groupings = GROUPINGS.filter(option => option.id !== 'groups' || groupsAvailable || grouping === 'groups').map(
+    option => (option.id === 'profile' ? { ...option, label: t.sidebar.gatewayGroups.grouping } : option)
   )
 
   const groupingLabel = groupings.find(option => option.id === grouping)?.label
@@ -287,6 +297,30 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
               </DropdownMenuRadioGroup>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+
+          {groupsAvailable && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>{f.groupFilter}</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  onValueChange={value => setSidebarGroupFilter(value || null)}
+                  value={groupFilter ?? ''}
+                >
+                  <DropdownMenuRadioItem onSelect={keepOpen} value="">
+                    {f.allGroups}
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem onSelect={keepOpen} value="__ungrouped__">
+                    {t.sidebar.gatewayGroups.ungrouped}
+                  </DropdownMenuRadioItem>
+                  {cntrlGroups.map(group => (
+                    <DropdownMenuRadioItem key={group.name} onSelect={keepOpen} value={group.name}>
+                      {group.name}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
 
           {showsAdvancedChrome && (
             <DropdownMenuSub>
