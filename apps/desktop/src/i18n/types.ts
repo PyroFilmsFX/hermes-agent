@@ -3040,6 +3040,10 @@ export interface Translations {
       handoffOrigin: (platform: string) => string
       ownedByProfile: (profile: string) => string
       renamed: string
+      role: string
+      roleAuto: string
+      roleFailed: string
+      roleNames: { manager: string; orchestrator: string; worker: string; stream: string }
       renameFailed: string
       renameTitle: string
       renameDesc: string

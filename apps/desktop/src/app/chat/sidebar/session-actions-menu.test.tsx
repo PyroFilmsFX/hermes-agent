@@ -2,6 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { setSessionRole } from '@/hermes'
+import { notifyError } from '@/store/notifications'
+import { setSessions } from '@/store/session'
+
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
 afterEach(cleanup)
@@ -19,6 +23,7 @@ vi.mock('@/components/pane-shell/tree/store', () => ({
 vi.mock('@/hermes', () => ({
   renameSession: vi.fn(),
   setApiRequestProfile: vi.fn(),
+  setSessionRole: vi.fn(() => Promise.resolve({ ok: true })),
   setSessionUnreadRemote: vi.fn(() => Promise.resolve({ ok: true }))
 }))
 vi.mock('@/i18n', () => ({
@@ -61,6 +66,10 @@ vi.mock('@/i18n', () => ({
           renameFailed: 'Rename failed',
           renameTitle: 'Rename session',
           renamed: 'Renamed',
+          role: 'Role',
+          roleAuto: 'Auto (from name)',
+          roleFailed: 'Could not set role',
+          roleNames: { manager: 'Manager', orchestrator: 'Orchestrator', stream: 'Stream', worker: 'Worker' },
           sessionActions: 'Session actions',
           unpin: 'Unpin',
           untitledPlaceholder: 'Untitled'
@@ -284,5 +293,70 @@ describe('SessionActionsMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     expect(await screen.findByText('Session deleted')).toBeTruthy()
     expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Role submenu', () => {
+  async function openRoleSubmenu() {
+    render(
+      <SessionContextMenu profile="tommy" sessionId="s1" title="lane-manager">
+        <button aria-label="Session row" type="button">
+          Row
+        </button>
+      </SessionContextMenu>
+    )
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Session row' }))
+    const trigger = await screen.findByRole('menuitem', { name: /^role$/i })
+    // Radix sub-triggers open on click (touch path) and ArrowRight.
+    fireEvent.click(trigger)
+    fireEvent.keyDown(trigger, { key: 'ArrowRight' })
+  }
+
+  afterEach(() => {
+    vi.mocked(setSessionRole).mockClear()
+    vi.mocked(setSessions).mockClear()
+    vi.mocked(notifyError).mockClear()
+  })
+
+  it('offers Auto plus the four roles', async () => {
+    await openRoleSubmenu()
+
+    for (const name of ['Auto (from name)', 'Manager', 'Orchestrator', 'Worker', 'Stream']) {
+      expect(await screen.findByRole('menuitem', { name })).toBeTruthy()
+    }
+  })
+
+  it('sets an explicit role through the session PATCH and updates the row', async () => {
+    await openRoleSubmenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Worker' }))
+
+    await waitFor(() => expect(setSessionRole).toHaveBeenCalledWith('s1', 'worker', 'tommy'))
+    await waitFor(() => expect(setSessions).toHaveBeenCalled())
+
+    const update = vi.mocked(setSessions).mock.calls[0][0] as unknown as (
+      prev: { id: string; session_role?: null | string }[]
+    ) => { id: string; session_role?: null | string }[]
+
+    expect(update([{ id: 's1' }, { id: 's2', session_role: 'stream' }])).toEqual([
+      { id: 's1', session_role: 'worker' },
+      { id: 's2', session_role: 'stream' }
+    ])
+  })
+
+  it('Auto clears the explicit role', async () => {
+    await openRoleSubmenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Auto (from name)' }))
+
+    await waitFor(() => expect(setSessionRole).toHaveBeenCalledWith('s1', null, 'tommy'))
+  })
+
+  it('surfaces a failed PATCH instead of updating the row', async () => {
+    vi.mocked(setSessionRole).mockRejectedValueOnce(new Error('Session not found'))
+    await openRoleSubmenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Stream' }))
+
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(expect.any(Error), 'Could not set role'))
+    expect(setSessions).not.toHaveBeenCalled()
   })
 })

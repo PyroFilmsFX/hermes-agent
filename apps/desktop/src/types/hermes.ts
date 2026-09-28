@@ -568,6 +568,11 @@ export interface SessionInfo {
    *  explicitly marked unread or a response arrived after it was last read.
    *  Undefined against a backend predating the flag; treat as read. */
   unread?: boolean
+  /** Owner-set explicit role tag (`sessions.session_role`, D28): one of
+   *  manager / orchestrator / worker / stream, or null when unset ("Auto" —
+   *  the badge derives the role from the title). Overrides the name-derived
+   *  role; see effectiveSessionRole. Undefined against older backends. */
+  session_role?: null | string
   preview: null | string
   source: null | string
   started_at: number

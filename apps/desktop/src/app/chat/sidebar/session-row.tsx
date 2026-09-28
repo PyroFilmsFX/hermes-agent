@@ -21,7 +21,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { middleClickHandlers } from '@/lib/middle-click'
 import { displayModelName } from '@/lib/model-status-label'
 import { sessionProjectLabel } from '@/lib/session-project-label'
-import { sessionRole } from '@/lib/session-role'
+import { effectiveSessionRole } from '@/lib/session-role'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
@@ -154,7 +154,8 @@ function SidebarSessionRowImpl({
   const r = t.sidebar.row
   const { cancelPrewarm, notePointerMove, startPrewarm } = useProfilePrewarm(session.profile)
   const title = sessionTitle(session)
-  const role = sessionRole(title)
+  // Explicit owner-set tag first, else derived from the displayed title (D28).
+  const role = effectiveSessionRole({ session_role: session.session_role, title })
   const density = useStore($sessionListDensity)
   const fmt = t.sidebar
 

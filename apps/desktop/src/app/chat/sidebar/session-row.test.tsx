@@ -456,6 +456,26 @@ describe('SidebarSessionRow role badge and turn elapsed time', () => {
     expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe(role)
   })
 
+  it('shows the worker badge for a -worker title', () => {
+    const { container } = renderRow(makeSession({ title: 'hermes:lane-worker' }))
+    expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe('worker')
+  })
+
+  it('shows the explicit role over the name-derived one (explicit > name)', () => {
+    const { container } = renderRow(makeSession({ session_role: 'worker', title: 'lane-manager' }))
+    expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe('worker')
+  })
+
+  it('shows an explicit role on a title that implies none', () => {
+    const { container } = renderRow(makeSession({ session_role: 'orchestrator', title: 'My Regular Chat' }))
+    expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe('orchestrator')
+  })
+
+  it('falls back to the name when the explicit role is cleared (Auto)', () => {
+    const { container } = renderRow(makeSession({ session_role: null, title: 'video-stream' }))
+    expect(container.querySelector('[data-slot="badge"]')?.textContent).toBe('stream')
+  })
+
   it('does not show a role badge for a regular title', () => {
     const { container } = renderRow(makeSession({ title: 'My Regular Chat' }))
     expect(container.querySelector('[data-slot="badge"]')).toBeNull()

@@ -1,6 +1,7 @@
 import { isMissingRestEndpoint } from '@/lib/gateway-rpc'
 import { maybeBackfillLegacySessionOwners } from '@/lib/legacy-session-owner-backfill'
 import { stampRowsWithOwningConnection } from '@/lib/session-owner-stamp'
+import type { SessionRole } from '@/lib/session-role'
 import { recordTranscriptTail } from '@/store/transcript-tail'
 import type {
   PaginatedSessions,
@@ -412,6 +413,25 @@ export function setSessionUnreadRemote(id: string, unread: boolean, profile?: st
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'PATCH',
     body: { unread, ...(owner ? { profile: owner } : {}) }
+  })
+}
+
+// Set or clear the owner's explicit role tag (sessions.session_role, D28). The
+// explicit role overrides the title-derived badge; `null` ("Auto (from name)")
+// clears it, sent as "" to match the title's clear idiom. Same profile routing
+// as the other session mutations.
+export function setSessionRole(
+  id: string,
+  role: SessionRole | null,
+  profile?: string | null
+): Promise<{ ok: boolean; role?: SessionRole | null }> {
+  const owner = sessionWriteProfile(profile)
+
+  return hermesApi<{ ok: boolean; role?: SessionRole | null }>({
+    ...(owner ? { profile: owner } : {}),
+    path: `/api/sessions/${encodeURIComponent(id)}`,
+    method: 'PATCH',
+    body: { role: role ?? '', ...(owner ? { profile: owner } : {}) }
   })
 }
 

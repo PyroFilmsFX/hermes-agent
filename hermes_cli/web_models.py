@@ -262,6 +262,9 @@ class SessionRename(BaseModel):
     pinned: Optional[bool] = None  # durable "keep" (Desktop pins); exempt from auto_archive
     # Read-state watermark (sessions.last_read_at): True = unread, False = read now, None = leave.
     unread: Optional[bool] = None
+    # Explicit role tag (sessions.session_role, D28): a role name sets it, "" clears it
+    # (Auto: the desktop derives the role from the title), None leaves it.
+    role: Optional[str] = None
     profile: Optional[str] = None  # session owned by another profile (opens its state.db)
 
 class SessionOwnerBackfill(BaseModel):

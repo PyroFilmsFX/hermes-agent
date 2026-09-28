@@ -24,12 +24,13 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { renameSession } from '@/hermes'
+import { renameSession, setSessionRole } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSubmitEnter } from '@/lib/ime'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
+import { isSessionRole, SESSION_ROLES, type SessionRole } from '@/lib/session-role'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { $projectTree, moveSessionToProject, projectIdForCwd, projectRootCwd } from '@/store/projects'
@@ -142,6 +143,51 @@ function SessionColorSwatches({ sessionId }: { sessionId: string }) {
       value={overrides[durableId] ?? null}
     />
   )
+}
+
+// The Role submenu (D28): Auto / Manager / Orchestrator / Worker / Stream. Its
+// own component so only an OPEN submenu subscribes to $sessions (same reasoning
+// as SessionColorSwatches). The explicit role persists on the session row via
+// PATCH /api/sessions/{id} `role` and overrides the title-derived badge; Auto
+// clears it so the name decides again. Display metadata only — the role never
+// reaches the prompt or history. The check marks the stored explicit role
+// (Auto when none), not the effective one: that is what the owner is choosing.
+function SessionRoleItems({ kit, sessionId, profile }: { kit: MenuKit; sessionId: string; profile?: string }) {
+  const { t } = useI18n()
+  const r = t.sidebar.row
+  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const explicit = session?.session_role
+  const current = isSessionRole(explicit) ? explicit : null
+
+  const options: { label: string; role: SessionRole | null }[] = [
+    { label: r.roleAuto, role: null },
+    ...SESSION_ROLES.map(role => ({ label: r.roleNames[role], role }))
+  ]
+
+  return (
+    <>
+      {options.map(({ label, role }) => (
+        <kit.Item
+          key={role ?? 'auto'}
+          onSelect={() => {
+            triggerHaptic('selection')
+            void applySessionRole(sessionId, role, profile).catch(err => notifyError(err, r.roleFailed))
+          }}
+        >
+          <Codicon className={current === role ? undefined : 'invisible'} name="check" size="0.875rem" />
+          <span>{label}</span>
+        </kit.Item>
+      ))}
+    </>
+  )
+}
+
+/** Persist the explicit role (null = Auto) and mirror it onto the local row so
+ *  the badge updates without waiting for the next sidebar refresh. */
+export async function applySessionRole(sessionId: string, role: SessionRole | null, profile?: string) {
+  const result = await setSessionRole(sessionId, role, profile)
+  const stored = result && 'role' in result ? (result.role ?? null) : role
+  setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, session_role: stored } : s)))
 }
 
 // The project list inside the session menu's "Move to project" submenu. Its own
@@ -472,6 +518,15 @@ function useSessionActions({
         </kit.SubTrigger>
         <kit.SubContent className="p-2">
           <SessionColorSwatches sessionId={sessionId} />
+        </kit.SubContent>
+      </kit.Sub>
+      <kit.Sub>
+        <kit.SubTrigger disabled={!sessionId}>
+          <Codicon name="person" size="0.875rem" />
+          <span>{r.role}</span>
+        </kit.SubTrigger>
+        <kit.SubContent>
+          <SessionRoleItems kit={kit} profile={profile} sessionId={sessionId} />
         </kit.SubContent>
       </kit.Sub>
       <CopyButton

@@ -975,6 +975,27 @@ class SessionSessionsMixin:
         """Hide/unhide a session and its compression lineage from the default listing; still resumable."""
         return self._set_lineage_column("hidden", session_id, int(hidden))
 
+    # Explicit session role tags the owner can set (D28); mirrors SESSION_ROLES in
+    # apps/desktop/src/lib/session-role.ts.
+    SESSION_ROLES = ("manager", "orchestrator", "worker", "stream")
+
+    def set_session_role(self, session_id: str, role: Optional[str]) -> bool:
+        """Set (or clear, with ``None``/blank) the explicit role tag across the compression lineage.
+        The explicit role overrides the one the desktop derives from the title; clearing it falls
+        back to the name. Display metadata only: it never enters the system prompt or transcript.
+        Raises ValueError for a role outside :attr:`SESSION_ROLES`."""
+        normalized = (role or "").strip().lower() or None
+        if normalized is not None and normalized not in self.SESSION_ROLES:
+            raise ValueError(
+                f"Unknown session role {role!r}; expected one of {', '.join(self.SESSION_ROLES)}, or empty to clear."
+            )
+        return self._set_lineage_column("session_role", session_id, normalized)
+
+    def get_session_role(self, session_id: str) -> Optional[str]:
+        """The explicit role tag, or None when unset (the title decides)."""
+        row = self._read_one("SELECT session_role FROM sessions WHERE id = ?", (session_id,))
+        return (row["session_role"] or None) if row else None
+
     def set_session_read(self, session_id: str, read: bool = True) -> bool:
         """Mark read/unread across the compression lineage. ``last_read_at`` is a watermark: unread when
         activity postdates it (no write on the message path). NULL = never tracked = read; 0 = unread."""

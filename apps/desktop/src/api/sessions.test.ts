@@ -19,6 +19,7 @@ const {
   getSession,
   setSessionArchived,
   setSessionPinnedRemote,
+  setSessionRole,
   setSessionUnreadRemote,
   listSidebarSessions
 } = await import('./sessions')
@@ -245,5 +246,32 @@ describe('listSidebarSessions storage health', () => {
     })
 
     expect(result.storage).toEqual({ default: 'corrupt' })
+  })
+})
+
+describe('setSessionRole', () => {
+  it('PATCHes the explicit role with the owning profile in the body', async () => {
+    hermesApi.mockResolvedValue({ ok: true, role: 'worker' } as never)
+
+    await setSessionRole('sess-r', 'worker', 'tommy')
+
+    expect(hermesApi.mock.calls[0][0]).toMatchObject({
+      method: 'PATCH',
+      path: '/api/sessions/sess-r',
+      profile: 'tommy',
+      body: { role: 'worker', profile: 'tommy' }
+    })
+  })
+
+  it('clears the role (Auto) with an empty string', async () => {
+    hermesApi.mockResolvedValue({ ok: true, role: null } as never)
+
+    await setSessionRole('sess-r', null)
+
+    expect(hermesApi.mock.calls[0][0]).toMatchObject({
+      method: 'PATCH',
+      path: '/api/sessions/sess-r',
+      body: { role: '' }
+    })
   })
 })
