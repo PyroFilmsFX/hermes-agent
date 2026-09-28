@@ -8764,7 +8764,8 @@
               "active",
               "waiting",
               "blocked",
-              "lease_expired"
+              "lease_expired",
+              "stale"
             ],
             "title": "State",
             "type": "string"

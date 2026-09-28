@@ -38,4 +38,12 @@ describe('conductor build status strip', () => {
     const { container } = render(<ConductorBuildStrip build={{ ...base, state }} onOpen={vi.fn()} />)
     expect(container.querySelector('[data-state="dimmed"]')).toBeTruthy()
   })
+
+  it('renders state "stale" muted with the label "Stale build (not marked done)"', () => {
+    const { container } = render(<ConductorBuildStrip build={{ ...base, state: 'stale' as ConductorBuild['state'] }} onOpen={vi.fn()} />)
+    const button = screen.getByRole('button', { name: 'tb-build · PLAN · W3/7 · Stale build (not marked done) · 3 lanes' })
+    expect(button).toBeTruthy()
+    expect(container.querySelector('[data-state="dimmed"]')).toBeTruthy()
+  })
 })
+

@@ -41,11 +41,8 @@ export function ConductorPane({ sessionId: sessionIdProp }: ConductorPaneProps =
   const armedAt = build ? formatBuildTime(build.armed_at) : null
   const leaseExpiresAt = build ? formatBuildTime(build.lease_expires_at) : null
 
-  if (!build) {
-    return <div className="p-3 text-sm text-(--ui-text-secondary)">No build armed in this workspace.</div>
-  }
-
-  const waveLabel = build.wave_current !== null
+  const waveLabel = build
+    && build.wave_current !== null
     && build.waves_total !== null
     && Number.isInteger(build.wave_current)
     && Number.isInteger(build.waves_total)
@@ -55,32 +52,38 @@ export function ConductorPane({ sessionId: sessionIdProp }: ConductorPaneProps =
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 overflow-auto p-3 text-sm" data-slot="conductor-pane">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <dt>Plan</dt><dd>{build.plan}</dd>
-        <dt>Run</dt><dd>{build.run_id}</dd>
-        {waveLabel && <><dt>Wave</dt><dd>{waveLabel}</dd></>}
-        <dt>Done</dt><dd>Done {build.waves_done}</dd>
-        <dt>State</dt><dd>{build.state === 'lease_expired' ? 'lease expired' : build.state}</dd>
-        {build.waiting_on && <><dt>Waiting on</dt><dd>{build.waiting_on}</dd></>}
-        {waitSince && <><dt>Wait since</dt><dd>{waitSince}</dd></>}
-        {armedAt && <><dt>Armed</dt><dd>{armedAt}</dd></>}
-        {leaseExpiresAt && <><dt>Lease expires</dt><dd>{leaseExpiresAt}</dd></>}
-      </dl>
-      <div>Cost: not metered</div>
-      <div>Stage/unit: needs conductor T1</div>
-      <button
-        className="self-start rounded px-2 py-1 text-xs text-(--ui-text-secondary) hover:bg-(--ui-row-hover-background)"
-        disabled={!sessionId}
-        onClick={() => sessionId && openArtifactViewer({ sessionId, runId: build.run_id })}
-        type="button"
-      >
-        Run artifacts
-      </button>
-      {build.lanes_build_matched > 0 && (
-        <div className="flex items-center gap-1.5 text-xs" data-slot="conductor-build-lane-summary">
-          <span className="rounded bg-(--ui-purple)/12 px-1 text-[0.58rem] text-(--ui-purple)">build</span>
-          <span>{build.lanes_build_matched} build-matched lanes</span>
-        </div>
+      {!build ? (
+        <div className="text-sm text-(--ui-text-secondary)">No build armed in this workspace.</div>
+      ) : (
+        <>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt>Plan</dt><dd>{build.plan}</dd>
+            <dt>Run</dt><dd>{build.run_id}</dd>
+            {waveLabel && <><dt>Wave</dt><dd>{waveLabel}</dd></>}
+            <dt>Done</dt><dd>Done {build.waves_done}</dd>
+            <dt>State</dt><dd>{build.state === 'lease_expired' ? 'lease expired' : build.state}</dd>
+            {build.waiting_on && <><dt>Waiting on</dt><dd>{build.waiting_on}</dd></>}
+            {waitSince && <><dt>Wait since</dt><dd>{waitSince}</dd></>}
+            {armedAt && <><dt>Armed</dt><dd>{armedAt}</dd></>}
+            {leaseExpiresAt && <><dt>Lease expires</dt><dd>{leaseExpiresAt}</dd></>}
+          </dl>
+          <div>Cost: not metered</div>
+          <div>Stage/unit: needs conductor T1</div>
+          <button
+            className="self-start rounded px-2 py-1 text-xs text-(--ui-text-secondary) hover:bg-(--ui-row-hover-background)"
+            disabled={!sessionId}
+            onClick={() => sessionId && openArtifactViewer({ sessionId, runId: build.run_id })}
+            type="button"
+          >
+            Run artifacts
+          </button>
+          {build.lanes_build_matched > 0 && (
+            <div className="flex items-center gap-1.5 text-xs" data-slot="conductor-build-lane-summary">
+              <span className="rounded bg-(--ui-purple)/12 px-1 text-[0.58rem] text-(--ui-purple)">build</span>
+              <span>{build.lanes_build_matched} build-matched lanes</span>
+            </div>
+          )}
+        </>
       )}
       <div className="flex flex-col">
         {jobs.filter(job => job.status === 'running' || job.status === 'stale').map(job => (

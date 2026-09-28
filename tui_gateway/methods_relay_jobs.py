@@ -40,7 +40,11 @@ def _list_relay_jobs(session_cwd: str, *, now: datetime | None = None) -> list[d
     import stat
     from datetime import datetime, timedelta, timezone
 
-    workspace = Path(session_cwd).expanduser().resolve()
+    from . import git_probe
+
+    resolved_cwd = Path(session_cwd).expanduser().resolve()
+    top = git_probe.repo_root(str(resolved_cwd))
+    workspace = Path(top).resolve() if top else resolved_cwd
     jobs_dir = workspace / ".claude" / "state" / "worker-spawn" / "jobs"
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:

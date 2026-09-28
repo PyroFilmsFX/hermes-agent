@@ -1185,7 +1185,7 @@ export interface ConductorBuildResult {
   unreadable?: boolean
 }
 export interface ConductorBuild {
-  state: 'active' | 'waiting' | 'blocked' | 'lease_expired'
+  state: 'active' | 'waiting' | 'blocked' | 'lease_expired' | 'stale'
   plan: string
   run_id: string
   session_id: string

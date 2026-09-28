@@ -10,7 +10,7 @@ from .registry import method
 
 
 class ConductorBuild(Result):
-    state: Literal["active", "waiting", "blocked", "lease_expired"]
+    state: Literal["active", "waiting", "blocked", "lease_expired", "stale"]
     plan: str
     run_id: str
     session_id: str

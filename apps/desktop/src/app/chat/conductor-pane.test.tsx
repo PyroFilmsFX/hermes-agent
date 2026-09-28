@@ -57,4 +57,16 @@ describe('conductor runs pane', () => {
     render(<ConductorPane sessionId="session-1" />)
     expect(screen.getByText('No build armed in this workspace.')).toBeTruthy()
   })
+
+  it('lists relay jobs even when the build is null', () => {
+    $conductorBuildBySession.set({ 'session-1': null })
+    $relayJobsBySession.set({ 'session-1': [{
+      durationSeconds: 0, jobId: 'w_one', lane: 'impl', model: 'gpt-6-sol', role: 'worker',
+      spawnedAt: 10, status: 'running', worker: 'codex'
+    }] })
+    render(<ConductorPane sessionId="session-1" />)
+    expect(screen.getByText('No build armed in this workspace.')).toBeTruthy()
+    expect(screen.getByText('codex')).toBeTruthy()
+  })
 })
+

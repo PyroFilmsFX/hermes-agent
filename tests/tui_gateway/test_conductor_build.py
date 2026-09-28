@@ -53,6 +53,8 @@ def _marker(**overrides):
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     state = tmp_path / ".claude" / "state"
     (state / "worker-spawn" / "jobs").mkdir(parents=True)
     marker = state / "tb-build-active.json"
@@ -106,6 +108,7 @@ def test_invalid_or_retired_markers_are_not_shown(workspace, change):
     if change == "done":
         marker.write_text(json.dumps(_marker(done=True)), encoding="utf-8")
     elif change == "old":
+        marker.write_text(json.dumps(_marker(done=True)), encoding="utf-8")
         os.utime(marker, (time.time() - 12 * 3600 - 1,) * 2)
     elif change == "symlink":
         marker.unlink()
@@ -194,3 +197,36 @@ def test_method_is_long_owned_session_only_and_registered():
         assert server._methods["conductor_build.get"](2, {"session_id": "other"})["error"]["code"] == 4001
     finally:
         monkeypatch.undo()
+
+
+def test_old_marker_done_false_gives_stale_done_true_gives_none(workspace):
+    root, marker = workspace
+    old_time = time.time() - 13 * 3600
+
+    marker.write_text(json.dumps(_marker(done=False)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] == "stale"
+
+    marker.write_text(json.dumps(_marker(done=True)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    assert _result(workspace)["result"]["build"] is None
+
+
+def test_cwd_in_subdirectory_resolves_toplevel_marker(tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    state = tmp_path / ".claude" / "state"
+    state.mkdir(parents=True)
+    marker = state / "tb-build-active.json"
+    marker.write_text(json.dumps(_marker()), encoding="utf-8")
+
+    sub = tmp_path / "a" / "b" / "c"
+    sub.mkdir(parents=True)
+
+    monkeypatch.setattr(server, "_current_session_steer_authority", lambda _sid: (object(), {"cwd": str(sub)}))
+    result = server._methods["conductor_build.get"](1, {"session_id": "session"})["result"]
+    assert result["build"] is not None
+    assert result["build"]["plan"] == "FAKE-PLAN"
+

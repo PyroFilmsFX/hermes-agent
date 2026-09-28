@@ -9,10 +9,12 @@ import pytest
 
 @pytest.fixture
 def relay_runtime(monkeypatch, tmp_path):
+    import subprocess
     from tui_gateway import server
 
     cwd = tmp_path / "workspace"
     cwd.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=cwd, check=True)
     class Transport:
         def __init__(self):
             self.frames = []
@@ -225,3 +227,37 @@ def test_relay_job_listing_uses_long_handler_pool(relay_runtime):
     server, _, _ = relay_runtime
 
     assert "relay_jobs.list" in server._LONG_HANDLERS
+
+
+def test_cwd_in_subdirectory_resolves_toplevel_jobs(tmp_path, monkeypatch):
+    import subprocess
+    from tui_gateway import server
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    sub = repo / "sub" / "dir"
+    sub.mkdir(parents=True)
+
+    _write_job(repo, _job("w_top", status="running"))
+
+    class Transport:
+        def __init__(self):
+            self.frames = []
+            self.ready = threading.Event()
+
+        def write(self, frame):
+            self.frames.append(frame)
+            self.ready.set()
+
+    transport = Transport()
+    owner = {"session_key": "parent", "history": [], "transport": transport, "cwd": str(sub)}
+    monkeypatch.setattr(server, "_sessions", {"relay-owner": owner})
+
+    result = _call(server, transport)
+    assert "error" not in result
+    rows = result["result"]["jobs"]
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "w_top"
+

@@ -7,14 +7,18 @@ interface ConductorBuildStripProps {
   onOpen: () => void
 }
 
-const buildStateLabel = (state: ConductorBuild['state']) => state === 'lease_expired' ? 'lease expired' : state
+const buildStateLabel = (state: ConductorBuild['state']) => {
+  if (state === 'lease_expired') return 'lease expired'
+  if (state === 'stale') return 'Stale build (not marked done)'
+  return state
+}
 
 export function ConductorBuildStrip({ build, onOpen }: ConductorBuildStripProps) {
   if (!build) {
     return null
   }
 
-  const dimmed = build.state === 'blocked' || build.state === 'lease_expired'
+  const dimmed = build.state === 'blocked' || build.state === 'lease_expired' || build.state === 'stale'
   const hasWave = build.wave_current !== null
     && build.waves_total !== null
     && Number.isInteger(build.wave_current)

@@ -13,6 +13,7 @@ method = _registry.method
 
 _MARKER_MAX_BYTES = 256 * 1024
 _MARKER_MAX_AGE_SECONDS = 12 * 60 * 60
+_STALE_KEY = "\x00hermes_stale"
 _MARKER_CACHE_LIMIT = 128
 _MARKER_CACHE: OrderedDict[tuple[str, int, int], dict | None] = OrderedDict()
 
@@ -87,9 +88,15 @@ def _read_marker(workspace: Path) -> tuple[dict | None, bool]:
 
         if not isinstance(record, dict):
             return None, True
-        age = datetime.now(timezone.utc).timestamp() - before.st_mtime
-        if age > _MARKER_MAX_AGE_SECONDS or record.get("done") is True:
+        if record.get("done") is True:
             return None, False
+        age = datetime.now(timezone.utc).timestamp() - before.st_mtime
+        if age > _MARKER_MAX_AGE_SECONDS:
+            # A never-finished build stays visible, muted, instead of vanishing (D32). A private key,
+            # so a marker field can never collide with it.
+            record = dict(record)
+            record[_STALE_KEY] = True
+            return record, False
         return record, False
     finally:
         os.close(directory_fd)
@@ -107,7 +114,11 @@ def _build_snapshot(session_cwd: str) -> tuple[dict | None, bool]:
     from datetime import datetime, timezone
     from pathlib import Path
 
-    workspace = Path(session_cwd).expanduser().resolve()
+    from . import git_probe
+
+    resolved_cwd = Path(session_cwd).expanduser().resolve()
+    top = git_probe.repo_root(str(resolved_cwd))
+    workspace = Path(top).resolve() if top else resolved_cwd
     marker, unreadable = _read_marker(workspace)
     if marker is None:
         return None, unreadable
@@ -141,8 +152,10 @@ def _build_snapshot(session_cwd: str) -> tuple[dict | None, bool]:
             lease_expired = lease_time.timestamp() <= datetime.now(timezone.utc).timestamp()
         except ValueError:
             pass
-    state = "blocked" if marker.get("blocked") is True else (
-        "lease_expired" if lease_expired else "waiting" if waiting_on else "active"
+    state = "stale" if marker.get(_STALE_KEY) is True else (
+        "blocked" if marker.get("blocked") is True else (
+            "lease_expired" if lease_expired else "waiting" if waiting_on else "active"
+        )
     )
 
     jobs = _relay_job_reader(str(workspace))
