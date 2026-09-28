@@ -261,7 +261,7 @@ export const $sidebarAgentsGrouped: ReadableAtom<boolean> = computed(
 /** How the recents list is divided. `date` is the sidebar's long-standing
  *  default (Today / Yesterday / Last week dividers). `profile` only means
  *  anything while the sidebar is showing every profile at once. */
-export const SIDEBAR_GROUPING_ORDER = ['date', 'project', 'status', 'profile'] as const
+export const SIDEBAR_GROUPING_ORDER = ['date', 'project', 'status', 'profile', 'groups'] as const
 /** Derived from the order so a new grouping cannot exist without a slot in the
  *  filter menu and the `view.cycleSidebarGrouping` keybind, which both walk it. */
 export type SidebarGrouping = (typeof SIDEBAR_GROUPING_ORDER)[number]
@@ -299,7 +299,7 @@ export const SIDEBAR_SORT_KEYS: readonly SidebarSortKey[] = ['updated', 'created
 const $sidebarFlatGrouping = persistentAtom<SidebarGrouping>(
   SIDEBAR_GROUPING_STORAGE_KEY,
   'date',
-  oneOf(['date', 'status'], 'date')
+  oneOf(['date', 'status', 'groups'], 'date')
 )
 
 // All-profiles keeps its own grouping: `profile` only means anything there, and
@@ -309,7 +309,7 @@ const $sidebarFlatGrouping = persistentAtom<SidebarGrouping>(
 const $sidebarAllProfilesGrouping = persistentAtom<SidebarGrouping>(
   SIDEBAR_ALL_PROFILES_GROUPING_STORAGE_KEY,
   'date',
-  oneOf(['date', 'profile', 'status'], 'date')
+  oneOf(['date', 'profile', 'status', 'groups'], 'date')
 )
 
 // The sidebar as it ships. Declared once so the atoms below, "Reset to
@@ -384,6 +384,13 @@ export const $sidebarProfileFilter = persistentAtom(
   Codecs.stringArray
 )
 
+/** A selected cntrl-groups bucket belongs to its gateway/profile connection. */
+export const $sidebarGroupFilter = connectionScopedAtom<string | null>(
+  'hermes.desktop.sidebarGroupFilter.v1',
+  null,
+  Codecs.json<string | null>()
+)
+
 // Whether a session's branch has a PR, and in what state. Fetched per repo via
 // `gh` (see store/pull-requests), so this is empty on backends without a local
 // checkout — the menu hides the submenu rather than offering a dead filter.
@@ -406,9 +413,16 @@ export const $sidebarOrdering: ReadableAtom<SidebarOrdering> = computed(
 )
 
 export const $sidebarFiltersActive: ReadableAtom<boolean> = computed(
-  [$sidebarStatusFilter, $sidebarProjectFilter, $sidebarProfileFilter, $sidebarPrFilter, $sidebarShowArchived],
-  (statuses, projects, profiles, prs, archived) =>
-    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived
+  [
+    $sidebarStatusFilter,
+    $sidebarProjectFilter,
+    $sidebarProfileFilter,
+    $sidebarPrFilter,
+    $sidebarShowArchived,
+    $sidebarGroupFilter
+  ],
+  (statuses, projects, profiles, prs, archived, group) =>
+    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived || group !== null
 )
 
 /** Anything at all moved off the shipped view — what makes a reset worth
@@ -724,6 +738,10 @@ export function toggleSidebarProfileFilter(profile: string) {
   toggleIn($sidebarProfileFilter, profile)
 }
 
+export function setSidebarGroupFilter(group: string | null) {
+  $sidebarGroupFilter.set(group)
+}
+
 export function toggleSidebarPrFilter(bucket: PullRequestBucket) {
   toggleIn($sidebarPrFilter, bucket)
 }
@@ -732,6 +750,7 @@ function clearSidebarFilters() {
   $sidebarStatusFilter.set([])
   $sidebarProjectFilter.set([])
   $sidebarProfileFilter.set([])
+  $sidebarGroupFilter.set(null)
   $sidebarPrFilter.set([])
   $sidebarShowArchived.set(false)
 }

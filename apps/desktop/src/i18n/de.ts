@@ -3856,6 +3856,7 @@ export const deOverrides = {
   sidebar: {
     filter: {
       grouping: 'Gruppierung',
+      groups: 'Gruppen',
       ordering: 'Sortierung',
       show: 'Anzeigen',
       filters: 'Filter',
@@ -3883,10 +3884,21 @@ export const deOverrides = {
       open: 'Offen',
       merged: 'Gemergt',
       closed: 'Geschlossen',
-      noPR: 'Kein PR'
+      noPR: 'Kein PR',
+      groupFilter: 'Gruppe',
+      allGroups: 'Alle Gruppen',
     },
     gatewayGroups: {
       grouping: 'Gateway & Profil',
+      groups: 'Gruppen',
+      moveToGroup: 'In Gruppe verschieben',
+      newGroup: 'Neue Gruppe…',
+      ungrouped: 'Ohne Gruppe',
+      pinGroup: 'Gruppe anheften',
+      unpinGroup: 'Gruppe lösen',
+      ungroupAll: 'Alle Gruppenzuordnungen entfernen',
+      groupName: 'Gruppenname',
+      groupNameInvalid: '1–64 Buchstaben, Zahlen, Leerzeichen, Punkte, Bindestriche oder Unterstriche.',
       rename: 'Gruppe umbenennen',
       aliasLabel: 'Anzeigename',
       aliasHint: 'Nur der Anzeigename; Gateway- und Profilname bleiben unverändert.',

@@ -2889,9 +2889,21 @@ export interface Translations {
       merged: string
       closed: string
       noPR: string
+      groups: string
+      groupFilter: string
+      allGroups: string
     }
     gatewayGroups: {
       grouping: string
+      groups: string
+      moveToGroup: string
+      newGroup: string
+      ungrouped: string
+      pinGroup: string
+      unpinGroup: string
+      ungroupAll: string
+      groupName: string
+      groupNameInvalid: string
       rename: string
       aliasLabel: string
       aliasHint: string

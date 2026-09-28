@@ -126,6 +126,10 @@ interface SidebarSessionsSectionProps {
   headerAction?: React.ReactNode
   footer?: React.ReactNode
   groups?: SidebarSessionGroup[]
+  // Caller-drawn groups (the cntrl Groups grouping) over this section's own
+  // rows: handed the same row renderer the gateway/profile groups use, so a
+  // grouped row is the section's row, with its menus, pins and selection.
+  renderGroupedRows?: (renderRows: (sessions: SessionInfo[]) => React.ReactNode) => React.ReactNode
   // Owner groups inside a messaging platform: the section's footer pages them.
   embeddedGroups?: boolean
   tree?: SidebarWorkspaceTree[]
@@ -216,6 +220,7 @@ export function SidebarSessionsSection({
   headerAction,
   footer,
   groups,
+  renderGroupedRows,
   embeddedGroups = false,
   projectOverview,
   projectOverviewPreviews,
@@ -472,6 +477,7 @@ export function SidebarSessionsSection({
   const flatVirtualized =
     !pinned &&
     !showEmptyState &&
+    !renderGroupedRows &&
     !groups?.length &&
     !projectOverview?.length &&
     !projectContent &&
@@ -559,6 +565,8 @@ export function SidebarSessionsSection({
         )}
       </>
     )
+  } else if (renderGroupedRows) {
+    inner = renderGroupedRows(renderRows)
   } else if (groups?.length && groups.every(group => group.mode === 'profile' && group.profile)) {
     inner = (
       <GatewayProfileGroups

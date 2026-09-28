@@ -57,6 +57,12 @@ def connect() -> sqlite3.Connection:
         " added_at REAL NOT NULL)"
     )
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_name ON {TABLE}(group_name)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cntrl_group_prefs ("
+        " group_name TEXT PRIMARY KEY,"
+        " pinned INTEGER NOT NULL DEFAULT 0,"
+        " sort_order INTEGER NOT NULL DEFAULT 0)"
+    )
     conn.commit()
     return conn
 

@@ -40,6 +40,12 @@ vi.mock('@/i18n', () => ({
       },
       errors: { genericFailure: 'Something went wrong' },
       sidebar: {
+        gatewayGroups: {
+          groupName: 'Group name',
+          groupNameInvalid: 'Invalid group name',
+          moveToGroup: 'Move to group',
+          newGroup: 'New group…'
+        },
         projects: {
           menuAppearance: 'Appearance',
           moveFailed: 'Could not move session',
