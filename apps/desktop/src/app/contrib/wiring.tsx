@@ -23,9 +23,10 @@ import { FreeTierSignInDialog } from '@/components/free-tier/sign-in-dialog'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { IntroRevealGate } from '@/components/intro-reveal'
 import { NotificationStack } from '@/components/notifications'
-import { ForwardSheet } from '@/components/owner-forward/forward-sheet'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { OnboardingChatGate } from '@/components/onboarding-chat/gate'
+import { ForwardSheet } from '@/components/owner-forward/forward-sheet'
+import { TranscriptSelectionForward } from '@/components/owner-forward/transcript-forward'
 import { $newSessionTabAction, registerPaneCloser } from '@/components/pane-shell/tree/store'
 import {
   $workspaceMode,
@@ -1447,6 +1448,9 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       {/* #60 owner-forward sheet — renders only while open (Forward to…, /to, proposal cards). */}
       <ForwardSheet />
+
+      {/* #67 / D29 the small "Forward" action after a transcript selection (quotes it into that composer). */}
+      <TranscriptSelectionForward />
 
       {/* Send Diagnostics consent/upload dialog — driven by $sendDiagnostics
           (error card action); renders nothing until requested. */}

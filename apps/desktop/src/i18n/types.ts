@@ -3125,6 +3125,15 @@ export interface Translations {
     copyHint: string
     signedSend: string
     signedNeedsSession: string
+    forwardSelection: string
+    forwardSelectionHint: string
+    sendTo: string
+    sendToTitle: (title: string) => string
+    sendHere: string
+    ttlSummary: (ttl: string) => string
+    composerPlaceholder: (title: string) => string
+    commandRefused: string
+    tooLong: (max: number) => string
   }
   composer: {
     message: string

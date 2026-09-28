@@ -11,6 +11,7 @@ import { $hudMode, closeHud, resetHudLayout } from '@/store/hud'
 import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
+import { ForwardTargetPill } from './forward-target-pill'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
 import { ReasoningPill } from './reasoning-pill'
@@ -114,6 +115,9 @@ export function ComposerControls({
 
   return (
     <div className="flex min-w-0 shrink items-center gap-(--composer-control-gap)">
+      {/* #67 / D29 "send to: <chat>", beside the model picker. Minimal rows (and the guided chat,
+          which hides the model picker) show it only while a target is set. */}
+      <ForwardTargetPill compact={compactModelPill} disabled={disabled} minimal={minimal || hideModelPill} />
       {minimal ? null : (
         <>
           {hideModelPill ? null : (

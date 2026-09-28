@@ -58,6 +58,7 @@ import { ComposerControls } from './controls'
 import { ComposerDirectiveActions } from './directive-actions'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
 import { markActiveComposer, onComposerAttachImagesRequest } from './focus'
+import { useComposerForwardTarget } from './forward-target-pill'
 import { HelpHint } from './help-hint'
 import { useAtCompletions } from './hooks/use-at-completions'
 import { useComposerBranch } from './hooks/use-composer-branch'
@@ -461,7 +462,14 @@ export function ChatBar({
 
   // Resting / reconnecting / starting placeholder text, re-rolled only on a real
   // conversation change.
-  const placeholder = useComposerPlaceholder({ disabled, reconnecting, sessionId })
+  const restingPlaceholder = useComposerPlaceholder({ disabled, reconnecting, sessionId })
+  // #67 / D29: with a "send to" target set, the empty composer says where Send goes.
+  const forwardTarget = useComposerForwardTarget()
+
+  const placeholder =
+    forwardTarget && !disabled
+      ? t.ownerForward.composerPlaceholder(forwardTarget.title || forwardTarget.session_id.slice(0, 8))
+      : restingPlaceholder
 
   // Trigger / completion engine: @// detection, the adapter-driven item list,
   // popover selection, and chip insertion. The keydown nav block below consumes

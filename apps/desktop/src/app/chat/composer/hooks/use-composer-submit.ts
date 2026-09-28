@@ -8,12 +8,14 @@ import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import {
   describeForwardResult,
+  FORWARD_MAX_CHARS,
   forwardCandidates,
   type ForwardOutcome,
   forwardProfile,
   openForwardSheetFromTypedDraft,
   sendOwnerForward
 } from '@/lib/owner-forward/client'
+import { type ComposerForwardTarget, composerForwardTargetFor, setComposerForwardTarget } from '@/lib/owner-forward/composer-target'
 import { isForwardCommandText, parseToDraft, resolveToTokens } from '@/lib/owner-forward/parse-to'
 import { isTrustedGesture } from '@/lib/owner-forward/trusted'
 import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
@@ -100,6 +102,8 @@ export function useComposerSubmit({
   const { t } = useI18n()
   const forwardCopy = t.ownerForward
   const storedSessionId = useStore(useSessionView().$storedId)
+  // #67 one composer-target forward at a time: a second Enter while main's dialog is up is dropped.
+  const targetForwardPending = useRef(false)
 
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
@@ -283,6 +287,69 @@ export function useComposerSubmit({
     ).then(reportForward)
   }
 
+  // #67 / D29 the composer's "send to" target (the control beside the model picker). While it is set,
+  // Send routes the draft through the SAME owner-forward path as a typed /to (secrets.mask → main's
+  // native confirm → owner.forward), quote-only with the owner's TTL, and posts nothing in this chat.
+  // Read from the store at submit time, never from a render-lagged prop.
+  const composerTarget = (): ComposerForwardTarget | null => composerForwardTargetFor(storedSessionId)
+
+  const forwardDraftToTarget = (target: ComposerForwardTarget) => {
+    const text = draftRef.current.trim()
+
+    if (!storedSessionId || targetForwardPending.current) {
+      return
+    }
+
+    if (attachments.length > 0) {
+      notify({ kind: 'error', message: forwardCopy.attachmentsRefused })
+
+      return
+    }
+
+    if (!text) {
+      return
+    }
+
+    // Main refuses a signed text that starts with '/', and a command belongs to this chat anyway.
+    if (text.startsWith('/')) {
+      notify({ kind: 'error', message: forwardCopy.commandRefused })
+
+      return
+    }
+
+    if (text.length > FORWARD_MAX_CHARS) {
+      notify({ kind: 'error', message: forwardCopy.tooLong(FORWARD_MAX_CHARS) })
+
+      return
+    }
+
+    targetForwardPending.current = true
+    triggerHaptic('submit')
+    void sendOwnerForward(
+      {
+        text,
+        gesture: 'slash_to',
+        origin: { session_id: storedSessionId, message_id: null, role: 'user' },
+        targets: [{ profile: target.profile, session_id: target.session_id, title: target.title ?? null }],
+        scope: [],
+        ttlMs: target.ttlMs
+      },
+      { onConfirmed: clearAfterConfirm() }
+    )
+      .then(outcome => {
+        // One-shot (D29/D35): a delivered forward clears the target, so the next message can't be
+        // rerouted by a target the owner forgot was set. A failed delivery keeps it for a retry.
+        if (outcome.kind === 'sent' && !outcome.results.some(line => line.status.startsWith('failed'))) {
+          setComposerForwardTarget(storedSessionId, null)
+        }
+
+        reportForward(outcome)
+      })
+      .finally(() => {
+        targetForwardPending.current = false
+      })
+  }
+
   // ⌘⇧↩ "Send as signed decision": the owner signs what they typed, for THIS chat only.
   const signedSendDraft = async (event: { isTrusted?: boolean } | null | undefined) => {
     if (disabled || !isTrustedGesture(event)) {
@@ -353,6 +420,18 @@ export function useComposerSubmit({
     // A typed `/to` never becomes a turn: it goes to the owner-forward confirm (or the sheet).
     if (!queueEdit && isForwardCommandText(draftRef.current)) {
       forwardTypedDraft(draftRef.current)
+      focusInput()
+
+      return
+    }
+
+    // D29: a "send to" target set on this composer takes the draft instead of this chat, busy or not
+    // (never a steer or a queue here). Clearing the target restores everything below.
+    // An empty composer keeps its normal meaning (Stop while busy, drain the queue).
+    const target = queueEdit || !(draftRef.current.trim() || attachments.length) ? null : composerTarget()
+
+    if (target) {
+      forwardDraftToTarget(target)
       focusInput()
 
       return
@@ -472,6 +551,21 @@ export function useComposerSubmit({
 
   const queueDraft = () => {
     if (disabled || !busy) {
+      return
+    }
+
+    // ⌘↩ / the queue button with a "send to" target set: the words are for the target, not this
+    // chat's next turn.
+    const target = queueEdit ? null : composerTarget()
+
+    if (target) {
+      syncDraftFromEditor()
+    }
+
+    if (target && draftRef.current.trim()) {
+      forwardDraftToTarget(target)
+      focusInput()
+
       return
     }
 

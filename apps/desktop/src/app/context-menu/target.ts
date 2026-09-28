@@ -7,6 +7,12 @@
  * image section still appears because the target carries both.
  */
 
+import {
+  type TranscriptForward,
+  transcriptItemForward,
+  transcriptSelectionForward
+} from '@/lib/owner-forward/transcript-selection'
+
 export interface ContextMenuDomTarget {
   /** The enclosing dialog content node, when the click landed inside one. */
   dialogPortalContainer: HTMLElement | null
@@ -21,6 +27,9 @@ export interface ContextMenuDomTarget {
   onImage: boolean
   /** The live selection's text at the moment of the click. */
   selectionText: string
+  /** #67 what "Forward" would quote into the composer: the transcript selection, else a rendered
+   *  item (code block, table) under the click. Null outside a chat transcript. */
+  transcriptForward: TranscriptForward | null
 }
 
 /** Form fields and `contenteditable` hosts. Mirrors the keybind helper, but
@@ -52,7 +61,8 @@ export function resolveDomTarget(element: Element | null): ContextMenuDomTarget 
     linkUrl: linkUrl === '#' ? '' : linkUrl,
     imageUrl: image instanceof HTMLImageElement ? image.currentSrc || image.src : '',
     onImage: Boolean(image),
-    selectionText: window.getSelection()?.toString().trim() ?? ''
+    selectionText: window.getSelection()?.toString().trim() ?? '',
+    transcriptForward: transcriptSelectionForward(window.getSelection()) ?? transcriptItemForward(element)
   }
 }
 

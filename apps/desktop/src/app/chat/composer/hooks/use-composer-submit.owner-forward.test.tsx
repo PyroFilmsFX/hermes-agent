@@ -11,8 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
 import { $forwardSheet, setForwardGatewayRequestForTests } from '@/lib/owner-forward/client'
+import {
+  $composerForwardTargets,
+  composerForwardTargetFor,
+  setComposerForwardTarget,
+  setComposerForwardTtl
+} from '@/lib/owner-forward/composer-target'
 import type { ComposerAttachment } from '@/store/composer'
-import { clearNotifications } from '@/store/notifications'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $selectedStoredSessionId, $sessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
@@ -52,6 +58,7 @@ beforeEach(() => {
   $selectedStoredSessionId.set('mgr_session_1')
   $activeGatewayProfile.set('default')
   $forwardSheet.set(null)
+  $composerForwardTargets.set({})
 })
 
 afterEach(() => {
@@ -61,12 +68,19 @@ afterEach(() => {
   delete (window as any).hermesDesktop
 })
 
-function renderSubmit({ attachments = [], text = '' }: { attachments?: ComposerAttachment[]; text?: string } = {}) {
+function renderSubmit({
+  attachments = [],
+  busy = false,
+  text = ''
+}: { attachments?: ComposerAttachment[]; busy?: boolean; text?: string } = {}) {
   const draftRef = { current: text }
   const editor = window.document.createElement('div')
   editor.dataset.slot = 'composer-rich-input'
   editor.textContent = text
   const onSubmit = vi.fn(async () => true)
+  const onSteer = vi.fn(async () => true)
+  const queueCurrentDraft = vi.fn(() => true)
+  const onCancel = vi.fn()
   const loadIntoComposer = vi.fn()
 
   const clearDraft = vi.fn(() => {
@@ -94,7 +108,7 @@ function renderSubmit({ attachments = [], text = '' }: { attachments?: ComposerA
         activeQueueSessionKey: 'mgr_session_1',
         activeQueueSessionKeyRef: { current: 'mgr_session_1' },
         attachments,
-        busy: false,
+        busy,
         compacting: false,
         clearDraft,
         disabled: false,
@@ -105,11 +119,11 @@ function renderSubmit({ attachments = [], text = '' }: { attachments?: ComposerA
         focusInput: vi.fn(),
         inputDisabled: false,
         loadIntoComposer,
-        onCancel: vi.fn(),
-        onSteer: vi.fn(async () => true),
+        onCancel,
+        onSteer,
         onSteerHidden: vi.fn(async () => true),
         onSubmit,
-        queueCurrentDraft: vi.fn(() => true),
+        queueCurrentDraft,
         queueEdit: null,
         queuedPrompts: [],
         sessionId: 'runtime-1',
@@ -119,7 +133,7 @@ function renderSubmit({ attachments = [], text = '' }: { attachments?: ComposerA
     { wrapper: Wrapper }
   )
 
-  return { clearDraft, draftRef, hook, loadIntoComposer, onSubmit, surfaceId }
+  return { clearDraft, draftRef, hook, loadIntoComposer, onCancel, onSteer, onSubmit, queueCurrentDraft, surfaceId }
 }
 
 describe('V-1..V-3: non-typed paths never reach the forward path', () => {
@@ -234,6 +248,161 @@ describe('⌘⇧↩ Send as signed decision (composer_signed)', () => {
 
     act(() => void hook.result.current.signedSendDraft({ isTrusted: false }))
 
+    expect(confirm).not.toHaveBeenCalled()
+  })
+})
+
+describe('D29: the composer "send to" target', () => {
+  const signed = {
+    ok: true,
+    decisionId: 'od_c',
+    grantId: 'og_c',
+    envelope: { format: 'hermes-owner-grant/v1', kid: 'k', payload: 'p', sig: 's' },
+    targets: ['default:worker_session_1']
+  }
+
+  function maskThenDeliver(status = 'delivered') {
+    gatewayRequest.mockImplementation(async (method: string, params: { text?: string }) =>
+      method === 'secrets.mask'
+        ? { text: params.text }
+        : { results: [{ target_session_id: 'worker_session_1', status }] }
+    )
+  }
+
+  function setTarget() {
+    setComposerForwardTarget('mgr_session_1', {
+      profile: 'default',
+      session_id: 'worker_session_1',
+      title: 'worker-one'
+    })
+  }
+
+  it('a set target: Send masks, confirms in main, calls owner.forward, and never posts a turn here', async () => {
+    confirm.mockResolvedValue(signed)
+    maskThenDeliver()
+    setTarget()
+    setComposerForwardTtl('mgr_session_1', 3_600_000)
+    const { clearDraft, hook, onSubmit } = renderSubmit({ text: '> quoted line\n\nplease pick this up' })
+
+    act(() => hook.result.current.submitDraft())
+
+    await vi.waitFor(() =>
+      expect(gatewayRequest).toHaveBeenCalledWith('owner.forward', expect.anything(), expect.any(Number))
+    )
+    const methods = gatewayRequest.mock.calls.map(call => call[0])
+    expect(methods.indexOf('secrets.mask')).toBeLessThan(methods.indexOf('owner.forward'))
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gesture: 'slash_to',
+        text: '> quoted line\n\nplease pick this up',
+        origin: { session_id: 'mgr_session_1', message_id: null, role: 'user' },
+        targets: [{ profile: 'default', session_id: 'worker_session_1' }],
+        scope: [],
+        ttlMs: 3_600_000
+      })
+    )
+    expect(gatewayRequest).toHaveBeenCalledWith(
+      'owner.forward',
+      expect.objectContaining({ text: '> quoted line\n\nplease pick this up', targets: ['default:worker_session_1'] }),
+      expect.any(Number)
+    )
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(clearDraft).toHaveBeenCalled()
+    // The sent confirmation names the target.
+    await vi.waitFor(() =>
+      expect($notifications.get().some(n => n.kind === 'success' && /Sent to worker-one/.test(n.message))).toBe(true)
+    )
+    // One-shot (D35): a delivered forward clears the target, so the next message sends here.
+    expect(composerForwardTargetFor('mgr_session_1')).toBeNull()
+  })
+
+  it('a set target while this chat is busy still forwards: no steer, no queue', async () => {
+    confirm.mockResolvedValue(signed)
+    maskThenDeliver('queued')
+    setTarget()
+    const { hook, onSteer, onSubmit, queueCurrentDraft } = renderSubmit({ busy: true, text: 'for the worker' })
+
+    act(() => hook.result.current.submitDraft())
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled())
+    expect(onSteer).not.toHaveBeenCalled()
+    expect(queueCurrentDraft).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('an empty composer keeps Stop while busy, even with a target set', () => {
+    setTarget()
+    const { hook, onCancel } = renderSubmit({ busy: true, text: '' })
+
+    act(() => hook.result.current.submitDraft())
+
+    expect(onCancel).toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it('⌘↩ / the queue button with a target set forwards instead of queueing here', async () => {
+    confirm.mockResolvedValue({ ok: false, cancelled: true, reason: 'dialog' })
+    maskThenDeliver()
+    setTarget()
+    const { hook, queueCurrentDraft } = renderSubmit({ busy: true, text: 'for the worker' })
+
+    act(() => hook.result.current.queueDraft())
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled())
+    expect(queueCurrentDraft).not.toHaveBeenCalled()
+  })
+
+  it('Cancel in the native dialog keeps the draft; nothing is sent anywhere', async () => {
+    confirm.mockResolvedValue({ ok: false, cancelled: true, reason: 'dialog' })
+    maskThenDeliver()
+    setTarget()
+    const { clearDraft, hook, onSubmit } = renderSubmit({ text: 'not yet' })
+
+    act(() => hook.result.current.submitDraft())
+
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalled())
+    await Promise.resolve()
+    expect(clearDraft).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(gatewayRequest).not.toHaveBeenCalledWith('owner.forward', expect.anything(), expect.anything())
+  })
+
+  it('a set target refuses attachments and slash commands without sending', () => {
+    setTarget()
+    const attachment: ComposerAttachment = { id: 'a1', kind: 'file', label: 'pasted.txt' }
+    const withFile = renderSubmit({ attachments: [attachment], text: 'see file' })
+
+    act(() => withFile.hook.result.current.submitDraft())
+
+    const slash = renderSubmit({ text: '/new' })
+
+    act(() => slash.hook.result.current.submitDraft())
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(withFile.onSubmit).not.toHaveBeenCalled()
+    expect(slash.onSubmit).not.toHaveBeenCalled()
+    expect(slash.clearDraft).not.toHaveBeenCalled()
+  })
+
+  it('a cleared target restores normal send', async () => {
+    setTarget()
+    setComposerForwardTarget('mgr_session_1', null)
+    const { hook, onSubmit } = renderSubmit({ text: 'back to this chat' })
+
+    act(() => hook.result.current.submitDraft())
+
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith('back to this chat', expect.anything()))
+    expect(confirm).not.toHaveBeenCalled()
+    expect(gatewayRequest).not.toHaveBeenCalled()
+  })
+
+  it('a target set for ANOTHER chat does not re-route this one', async () => {
+    setComposerForwardTarget('worker_session_1', { profile: 'default', session_id: 'mgr_session_1', title: 'manager' })
+    const { hook, onSubmit } = renderSubmit({ text: 'normal' })
+
+    act(() => hook.result.current.submitDraft())
+
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalled())
     expect(confirm).not.toHaveBeenCalled()
   })
 })

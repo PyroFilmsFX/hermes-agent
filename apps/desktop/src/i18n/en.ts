@@ -3692,7 +3692,16 @@ export const en: Translations = {
     copyHint:
       'An earlier row in this chat already carries this signed text. This row is a copy of it, not a second decision.',
     signedSend: 'Send as signed decision',
-    signedNeedsSession: 'Send a first message, then sign.'
+    signedNeedsSession: 'Send a first message, then sign.',
+    forwardSelection: 'Forward',
+    forwardSelectionHint: 'Quote this in the composer, then send it to another chat',
+    sendTo: 'Send to another chat',
+    sendToTitle: title => `Sending to ${title}, not this chat`,
+    sendHere: 'Send here instead',
+    ttlSummary: ttl => `Expires after ${ttl}`,
+    composerPlaceholder: title => `Message for ${title}`,
+    commandRefused: 'Commands run in this chat. Clear the send-to target first.',
+    tooLong: max => `A forward is at most ${max} characters.`
   },
   composer: {
     message: 'Message',

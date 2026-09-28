@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useNavigate } from 'react-router'
 
 import { terminalMenuHandleFor } from '@/app/right-sidebar/terminal/terminal-context-menu'
+import { forwardIntoComposer } from '@/components/owner-forward/transcript-forward'
 import { toggleTargetZoneTabStrip } from '@/components/pane-shell/tree/store'
 import { Codicon } from '@/components/ui/codicon'
 import { HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
@@ -599,6 +600,26 @@ function shellSections({ navigate, t }: ShellVerbs): ReactNode[][] {
   ]
 }
 
+/** #67 / D29 "Forward": quote the transcript selection / rendered item into that pane's composer. */
+function forwardSection(open: OpenContextMenu, t: Translations): ReactNode[][] {
+  const forward = open.kind === 'dom' ? open.target.transcriptForward : null
+
+  if (!forward) {
+    return []
+  }
+
+  return [
+    [
+      <Item
+        icon="send"
+        key="transcript-forward"
+        label={t.ownerForward.forwardSelection}
+        onSelect={() => forwardIntoComposer(forward)}
+      />
+    ]
+  ]
+}
+
 /**
  * THE app context menu: one capture-phase listener, one store, one menu.
  *
@@ -675,7 +696,11 @@ export function AppContextMenu() {
       ? terminalSections(open, t)
       : open.kind === 'guest'
         ? guestSections(open, t)
-        : (list => (list.length ? list : shellSections({ navigate, t })))(domSections(open, t))
+        : (list =>
+            // A bare rendered item (no selection) only adds Forward: the window verbs stay.
+            list.length
+              ? [...list, ...forwardSection(open, t)]
+              : [...forwardSection(open, t), ...shellSections({ navigate, t })])(domSections(open, t))
 
   return (
     <DropdownMenu
