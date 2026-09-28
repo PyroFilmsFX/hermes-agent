@@ -282,6 +282,7 @@ class ToolStartPayload(Payload):
     tool_id: str
     name: str
     context: str | None = None
+    title: str | None = None
     args: dict[str, JsonValue] | None = None
     args_text: str | None = None
     preview: str | None = None
@@ -289,6 +290,20 @@ class ToolStartPayload(Payload):
 
 
 event("tool.start", ToolStartPayload, doc="A tool call began (stable id + full args).")
+
+
+class ToolProgressPayload(Payload):
+    """``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` via ``tool_progress_callback``."""
+
+    tool_id: str
+    name: str
+    preview: str
+    progress: float
+    total: float | None = None
+    message: str | None = None
+
+
+event("tool.progress", ToolProgressPayload, doc="An active MCP tool reported progress.")
 
 
 class ToolCompletePayload(Payload):

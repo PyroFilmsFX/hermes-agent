@@ -6,6 +6,8 @@ import asyncio
 import contextvars
 import inspect
 import json
+import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from functools import partial
@@ -56,20 +58,88 @@ def _tool_is_read_only(server_name: str, tool_name: str) -> bool:
     return _core._tool_read_only_hints.get(_resolve_server_key(server_name), {}).get(tool_name) is True
 
 
+def _tool_metadata(server_name: str, tool_name: str) -> dict:
+    from tools.mcp_tool_scope import _resolve_server_key
+    return _core._tool_annotations.get(_resolve_server_key(server_name), {}).get(tool_name, {})
+
+
+def _tool_display_title(registry_name: str) -> str | None:
+    """Card title captured at discovery for a registered MCP tool."""
+    server_name = _core._mcp_tool_server_names.get(registry_name)
+    tool_name = _core._tool_raw_names.get(registry_name)
+    return _tool_metadata(server_name, tool_name).get("title") if server_name and tool_name else None
+
+
+def _traceparent(value: str | None) -> str:
+    """Use a valid caller trace context or create a W3C version-00 parent for this RPC."""
+    if isinstance(value, str):
+        match = re.fullmatch(r"00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})", value)
+        if match and all(int(part, 16) for part in match.groups()[:2]):
+            return value
+    return f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"
+
+
+def _validate_structured_output(result, output_schema: dict | None) -> str | None:
+    structured = mcp_field(result, "structured_content", "structuredContent")
+    if structured is None or not isinstance(output_schema, dict):
+        return None
+    try:
+        import jsonschema
+        validator = jsonschema.validators.validator_for(output_schema)
+        validator.check_schema(output_schema)
+        validator(output_schema).validate(structured)
+    except ImportError:
+        return "JSON Schema validation is unavailable in this environment"
+    except jsonschema.ValidationError as exc:
+        path = ".".join(str(part) for part in exc.absolute_path) or "$"
+        return f"Invalid structured content at {path}: {exc.message}"
+    except jsonschema.SchemaError as exc:
+        return f"MCP tool advertised an invalid outputSchema: {exc.message}"
+    return None
+
+
+def _render_validated_call_tool_result(result, server_name: str, tool_name: str) -> str:
+    error = _validate_structured_output(result, _tool_metadata(server_name, tool_name).get("outputSchema"))
+    if error:
+        return tool_error(error, error_type="mcp_output_schema", tool=tool_name)
+    return _render_call_tool_result(result, server_name)
+
+
+def _structured_output_exception_result(exc: BaseException, tool_name: str) -> str | None:
+    """Normalize SDK-side outputSchema validation into the same MCP tool error envelope."""
+    prefix = f"Invalid structured content returned by tool {tool_name}:"
+    if str(exc).startswith(prefix):
+        return tool_error(str(exc), error_type="mcp_output_schema", tool=tool_name)
+    return None
+
+
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
-    """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
-    else a ``tool_error``. Fail-closed: approval-system errors block."""
+    """Approval gate (D56). None to proceed, else a ``tool_error``. Fail-closed: approval-system errors block.
+
+    Prompts when (a) the server is ``trust: untrusted`` and the tool is not ``readOnlyHint``, or (b) the tool is
+    ``destructiveHint`` and that server sets ``confirm_destructive: true`` (any trust tier). ``trust: full`` alone
+    never prompts, so unattended runs (cron, ``-q``) are not declined. (b) is an always-ask rule: a
+    ``readOnlyHint`` never waives it."""
     from tools.mcp_tool_scope import _server_key
+    key = _server_key(server_name)
     # Trust is the calling profile's own policy (an adopter of a shared connection keeps its own tier).
-    trust = _core._server_trust_levels.get(_server_key(server_name), _core._TRUST_FULL)
-    if trust != _core._TRUST_UNTRUSTED or _tool_is_read_only(server_name, tool_name):
+    trust = _core._server_trust_levels.get(key, _core._TRUST_FULL)
+    metadata = _tool_metadata(server_name, tool_name)
+    read_only = _tool_is_read_only(server_name, tool_name)
+    destructive = metadata.get("destructiveHint") is True
+    ask_destructive = destructive and _core._server_confirm_destructive.get(key, False)
+    ask_untrusted = trust == _core._TRUST_UNTRUSTED and not read_only
+    if not (ask_destructive or ask_untrusted):
         return None
     try:  # lazy: tools.approval routes the prompt to whichever surface owns the session
         from tools.approval_prompt import request_elicitation_consent
+        policy_reason = (f"Server '{server_name}' is configured 'confirm_destructive: true' and tool '{tool_name}' "
+                         f"is marked destructive." if ask_destructive and not ask_untrusted
+                         else f"Server '{server_name}' is configured 'trust: untrusted'.")
         answer = request_elicitation_consent(
-            f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This tool is write-capable "
-            f"(no readOnlyHint=true annotation) and may modify external state.",
-            f"Server '{server_name}' is configured 'trust: untrusted'. "
+            f"MCP tool '{metadata.get('title') or tool_name}' on server '{server_name}' wants to run. "
+            f"{'The tool is marked destructive.' if ask_destructive else 'This tool is write-capable and may modify external state.'}",
+            policy_reason + " "
             f"Approve to run '{tool_name}' once, or deny to block it.",
             surface=f"mcp-trust/{server_name}", title=f"MCP server '{server_name}' is asking")
     except Exception as exc:
@@ -377,7 +447,9 @@ async def _track_inflight_rpc(server: Any, server_name: str, op: str, *, retry_s
             inflight.discard(task)
 
 
-async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict):
+async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict,
+                                        progress_callback=None, traceparent: str | None = None,
+                                        tool_call_id: str | None = None):
     """``session.call_tool`` that fails fast when the stdio child is/gets dead: pre-call (a dead
     child must not hold the slot for the full timeout) and mid-call (race against
     ``_watch_stdio_children``). Both raise :class:`_StdioChildExited` for the respawn path, which
@@ -391,7 +463,18 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
             f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched",
             in_flight=False,
         )
-    _call_coro = server.session.call_tool(tool_name, arguments=args)
+    async def _on_progress(current: float, total: float | None, message: str | None) -> None:
+        if progress_callback is None:
+            return
+        preview = str(message) if message else (f"{current:g}/{total:g}" if total is not None else str(current))
+        try:
+            progress_callback("tool.progress", f"mcp__{server_name}__{tool_name}", preview, args,
+                              progress=current, total=total, message=message, tool_call_id=tool_call_id)
+        except Exception:
+            logger.debug("MCP %s/%s progress callback failed", server_name, tool_name, exc_info=True)
+
+    _call_coro = server.session.call_tool(
+        tool_name, arguments=args, progress_callback=_on_progress, meta={"traceparent": _traceparent(traceparent)})
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
@@ -571,13 +654,23 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op, retry_safe=read_only):
                 server._pending_call_context = contextvars.copy_context()  # for the elicitation callback
+                schema_error = None
                 try:
-                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
+                    result = await _call_tool_racing_stdio_death(
+                        server, server_name, tool_name, args,
+                        progress_callback=kwargs.get("tool_progress_callback"),
+                        traceparent=kwargs.get("traceparent"), tool_call_id=kwargs.get("tool_call_id"))
+                except RuntimeError as exc:
+                    schema_error = _structured_output_exception_result(exc, tool_name)
+                    if schema_error is None:
+                        raise
                 finally:
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
-            return _render_call_tool_result(result, server_name)
+            if schema_error is not None:
+                return schema_error
+            return _render_validated_call_tool_result(result, server_name, tool_name)
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)

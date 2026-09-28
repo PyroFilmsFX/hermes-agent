@@ -36542,6 +36542,60 @@
         "title": "ToolOutputRiskPayload",
         "type": "object"
       },
+      "ToolProgressPayload": {
+        "additionalProperties": false,
+        "description": "``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` via ``tool_progress_callback``.",
+        "properties": {
+          "tool_id": {
+            "title": "Tool Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "preview": {
+            "title": "Preview",
+            "type": "string"
+          },
+          "progress": {
+            "title": "Progress",
+            "type": "number"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message"
+          }
+        },
+        "required": [
+          "tool_id",
+          "name",
+          "preview",
+          "progress"
+        ],
+        "title": "ToolProgressPayload",
+        "type": "object"
+      },
       "ToolShowRow": {
         "additionalProperties": false,
         "properties": {
@@ -36606,6 +36660,18 @@
             ],
             "default": null,
             "title": "Context"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
           },
           "args": {
             "anyOf": [
@@ -40683,6 +40749,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/ToolOutputRiskPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tool.progress",
+      "summary": "An active MCP tool reported progress.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/ToolProgressPayload"
           }
         }
       ]

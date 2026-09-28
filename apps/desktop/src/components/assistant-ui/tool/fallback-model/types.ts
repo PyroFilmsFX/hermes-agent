@@ -5,6 +5,8 @@ export type ToolStatus = 'error' | 'notice' | 'running' | 'success' | 'warning'
 
 export interface ToolPart {
   toolResultMetadata?: ToolResultMetadata
+  toolTitle?: string
+  progressPreview?: string
   args?: unknown
   completedAt?: number
   interrupted?: boolean

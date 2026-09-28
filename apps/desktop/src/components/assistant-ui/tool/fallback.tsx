@@ -360,7 +360,10 @@ function ToolEntry({ part }: ToolEntryProps) {
   // below and re-running buildToolView (full JSON.stringify of result) on every
   // stream delta — the freeze on big `/learn` runs. Re-derive a stable part from
   // the referentially-stable args/result so the memos hold across deltas.
-  const { args, completedAt, interrupted, isError, result, toolResultMetadata, timestamp, toolCallId, toolName } = part
+  const {
+    args, completedAt, interrupted, isError, progressPreview, result, toolResultMetadata,
+    timestamp, toolCallId, toolName, toolTitle
+  } = part
 
   const stablePart = useMemo<ToolPart>(
     () => ({
@@ -372,10 +375,13 @@ function ToolEntry({ part }: ToolEntryProps) {
       toolResultMetadata,
       timestamp,
       toolCallId,
+      progressPreview,
+      toolTitle,
       toolName,
       type: 'tool-call'
     }),
-    [args, completedAt, interrupted, isError, result, toolResultMetadata, timestamp, toolCallId, toolName]
+    [args, completedAt, interrupted, isError, progressPreview, result, toolResultMetadata, timestamp, toolCallId,
+      toolTitle, toolName]
   )
 
   const disclosureId = toolEntryDisclosureId(messageId, stablePart)
@@ -402,8 +408,9 @@ function ToolEntry({ part }: ToolEntryProps) {
     const p =
       !isPending && result === undefined ? { ...stablePart, completedAt: stablePart.completedAt ?? 0 } : stablePart
 
-    return buildToolView(p, inlineDiff)
-  }, [inlineDiff, isPending, result, stablePart])
+    const view = buildToolView(p, inlineDiff)
+    return toolTitle ? { ...view, title: toolTitle } : view
+  }, [inlineDiff, isPending, result, stablePart, toolTitle])
 
   // Keep counts and saved disclosure intent, but never mount code while hidden.
   // Failed edits still expose their explanation.
@@ -614,6 +621,9 @@ function ToolEntry({ part }: ToolEntryProps) {
               title={view.title}
               titleAction={view.titleAction}
             />
+            {isPending && progressPreview && (
+              <span className="truncate text-xs text-(--conversation-scaffold-meta)">{progressPreview}</span>
+            )}
             {!isPending && view.countLabel && (
               <span className={cn(SCAFFOLD_META_CLASS, memoryMetaClass)}>{view.countLabel}</span>
             )}

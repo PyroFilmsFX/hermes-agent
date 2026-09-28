@@ -1272,11 +1272,17 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         turnController.recordToolStart(
           ev.payload.tool_id,
-          ev.payload.name ?? 'tool',
+          ev.payload.title ?? ev.payload.name ?? 'tool',
           ev.payload.context ?? '',
           ev.payload.args_text ? stripAnsi(String(ev.payload.args_text)) : undefined,
           ev.payload.labels ?? undefined
         )
+
+        return
+      case 'tool.progress':
+        if (ev.payload) {
+          turnController.recordToolProgress(ev.payload.tool_id, ev.payload.preview)
+        }
 
         return
       case 'tool.complete': {

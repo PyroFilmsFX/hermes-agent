@@ -510,6 +510,11 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     if (_tool_progress_enabled(sid) or _tool_lifecycle_required_for_ui(name)
             or _connector_tool_lifecycle(name, args)):
         payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)}
+        with contextlib.suppress(Exception):
+            from tools.mcp_tool_handlers import _tool_display_title
+            payload["title"] = _tool_display_title(name)
+            if payload["title"] is None:
+                payload.pop("title")
         if (labels := _tool_labels(name, args)) is not None:
             payload["labels"] = labels
         # Full args (not just the 80-char `context` preview) so the desktop's expanded tool row is complete
@@ -635,6 +640,20 @@ def _progress_output_risk(sid, name, preview, kw):
         })
 
 
+def _progress_mcp(sid, name, preview, kw):
+    tool_id = kw.get("tool_call_id")
+    if not tool_id:
+        return
+    payload = {
+        "tool_id": str(tool_id), "name": str(name or ""),
+        "preview": str(preview or ""), "progress": float(kw["progress"])}
+    if kw.get("total") is not None:
+        payload["total"] = float(kw["total"])
+    if kw.get("message") is not None:
+        payload["message"] = str(kw["message"])
+    _emit("tool.progress", sid, payload)
+
+
 def _progress_reasoning(sid, name, preview, kw):
     _emit("reasoning.available", sid, {"text": str(preview), **({"verbose": True} if _session_verbose(sid) else {})})
 
@@ -727,6 +746,7 @@ def _progress_subagent(sid, name, preview, kw, event_type):
 # event_type -> (handler, requires): `requires` names the arg that must be truthy for the row to be
 # emitted at all ("name" / "preview" / None).
 _PROGRESS_HANDLERS = {
+    "tool.progress": (_progress_mcp, None),
     "tool.output_risk": (_progress_output_risk, "name"), "reasoning.available": (_progress_reasoning, "preview"),
     "moa.reference": (_progress_moa_reference, "name"),
     "moa.aggregating": (lambda sid, name, preview, kw: _emit("moa.aggregating", sid, {"aggregator": str(name or "")}), None),

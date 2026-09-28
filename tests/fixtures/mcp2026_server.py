@@ -117,7 +117,7 @@ def build_server(task_duration: float = 0.05) -> MCPServer:
         extensions=[FixtureExtensions(task_duration), AppsExtension()],
     )
 
-    @server.tool(description="Report N progress steps.")
+    @server.tool(title="Progress steps", description="Report N progress steps.")
     async def progress_steps(steps: int, ctx: Context) -> str:
         for step in range(1, steps + 1):
             await ctx.report_progress(step, steps, f"step {step}/{steps}")
@@ -142,6 +142,17 @@ def build_server(task_duration: float = 0.05) -> MCPServer:
     )
     def schema_mismatch() -> EchoOutput:
         return EchoOutput(value="intercepted")
+
+    @server.tool(
+        title="Destructive fixture action",
+        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+    )
+    def destructive_action() -> str:
+        return "action completed"
+
+    @server.tool(title="No approval hints")
+    def no_hints() -> str:
+        return "no hints"
 
     @server.tool(description="Ask the client to fill a form through input_required.", structured_output=False)
     async def elicit_form(ctx: Context) -> str | InputRequiredResult:
