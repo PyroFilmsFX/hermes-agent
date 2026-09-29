@@ -20,6 +20,7 @@ from tools import mcp_tool_lifecycle as _lifecycle
 logger = logging.getLogger("tools.mcp_tool")
 MCP_TASK_POLL_INTERVAL_S = 5.0
 _mcp_task_backoff: dict[tuple[str, str], tuple[float, float]] = {}
+_mcp_task_pollers: dict[str, asyncio.Task] = {}
 
 
 class _LockCookie:
@@ -252,13 +253,14 @@ def _ensure_mcp_loop():
     module (tests read and reset ``tools.mcp_tool._mcp_loop``), so they are written there."""
     from tools import mcp_tool as _origin
     with _core._lock:
-        if _origin._mcp_loop is not None and _origin._mcp_loop.is_running():
-            return
-        loop = _origin._mcp_loop = asyncio.new_event_loop()
-        loop.set_exception_handler(_mcp_loop_exception_handler)
-        _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
-        _origin._mcp_thread.start()
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(_poll_mcp_tasks()))
+        if _origin._mcp_loop is None or not _origin._mcp_loop.is_running():
+            loop = _origin._mcp_loop = asyncio.new_event_loop()
+            loop.set_exception_handler(_mcp_loop_exception_handler)
+            _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
+            _origin._mcp_thread.start()
+    # Existing undelivered rows need to resume after a process restart, but the polling task is
+    # profile-scoped and should not exist for profiles with no outstanding tasks.
+    _ensure_mcp_task_poller_if_pending()
 
 
 def _task_poll_interval() -> float:
@@ -275,6 +277,47 @@ def _task_db():
     db = SessionDB()
     db.ensure_peer_mailbox()
     return db
+
+
+def _profile_task_key() -> str:
+    from hermes_constants import hermes_home_key
+    return hermes_home_key()
+
+
+def _has_pending_mcp_tasks() -> bool:
+    db = _task_db()
+    try:
+        return db._read_one("SELECT 1 FROM mcp_pending_tasks WHERE delivered_at IS NULL LIMIT 1") is not None
+    finally:
+        db.close()
+
+
+def _ensure_mcp_task_poller_if_pending() -> None:
+    """Start one poller for the active profile only when its DB has undelivered task rows."""
+    try:
+        if not _has_pending_mcp_tasks():
+            return
+        key = _profile_task_key()
+    except Exception:
+        logger.debug("Unable to check for pending MCP tasks", exc_info=True)
+        return
+
+    def start() -> None:
+        task = _mcp_task_pollers.get(key)
+        if task is None or task.done():
+            _mcp_task_pollers[key] = asyncio.create_task(_poll_mcp_tasks(), name="_poll_mcp_tasks")
+
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is not None:
+        start()
+        return
+    from tools import mcp_tool as _origin
+    loop = _origin._mcp_loop
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(start)
 
 
 def _enqueue_task_wake(db, row: dict, result: Any) -> None:
@@ -343,14 +386,25 @@ async def _poll_mcp_tasks_once() -> None:
 
 
 async def _poll_mcp_tasks() -> None:
-    while True:
-        try:
-            await _poll_mcp_tasks_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("MCP task poller failed", exc_info=True)
-        await asyncio.sleep(_task_poll_interval())
+    key = _profile_task_key()
+    current = asyncio.current_task()
+    try:
+        while True:
+            try:
+                await _poll_mcp_tasks_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("MCP task poller failed", exc_info=True)
+            try:
+                if not _has_pending_mcp_tasks():
+                    return
+            except Exception:
+                logger.debug("Unable to check for pending MCP tasks", exc_info=True)
+            await asyncio.sleep(_task_poll_interval())
+    finally:
+        if current is not None and _mcp_task_pollers.get(key) is current:
+            _mcp_task_pollers.pop(key, None)
 
 
 def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:

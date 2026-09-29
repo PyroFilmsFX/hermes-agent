@@ -314,6 +314,13 @@ async def _drain_mcp_loop_tasks(*, timeout: Optional[float] = None) -> None:
     if timeout is None:
         timeout = _core._MCP_LOOP_DRAIN_TIMEOUT
     current = asyncio.current_task()
+    from tools import mcp_tool_loop as task_loop
+    pollers = [task for task in task_loop._mcp_task_pollers.values() if task is not current and not task.done()]
+    for task in pollers:
+        task.cancel()
+    if pollers:
+        await asyncio.wait(pollers, timeout=timeout)
+    task_loop._mcp_task_pollers.clear()
     pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
     if not pending:
         return

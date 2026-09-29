@@ -48,6 +48,7 @@ def _persist_mcp_task(result, *, server_name: str, session_id: str, tool_call_id
             (server_name, str(task_id), session_id, tool_call_id, time.time())))
     finally:
         db.close()
+    _loop._ensure_mcp_task_poller_if_pending()
     return str(task_id)
 
 _NEEDS_REAUTH_MSG = (
@@ -500,10 +501,16 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         except Exception:
             logger.debug("MCP %s/%s progress callback failed", server_name, tool_name, exc_info=True)
 
-    _call_coro = server.session.call_tool(
-        tool_name, arguments=args, progress_callback=_on_progress,
-        meta={"traceparent": _traceparent(traceparent), "io.modelcontextprotocol/tasks": {}},
-        allow_claimed=True)
+    call_kwargs = {
+        "arguments": args,
+        "progress_callback": _on_progress,
+        "meta": {"traceparent": _traceparent(traceparent)},
+    }
+    capabilities = getattr(getattr(server, "initialize_result", None), "capabilities", None)
+    if capabilities is not None and getattr(capabilities, "tasks", None) is not None:
+        call_kwargs["meta"]["io.modelcontextprotocol/tasks"] = {}
+        call_kwargs["allow_claimed"] = True
+    _call_coro = server.session.call_tool(tool_name, **call_kwargs)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.

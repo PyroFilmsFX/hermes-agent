@@ -31,8 +31,9 @@ def test_mcp_task_persists_resumes_and_enqueues_once(monkeypatch, tmp_path):
     from tools import mcp_tool_loop as loop
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(loop, "_task_poll_interval", lambda: 0.1)
     monkeypatch.setattr("tui_gateway.session_mailbox.schedule_drain", lambda *args: None)
+    # This test drives polling explicitly so background scheduling cannot race the assertions.
+    monkeypatch.setattr(loop, "_ensure_mcp_task_poller_if_pending", lambda: None)
     handle = SimpleNamespace(result_type="task", task_id="task-1")
     assert handlers._persist_mcp_task(handle, server_name="fixture", session_id="session-1",
                                       tool_call_id="call-1") == "task-1"
@@ -44,10 +45,6 @@ def test_mcp_task_persists_resumes_and_enqueues_once(monkeypatch, tmp_path):
     finally:
         db.close()
 
-    async def idle_poller():
-        await loop._poll_mcp_tasks_once()
-
-    monkeypatch.setattr(loop, "_poll_mcp_tasks", idle_poller)
     loop._ensure_mcp_loop()
     with core._lock:
         core._servers["m8-fixture"] = _TaskServer()
@@ -86,3 +83,41 @@ def test_mcp_task_persists_resumes_and_enqueues_once(monkeypatch, tmp_path):
     finally:
         with core._lock:
             core._servers.pop("m8-fixture", None)
+
+
+def test_mcp_task_persists_to_active_profile_db(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    import hermes_state
+    from tools import mcp_tool_handlers as handlers
+    from tools import mcp_tool_loop as loop
+
+    default_home = tmp_path / "default"
+    profile_home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    # Keep the test fixture's redirected DB path from overriding runtime profile resolution.
+    sentinel_db = tmp_path / "sentinel" / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", sentinel_db)
+    monkeypatch.setattr(hermes_state, "_IMPORT_DEFAULT_DB_PATH", sentinel_db)
+    monkeypatch.setattr(loop, "_ensure_mcp_task_poller_if_pending", lambda: None)
+    token = set_hermes_home_override(str(profile_home))
+    try:
+        result = SimpleNamespace(result_type="task", task_id="profile-task")
+        assert handlers._persist_mcp_task(result, server_name="fixture", session_id="profile-session",
+                                          tool_call_id="profile-call") == "profile-task"
+        assert get_hermes_home() == profile_home
+        db = SessionDB()
+        try:
+            assert db.db_path == profile_home / "state.db"
+            row = db._read_one("SELECT session_id, tool_call_id FROM mcp_pending_tasks WHERE task_id = ?",
+                               ("profile-task",))
+            assert tuple(row) == ("profile-session", "profile-call")
+        finally:
+            db.close()
+    finally:
+        reset_hermes_home_override(token)
+    db = SessionDB()
+    try:
+        assert db._read_one("SELECT 1 FROM mcp_pending_tasks WHERE task_id = ?", ("profile-task",)) is None
+    finally:
+        db.close()
