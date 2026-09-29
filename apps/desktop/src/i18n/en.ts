@@ -3407,6 +3407,8 @@ export const en: Translations = {
 
   conductors: {
     title: 'Conductors',
+    boundChip: 'bound',
+    boundTip: 'This session is bound to the project shown; the name comes from the owner-signed binding.',
     paletteLabel: 'Toggle conductors (all builds)',
     viewAll: 'View all conductors',
     gridLabel: 'Conductor builds',

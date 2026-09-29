@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 import { $conductorsNow } from '@/store/conductors'
 
 import type { ConductorOpenEvent } from './conductor-actions'
+import { type RowBinding, UNBOUND_ROW } from './conductor-binding'
 import { ConductorCiCell } from './conductor-ci-cell'
 import { ConductorRowActions } from './conductor-row-actions'
 import { ConductorRowDetail } from './conductor-row-detail'
@@ -172,6 +173,8 @@ export interface ConductorRowProps {
   /** The profile this window is on. A row owned by another profile shows its
    *  profile tag and opens under that profile (the open handler decides how). */
   activeProfile: string
+  /** b10 session binding for this row (renderer-side; the backend never reports it). */
+  binding?: RowBinding
   /** Detail open (§8 expanded row). Owned by the pane so only the toggled row
    *  re-renders. */
   expanded?: boolean
@@ -190,6 +193,7 @@ export interface ConductorRowProps {
 
 function ConductorRowImpl({
   abandoned,
+  binding = UNBOUND_ROW,
   activeProfile,
   expanded = false,
   onCopy,
@@ -374,7 +378,17 @@ function ConductorRowImpl({
               </button>
             )}
             <LivenessDot state={state} />
-            <span className="truncate text-(--ui-text-primary)">{project.name || c.none}</span>
+            <span className="truncate text-(--ui-text-primary)">{binding.bound ? binding.label : project.name || c.none}</span>
+            {binding.bound && (
+              <Tip label={c.boundTip}>
+                <span
+                  className="shrink-0 rounded border border-(--ui-stroke-tertiary) px-1 text-[0.6rem] text-(--ui-text-tertiary)"
+                  data-slot="conductor-bound-chip"
+                >
+                  {c.boundChip}
+                </span>
+              </Tip>
+            )}
           </Line>
           {project.branch && (
             <span
@@ -577,7 +591,7 @@ function ConductorRowImpl({
       {expanded && (
         <div className="border-b border-(--ui-stroke-tertiary)" data-row-detail={row.key} role="row">
           <div aria-colspan={10} role="gridcell">
-            <ConductorRowDetail row={row} />
+            <ConductorRowDetail bound={binding.bound} row={row} />
           </div>
         </div>
       )}

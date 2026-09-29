@@ -13,6 +13,8 @@ import { formatAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { $conductors, $conductorsNow, acquireConductorsPoller, refreshConductors } from '@/store/conductors'
 import { $activeProfile } from '@/store/profile'
+import { $projects } from '@/store/projects'
+import { $sessionBindings, ensureSessionBinding, sessionBindingKey } from '@/store/session-binding'
 
 import {
   type ConductorOpenEvent,
@@ -24,6 +26,7 @@ import {
   sendToConductorTarget
 } from './conductor-actions'
 import { GhLimitPill, useConductorGhReads } from './conductor-ci'
+import { rowBinding } from './conductor-binding'
 import { ConductorRow } from './conductor-row'
 import {
   type ConductorColumn,
@@ -216,6 +219,35 @@ function ConductorsPaneView({
   const shownRows = useMemo(() => liveRows.filter(row => matchesFilter(row, filter)), [liveRows, filter])
   const needsYou = useMemo(() => liveRows.filter(needsOwner).length, [liveRows])
 
+  // R8: b10 session bindings name each shown row's project. Cache-first reads, no timer,
+  // and only while the pane is visible.
+  const bindings = useStore($sessionBindings)
+  const projects = useStore($projects)
+
+  const bindingAsks = useMemo(() => {
+    const asks = new Map<string, [null | string, string]>()
+
+    for (const row of showAbandoned ? [...shownRows, ...abandonedRows] : shownRows) {
+      const sessionId = row.orchestrator.hermes_session_id
+
+      if (sessionId) {
+        asks.set(sessionBindingKey(row.orchestrator.profile, sessionId), [row.orchestrator.profile, sessionId])
+      }
+    }
+
+    return [...asks.values()]
+  }, [shownRows, abandonedRows, showAbandoned])
+
+  useEffect(() => {
+    if (!visible) {
+      return
+    }
+
+    for (const [profile, sessionId] of bindingAsks) {
+      ensureSessionBinding(profile, sessionId)
+    }
+  }, [bindingAsks, state.fetchedAt, visible])
+
   // R6 open intents (§8): plain = stack, ⌘ = tab, ⇧⌘ = window; a row owned by
   // another profile opens under that profile.
   const openRow = useCallback<OpenRow>(
@@ -324,6 +356,7 @@ function ConductorsPaneView({
     <ConductorRow
       abandoned={abandoned}
       activeProfile={activeProfile}
+      binding={rowBinding(row, bindings, projects)}
       expanded={expandedKeys.has(row.key)}
       key={row.key}
       onCopy={copyConductorText}

@@ -41,7 +41,7 @@ const join = (parts: (false | null | string | undefined)[]) => parts.filter(Bool
  * project, and how the row was attributed to its session. Static text only:
  * no timers, no requests.
  */
-export function ConductorRowDetail({ row }: { row: ConductorRowData }) {
+export function ConductorRowDetail({ bound = false, row }: { bound?: boolean; row: ConductorRowData }) {
   const { t } = useI18n()
   const c = t.conductors
   const { build, orchestrator, record } = row
@@ -156,7 +156,7 @@ export function ConductorRowDetail({ row }: { row: ConductorRowData }) {
         <Section id="attribution" title={c.detail.attribution}>
           <span>
             {join([
-              c.attribution[orchestrator.attribution],
+              bound ? c.attribution.bound : c.attribution[orchestrator.attribution],
               orchestrator.profile && orchestrator.profile !== 'default' ? orchestrator.profile : null,
               c.ownerLive[orchestrator.live]
             ])}

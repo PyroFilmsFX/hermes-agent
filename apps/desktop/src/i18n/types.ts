@@ -2855,6 +2855,8 @@ export interface Translations {
 
   conductors: {
     title: string
+    boundChip: string
+    boundTip: string
     paletteLabel: string
     viewAll: string
     gridLabel: string
