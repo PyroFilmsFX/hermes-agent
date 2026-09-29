@@ -19,6 +19,11 @@ export const ABANDONED_AFTER_SECONDS = (7 * DAY) / 1000
  *  never dropped. Measured against `generated_at`, not the ticking clock, so a
  *  row can't jump groups between two polls of identical data. */
 export function isAbandonedRow(row: ConductorRow, generatedAtSec: number): boolean {
+  // The backend owns the rule; the local check is only for older backends.
+  if (typeof row.abandoned === 'boolean') {
+    return row.abandoned
+  }
+
   const { build, orchestrator } = row
 
   if (orchestrator.live !== 'none') {

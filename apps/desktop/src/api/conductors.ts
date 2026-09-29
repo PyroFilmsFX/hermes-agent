@@ -180,6 +180,8 @@ export interface ConductorRow {
   record: ConductorRecord
   field_sources: Record<string, string>
   other_builds: ConductorOtherBuild[]
+  /** Server-flagged §4 abandoned row (kept in the payload, never dropped). */
+  abandoned?: boolean
 }
 
 export type ConductorMarkerIndexStatus = 'ok' | 'missing' | 'unreadable' | 'truncated'
@@ -583,7 +585,8 @@ export function parseConductorsResponse(raw: unknown): ConductorsResponse {
       build,
       record,
       field_sources,
-      other_builds
+      other_builds,
+      ...(typeof rowObj.abandoned === 'boolean' ? { abandoned: rowObj.abandoned } : {})
     })
   }
 

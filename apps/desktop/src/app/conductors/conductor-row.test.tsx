@@ -163,3 +163,13 @@ describe('model rules', () => {
     expect(second.rows[1]).not.toBe(first.rows[1])
   })
 })
+
+describe('server abandoned flag', () => {
+  it('wins over the local 7-day rule in both directions', async () => {
+    const { isAbandonedRow } = await import('./conductors-model')
+    const { makeConductorRow } = await import('./conductors-fixtures')
+    const fresh = makeConductorRow('r1')
+    expect(isAbandonedRow({ ...fresh, abandoned: true }, Date.now() / 1000)).toBe(true)
+    expect(isAbandonedRow({ ...fresh, abandoned: false }, Date.now() / 1000 + 30 * 86400)).toBe(false)
+  })
+})
