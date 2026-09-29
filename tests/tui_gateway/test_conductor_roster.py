@@ -271,20 +271,45 @@ def test_inode_change_triggers_full_reread(env):
     scan1 = read_marker_index(index_file)
     assert len(scan1.entries) == 1
     assert scan1.entries[0]["marker_path"] == m1
+    scan1_mtime_ns = os.stat(index_file).st_mtime_ns
 
     # Replace file with new inode
     index_file.unlink()
     row2 = json.dumps(_open_row(m2, run_id="r2")) + "\n"
     index_file.write_text(row2, encoding="utf-8")
-    # Linux may hand the new file the freed inode, the row is the same length, and a coarse
-    # mtime clock can repeat within one tick. A real rewrite lands on a later tick; model that.
-    st = index_file.stat()
-    os.utime(index_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    # Linux may hand the new file the freed inode and this row is the same length; pin the
+    # worst case (same dev/ino, size and mtime) so only the content can tell them apart.
+    old_st = os.stat(index_file)
+    os.utime(index_file, ns=(old_st.st_atime_ns, scan1_mtime_ns))
 
     scan2 = read_marker_index(index_file)
     assert len(scan2.entries) == 1
     assert scan2.entries[0]["marker_path"] == m2
     assert scan2.bytes_read == len(row2.encode("utf-8"))
+
+
+def test_in_place_same_length_rewrite_is_not_served_from_cache(env):
+    # Same inode, same size, same mtime: only the content changed. The cached scan must not
+    # be served, and the incremental path must not read "nothing appended".
+    home, _temp, index_file = env
+    m1 = _valid_marker(home, "p1")
+    m2 = _valid_marker(home, "p2")
+    row1 = json.dumps(_open_row(m1, run_id="r1")) + "\n"
+    row2 = json.dumps(_open_row(m2, run_id="r2")) + "\n"
+    assert len(row1) == len(row2)
+
+    index_file.write_text(row1, encoding="utf-8")
+    assert read_marker_index(index_file).entries[0]["marker_path"] == m1
+    before = os.stat(index_file)
+
+    with open(index_file, "r+", encoding="utf-8") as fh:
+        fh.write(row2)
+    os.utime(index_file, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = os.stat(index_file)
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)
+
+    scan = read_marker_index(index_file)
+    assert [e["marker_path"] for e in scan.entries] == [m2]
 
 
 def test_partial_trailing_line_ignored_then_picked_up(env):

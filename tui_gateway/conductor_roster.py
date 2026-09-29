@@ -78,7 +78,25 @@ class _FileCacheState:
     skipped: int
     folded: dict[str, _FoldedEntry]
     last_scan: IndexScan
+    # Fingerprint of the consumed region's two ends (first bytes of the file and the bytes just
+    # before last_offset). A rewrite that reuses the freed inode keeps dev/ino, and can keep size
+    # and mtime on a coarse clock; a changed fingerprint proves the file was replaced, so the
+    # cached offset and rows can't be trusted.
+    fingerprint: bytes = b""
 
+
+_FINGERPRINT_SPAN = 4096
+
+
+def _index_fingerprint(fd: int, end: int) -> bytes:
+    """sha256 over the first and the last ``_FINGERPRINT_SPAN`` bytes of ``[0, end)``."""
+    if end <= 0:
+        return b""
+    digest = hashlib.sha256()
+    digest.update(os.pread(fd, min(end, _FINGERPRINT_SPAN), 0))
+    tail_start = max(0, end - _FINGERPRINT_SPAN)
+    digest.update(os.pread(fd, end - tail_start, tail_start))
+    return digest.digest()
 
 _CACHE: dict[tuple[str, str], _FileCacheState] = {}
 _STATUS_HIGH_WATER: dict[tuple[str, str], tuple[int, StatusRead]] = {}
@@ -205,6 +223,16 @@ def read_marker_index(
 
         cache_key = (os.path.realpath(str(target_path)), os.path.realpath(str(effective_home)))
         cached = _CACHE.get(cache_key)
+        # Same inode but the consumed bytes changed: the file was replaced, not appended to.
+        if (
+            cached is not None
+            and cached.last_offset
+            and (
+                fst.st_size < cached.last_offset
+                or _index_fingerprint(fd, cached.last_offset) != cached.fingerprint
+            )
+        ):
+            cached = None
 
         # Unchanged file: 0 bytes read, reuse last scan
         if (
@@ -261,6 +289,7 @@ def read_marker_index(
                 folded={},
                 last_scan=scan,
             )
+            _CACHE[cache_key].fingerprint = _index_fingerprint(fd, _CACHE[cache_key].last_offset)
             return scan
 
         if seek_offset > 0:
@@ -294,6 +323,7 @@ def read_marker_index(
                     folded={},
                     last_scan=scan,
                 )
+                _CACHE[cache_key].fingerprint = _index_fingerprint(fd, _CACHE[cache_key].last_offset)
                 return scan
             data = data[first_nl + 1:]
             base_offset = seek_offset + first_nl + 1
@@ -322,6 +352,7 @@ def read_marker_index(
                 folded=folded,
                 last_scan=scan,
             )
+            _CACHE[cache_key].fingerprint = _index_fingerprint(fd, _CACHE[cache_key].last_offset)
             return scan
 
         complete_data = data[:last_nl]
@@ -384,6 +415,7 @@ def read_marker_index(
             folded=folded,
             last_scan=scan,
         )
+        _CACHE[cache_key].fingerprint = _index_fingerprint(fd, _CACHE[cache_key].last_offset)
         return scan
     finally:
         os.close(fd)
