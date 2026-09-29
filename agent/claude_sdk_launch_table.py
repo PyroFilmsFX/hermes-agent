@@ -3,11 +3,46 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Optional
 
 _condition = threading.Condition()
 _launches: dict[str, dict] = {}
 _seq: int = 0
+_last_consumer_seen: float = 0.0
+
+
+def record_consumer_seen(ts: Optional[float] = None) -> float:
+    """Record when a launch consumer polled the launch table."""
+    global _last_consumer_seen
+    val = time.monotonic() if ts is None else float(ts)
+    with _condition:
+        _last_consumer_seen = val
+    return val
+
+
+def get_last_consumer_seen() -> float:
+    """Return monotonic timestamp of the last consumer poll, or 0.0."""
+    with _condition:
+        return _last_consumer_seen
+
+
+def set_last_consumer_seen(ts: Optional[float] = None) -> float:
+    """Setter alias for record_consumer_seen."""
+    return record_consumer_seen(ts)
+
+
+def last_consumer_seen() -> float:
+    """Getter alias for get_last_consumer_seen."""
+    return get_last_consumer_seen()
+
+
+def has_recent_consumer(within_seconds: float = 60.0) -> bool:
+    """Return True if a consumer polled within the given window."""
+    with _condition:
+        if _last_consumer_seen <= 0.0:
+            return False
+        return (time.monotonic() - _last_consumer_seen) <= float(within_seconds)
 
 
 def record_launch(
@@ -16,11 +51,13 @@ def record_launch(
     claude_session_id: str,
     profile: str = "default",
     lineage: Optional[list[str]] = None,
+    recorded_at: Optional[float] = None,
 ) -> dict:
     """Record a planned CLI launch in the in-memory launch table."""
     global _seq
     cid = str(claude_session_id or "")
     capped = [str(x) for x in (lineage or []) if x][-16:]
+    rec_at = time.time() if recorded_at is None else float(recorded_at)
     with _condition:
         _seq += 1
         entry = {
@@ -30,6 +67,7 @@ def record_launch(
             "profile": str(profile or "default"),
             "lineage": capped,
             "hermes_lineage": capped,
+            "recorded_at": rec_at,
         }
         if cid:
             _launches[cid] = entry
@@ -42,6 +80,7 @@ def update_lineage(
     *,
     hermes_session_id: str,
     lineage: Optional[list[str]] = None,
+    recorded_at: Optional[float] = None,
 ) -> Optional[dict]:
     """Update an active launch's hermes_session_id and lineage across /compress."""
     global _seq
@@ -56,6 +95,8 @@ def update_lineage(
         entry["hermes_session_id"] = str(hermes_session_id or "")
         entry["lineage"] = capped
         entry["hermes_lineage"] = capped
+        if recorded_at is not None:
+            entry["recorded_at"] = float(recorded_at)
         _condition.notify_all()
         return dict(entry)
 
@@ -100,8 +141,9 @@ def wait_for_change(since_seq: int = 0, timeout: Optional[float] = None) -> int:
 
 def _reset_table_for_tests() -> None:
     """Test seam: clear all entries and reset the monotonic seq counter."""
-    global _seq
+    global _seq, _last_consumer_seen
     with _condition:
         _launches.clear()
         _seq = 0
+        _last_consumer_seen = 0.0
         _condition.notify_all()

@@ -507,6 +507,55 @@ async def get_session_stats(profile: Optional[str] = None):
     return await asyncio.to_thread(_with_db, profile, _stats, read_only=True)
 
 
+@manage_router.get("/api/session-launches")
+async def get_session_launches(
+    request: Request,
+    since: int = 0,
+    wait: float = 0.0,
+):
+    """Feed of planned Claude CLI session launches with long-poll wait (#49 / b10 H3)."""
+    import hermes_cli.web_deps as web_deps
+
+    if not web_deps.has_valid_session_token(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        since_val = max(0, int(since))
+    except (ValueError, TypeError):
+        since_val = 0
+
+    try:
+        wait_val = float(wait)
+        if wait_val != wait_val or wait_val < 0.0:
+            wait_val = 0.0
+        elif wait_val > 2.0:
+            wait_val = 2.0
+    except (ValueError, TypeError):
+        wait_val = 0.0
+
+    from agent import claude_sdk_launch_table
+
+    claude_sdk_launch_table.record_consumer_seen()
+
+    cur_seq, entries = claude_sdk_launch_table.snapshot(since_val)
+    if not entries and wait_val > 0.0:
+        await asyncio.to_thread(claude_sdk_launch_table.wait_for_change, since_val, wait_val)
+        cur_seq, entries = claude_sdk_launch_table.snapshot(since_val)
+
+    launches = [
+        {
+            "hermes_session_id": str(e.get("hermes_session_id") or ""),
+            "claude_session_id": str(e.get("claude_session_id") or ""),
+            "profile": str(e.get("profile") or "default"),
+            "launch_seq": int(e.get("launch_seq") or 0),
+            "hermes_lineage": list(e.get("hermes_lineage") or []),
+            "recorded_at": e.get("recorded_at"),
+        }
+        for e in entries
+    ]
+    return {"seq": cur_seq, "launches": launches}
+
+
 @manage_router.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None, message_id: Optional[str] = None):
     def _detail(db):

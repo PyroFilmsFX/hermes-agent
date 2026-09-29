@@ -9,6 +9,9 @@ import pytest
 
 from agent.claude_sdk_launch_table import (
     _reset_table_for_tests,
+    get_last_consumer_seen,
+    has_recent_consumer,
+    record_consumer_seen,
     record_launch,
     retire,
     snapshot,
@@ -282,3 +285,137 @@ class TestSessionLifecycleLaunchTable:
         # Retired after close
         _, snap_closed = snapshot(0)
         assert not any(e["claude_session_id"] == planned_id for e in snap_closed)
+
+
+class TestAttestationBarrier:
+    def test_consumer_seen_setter_and_getter(self):
+        assert get_last_consumer_seen() == 0.0
+        assert not has_recent_consumer(60.0)
+
+        record_consumer_seen(100.0)
+        assert get_last_consumer_seen() == 100.0
+
+        # Reset clears it
+        _reset_table_for_tests()
+        assert get_last_consumer_seen() == 0.0
+
+    def _setup_clock(self, monkeypatch):
+        cur_time = [1000.0]
+        sleep_calls = []
+        caller_tid = threading.get_ident()
+        orig_monotonic = time.monotonic
+        orig_sleep = time.sleep
+
+        def fake_monotonic():
+            if threading.get_ident() == caller_tid:
+                return cur_time[0]
+            return orig_monotonic()
+
+        def fake_sleep(secs):
+            if threading.get_ident() == caller_tid:
+                sleep_calls.append(secs)
+                cur_time[0] += secs
+            else:
+                orig_sleep(secs)
+
+        monkeypatch.setattr(time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(time, "sleep", fake_sleep)
+        return cur_time, sleep_calls
+
+    def test_barrier_no_consumer_no_wait(self, monkeypatch):
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-no-consumer",
+        )
+        try:
+            start = cur_time[0]
+            session.ensure_started()
+            elapsed = cur_time[0] - start
+            assert elapsed < 0.1
+            assert len(sleep_calls) == 0
+        finally:
+            session.close()
+
+    def test_barrier_consumer_and_attest_dir_appears_proceeds_early(self, monkeypatch, tmp_path):
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        record_consumer_seen(cur_time[0])
+        grants_dir = tmp_path / "grants"
+        grants_dir.mkdir()
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-attest-present",
+        )
+        planned_sid = session.planned_cli_session_id()
+        attest_dir = grants_dir / "session-attest" / planned_sid
+        attest_dir.mkdir(parents=True)
+        (attest_dir / "1759140000000-test.json").write_text('{"v":1}')
+
+        import hermes_owner_grant.anchor as anchor_mod
+
+        monkeypatch.setattr(
+            anchor_mod,
+            "load_trusted_anchor",
+            lambda *a, **k: types.SimpleNamespace(grants_dir=str(grants_dir)),
+        )
+
+        try:
+            start = cur_time[0]
+            session.ensure_started()
+            elapsed = cur_time[0] - start
+            assert elapsed < 0.1
+            assert len(sleep_calls) == 0
+        finally:
+            session.close()
+
+    def test_barrier_consumer_and_never_appears_proceeds_after_barrier(self, monkeypatch, tmp_path):
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        record_consumer_seen(cur_time[0])
+        grants_dir = tmp_path / "grants"
+        grants_dir.mkdir()
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-attest-never",
+        )
+
+        import hermes_owner_grant.anchor as anchor_mod
+
+        monkeypatch.setattr(
+            anchor_mod,
+            "load_trusted_anchor",
+            lambda *a, **k: types.SimpleNamespace(grants_dir=str(grants_dir)),
+        )
+
+        try:
+            start = cur_time[0]
+            session.ensure_started()
+            elapsed = cur_time[0] - start
+            assert 1.45 <= elapsed <= 1.55
+            assert len(sleep_calls) >= 25
+        finally:
+            session.close()
+
+    def test_barrier_anchor_load_failure_no_wait(self, monkeypatch):
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        record_consumer_seen(cur_time[0])
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-anchor-fail",
+        )
+
+        import hermes_owner_grant.anchor as anchor_mod
+
+        def _raise(*a, **k):
+            raise RuntimeError("anchor load failure")
+
+        monkeypatch.setattr(anchor_mod, "load_trusted_anchor", _raise)
+
+        try:
+            start = cur_time[0]
+            session.ensure_started()
+            elapsed = cur_time[0] - start
+            assert elapsed < 0.1
+            assert len(sleep_calls) == 0
+        finally:
+            session.close()
+

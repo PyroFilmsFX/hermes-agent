@@ -590,6 +590,48 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
     def generation(self) -> str:
         return getattr(self, "_instance_generation", "")
 
+    def _wait_for_attestation_barrier(self) -> None:
+        """Poll up to 1.5 s for signed attestation before spawning the CLI (#49 / b10 H3)."""
+        try:
+            from agent.claude_sdk_launch_table import has_recent_consumer
+
+            if not has_recent_consumer(60.0):
+                return
+        except Exception:
+            return
+
+        try:
+            from hermes_owner_grant.anchor import load_trusted_anchor
+
+            anchor = load_trusted_anchor()
+            grants_dir = getattr(anchor, "grants_dir", None)
+            if not grants_dir:
+                return
+        except Exception:
+            return
+
+        try:
+            planned_sid = self.planned_cli_session_id()
+            if not planned_sid:
+                return
+            attest_dir = os.path.join(str(grants_dir), "session-attest", str(planned_sid))
+            deadline = time.monotonic() + 1.5
+            while True:
+                if self._startup_is_retired():
+                    break
+                try:
+                    if os.path.isdir(attest_dir) and len(os.listdir(attest_dir)) > 0:
+                        break
+                except Exception:
+                    pass
+                now = time.monotonic()
+                if now >= deadline:
+                    break
+                step = min(0.05, max(0.0, deadline - now))
+                time.sleep(step)
+        except Exception:
+            pass
+
     def ensure_started(self) -> Optional[str]:
         """Start the loop thread, build the SDK client, connect. Idempotent —
         returns the session marker (SDK session ids arrive on first result)."""
@@ -717,6 +759,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 if refused:
                     raise SdkShuttingDownError()
                 return None
+            self._wait_for_attestation_barrier()
             self._run_coro(startup_client.connect(), timeout=60.0)
             self._record_peer_cli(startup_client)
             with self._turn_callback_lock:
