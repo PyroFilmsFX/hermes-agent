@@ -16,14 +16,17 @@ const oldUser = msg('local-user', 'user', 'compare these', {
   attachmentRefs: ['@image:/tmp/one.png', '@image:/tmp/two.png'],
   timestamp: 1_000
 })
+
 const oldError = msg('local-err', 'assistant', '', { error: 'Claude CLI exited mid-turn', timestamp: 1_001 })
 const failedTurn = msg('h-12', 'system', 'This turn failed.', { failedTurn: true, rowId: 12, timestamp: 1_002 })
+
 const newer = [
   msg('h-20', 'user', 'next question', { rowId: 20, timestamp: 2_000 }),
   msg('h-21', 'assistant', 'next answer', { rowId: 21, timestamp: 2_001 }),
   msg('h-30', 'user', 'latest question', { rowId: 30, timestamp: 3_000 }),
   msg('h-31', 'assistant', 'latest answer', { rowId: 31, timestamp: 3_001 })
 ]
+
 const peerWake = msg('h-40', 'system', 'woken by peer message: rex', { rowId: 40, timestamp: 4_000 })
 
 describe('#46 stale local error run', () => {

@@ -28,7 +28,7 @@
  */
 
 import { createHash, randomBytes as nodeRandomBytes } from 'node:crypto'
-import nodeFs from 'node:fs'
+import type nodeFs from 'node:fs'
 
 import type { OwnerGrantEnvelope, OwnerKeyStore } from './owner-grant-key'
 import {
@@ -337,10 +337,12 @@ export function createOwnerGrantContinuityIssuer(ports: ContinuityIssuerPorts): 
       generation.set(backendProfile, gen)
       current.set(backendProfile, backend)
       const now = ports.now()
+
       // Freeze the previous backend's recent observations; the new backend starts a fresh table.
       const before = [...(observed.get(backendProfile)?.values() ?? [])].filter(
         o => o.backend !== backend && now - o.at <= CONTINUITY_OBSERVATION_MAX_AGE_MS
       )
+
       observed.delete(backendProfile)
       const outcomes = await Promise.all(before.map(o => watchOne(backendProfile, o, backend, gen)))
 

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import path from 'node:path'
+
 import { ipcMain as electronIpcMain, type WebContents } from 'electron'
 
 export interface RawProcessInfo {
@@ -44,18 +45,21 @@ export interface ProcessTreeIpcDeps {
 }
 
 export function parseTimeSeconds(timeStr: string): number {
-  if (!timeStr) return 0
+  if (!timeStr) {return 0}
   let str = timeStr.trim()
   let days = 0
   const dashIndex = str.indexOf('-')
+
   if (dashIndex !== -1) {
     days = parseInt(str.slice(0, dashIndex), 10) || 0
     str = str.slice(dashIndex + 1)
   }
+
   const parts = str.split(':')
   let hours = 0
   let minutes = 0
   let seconds = 0
+
   if (parts.length === 3) {
     hours = parseInt(parts[0], 10) || 0
     minutes = parseInt(parts[1], 10) || 0
@@ -66,16 +70,19 @@ export function parseTimeSeconds(timeStr: string): number {
   } else if (parts.length === 1) {
     seconds = parseFloat(parts[0]) || 0
   }
+
   return days * 86400 + hours * 3600 + minutes * 60 + seconds
 }
 
 export function parsePsLine(line: string): RawProcessInfo | null {
   const trimmed = line.trim()
-  if (!trimmed) return null
+
+  if (!trimmed) {return null}
 
   // Match: pid, ppid, etime, time, and optional remainder
   const match = trimmed.match(/^(\d+)\s+(\d+)\s+([^\s]+)\s+([^\s]+)(?:\s+(.*))?$/)
-  if (!match) return null
+
+  if (!match) {return null}
 
   const pid = parseInt(match[1], 10)
   const ppid = parseInt(match[2], 10)
@@ -85,8 +92,10 @@ export function parsePsLine(line: string): RawProcessInfo | null {
 
   let comm = ''
   let args = ''
+
   if (remainder) {
     const spaceIdx = remainder.search(/\s/)
+
     if (spaceIdx === -1) {
       comm = remainder
       args = remainder
@@ -111,15 +120,18 @@ export function parsePsLine(line: string): RawProcessInfo | null {
 }
 
 export function parsePsOutput(raw: string): RawProcessInfo[] {
-  if (!raw) return []
+  if (!raw) {return []}
   const lines = raw.split(/\r?\n/)
   const result: RawProcessInfo[] = []
+
   for (const line of lines) {
     const parsed = parsePsLine(line)
+
     if (parsed) {
       result.push(parsed)
     }
   }
+
   return result
 }
 
@@ -131,31 +143,36 @@ export function matchOwningSessionOrLane(
   const haystack = `${cwd ?? ''} ${args}`
 
   // 1. Match /tmp/lane-* or /private/tmp/lane-*
-  const tmpLaneMatch = haystack.match(/(?:\/private)?\/tmp\/(lane-[a-zA-Z0-9_\-]+)/)
+  const tmpLaneMatch = haystack.match(/(?:\/private)?\/tmp\/(lane-[a-zA-Z0-9_-]+)/)
+
   if (tmpLaneMatch) {
     return `/tmp/${tmpLaneMatch[1]}`
   }
 
   // 2. Match .claude/worktrees/lane-*
-  const claudeLaneMatch = haystack.match(/(?:\.claude\/worktrees\/)(lane-[a-zA-Z0-9_\-]+)/)
+  const claudeLaneMatch = haystack.match(/(?:\.claude\/worktrees\/)(lane-[a-zA-Z0-9_-]+)/)
+
   if (claudeLaneMatch) {
     return `.claude/worktrees/${claudeLaneMatch[1]}`
   }
 
   // 3. Match generic lane-*
-  const genericLaneMatch = haystack.match(/(?:^|\s|\/)(lane-[a-zA-Z0-9_\-]+)/)
+  const genericLaneMatch = haystack.match(/(?:^|\s|\/)(lane-[a-zA-Z0-9_-]+)/)
+
   if (genericLaneMatch) {
     return genericLaneMatch[1]
   }
 
   // 4. Match --profile <name> or -p <name>
-  const profileMatch = haystack.match(/(?:--profile[= ]| -p )([a-zA-Z0-9_\-]+)/)
+  const profileMatch = haystack.match(/(?:--profile[= ]| -p )([a-zA-Z0-9_-]+)/)
+
   if (profileMatch) {
     return `profile:${profileMatch[1]}`
   }
 
   // 5. Match --session <id> or -s <id>
-  const sessionMatch = haystack.match(/(?:--session(?:-id)?[= ]| -s )([a-zA-Z0-9_\-]+)/)
+  const sessionMatch = haystack.match(/(?:--session(?:-id)?[= ]| -s )([a-zA-Z0-9_-]+)/)
+
   if (sessionMatch) {
     return `session:${sessionMatch[1]}`
   }
@@ -182,6 +199,7 @@ export function buildProcessTree(
   for (const proc of allProcesses) {
     procByPid.set(proc.pid, proc)
     const list = parentToChildren.get(proc.ppid)
+
     if (list) {
       list.push(proc.pid)
     } else {
@@ -203,10 +221,13 @@ export function buildProcessTree(
   while (queue.length > 0) {
     const { pid, depth } = queue.shift()!
     const proc = procByPid.get(pid)
+
     if (proc) {
       result.push({ ...proc, depth })
     }
+
     const children = parentToChildren.get(pid) ?? []
+
     for (const childPid of children) {
       if (!visited.has(childPid)) {
         visited.add(childPid)
@@ -244,6 +265,7 @@ export class ProcessTreeTracker {
       for (const p of tree) {
         this.knownPids.add(p.pid)
       }
+
       this.initialized = true
     } else {
       for (const p of tree) {
@@ -259,9 +281,11 @@ export class ProcessTreeTracker {
     this.spawnEvents = this.spawnEvents.filter(ev => ev.timestamp >= window60sStart)
 
     const counts = new Map<string, number>()
+
     for (const ev of this.spawnEvents) {
       counts.set(ev.basename, (counts.get(ev.basename) ?? 0) + 1)
     }
+
     const spawnsPerMinute: SpawnRateEntry[] = [...counts.entries()]
       .map(([basename, count]) => ({ basename, count }))
       .sort((a, b) => b.count - a.count || a.basename.localeCompare(b.basename))
@@ -272,6 +296,7 @@ export class ProcessTreeTracker {
     for (const p of tree) {
       const currentCpu = parseTimeSeconds(p.time)
       let history = this.cpuHistory.get(p.pid)
+
       if (!history) {
         history = []
         this.cpuHistory.set(p.pid, history)
@@ -280,11 +305,13 @@ export class ProcessTreeTracker {
       history.push({ timestamp: now, cpuTime: currentCpu })
 
       const pruneThreshold = now - 20000
+
       while (history.length > 1 && history[0].timestamp < pruneThreshold) {
         history.shift()
       }
 
       let baseline = history[0]
+
       for (const entry of history) {
         if (entry.timestamp <= window10sStart) {
           baseline = entry
@@ -329,6 +356,7 @@ export function defaultExecPs(): Promise<string> {
   if (process.platform === 'win32') {
     return Promise.resolve('')
   }
+
   return new Promise(resolve => {
     execFile(
       'ps',
@@ -337,8 +365,10 @@ export function defaultExecPs(): Promise<string> {
       (err, stdout) => {
         if (err) {
           resolve('')
+
           return
         }
+
         resolve(stdout)
       }
     )
@@ -362,14 +392,17 @@ export function registerProcessTreeIpc({
         clearInterval(intervalTimer)
         intervalTimer = null
       }
+
       return
     }
+
     try {
       const rootPids = getRootPids()
       const raw = await execPs()
       const rawProcs = parsePsOutput(raw)
       const knownCwds = getKnownCwds ? getKnownCwds() : undefined
       const snapshot = tracker.update(rawProcs, rootPids, Date.now(), knownCwds)
+
       for (const wc of subscribers) {
         if (!wc.isDestroyed()) {
           wc.send('hermes:process-tree:update', snapshot)
@@ -382,10 +415,12 @@ export function registerProcessTreeIpc({
 
   ipc.on('hermes:process-tree:subscribe', event => {
     const wc = event.sender
+
     if (!subscribers.has(wc)) {
       subscribers.add(wc)
       wc.once('destroyed', () => {
         subscribers.delete(wc)
+
         if (subscribers.size === 0 && intervalTimer) {
           clearInterval(intervalTimer)
           intervalTimer = null
@@ -393,6 +428,7 @@ export function registerProcessTreeIpc({
         }
       })
     }
+
     if (!intervalTimer) {
       void tick()
       intervalTimer = setInterval(() => void tick(), sampleIntervalMs)
@@ -402,6 +438,7 @@ export function registerProcessTreeIpc({
   ipc.on('hermes:process-tree:unsubscribe', event => {
     const wc = event.sender
     subscribers.delete(wc)
+
     if (subscribers.size === 0 && intervalTimer) {
       clearInterval(intervalTimer)
       intervalTimer = null
@@ -414,6 +451,7 @@ export function registerProcessTreeIpc({
     const raw = await execPs()
     const rawProcs = parsePsOutput(raw)
     const knownCwds = getKnownCwds ? getKnownCwds() : undefined
+
     return tracker.update(rawProcs, rootPids, Date.now(), knownCwds)
   })
 
@@ -423,6 +461,7 @@ export function registerProcessTreeIpc({
         clearInterval(intervalTimer)
         intervalTimer = null
       }
+
       subscribers.clear()
       tracker.reset()
     }

@@ -93,10 +93,10 @@ import {
   $projectOwnerBySessionId,
   $projects,
   $projectScope,
+  $projectsRpcAvailable,
   $projectTree,
   $projectTreeLoaded,
   $projectTreeLoading,
-  $projectsRpcAvailable,
   $reposScanning,
   ALL_PROJECTS,
   enterProject,
@@ -892,6 +892,7 @@ export function ChatSidebar({
 
     if (projectsRpcAvailable === false) {
       setProjectTreeLoadError(false)
+
       return
     }
 
@@ -931,7 +932,8 @@ export function ChatSidebar({
 
         return () => {
           cancelled = true
-          if (retryTimer !== null) window.clearTimeout(retryTimer)
+
+          if (retryTimer !== null) {window.clearTimeout(retryTimer)}
         }
       }
 
@@ -943,7 +945,8 @@ export function ChatSidebar({
 
       return () => {
         cancelled = true
-        if (retryTimer !== null) window.clearTimeout(retryTimer)
+
+        if (retryTimer !== null) {window.clearTimeout(retryTimer)}
       }
     }
 
@@ -956,7 +959,8 @@ export function ChatSidebar({
     return () => {
       cancelled = true
       window.clearTimeout(warm)
-      if (retryTimer !== null) window.clearTimeout(retryTimer)
+
+      if (retryTimer !== null) {window.clearTimeout(retryTimer)}
     }
   }, [
     activeConnectionId,

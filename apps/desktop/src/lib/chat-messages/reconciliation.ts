@@ -160,11 +160,13 @@ function reconcileLocalAssistantTimeline(nextMessages: ChatMessage[], currentMes
 
       unusedLocalParts.delete(localIndex)
       const localPart = local.parts[localIndex]
+
       const carryLiveToolResult =
         part.type === 'tool-call' &&
         localPart.type === 'tool-call' &&
         !Object.hasOwn(part, 'result') &&
         Object.hasOwn(localPart, 'result')
+
       const liveResultMetadata =
         carryLiveToolResult && localPart.type === 'tool-call'
           ? { ...localPart.toolResultMetadata, ...part.toolResultMetadata }

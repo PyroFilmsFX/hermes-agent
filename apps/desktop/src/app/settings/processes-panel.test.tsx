@@ -1,6 +1,8 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { DesktopProcessTreeSnapshot } from '@/global'
+
 import { ProcessesPanel } from './processes-panel'
 
 describe('ProcessesPanel', () => {
@@ -19,8 +21,10 @@ describe('ProcessesPanel', () => {
   it('subscribes on mount and unsubscribes on unmount', () => {
     let subscriberCallback: ((snapshot: DesktopProcessTreeSnapshot) => void) | null = null
     const unsubscribeMock = vi.fn()
+
     const subscribeMock = vi.fn((cb: (snapshot: DesktopProcessTreeSnapshot) => void) => {
       subscriberCallback = cb
+
       return unsubscribeMock
     })
 
@@ -52,6 +56,7 @@ describe('ProcessesPanel', () => {
         get: vi.fn(),
         subscribe: (cb: (snapshot: DesktopProcessTreeSnapshot) => void) => {
           subscriberCallback = cb
+
           return unsubscribeMock
         }
       }
@@ -141,6 +146,7 @@ describe('ProcessesPanel', () => {
         get: vi.fn(),
         subscribe: (cb: (snapshot: DesktopProcessTreeSnapshot) => void) => {
           subscriberCallback = cb
+
           return vi.fn()
         }
       }

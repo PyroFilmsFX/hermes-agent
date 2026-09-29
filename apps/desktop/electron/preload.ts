@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
 import { apiErrorFromEnvelope, isApiErrorEnvelope } from './api-error-envelope'
-
 import type { DesktopProfileRoute } from './desktop-profile'
 import type { HudModifierApi, HudModifierStatus } from './hud-modifier-types'
 import { customWindowControlsEnabled } from './window-controls'
@@ -19,6 +18,7 @@ const hudNativeDrag = hudWindowing?.nativeDrag === true
 
 const launchFlags: { localModels?: boolean; guestOnboarding?: boolean; skipIntro?: boolean } | undefined =
   ipcRenderer.sendSync('hermes:feature-flags')
+
 // Local, sanitized skin payload for the first renderer theme paint. This does
 // not wait on `gateway.ready`, so an unreachable remote primary cannot force
 // the built-in palette over the skin configured on this machine.
@@ -349,6 +349,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   // rebuild the identical rejection here. See electron/api-error-envelope.ts.
   api: async request => {
     const result = await ipcRenderer.invoke('hermes:api', request)
+
     if (isApiErrorEnvelope(result)) {
       throw apiErrorFromEnvelope(result)
     }

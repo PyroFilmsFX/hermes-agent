@@ -55,6 +55,7 @@ describe('b9 parity with hermes_owner_grant/scopes.json', () => {
     const requestable = (catalog.scopes as Array<{ scope: string; label: string }>)
       .filter(e => !MAIN_ISSUED_CLASSES.has(e.scope.split(':')[1] as any))
       .map(e => ({ value: e.scope, label: e.label }))
+
     expect(SCOPE_CATALOG).toEqual(requestable)
     expect(SCOPE_CATALOG.some(e => e.value === 'conductor:continuity:session-relaunch')).toBe(false)
   })

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { describe, expect, it, vi } from 'vitest'
+
+import { describe, it } from 'vitest'
 
 import {
   buildProcessTree,
@@ -64,6 +65,7 @@ describe('parsePsLine & parsePsOutput', () => {
 
    300    200   00:05   00:00.10  git       git status
 `
+
     const procs = parsePsOutput(text)
     assert.equal(procs.length, 3)
     assert.equal(procs[0].pid, 100)
@@ -140,6 +142,7 @@ describe('ProcessTreeTracker (CPU delta & Spawn rate)', () => {
       { pid: 100, ppid: 1, etime: '00:01', time: '00:01.00', comm: 'electron', args: 'electron', command: 'electron' },
       { pid: 200, ppid: 100, etime: '00:01', time: '00:02.00', comm: 'python', args: 'python', command: 'python' }
     ]
+
     const s1 = tracker.update(raw1, [100], 0)
     assert.equal(s1.processes.length, 2)
     // First sample delta should be 0
@@ -155,6 +158,7 @@ describe('ProcessTreeTracker (CPU delta & Spawn rate)', () => {
       { pid: 200, ppid: 100, etime: '00:06', time: '00:03.50', comm: 'python', args: 'python', command: 'python' },
       { pid: 300, ppid: 200, etime: '00:02', time: '00:00.40', comm: 'git', args: 'git status', command: 'git status' }
     ]
+
     const s2 = tracker.update(raw2, [100], 5000)
     assert.equal(s2.processes.length, 3)
     // Delta for PID 200: 3.5 - 2.0 = 1.5s
@@ -172,6 +176,7 @@ describe('ProcessTreeTracker (CPU delta & Spawn rate)', () => {
       { pid: 301, ppid: 200, etime: '00:01', time: '00:00.10', comm: 'git', args: 'git log', command: 'git log' },
       { pid: 400, ppid: 200, etime: '00:01', time: '00:00.20', comm: 'rg', args: 'rg foo', command: 'rg foo' }
     ]
+
     const s3 = tracker.update(raw3, [100], 10000)
     assert.equal(s3.processes.length, 5)
     // Delta for PID 200: 4.50 - 2.00 = 2.50s (over the 10s window)
@@ -188,6 +193,7 @@ describe('ProcessTreeTracker (CPU delta & Spawn rate)', () => {
       { pid: 100, ppid: 1, etime: '01:16', time: '00:02.00', comm: 'electron', args: 'electron', command: 'electron' },
       { pid: 200, ppid: 100, etime: '01:16', time: '00:06.00', comm: 'python', args: 'python', command: 'python' }
     ]
+
     const s4 = tracker.update(raw4, [100], 75000)
     // The previous spawns from T=5000 and T=10000 are older than 60s, so spawn count is 0
     assert.equal(s4.spawnsPerMinute.length, 0)
@@ -205,8 +211,10 @@ describe('registerProcessTreeIpc', () => {
     } as any
 
     let psCalls = 0
+
     const mockExecPs = async () => {
       psCalls++
+
       return '  100    1   01:00   00:05.00  electron  electron'
     }
 
@@ -218,7 +226,7 @@ describe('registerProcessTreeIpc', () => {
       isDestroyed: () => destroyed,
       send: (channel: string, data: any) => sentEvents.push({ channel, data }),
       once: (event: string, fn: () => void) => {
-        if (event === 'destroyed') destroyedListeners.add(fn)
+        if (event === 'destroyed') {destroyedListeners.add(fn)}
       }
     } as any
 

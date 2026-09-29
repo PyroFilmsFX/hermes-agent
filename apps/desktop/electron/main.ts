@@ -357,6 +357,12 @@ import { registerNativeNotifications } from './notification-ipc'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { wireOauthSessionResponse } from './oauth-session-response'
+import {
+  createOwnerForwardConfirmHandler,
+  createOwnerGrantActionHandler,
+  isAppChromeSender,
+  OwnerForwardLookupError
+} from './owner-forward-confirm'
 import { readTrustedOwnerAnchor } from './owner-grant-anchor'
 import {
   createOsascriptAdminRunner,
@@ -366,12 +372,6 @@ import {
 } from './owner-grant-anchor-install'
 import { CONTINUITY_OBSERVE_MS, createOwnerGrantContinuityIssuer } from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
-import {
-  createOwnerForwardConfirmHandler,
-  createOwnerGrantActionHandler,
-  isAppChromeSender,
-  OwnerForwardLookupError
-} from './owner-forward-confirm'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
@@ -417,6 +417,7 @@ import {
 } from './primary-backend-startup'
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin } from './primary-profile-pin'
+import { registerProcessTreeIpc } from './process-tree'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import {
   assertLocalProfileCanStart,
@@ -441,7 +442,6 @@ import {
   spliceRegistrySessionRows,
   tagRegistrySessionResponse
 } from './profile-session-routing'
-import { registerProcessTreeIpc } from './process-tree'
 import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySettings } from './quick-entry'
 import { createQuitFinalization } from './quit-finalization'
 import { type ActiveWork, backendOwnedByApp, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
@@ -8094,6 +8094,7 @@ const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
       backendProfile,
       `/api/sessions?profile=${encodeURIComponent(backendProfile)}&limit=20&order=recent`
     )
+
     const rows: any[] = Array.isArray(listed?.sessions) ? listed.sessions : Array.isArray(listed) ? listed : []
     const active = rows.filter(row => row && typeof row.id === 'string' && row.id && !row.ended_at).slice(0, 10)
     const out: Array<{ profile: string; sessionId: string; live: string | null }> = []
@@ -15480,6 +15481,7 @@ ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => appl
 // #60 U11: owner-grant anchor status and the enable / rotate / revoke actions. The renderer only
 // asks; main shows the native confirm (with the new kid) before the one macOS admin prompt.
 ipcMain.handle('hermes:owner-grant:status', async () => ownerGrantController.status())
+
 // Same app-main-frame sender check and a rate gate as the confirm (#60 fix round, P2).
 const isOwnerAppChromeSender = (event: unknown) =>
   isAppChromeSender(event, sender =>
@@ -17854,14 +17856,17 @@ registerProcessTreeIpc({
   getRootPids: () => {
     const pids: number[] = [process.pid]
     const hermesProcess = backendConnectionState.getProcess()
+
     if (hermesProcess && Number.isInteger(hermesProcess.pid)) {
       pids.push(hermesProcess.pid)
     }
+
     for (const entry of backendPool.values()) {
       if (entry.process && Number.isInteger(entry.process.pid)) {
         pids.push(entry.process.pid)
       }
     }
+
     return pids
   }
 })

@@ -258,14 +258,18 @@ export function parsePeerMessageEnvelope(content: string): ParsedPeerEnvelope | 
 
   if (mailbox) {
     const trailer = mailbox[5]
+
     if (trailer !== undefined) {
       const trimmed = trailer.trimEnd()
+
       if (trimmed.length > 1200) {
         return null
       }
+
       if (/\r?\n[ \t]*\r?\n/.test(trimmed)) {
         return null
       }
+
       if (
         trimmed.includes('<cross-session-message') ||
         trimmed.includes('</cross-session-message')

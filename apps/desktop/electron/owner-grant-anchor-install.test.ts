@@ -21,10 +21,11 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
+import { OWNER_ANCHOR_DIR, OWNER_ANCHOR_PATH, type OwnerAnchorFs, readTrustedOwnerAnchor } from './owner-grant-anchor'
 import {
   ADMIN_APPLESCRIPT,
-  ANCHOR_ROOT_SCRIPT,
   type AdminRunner,
+  ANCHOR_ROOT_SCRIPT,
   buildAdminArgv,
   createOsascriptAdminRunner,
   createOwnerGrantController,
@@ -35,7 +36,6 @@ import {
   STAGED_PAYLOAD_FILES,
   VERIFIER_PACKAGE_FILES
 } from './owner-grant-anchor-install'
-import { OWNER_ANCHOR_DIR, OWNER_ANCHOR_PATH, type OwnerAnchorFs, readTrustedOwnerAnchor } from './owner-grant-anchor'
 import { createOwnerKeyStore, GRANT_DOMAIN_PREFIX, OWNER_KEY_FILE, type SafeStorageLike } from './owner-grant-key'
 
 const UID = process.getuid!()
@@ -241,6 +241,7 @@ function fakeAdminRunner(rfs: RedirectFs, opts: { before?: (src: string) => void
         staged
       })
       opts.before?.(src)
+
       const res = spawnSync('/bin/sh', ['-c', retargetedRootScript(rfs.root, opts.warm), 'hermes-owner-anchor', src, sha], {
         encoding: 'utf8'
       })
@@ -458,6 +459,7 @@ describe('E-9: the admin command is a constant; only a validated temp path and a
       },
       ss: mockSafeStorage()
     })
+
     const bad = await swapped.controller.enable()
     expect(bad.ok).toBe(false)
     expect(fs.existsSync(swapped.rfs.real(OWNER_ANCHOR_PATH))).toBe(false)
@@ -473,11 +475,13 @@ describe('E-9: the admin command is a constant; only a validated temp path and a
       const line = ADMIN_APPLESCRIPT[1].slice(0, ADMIN_APPLESCRIPT[1].length - adminClause.length)
       expect(line).not.toContain('administrator')
       const hostile = `/tmp/a'b"c$(touch /tmp/pwned-u11)\`id\`;x`
+
       const res = spawnSync(
         OSASCRIPT_PATH,
         ['-e', ADMIN_APPLESCRIPT[0], '-e', line, '-e', ADMIN_APPLESCRIPT[2], 'printf "%s|%s|%s" "$0" "$1" "$2"', hostile, 'x y'],
         { encoding: 'utf8', timeout: 20_000 }
       )
+
       expect(res.status).toBe(0)
       // osascript prints the result plus one newline.
       expect(res.stdout).toBe(`hermes-owner-anchor|${hostile}|x y\n`)
@@ -522,6 +526,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
 
     // A restart with the same key dir and anchor loads it again.
     const again = createOwnerKeyStore({ safeStorage: h.ss.api, keyDir: h.keyDir })
+
     const relaunch = createOwnerGrantController({
       store: again,
       readAnchor: h.readAnchor,
@@ -531,6 +536,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
       grantsDir: '/Users/owner/.hermes/owner-grants',
       platform: 'darwin'
     })
+
     expect(relaunch.launch()).toMatchObject({ state: 'ready', canSign: true, kid })
   })
 
@@ -585,6 +591,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
         }
       })
     })
+
     const b = await lying.controller.enable()
     expect(b).toMatchObject({ ok: false, reason: 'not_pinned' })
     expect(lying.controller.status()).toMatchObject({ state: 'mismatch', canSign: false })
@@ -624,6 +631,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
   test('U11-I7 only one flow runs at a time', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>(resolve => (release = resolve))
+
     const h = harness({
       runner: rfs => {
         const inner = fakeAdminRunner(rfs).runner
@@ -631,6 +639,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
         return { run: async argv => (await gate, inner.run(argv)) }
       }
     })
+
     const first = h.controller.enable()
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(await h.controller.rotate()).toMatchObject({ ok: false, reason: 'busy' })
@@ -644,6 +653,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
     const ss = mockSafeStorage()
     const store = createOwnerKeyStore({ safeStorage: ss.api, keyDir: path.join(mkTmp('ogai-home-'), 'k') })
     let ran = false
+
     const controller = createOwnerGrantController({
       store,
       readAnchor: () => ({ ok: false, reason: 'anchor_missing', detail: 'x' }),
@@ -653,6 +663,7 @@ describe('U11 install: one admin step pins a fresh key; success only when the an
       grantsDir: '/Users/owner/.hermes/owner-grants',
       platform: 'linux'
     })
+
     expect(controller.status().state).toBe('unsupported')
     expect(await controller.enable()).toMatchObject({ ok: false, reason: 'unsupported' })
     expect(ran).toBe(false)
@@ -738,6 +749,7 @@ describe('U11 rotate and revoke go through the same admin path', () => {
     const h = harness()
     await h.controller.enable()
     const kid = h.store.publicInfo()!.kid
+
     const lie = createOwnerGrantController({
       store: h.store,
       readAnchor: h.readAnchor,
@@ -750,6 +762,7 @@ describe('U11 rotate and revoke go through the same admin path', () => {
       now: () => NOW,
       platform: 'darwin'
     })
+
     expect(await lie.revoke()).toMatchObject({ ok: false, reason: 'not_pinned' })
     expect(anchorOnDisk(h).keys[0]).toMatchObject({ kid, status: 'active' })
   })
@@ -844,6 +857,7 @@ describe('T-3 / T-4: the launch check refuses to sign instead of re-enrolling', 
     const order: string[] = []
     const ss = mockSafeStorage()
     const store = createOwnerKeyStore({ safeStorage: ss.api, keyDir: path.join(mkTmp('ogai-home-'), 'k') })
+
     const spy = new Proxy(store, {
       get(target, prop, receiver) {
         const value = Reflect.get(target, prop, receiver)
@@ -855,6 +869,7 @@ describe('T-3 / T-4: the launch check refuses to sign instead of re-enrolling', 
         return typeof value === 'function' ? value.bind(target) : value
       }
     })
+
     const controller = createOwnerGrantController({
       store: spy,
       readAnchor: () => (order.push('readAnchor'), { ok: false, reason: 'anchor_missing', detail: 'x' }),
@@ -864,6 +879,7 @@ describe('T-3 / T-4: the launch check refuses to sign instead of re-enrolling', 
       grantsDir: '/Users/owner/.hermes/owner-grants',
       platform: 'darwin'
     })
+
     controller.launch()
     expect(order).toEqual(['readAnchor', 'setAnchor', 'loadIfEnrolled'])
   })
@@ -950,6 +966,7 @@ describe('U11 cross-language: hermes_owner_grant.anchor.parse_anchor accepts the
       encoding: 'utf8',
       env: { PATH: '/usr/bin:/bin' }
     })
+
     expect(res.stderr).toBe('')
     expect(res.status).toBe(0)
     const [a, b, c] = JSON.parse(res.stdout)
@@ -1109,6 +1126,7 @@ describe('U11b: one admin prompt installs the anchor AND the root-owned verifier
         fs.appendFileSync(target, '\nimport os; os.system("id")\n')
       }
     })
+
     const res = await h.controller.enable()
     expect(res).toMatchObject({ ok: false, reason: 'admin_failed' })
     expect(leftovers(h.rfs.real(OWNER_ANCHOR_DIR))).toEqual([])
@@ -1136,6 +1154,7 @@ describe('U11b: one admin prompt installs the anchor AND the root-owned verifier
         fs.writeFileSync(src, fs.readFileSync(src, 'ascii').replace(oldSha, newSha))
       }
     })
+
     expect((await h.controller.enable()).ok).toBe(false)
     expect(leftovers(h.rfs.real(OWNER_ANCHOR_DIR))).toEqual([])
   })
@@ -1143,6 +1162,7 @@ describe('U11b: one admin prompt installs the anchor AND the root-owned verifier
   test('U11b-S5 a staged file swapped for a symlink is refused', async () => {
     const outside = path.join(mkTmp('ogai-out-'), 'verify.py')
     fs.copyFileSync(path.join(VERIFIER_SOURCE_DIR, 'verify.py'), outside)
+
     const h = harness({
       before: src => {
         const target = path.join(path.dirname(src), PKG_REL, 'verify.py')
@@ -1150,12 +1170,14 @@ describe('U11b: one admin prompt installs the anchor AND the root-owned verifier
         fs.symlinkSync(outside, target)
       }
     })
+
     expect((await h.controller.enable()).ok).toBe(false)
     expect(leftovers(h.rfs.real(OWNER_ANCHOR_DIR))).toEqual([])
   })
 
   test('U11b-S6 a failed rotate leaves the previous anchor, launcher and verifier exactly as they were', async () => {
     let tamper = false
+
     const h = harness({
       before: src => {
         if (tamper) {
@@ -1163,6 +1185,7 @@ describe('U11b: one admin prompt installs the anchor AND the root-owned verifier
         }
       }
     })
+
     expect((await h.controller.enable()).ok).toBe(true)
     const kid = h.store.publicInfo()!.kid
     const before = snapshot(h)
@@ -1243,12 +1266,14 @@ describe('U11b cross-language: the Python doctor check reads what the root scrip
   test.runIf(HAVE_PYTHON)('U11b-X1 same launcher and file list; match on the real install; mismatch after drift', async () => {
     const h = harness({ warm: true })
     expect((await h.controller.enable()).ok).toBe(true)
+
     const res = spawnSync(PYTHON, ['-I', '-c', PY_INSTALL_CHILD], {
       // realpath: /var is a symlink on macOS, and the StrictModes chain check refuses it.
       input: JSON.stringify({ repo: REPO, dir: fs.realpathSync(h.rfs.real(OWNER_ANCHOR_DIR)), tamper: ['', `${PKG_REL}/quote.py`] }),
       encoding: 'utf8',
       env: { PATH: '/usr/bin:/bin' }
     })
+
     expect(res.stderr).toBe('')
     expect(res.status).toBe(0)
     const out = JSON.parse(res.stdout)
@@ -1316,6 +1341,7 @@ describe('b9 §6: enable re-pushes the verifier PACKAGE when the installed manif
   test('a package refresh the admin step did not land is reported as a failure', async () => {
     const src = packageCopy()
     let calls = 0
+
     const h = harness({
       manifestReader: true,
       verifierSourceDir: src,
@@ -1325,6 +1351,7 @@ describe('b9 §6: enable re-pushes the verifier PACKAGE when the installed manif
         return { run: async argv => (++calls === 1 ? inner.run(argv) : { code: 1 }) }
       }
     })
+
     expect((await h.controller.enable()).ok).toBe(true)
     fs.appendFileSync(path.join(src, 'verify.py'), '\n')
 
@@ -1334,11 +1361,13 @@ describe('b9 §6: enable re-pushes the verifier PACKAGE when the installed manif
 
   test('installedVerifierIsCurrent: launcher and every package file must be listed with this app\'s hash', () => {
     const files = new Map(VERIFIER_PACKAGE_FILES.map(n => [`${PKG_REL}/${n}`, fs.readFileSync(path.join(VERIFIER_SOURCE_DIR, n))]))
+
     const lines = [
       `${sha256Hex(OWNER_VERIFY_LAUNCHER)}  hermes_owner_verify.py`,
       ...[...files].map(([rel, bytes]) => `${sha256Hex(bytes)}  ${rel}`),
       `${'0'.repeat(64)}  pycache/x.pyc`
     ]
+
     expect(installedVerifierIsCurrent(lines.join('\n') + '\n', files)).toBe(true)
     expect(installedVerifierIsCurrent(null, files)).toBe(false)
     expect(installedVerifierIsCurrent(lines.slice(1).join('\n'), files)).toBe(false)

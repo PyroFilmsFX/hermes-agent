@@ -30,6 +30,7 @@ export async function refreshCntrlGroups() {
 
   try {
     const groups = await pluginRest<CntrlGroup[]>('cntrl_groups', '/groups')
+
     if (generation === refreshGeneration) {
       $cntrlGroups.set(Array.isArray(groups) ? groups : [])
       $cntrlGroupsAvailable.set(Array.isArray(groups))
@@ -63,7 +64,9 @@ export function migrateCntrlGroup(oldName: string, newName: string) {
   if ($sidebarGroupFilter.get() === oldName) {
     setSidebarGroupFilter(newName)
   }
+
   const current = $cntrlGroupCollapsed.get()
+
   if (current.includes(oldName)) {
     $cntrlGroupCollapsed.set(current.map(item => (item === oldName ? newName : item)))
   }
@@ -73,7 +76,9 @@ export function clearCntrlGroup(name: string) {
   if ($sidebarGroupFilter.get() === name) {
     setSidebarGroupFilter(null)
   }
+
   const current = $cntrlGroupCollapsed.get()
+
   if (current.includes(name)) {
     $cntrlGroupCollapsed.set(current.filter(item => item !== name))
   }
@@ -81,9 +86,11 @@ export function clearCntrlGroup(name: string) {
 
 export async function updateCntrlGroup(name: string, patch: { name?: string; order?: number; pinned?: boolean }) {
   await pluginRest('cntrl_groups', `/groups/${encodeURIComponent(name)}`, { method: 'PATCH', body: patch })
+
   if (patch.name && patch.name !== name) {
     migrateCntrlGroup(name, patch.name)
   }
+
   await refreshCntrlGroups()
 }
 

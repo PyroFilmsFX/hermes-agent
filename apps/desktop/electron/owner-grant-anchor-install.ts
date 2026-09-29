@@ -870,11 +870,13 @@ class OwnerGrantControllerImpl {
    *  clean up. The manifest pins every staged file; argv pins the manifest. */
   async #install(doc: AnchorDoc, verifier: VerifierFiles): Promise<AdminRunResult & { error?: string }> {
     const fs = this.#fs
+
     const payload = new Map<string, Buffer>([
       ['anchor.json', Buffer.from(JSON.stringify(doc), 'utf8')],
       ['hermes_owner_verify.py', Buffer.from(OWNER_VERIFY_LAUNCHER, 'utf8')],
       ...verifier
     ])
+
     const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
     let dir: string | null = null
 

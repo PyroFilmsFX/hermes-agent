@@ -24,11 +24,11 @@ import {
   parseScope,
   SCOPE_CLASS_POLICY,
   SCOPE_LABELS,
-  SUBJECT_GRAMMAR,
-  subjectMatchesGrammar,
   type SignedOutcome,
   type SignPorts,
   type SignRequest,
+  SUBJECT_GRAMMAR,
+  subjectMatchesGrammar,
   writeGrantFile
 } from './owner-grant-sign'
 
@@ -363,6 +363,7 @@ describe('T-6: a conductor scope binds every target to a live Claude CLI session
   test('a scope with any unbound target is refused before the dialog; nothing is written', async () => {
     const base = readyStore()
     const p = ports(base)
+
     const targets = [
       { profile: 'default', session_id: 'w-1', claude_session_id: 'c-1', backend: 'bk_a' },
       { profile: 'default', session_id: 'w-2', claude_session_id: null, backend: 'bk_a' }
@@ -464,10 +465,12 @@ describe('b9: new scope classes and the per-scope subject grammar (tests/fixture
 
   test('TTL clamps to the class max; policy and spend need Touch ID when it can prompt', async () => {
     const s = readyStore()
+
     const gc = (await confirmAndSignGrants(
       request({ scope: ['conductor:gc:prune-lanes'], subject: { 'conductor:gc:prune-lanes': 'c'.repeat(64) }, ttlMs: 86_400_000 }),
       ports(s)
     )) as SignedOutcome
+
     const gp = payloadOf(gc.grants[0].envelope)
     expect(gp.expires_at - gp.issued_at).toBe(3_600_000)
 
@@ -476,10 +479,12 @@ describe('b9: new scope classes and the per-scope subject grammar (tests/fixture
       ['conductor:policy:unsandboxed-write', 'codex', 'change a conductor policy as you']
     ]) {
       const prompt = vi.fn(async () => {})
+
       const out = (await confirmAndSignGrants(
         request({ scope: [scope], subject: { [scope]: subject } }),
         ports(s, { touchId: { canPrompt: () => true, prompt } })
       )) as SignedOutcome
+
       expect(prompt).toHaveBeenCalledWith(reason)
       expect(payloadOf(out.grants[0].envelope).confirm).toBe('touch_id')
     }

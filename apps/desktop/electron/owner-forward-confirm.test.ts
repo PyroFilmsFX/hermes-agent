@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
@@ -252,6 +253,7 @@ describe('the native confirm shows what main resolved, never renderer labels', (
 
   test('long text shows head and tail with counts; short text is shown whole', () => {
     const long = 'A'.repeat(2000) + 'MIDDLE' + 'Z'.repeat(2000)
+
     const model = {
       targets: [],
       scopes: [],
@@ -297,6 +299,7 @@ describe('the native confirm shows what main resolved, never renderer labels', (
       textChars: 46,
       textBytes: 46
     }
+
     const detail2 = buildConfirmDialog(model2, ms => String(ms)).detail
     expect(detail2).toContain('2 secrets masked')
   })
@@ -532,6 +535,7 @@ describe('long texts: Send is only offered after the owner viewed the full text 
 
   test('the file is created 0600 (checked while it is open)', async () => {
     const modes: number[] = []
+
     const h = harness({
       openPath: vi.fn(async (p: string) => {
         modes.push(fs.statSync(p).mode & 0o777)
@@ -539,6 +543,7 @@ describe('long texts: Send is only offered after the owner viewed the full text 
         return ''
       })
     })
+
     h.showMessageBox.mockResolvedValueOnce({ response: 0 }).mockResolvedValueOnce({ response: 2 })
 
     await h.handler(h.event(), req({ text: long }))
@@ -615,6 +620,7 @@ describe('titles in the native dialog are sanitized in main', () => {
     await h.handler(h.event(), req())
     const detail: string = h.showMessageBox.mock.calls[0][0].detail
 
+    // eslint-disable-next-line no-control-regex -- asserting control chars are stripped
     expect(detail).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060\uFEFF\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]/)
     expect(detail).toContain('Owner approved')
     const line = detail.split('\n').find(l => l.includes('Owner approved'))!
@@ -625,6 +631,7 @@ describe('titles in the native dialog are sanitized in main', () => {
 describe('source_session.role is looked up by main, never taken from the renderer', () => {
   test('main asks the backend for the origin message and signs its role; the dialog shows it', async () => {
     const h = harness()
+
     const result: any = await h.handler(
       h.event(),
       req({ origin: { session_id: 'mgr', message_id: '41', role: 'user' } })
@@ -641,10 +648,12 @@ describe('source_session.role is looked up by main, never taken from the rendere
     expect(payloadOf(menu).source_session.role).toBeNull()
 
     h.setNow(NOW + 10_000)
+
     const proposal: any = await h.handler(
       h.event(),
       req({ gesture: 'proposal', origin: { session_id: 'mgr', message_id: null, role: 'user' } })
     )
+
     expect(payloadOf(proposal).source_session.role).toBe('assistant')
   })
 
@@ -662,6 +671,7 @@ describe('hermes:owner-grant:action: same main-frame check and a rate gate', () 
     const appSenders = new Set<unknown>()
     let now = NOW
     const runAction = vi.fn(async (_action: unknown) => ({ ok: true }))
+
     const handler = createOwnerGrantActionHandler({
       isTrustedSender: event => isAppChromeSender(event, sender => appSenders.has(sender)),
       runAction,
@@ -761,6 +771,7 @@ describe('b9: Touch ID warning for policy and spend; the continuity scope is not
 
     for (const gesture of ['menu', 'proposal', 'selection', 'slash_to', 'composer_signed']) {
       const self = gesture === 'composer_signed'
+
       const result = await h.handler(
         h.event(),
         req({

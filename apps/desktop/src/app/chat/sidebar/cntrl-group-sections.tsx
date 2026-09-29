@@ -17,7 +17,6 @@ import {
   $cntrlGroupCollapsed,
   CNTRL_GROUP_UNGROUPED,
   type CntrlGroup,
-  refreshCntrlGroups,
   reorderCntrlGroups,
   toggleCntrlGroupCollapsed,
   ungroupAllCntrlGroup,

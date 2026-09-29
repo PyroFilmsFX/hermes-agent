@@ -23,8 +23,6 @@ import {
   $cntrlGroupsAvailable,
   CNTRL_GROUP_UNGROUPED,
   type CntrlGroup,
-  clearCntrlGroup,
-  migrateCntrlGroup,
   orderedCntrlGroups,
   refreshCntrlGroups,
   reorderCntrlGroups,
@@ -53,6 +51,7 @@ vi.mock('@/api/plugins', async importOriginal => ({
 }))
 
 const noop = () => {}
+
 const noopAsync = async () => {}
 
 const mount = () =>
@@ -166,6 +165,7 @@ it('marks the plugin available only when the groups read answers', async () => {
 
 it('renumbers a band on reorder so fresh (all order 0) groups actually move', async () => {
   api.groups = []
+
   const band: CntrlGroup[] = [
     { name: 'A', session_ids: ['a'], pinned: false, order: 0 },
     { name: 'B', session_ids: ['b'], pinned: false, order: 0 }

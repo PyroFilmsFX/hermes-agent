@@ -198,6 +198,7 @@ describe('the observer and the relaunch watcher (main\'s backend lifecycle only)
       ],
       live: { 'default:moved': NEW, 'default:same': 'same-sid' }
     })
+
     await w.issuer.observe('default', 'spawn_1')
 
     const first = await w.issuer.onBackendRelaunch('default', 'spawn_2')
@@ -330,6 +331,7 @@ describe('no IPC channel, gateway method or tool can mint the continuity grant',
     const importers = sourceFiles(ELECTRON_DIR)
       .filter(file => /from '\.\/owner-grant-continuity'/.test(fs.readFileSync(file, 'utf8')))
       .map(file => path.relative(ELECTRON_DIR, file))
+
     expect(importers).toEqual(['main.ts'])
 
     const main = fs.readFileSync(path.join(ELECTRON_DIR, 'main.ts'), 'utf8')
@@ -375,6 +377,7 @@ describe('no IPC channel, gateway method or tool can mint the continuity grant',
       .filter(file => /\.signEnvelope\(/.test(fs.readFileSync(file, 'utf8')))
       .map(file => path.relative(ELECTRON_DIR, file))
       .sort()
+
     const allowed = ['owner-grant-continuity.ts', 'owner-grant-key.ts', 'owner-grant-sign.ts']
     expect(callers.filter(file => !allowed.includes(file))).toEqual([])
     expect(callers).toContain('owner-grant-continuity.ts')

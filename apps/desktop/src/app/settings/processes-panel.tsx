@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { Input } from '@/components/ui/input'
+import type { DesktopProcessInfo, DesktopProcessTreeSnapshot } from '@/global'
 import { useI18n } from '@/i18n'
 import { Activity, ArrowDown, ArrowUp, Cpu, Loader2, Search } from '@/lib/icons'
 import { cn } from '@/lib/utils'
@@ -19,6 +20,7 @@ export function ProcessesPanel() {
   useEffect(() => {
     if (!window.hermesDesktop?.processTree?.subscribe) {
       setLoading(false)
+
       return
     }
 
@@ -44,7 +46,9 @@ export function ProcessesPanel() {
   const filteredProcesses = useMemo(() => {
     const list = snapshot?.processes ?? []
     const q = filterText.trim().toLowerCase()
-    if (!q) return list
+
+    if (!q) {return list}
+
     return list.filter(
       proc =>
         proc.pid.toString().includes(q) ||
@@ -58,6 +62,7 @@ export function ProcessesPanel() {
   const sortedProcesses = useMemo(() => {
     return [...filteredProcesses].sort((a, b) => {
       let cmp = 0
+
       if (sortColumn === 'cpuTime10s') {
         cmp = a.cpuTime10s - b.cpuTime10s
       } else if (sortColumn === 'pid') {
@@ -71,6 +76,7 @@ export function ProcessesPanel() {
       } else if (sortColumn === 'laneOrSession') {
         cmp = a.laneOrSession.localeCompare(b.laneOrSession)
       }
+
       return sortOrder === 'desc' ? -cmp : cmp
     })
   }, [filteredProcesses, sortColumn, sortOrder])

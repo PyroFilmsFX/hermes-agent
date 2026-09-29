@@ -1065,14 +1065,17 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   const snapshotErrorSurface = parseErrorSurface(projection.inflight?.error_surface)
   const latestUserIndex = messages.findLastIndex(message => message.role === 'user')
   const latestUserText = latestUserIndex >= 0 ? textWithoutReferenceLines(chatMessageText(messages[latestUserIndex])) : ''
+
   const hasSuccessfulTurnAfterLatestUser = messages.slice(latestUserIndex + 1).some(
     message => message.role === 'assistant' && !message.error && message.pending !== true
   )
+
   const failedPromptIsStored = messages.some(
     message =>
       message.role === 'user' &&
       textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(snapshotUser)
   )
+
   // A reconnect can replay the last retained failure after another turn has
   // already succeeded. It is no longer the transcript tail, so do not project
   // its old prompt/error a second time underneath that newer reply. An error
@@ -1083,6 +1086,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     latestUserText !== textWithoutReferenceLines(snapshotUser) &&
     hasSuccessfulTurnAfterLatestUser
   )
+
   const inflightUser = retainedErrorIsOlder ? '' : snapshotUser
   const inflightAssistant = retainedErrorIsOlder ? '' : snapshotAssistant
   const inflightStreaming = retainedErrorIsOlder ? false : snapshotStreaming
