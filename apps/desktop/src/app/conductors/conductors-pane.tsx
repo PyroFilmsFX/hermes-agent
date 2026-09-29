@@ -23,6 +23,7 @@ import {
   openConductorTarget,
   sendToConductorTarget
 } from './conductor-actions'
+import { GhLimitPill, useConductorGhReads } from './conductor-ci'
 import { ConductorRow } from './conductor-row'
 import {
   type ConductorColumn,
@@ -209,6 +210,9 @@ function ConductorsPaneView({
     return { abandonedRows: sortConductorRows(gone), liveRows: sortConductorRows(live) }
   }, [rows, data?.generated_at])
 
+  // R7: gh reads (PR checks, run status) only while the pane is visible.
+  useConductorGhReads(liveRows, visible, state.fetchedAt)
+
   const shownRows = useMemo(() => liveRows.filter(row => matchesFilter(row, filter)), [liveRows, filter])
   const needsYou = useMemo(() => liveRows.filter(needsOwner).length, [liveRows])
 
@@ -349,6 +353,7 @@ function ConductorsPaneView({
           {needsYou > 0 && <span className="text-(--ui-yellow)"> · {c.needsYou(needsYou)}</span>}
         </span>
         {data && <SegmentedControl onChange={setFilter} options={filterOptions} value={filter} />}
+        <GhLimitPill />
         <span className="ml-auto truncate text-(--ui-text-tertiary)">
           {state.fetchedAt !== null && !staleData && <UpdatedAgo fetchedAt={state.fetchedAt} />}
         </span>

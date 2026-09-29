@@ -29,6 +29,8 @@ export interface ConductorOrchestrator {
 export interface ConductorProject {
   name: string
   root_display: string
+  /** Absolute repo root when the backend reports one (gh needs a real path). */
+  root?: string
   branch: string | null
   bound: boolean
   nested_in: string | null
@@ -339,6 +341,7 @@ export function parseConductorsResponse(raw: unknown): ConductorsResponse {
     const project: ConductorProject = {
       name: asString(projObj.name, ''),
       root_display: asString(projObj.root_display, ''),
+      ...(typeof projObj.root === 'string' && projObj.root ? { root: projObj.root } : {}),
       branch: asNullableString(projObj.branch),
       bound: asBoolean(projObj.bound, false),
       nested_in: asNullableString(projObj.nested_in)

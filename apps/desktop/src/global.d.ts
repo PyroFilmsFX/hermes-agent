@@ -1678,12 +1678,15 @@ export interface HermesRepoPullRequests {
   prs: HermesBranchPullRequest[]
   rate_limit?: HermesRateLimit
   error?: 'gh_unavailable' | 'rate_limited' | 'backoff' | string
+  suspended?: boolean
+  gh_unavailable?: boolean
 }
 
 export interface HermesGhRunStatus {
   status: string
   conclusion: string | null
   error?: 'gh_unavailable' | 'rate_limited' | 'backoff' | string
+  gh_unavailable?: boolean
 }
 
 // gh availability/auth + the current branch's PR — drives the review pane's PR

@@ -2872,6 +2872,10 @@ export interface Translations {
     derived: string
     derivedRelayOnly: string
     derivedWorkspace: string
+    ghLimit: (clock: string) => string
+    ghLimitHint: string
+    ghSignedOut: string
+    ciChecks: { fail: string; none: string; pass: string; pending: string }
     loading: string
     emptyTitle: string
     emptyBody: string

@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 import { $conductorsNow } from '@/store/conductors'
 
 import type { ConductorOpenEvent } from './conductor-actions'
+import { ConductorCiCell } from './conductor-ci-cell'
 import { ConductorRowActions } from './conductor-row-actions'
 import { ConductorRowDetail } from './conductor-row-detail'
 import {
@@ -325,7 +326,6 @@ function ConductorRowImpl({
     </span>
   )
 
-  const ci = build.ci[0]
   const blocker = build.owner_blockers[0]
   const extraBlockers = build.owner_blockers.length - 1
 
@@ -526,19 +526,9 @@ function ConductorRowImpl({
           </Line>
         </Cell>
 
-        {/* 8. CI/PR — conductor's own observation until R7 joins the PR cache */}
+        {/* 8. CI/PR: conductor first, then the shared PR cache / run status (R7) */}
         <Cell column="ci">
-          {ci ? (
-            <span
-              className={cn('truncate tabular-nums', ci.state === 'failure' && 'text-(--ui-red)')}
-              data-ci-state={ci.state}
-            >
-              {ci.pr !== null ? `#${ci.pr}` : ci.kind || 'run'}{' '}
-              {ci.state === 'success' ? '✓' : ci.state === 'failure' ? '✕' : ci.state === 'pending' ? '·' : '?'}
-            </span>
-          ) : (
-            <span className="text-(--ui-text-quaternary)">{c.none}</span>
-          )}
+          <ConductorCiCell row={row} />
         </Cell>
 
         {/* 9. owner blockers */}
