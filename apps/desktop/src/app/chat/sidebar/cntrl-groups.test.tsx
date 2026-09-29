@@ -6,7 +6,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import type { HermesConnection } from '@/global'
 import { readKey } from '@/lib/storage'
-import { $pinnedSessionIds, $sidebarGroupFilter, setSidebarGroupFilter, setSidebarGrouping } from '@/store/layout'
+import {
+  $pinnedSessionIds,
+  $sidebarFiltersActive,
+  $sidebarGroupFilter,
+  $sidebarStatusFilter,
+  setSidebarGroupFilter,
+  setSidebarGrouping
+} from '@/store/layout'
 import { $sessions, setConnection } from '@/store/session'
 import { makeSessionInfo } from '@/test/session-info'
 
@@ -14,11 +21,16 @@ import {
   $cntrlGroupCollapsed,
   $cntrlGroups,
   $cntrlGroupsAvailable,
+  CNTRL_GROUP_UNGROUPED,
   type CntrlGroup,
+  clearCntrlGroup,
+  migrateCntrlGroup,
   orderedCntrlGroups,
   refreshCntrlGroups,
   reorderCntrlGroups,
-  toggleCntrlGroupCollapsed
+  toggleCntrlGroupCollapsed,
+  ungroupAllCntrlGroup,
+  updateCntrlGroup
 } from './cntrl-groups'
 
 import { ChatSidebar } from './index'
@@ -67,6 +79,12 @@ const mount = () =>
 
 const now = () => Date.now() / 1000
 
+const openTriggerMenu = (trigger: HTMLElement) => {
+  fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+  fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+  fireEvent.click(trigger)
+}
+
 beforeEach(() => {
   api.groups = null
   api.calls = []
@@ -78,6 +96,7 @@ afterEach(() => {
   setSidebarGroupFilter(null)
   setSidebarGrouping('date')
   $pinnedSessionIds.set([])
+  $sidebarStatusFilter.set([])
   $cntrlGroupCollapsed.set([])
   $cntrlGroups.set([])
   $cntrlGroupsAvailable.set(null)
@@ -104,7 +123,7 @@ it('draws groups like gateway groups, Ungrouped last, and keeps a pinned grouped
   await waitFor(() => expect(screen.getByText('Research')).toBeTruthy())
 
   const order = [...document.querySelectorAll('[data-cntrl-group]')].map(node => node.getAttribute('data-cntrl-group'))
-  expect(order).toEqual(['Ops', 'Research', '__ungrouped__'])
+  expect(order).toEqual(['Ops', 'Research', '/ungrouped'])
   // Pins stay global: one row, in Pinned, never repeated under its group.
   expect(screen.getAllByText('Pinned grouped chat')).toHaveLength(1)
 
@@ -187,4 +206,130 @@ it('toggles a group collapsed preference back open', () => {
   expect($cntrlGroupCollapsed.get()).toEqual(['Research'])
   toggleCntrlGroupCollapsed('Research')
   expect($cntrlGroupCollapsed.get()).toEqual([])
+})
+
+it('uses /ungrouped as the sentinel for ungrouped sessions, allowing a real group named __ungrouped__ without collision', async () => {
+  api.groups = [
+    { name: '__ungrouped__', session_ids: ['grouped-in-literal-ungrouped'], pinned: false, order: 0 }
+  ]
+  mount()
+  act(() => {
+    setSidebarGrouping('groups')
+    $sessions.set([
+      makeSessionInfo({ id: 'grouped-in-literal-ungrouped', title: 'Named group chat', last_active: now() }),
+      makeSessionInfo({ id: 'loose', title: 'Loose chat', last_active: now() })
+    ])
+  })
+
+  await waitFor(() => expect(screen.getByText('Named group chat')).toBeTruthy())
+
+  const sections = [...document.querySelectorAll('[data-cntrl-group]')].map(node => node.getAttribute('data-cntrl-group'))
+  expect(sections).toEqual(['__ungrouped__', CNTRL_GROUP_UNGROUPED])
+
+  // Filter by the real group named '__ungrouped__' -> keeps only sessions in that group
+  act(() => setSidebarGroupFilter('__ungrouped__'))
+  expect(screen.getByText('Named group chat')).toBeTruthy()
+  expect(screen.queryByText('Loose chat')).toBeNull()
+
+  // Filter by CNTRL_GROUP_UNGROUPED -> keeps only ungrouped/loose sessions
+  act(() => setSidebarGroupFilter(CNTRL_GROUP_UNGROUPED))
+  expect(screen.queryByText('Named group chat')).toBeNull()
+  expect(screen.getByText('Loose chat')).toBeTruthy()
+
+  // Collapsing the ungrouped section persists CNTRL_GROUP_UNGROUPED
+  const ungroupedSection = document.querySelector(`[data-cntrl-group="${CNTRL_GROUP_UNGROUPED}"]`) as HTMLElement
+  fireEvent.click(within(ungroupedSection).getByRole('button', { name: 'Hide Ungrouped sessions' }))
+  expect($cntrlGroupCollapsed.get()).toContain(CNTRL_GROUP_UNGROUPED)
+  expect($cntrlGroupCollapsed.get()).not.toContain('__ungrouped__')
+})
+
+it('migrates a persisted group filter and collapsed entry when a group is renamed', async () => {
+  api.groups = [{ name: 'OldName', session_ids: ['s1'], pinned: false, order: 0 }]
+  setSidebarGroupFilter('OldName')
+  $cntrlGroupCollapsed.set(['OldName', 'OtherGroup'])
+
+  await updateCntrlGroup('OldName', { name: 'NewName' })
+
+  expect($sidebarGroupFilter.get()).toBe('NewName')
+  expect($cntrlGroupCollapsed.get()).toEqual(['NewName', 'OtherGroup'])
+})
+
+it('clears a persisted group filter and collapsed entry when ungrouping all sessions in that group', async () => {
+  api.groups = [{ name: 'ToClear', session_ids: ['s1', 's2'], pinned: false, order: 0 }]
+  setSidebarGroupFilter('ToClear')
+  $cntrlGroupCollapsed.set(['ToClear', 'OtherGroup'])
+
+  await ungroupAllCntrlGroup('ToClear', ['s1', 's2'])
+
+  expect($sidebarGroupFilter.get()).toBeNull()
+  expect($cntrlGroupCollapsed.get()).toEqual(['OtherGroup'])
+  const deletes = api.calls.filter(call => call[2] === 'DELETE')
+  expect(deletes).toHaveLength(2)
+})
+
+it('migrates filter and collapsed state through the group header rename and ungroup-all menus', async () => {
+  api.groups = [{ name: 'Research', session_ids: ['s1'], pinned: false, order: 0 }]
+  setSidebarGroupFilter('Research')
+  $cntrlGroupCollapsed.set(['Research'])
+  mount()
+  act(() => {
+    setSidebarGrouping('groups')
+    $sessions.set([makeSessionInfo({ id: 's1', title: 'Research session', last_active: now() })])
+  })
+
+  await waitFor(() => expect(screen.getByText('Research')).toBeTruthy())
+
+  // Open actions menu and click Rename group
+  const research = document.querySelector('[data-cntrl-group="Research"]') as HTMLElement
+  openTriggerMenu(within(research).getByRole('button', { name: 'Group actions: Research' }))
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename group' }))
+
+  // Type new name in the dialog and submit
+  const input = screen.getByLabelText('Group name')
+  fireEvent.change(input, { target: { value: 'Investigations' } })
+  api.groups = [{ name: 'Investigations', session_ids: ['s1'], pinned: false, order: 0 }]
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+  await waitFor(() => expect($sidebarGroupFilter.get()).toBe('Investigations'))
+  expect($cntrlGroupCollapsed.get()).toEqual(['Investigations'])
+
+  // Now test Ungroup all on Investigations
+  await waitFor(() => expect(screen.getByText('Investigations')).toBeTruthy())
+  const investigations = document.querySelector('[data-cntrl-group="Investigations"]') as HTMLElement
+  openTriggerMenu(within(investigations).getByRole('button', { name: 'Group actions: Investigations' }))
+  api.groups = [{ name: 'Investigations', session_ids: [], pinned: false, order: 0 }]
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Ungroup all' }))
+
+  await waitFor(() => expect($sidebarGroupFilter.get()).toBeNull())
+  expect($cntrlGroupCollapsed.get()).toEqual([])
+})
+
+it('excludes a persisted group filter from $sidebarFiltersActive when $cntrlGroupsAvailable is false', () => {
+  setSidebarGroupFilter('Research')
+  $cntrlGroupsAvailable.set(null)
+  expect($sidebarFiltersActive.get()).toBe(true)
+
+  $cntrlGroupsAvailable.set(true)
+  expect($sidebarFiltersActive.get()).toBe(true)
+
+  $cntrlGroupsAvailable.set(false)
+  expect($sidebarFiltersActive.get()).toBe(false)
+
+  // Another active filter still activates $sidebarFiltersActive even when groups plugin is absent
+  $sidebarStatusFilter.set(['working'])
+  expect($sidebarFiltersActive.get()).toBe(true)
+  $sidebarStatusFilter.set([])
+  expect($sidebarFiltersActive.get()).toBe(false)
+})
+
+it('does not show the filter button as active when only a group filter is persisted and the plugin is absent', async () => {
+  api.groups = null
+  setSidebarGroupFilter('Research')
+  mount()
+
+  await waitFor(() => expect($cntrlGroupsAvailable.get()).toBe(false))
+  expect($sidebarFiltersActive.get()).toBe(false)
+
+  const filterBtn = screen.getByRole('button', { name: 'Filters' })
+  expect(filterBtn.classList.contains('bg-(--ui-control-active-background)')).toBe(false)
 })

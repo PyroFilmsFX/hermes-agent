@@ -156,7 +156,13 @@ import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session
 
 import { SidebarSectionAddButton } from './chrome'
 import { CntrlGroupRows } from './cntrl-group-sections'
-import { $cntrlGroups, $cntrlGroupsAvailable, orderedCntrlGroups, refreshCntrlGroups } from './cntrl-groups'
+import {
+  $cntrlGroups,
+  $cntrlGroupsAvailable,
+  CNTRL_GROUP_UNGROUPED,
+  orderedCntrlGroups,
+  refreshCntrlGroups
+} from './cntrl-groups'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
@@ -653,11 +659,11 @@ export function ChatSidebar({
         }
       }
 
-      if (groupFilter === '__ungrouped__' && groupSessionIds.has(session.id)) {
+      if (groupFilter === CNTRL_GROUP_UNGROUPED && groupSessionIds.has(session.id)) {
         return false
       }
 
-      if (groupFilter && groupFilter !== '__ungrouped__') {
+      if (groupFilter && groupFilter !== CNTRL_GROUP_UNGROUPED) {
         const group = cntrlGroups.find(item => item.name === groupFilter)
 
         if (!group?.session_ids.includes(session.id)) {

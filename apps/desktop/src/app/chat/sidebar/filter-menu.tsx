@@ -71,7 +71,7 @@ import { $unreadFinishedSessionIds, markAllSessionsRead } from '@/store/session'
 import type { SessionStatusBucket } from '@/store/session-dot-state'
 import { $sessionsHaveCost } from '@/store/sidebar-archive'
 
-import { $cntrlGroups, $cntrlGroupsAvailable } from './cntrl-groups'
+import { $cntrlGroups, $cntrlGroupsAvailable, CNTRL_GROUP_UNGROUPED } from './cntrl-groups'
 
 interface Option<T extends string = string> {
   /** A status dot's full className, from the row's own vocabulary. */
@@ -309,7 +309,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
                   <DropdownMenuRadioItem onSelect={keepOpen} value="">
                     {f.allGroups}
                   </DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem onSelect={keepOpen} value="__ungrouped__">
+                  <DropdownMenuRadioItem onSelect={keepOpen} value={CNTRL_GROUP_UNGROUPED}>
                     {t.sidebar.gatewayGroups.ungrouped}
                   </DropdownMenuRadioItem>
                   {cntrlGroups.map(group => (

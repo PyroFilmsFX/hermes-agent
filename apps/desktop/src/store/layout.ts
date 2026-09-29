@@ -391,6 +391,11 @@ export const $sidebarGroupFilter = connectionScopedAtom<string | null>(
   Codecs.json<string | null>()
 )
 
+/** Whether the cntrl_groups plugin API answers on this connection: null until
+ *  the first read settles, false when the plugin is disabled or not installed.
+ *  Every Groups affordance (grouping, filter, "Move to group") keys off it. */
+export const $cntrlGroupsAvailable = atom<boolean | null>(null)
+
 // Whether a session's branch has a PR, and in what state. Fetched per repo via
 // `gh` (see store/pull-requests), so this is empty on backends without a local
 // checkout — the menu hides the submenu rather than offering a dead filter.
@@ -419,10 +424,16 @@ export const $sidebarFiltersActive: ReadableAtom<boolean> = computed(
     $sidebarProfileFilter,
     $sidebarPrFilter,
     $sidebarShowArchived,
-    $sidebarGroupFilter
+    $sidebarGroupFilter,
+    $cntrlGroupsAvailable
   ],
-  (statuses, projects, profiles, prs, archived, group) =>
-    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived || group !== null
+  (statuses, projects, profiles, prs, archived, group, groupsAvailable) =>
+    statuses.length > 0 ||
+    projects.length > 0 ||
+    profiles.length > 0 ||
+    prs.length > 0 ||
+    archived ||
+    (group !== null && groupsAvailable !== false)
 )
 
 /** Anything at all moved off the shipped view — what makes a reset worth

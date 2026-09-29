@@ -15,11 +15,12 @@ import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
 import { SidebarGroupRow, SidebarRowLead, SidebarRowLeadGlyph, SidebarRowLink, SidebarRowStack } from './chrome'
 import {
   $cntrlGroupCollapsed,
+  CNTRL_GROUP_UNGROUPED,
   type CntrlGroup,
   refreshCntrlGroups,
   reorderCntrlGroups,
   toggleCntrlGroupCollapsed,
-  untagCntrlGroup,
+  ungroupAllCntrlGroup,
   updateCntrlGroup
 } from './cntrl-groups'
 import { rankSessions } from './order'
@@ -27,7 +28,7 @@ import { SIDEBAR_GROUP_PAGE } from './projects/model'
 import { WorkspaceShowMoreButton } from './projects/workspace-header'
 import { SIDEBAR_LEAD_ICON_SIZE } from './row-geometry'
 
-const UNGROUPED_ID = '__ungrouped__'
+const UNGROUPED_ID = CNTRL_GROUP_UNGROUPED
 
 function GroupHeaderMenu({ group, groups, label }: { group: CntrlGroup; groups: CntrlGroup[]; label: string }) {
   const { t } = useI18n()
@@ -110,15 +111,9 @@ function GroupHeaderMenu({ group, groups, label }: { group: CntrlGroup; groups: 
             onSelect={() => {
               void (async () => {
                 try {
-                  for (const id of group.session_ids) {
-                    await untagCntrlGroup(group.name, id, false)
-                  }
+                  await ungroupAllCntrlGroup(group.name, group.session_ids)
                 } catch (error) {
                   notifyError(error, c.ungroupAll)
-                } finally {
-                  // One authoritative read after the series, success or not, so
-                  // a partial failure never leaves the sidebar showing stale rows.
-                  await refreshCntrlGroups()
                 }
               })()
             }}

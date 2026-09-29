@@ -2,6 +2,13 @@ import { atom } from 'nanostores'
 
 import { pluginRest } from '@/api/plugins'
 import { Codecs, persistentAtom } from '@/lib/persisted'
+import { $cntrlGroupsAvailable, $sidebarGroupFilter, setSidebarGroupFilter } from '@/store/layout'
+
+export { $cntrlGroupsAvailable }
+
+export const CNTRL_GROUP_UNGROUPED = '/ungrouped'
+export const CNTRL_GROUP_UNGROUPED_ID = CNTRL_GROUP_UNGROUPED
+export const UNGROUPED_ID = CNTRL_GROUP_UNGROUPED
 
 export interface CntrlGroup {
   name: string
@@ -11,10 +18,6 @@ export interface CntrlGroup {
 }
 
 export const $cntrlGroups = atom<CntrlGroup[]>([])
-/** Whether the cntrl_groups plugin API answers on this connection: null until
- *  the first read settles, false when the plugin is disabled or not installed.
- *  Every Groups affordance (grouping, filter, "Move to group") keys off it. */
-export const $cntrlGroupsAvailable = atom<boolean | null>(null)
 export const $cntrlGroupCollapsed = persistentAtom(
   'hermes.desktop.sidebar.cntrlGroups.collapsed.v1',
   [],
@@ -56,9 +59,43 @@ export async function untagCntrlGroup(name: string, sessionId: string, refresh =
   }
 }
 
+export function migrateCntrlGroup(oldName: string, newName: string) {
+  if ($sidebarGroupFilter.get() === oldName) {
+    setSidebarGroupFilter(newName)
+  }
+  const current = $cntrlGroupCollapsed.get()
+  if (current.includes(oldName)) {
+    $cntrlGroupCollapsed.set(current.map(item => (item === oldName ? newName : item)))
+  }
+}
+
+export function clearCntrlGroup(name: string) {
+  if ($sidebarGroupFilter.get() === name) {
+    setSidebarGroupFilter(null)
+  }
+  const current = $cntrlGroupCollapsed.get()
+  if (current.includes(name)) {
+    $cntrlGroupCollapsed.set(current.filter(item => item !== name))
+  }
+}
+
 export async function updateCntrlGroup(name: string, patch: { name?: string; order?: number; pinned?: boolean }) {
   await pluginRest('cntrl_groups', `/groups/${encodeURIComponent(name)}`, { method: 'PATCH', body: patch })
+  if (patch.name && patch.name !== name) {
+    migrateCntrlGroup(name, patch.name)
+  }
   await refreshCntrlGroups()
+}
+
+export async function ungroupAllCntrlGroup(name: string, sessionIds: string[]) {
+  try {
+    for (const id of sessionIds) {
+      await untagCntrlGroup(name, id, false)
+    }
+  } finally {
+    clearCntrlGroup(name)
+    await refreshCntrlGroups()
+  }
 }
 
 /** Persist a band's order as 0..n-1 in the given sequence, then read back once. */
