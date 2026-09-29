@@ -23027,6 +23027,31 @@
         "title": "PluginActivation",
         "type": "object"
       },
+      "PluginEventPayload": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/server.py::forward_plugin_event``.",
+        "properties": {
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "plugin",
+          "name"
+        ],
+        "title": "PluginEventPayload",
+        "type": "object"
+      },
       "PluginLiveNow": {
         "additionalProperties": false,
         "properties": {
@@ -41071,6 +41096,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/ChangeSignalPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "plugin.event",
+      "summary": "A backend plugin emitted an event; forwarded to desktop plugins.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PluginEventPayload"
           }
         }
       ]
