@@ -460,7 +460,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
     issuer.dispose()
   })
 
-  test('8. crosslang fixture emission: writes attest_issuer_vector.json', async () => {
+  test('8. crosslang fixture: issued envelope matches the committed vector shape (regen with HERMES_REGEN_VECTORS=1)', async () => {
     const h = harness()
     h.bindingStore.bind({
       profile: 'default',
@@ -519,9 +519,17 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       envelope: content
     }
 
+    // The committed vector is the Python side's golden input: rewrite it only on request
+    // (HERMES_REGEN_VECTORS=1), never as a side effect of a normal test run.
     const targetVectorPath = path.resolve(__dirname, '../../../tests/hermes_owner_grant/fixtures/attest_issuer_vector.json')
-    fs.writeFileSync(targetVectorPath, JSON.stringify(vectorData, null, 2) + '\n', 'utf8')
-    expect(fs.existsSync(targetVectorPath)).toBe(true)
+    if (process.env.HERMES_REGEN_VECTORS === '1') {
+      fs.writeFileSync(targetVectorPath, JSON.stringify(vectorData, null, 2) + '\n', 'utf8')
+    }
+    const committed = JSON.parse(fs.readFileSync(targetVectorPath, 'utf8'))
+    expect(committed.schema).toBe(vectorData.schema)
+    expect(Object.keys(committed).sort()).toEqual(Object.keys(vectorData).sort())
+    expect(Object.keys(committed.envelope).sort()).toEqual(Object.keys(vectorData.envelope).sort())
+    expect(committed.envelope.format).toBe(vectorData.envelope.format)
 
     issuer.dispose()
   })
