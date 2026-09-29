@@ -679,6 +679,12 @@ async function pidIsOurDashboard(
     ' except subprocess.CalledProcessError:\n' +
     '  # pid already gone — a dead process is FOREIGN, not a transport error\n' +
     '  print("FOREIGN");sys.exit(0)\n' +
+    // `ps -o command=` joins argv with spaces and drops quoting, so a path with a space
+    // (a spaced $HOME, "/Applications/Hermes Desktop.app") would split apart. Re-quote the
+    // exact expected paths first; the proof below still compares them verbatim.
+    ' for known in sorted({expected_token,*expected_entries}-{""},key=len,reverse=True):\n' +
+    '  if " " in known:\n' +
+    '   line=line.replace(known,shlex.quote(known))\n' +
     ' args=shlex.split(line)\n' +
     'ok=False\n' +
     'try:\n' +
