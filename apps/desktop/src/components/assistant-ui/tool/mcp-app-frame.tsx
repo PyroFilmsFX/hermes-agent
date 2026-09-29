@@ -110,6 +110,8 @@ export const McpAppFrame: FC<McpAppFrameProps> = ({ appUri, approve, callTool, h
       allow={MCP_APP_PERMISSIONS_POLICY}
       className="block w-full border-0 bg-transparent"
       data-mcp-app={appUri}
+      // Electron main guards sub-frame navigation only for frames with this name.
+      name="hermes-mcp-app"
       onLoad={onLoad}
       ref={frameRef}
       referrerPolicy="no-referrer"
