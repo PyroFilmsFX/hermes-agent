@@ -159,10 +159,13 @@ export function useRepoWorktreeMap(
   // Refetch when a worktree is added/removed so a new lane shows immediately.
   const refreshToken = useStore($worktreeRefreshToken)
 
+  // Keyed on the path SET, not the array: callers rebuild the array on
+  // unrelated renders, and each rerun starts a full per-lane git scan.
   useEffect(() => {
     const git = desktopGit()
+    const paths = key ? key.split('\n') : []
 
-    if (!enabled || !repoPaths.length || !git?.worktreeList) {
+    if (!enabled || !paths.length || !git?.worktreeList) {
       setMap({})
       setLoading(false)
 
@@ -173,7 +176,7 @@ export function useRepoWorktreeMap(
 
     setLoading(true)
     // Bounded so a many-repo project doesn't spawn a `git` process per repo at once.
-    void mapPool(repoPaths, WORKTREE_PROBE_CONCURRENCY, async repoPath => {
+    void mapPool(paths, WORKTREE_PROBE_CONCURRENCY, async repoPath => {
       try {
         return [repoPath, await git.worktreeList(repoPath)] as const
       } catch {
@@ -186,7 +189,7 @@ export function useRepoWorktreeMap(
     return () => {
       cancelled = true
     }
-  }, [enabled, key, repoPaths, refreshToken])
+  }, [enabled, key, refreshToken])
 
   return [map, loading]
 }

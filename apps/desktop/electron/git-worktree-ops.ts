@@ -198,6 +198,29 @@ async function listWorktreeRecords(resolved, gitBin) {
 //  - `clean`: `git status --porcelain` is empty; null when it could not run.
 // `merged` stays the boolean the "merged" badge reads (either proof).
 // Every probe fails toward "not merged" / "unknown", never toward done.
+// A merge proof depends only on the lane's head and the trunk tips, so it is
+// cached on exactly those shas and never goes stale. Bounded so a long-lived
+// app with many lanes cannot grow it without limit.
+const MERGE_PROOF_CACHE_MAX = 4096
+const mergeProofCache = new Map()
+
+function rememberMergeProof(key, value) {
+  if (mergeProofCache.size >= MERGE_PROOF_CACHE_MAX) {
+    mergeProofCache.delete(mergeProofCache.keys().next().value)
+  }
+
+  mergeProofCache.set(key, value)
+}
+
+// One listing per repo at a time. The sidebar asks again on every re-probe
+// (turn settle, focus, project change); without this, overlapping calls each
+// start a full per-lane scan and a many-lane repo spawns hundreds of `git`
+// processes at once. A caller that arrives while a scan runs shares it, and a
+// finished result is reused for a short window.
+const LISTING_REUSE_MS = 5000
+const listingInflight = new Map()
+const listingRecent = new Map()
+
 async function listWorktrees(repoPath, gitBin) {
   let resolved
 
@@ -207,6 +230,36 @@ async function listWorktrees(repoPath, gitBin) {
     return []
   }
 
+  const recent = listingRecent.get(resolved)
+
+  if (recent && Date.now() - recent.at < LISTING_REUSE_MS) {
+    return recent.value
+  }
+
+  const running = listingInflight.get(resolved)
+
+  if (running) {
+    return running
+  }
+
+  // Only the scan still registered may publish or unregister: one that was
+  // forgotten mid-flight (a lane was added or removed) must not overwrite the
+  // fresher state with what it saw before the change.
+  const scan = scanWorktrees(resolved, gitBin).then(value => {
+    if (listingInflight.get(resolved) === scan) {
+      listingInflight.delete(resolved)
+      listingRecent.set(resolved, { at: Date.now(), value })
+    }
+
+    return value
+  })
+
+  listingInflight.set(resolved, scan)
+
+  return scan
+}
+
+async function scanWorktrees(resolved, gitBin) {
   try {
     const out = await runGit(gitBin, ['worktree', 'list', '--porcelain'], resolved)
     const trees = parseWorktrees(out)
@@ -226,12 +279,22 @@ async function listWorktrees(repoPath, gitBin) {
       if (ancestorMerged.has(tree.branch)) {
         mergedVia = 'merged-ancestor'
       } else {
-        // Only lanes git did not already prove merged pay for `git cherry`.
-        for (const { sha } of trunkRefs) {
-          if (await cherryMerged(gitBin, resolved, tree.branch, tree.head, sha)) {
-            mergedVia = 'merged-squash'
+        const proofKey = [resolved, tree.branch, tree.head, ...trunkRefs.map(ref => ref.sha)].join('\0')
 
-            break
+        if (tree.head && mergeProofCache.has(proofKey)) {
+          mergedVia = mergeProofCache.get(proofKey)
+        } else {
+          // Only lanes git did not already prove merged pay for `git cherry`.
+          for (const { sha } of trunkRefs) {
+            if (await cherryMerged(gitBin, resolved, tree.branch, tree.head, sha)) {
+              mergedVia = 'merged-squash'
+
+              break
+            }
+          }
+
+          if (tree.head) {
+            rememberMergeProof(proofKey, mergedVia)
           }
         }
       }
@@ -706,14 +769,38 @@ async function listBaseBranches(repoPath, gitBin) {
   }
 }
 
+// Adding or removing a lane changes the listing, so a reused or in-flight
+// scan from before the change must not answer the next ask. Cleared after the
+// change lands, so a scan that raced it is not reused either.
+function forgetWorktreeListings() {
+  listingRecent.clear()
+  listingInflight.clear()
+}
+
+async function addWorktreeAndForget(repoPath, options, gitBin) {
+  try {
+    return await addWorktree(repoPath, options, gitBin)
+  } finally {
+    forgetWorktreeListings()
+  }
+}
+
+async function removeWorktreeAndForget(repoPath, worktreePath, options, gitBin) {
+  try {
+    return await removeWorktree(repoPath, worktreePath, options, gitBin)
+  } finally {
+    forgetWorktreeListings()
+  }
+}
+
 export {
-  addWorktree,
+  addWorktreeAndForget as addWorktree,
   ensureGitRepo,
   listBaseBranches,
   listBranches,
   listWorktrees,
   parseWorktrees,
-  removeWorktree,
+  removeWorktreeAndForget as removeWorktree,
   sanitizeBranch,
   switchBranch
 }

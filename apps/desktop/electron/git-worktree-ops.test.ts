@@ -733,3 +733,74 @@ test('switchBranch: repo dir still validates the branch name and switches', asyn
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// A `git` stand-in that logs each invocation, so a test can count how many git
+// processes a listing really spawned.
+function countingGit(dir) {
+  const log = path.join(dir, '.git-calls.log')
+  const bin = path.join(dir, 'counting-git.sh')
+  const realGit = execFileSync('which', ['git']).toString().trim()
+
+  fs.writeFileSync(bin, `#!/bin/sh\necho "$*" >> "${log}"\nexec "${realGit}" "$@"\n`, { mode: 0o755 })
+
+  return {
+    bin,
+    calls: (needle) => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(line => line.includes(needle)).length : 0)
+  }
+}
+
+function repoWithLane(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const repo = path.join(dir, 'repo')
+  fs.mkdirSync(repo)
+  const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' }).toString().trim()
+
+  git('init', '-b', 'main')
+  git('config', 'user.name', 'Hermes Test')
+  git('config', 'user.email', 'hermes@example.test')
+  fs.writeFileSync(path.join(repo, 'README'), 'root\n')
+  git('add', 'README')
+  git('commit', '-m', 'root')
+  git('worktree', 'add', '-b', 'feature/lane', path.join(dir, 'lane-wt'))
+  git('branch', 'feature/next')
+
+  return { dir, repo }
+}
+
+test('listWorktrees: overlapping calls for one repo share a single scan', async () => {
+  const { dir, repo } = repoWithLane('hermes-worktrees-singleflight-')
+  const git = countingGit(dir)
+
+  try {
+    const results = await Promise.all(Array.from({ length: 10 }, () => listWorktrees(repo, git.bin)))
+
+    assert.equal(git.calls('worktree list'), 1)
+    assert.equal(git.calls(' status '), 1)
+
+    for (const result of results) {
+      assert.deepEqual(result, results[0])
+    }
+
+    // A call inside the reuse window is answered without spawning git again.
+    await listWorktrees(repo, git.bin)
+    assert.equal(git.calls('worktree list'), 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees: a lane added through addWorktree shows at once, not after the reuse window', async () => {
+  const { dir, repo } = repoWithLane('hermes-worktrees-forget-')
+
+  try {
+    const before = await listWorktrees(repo, 'git')
+    assert.equal(before.some(tree => tree.branch === 'feature/next'), false)
+
+    await addWorktree(repo, { existingBranch: 'feature/next' }, 'git')
+
+    const after = await listWorktrees(repo, 'git')
+    assert.equal(after.some(tree => tree.branch === 'feature/next'), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
