@@ -44,6 +44,11 @@ export interface LaunchFeedEntry {
   hermes_lineage?: string[]
   recorded_at?: number
   backend?: string
+  /** Where the planned Claude sid came from (backend launch table, b10 fix B). */
+  sid_origin?: 'fresh' | 'resumed' | 'unknown'
+  /** false only for a fresh sid, or a resumed sid with a prior active-kid attestation. Main attests
+   *  a launch ONLY when this is exactly `false`; missing or non-boolean = unverified (skip). */
+  resumed_unverified?: boolean
 }
 
 export interface LaunchAttestationPayload {
@@ -332,7 +337,10 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
       launch_seq: launchSeq,
       hermes_lineage: lineage,
       recorded_at: typeof rec.recorded_at === 'number' ? rec.recorded_at : undefined,
-      backend: typeof rec.backend === 'string' ? rec.backend : undefined
+      backend: typeof rec.backend === 'string' ? rec.backend : undefined,
+      sid_origin: rec.sid_origin === 'fresh' || rec.sid_origin === 'resumed' ? rec.sid_origin : 'unknown',
+      // Strict: anything but the boolean false (missing, true, "false", 0) is unverified.
+      resumed_unverified: rec.resumed_unverified !== false
     }
   }
 
@@ -365,6 +373,29 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
       return deps.backend
     }
     return 'spawn-1'
+  }
+
+  function mayAttest(entry: LaunchFeedEntry): boolean {
+    return entry.resumed_unverified === false
+  }
+
+  /** Stop tracking a launch: no refresh, and any in-flight refresh for it is discarded. */
+  function dropLaunch(claudeSessionId: string, why: string): void {
+    const record = liveLaunches.get(claudeSessionId)
+
+    if (!record) {
+      return
+    }
+
+    record.generation += 1
+
+    if (record.refreshTimer) {
+      clearTimeoutFn(record.refreshTimer)
+      record.refreshTimer = undefined
+    }
+
+    liveLaunches.delete(claudeSessionId)
+    deps.log?.(`[session-binding-issuer] ${why}: ${claudeSessionId}`)
   }
 
   function isBoundVerified(binding: SessionBindingRecord | null | undefined): binding is SessionBindingRecord {
@@ -435,6 +466,13 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
    * is stale and drops its work. `forceNull` signs the explicit revocation (null binding fields).
    */
   function issueAttestation(entry: LaunchFeedEntry, issuedAt: number, options: { forceNull?: boolean } = {}): boolean {
+    // b10 fix B: a resumed Claude sid came from agent-writable state; attest only a launch the
+    // backend verified (resumed_unverified exactly false). Never sign, never re-arm otherwise.
+    if (!mayAttest(entry)) {
+      deps.log?.(`[session-binding-issuer] not attesting unverified launch: ${entry.claude_session_id}`)
+      return false
+    }
+
     const existing = liveLaunches.get(entry.claude_session_id)
     const generation = (existing?.generation ?? 0) + 1
 
@@ -582,6 +620,11 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
         return
       }
 
+      if (!mayAttest(active)) {
+        dropLaunch(claudeSessionId, 'stopped refresh, launch is resumed_unverified')
+        return
+      }
+
       // The feed's own view wins over the cached launch (e.g. /compress moved it to a child id).
       if (active.launch_seq >= record.launch.launch_seq) {
         launch = active
@@ -619,6 +662,12 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
     const entry = validateFeedEntry(raw)
     if (!entry) {
       deps.log?.('[session-binding-issuer] skipping malformed launch entry')
+      return
+    }
+
+    if (!mayAttest(entry)) {
+      // Also stop refreshing an earlier attestation for this Claude sid.
+      dropLaunch(entry.claude_session_id, 'skipping resumed_unverified launch')
       return
     }
 

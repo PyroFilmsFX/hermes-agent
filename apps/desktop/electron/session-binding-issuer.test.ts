@@ -93,7 +93,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_1',
       claude_session_id: 'cs_1',
       profile: 'default',
-      launch_seq: 1,
+      launch_seq: 1, resumed_unverified: false,
       hermes_lineage: ['parent_0']
     }
 
@@ -168,7 +168,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_unbound',
       claude_session_id: 'cs_unbound',
       profile: 'default',
-      launch_seq: 2
+      launch_seq: 2, resumed_unverified: false
     }
 
     const fakeFetch = vi.fn(async () => ({ seq: 2, launches: [launch] }))
@@ -221,7 +221,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_refresh',
       claude_session_id: 'cs_refresh',
       profile: 'default',
-      launch_seq: 1
+      launch_seq: 1, resumed_unverified: false
     }
 
     let activeInFeed = true
@@ -290,7 +290,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_revoke',
       claude_session_id: 'cs_revoke',
       profile: 'default',
-      launch_seq: 1
+      launch_seq: 1, resumed_unverified: false
     }
 
     const fakeFetch = vi.fn(async () => ({ seq: 1, launches: [launch] }))
@@ -346,7 +346,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_live',
       claude_session_id: 'cs_live',
       profile: 'default',
-      launch_seq: 1
+      launch_seq: 1, resumed_unverified: false
     }
 
     const fakeFetch = vi.fn(async () => ({ seq: 1, launches: [launch] }))
@@ -436,7 +436,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: 'hs_unanchored',
       claude_session_id: 'cs_unanchored',
       profile: 'default',
-      launch_seq: 1
+      launch_seq: 1, resumed_unverified: false
     }
 
     const fakeFetch = vi.fn(async () => ({ seq: 1, launches: [launch] }))
@@ -474,7 +474,7 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
       hermes_session_id: '20260929_issuer_session',
       claude_session_id: 'claude_session_crosslang_1',
       profile: 'default',
-      launch_seq: 1,
+      launch_seq: 1, resumed_unverified: false,
       hermes_lineage: ['parent_lineage_0']
     }
 
@@ -584,7 +584,7 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
 
   test('3a. binding an already-running unbound session re-issues its attestation at once (onBindingChanged)', async () => {
     const h = harness()
-    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_late', claude_session_id: 'cs_late', profile: 'default', launch_seq: 1 }
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_late', claude_session_id: 'cs_late', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const timers = manualTimers()
     const issuer = createSessionAttestationIssuer({
       bindingStore: h.bindingStore,
@@ -614,7 +614,7 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
 
   test('3b. a refresh derives the binding from the current store, even for a launch cached as unbound', async () => {
     const h = harness()
-    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_rf', claude_session_id: 'cs_rf', profile: 'default', launch_seq: 1 }
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_rf', claude_session_id: 'cs_rf', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const timers = manualTimers()
     const issuer = createSessionAttestationIssuer({
       bindingStore: h.bindingStore,
@@ -642,7 +642,7 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
   test('3c. a re-bind moves the live attestation to the new project immediately', async () => {
     const h = harness()
     h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_mv', project_root: '/abs/old', repo_common_root: '/abs/old' })
-    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_mv', claude_session_id: 'cs_mv', profile: 'default', launch_seq: 1 }
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_mv', claude_session_id: 'cs_mv', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const timers = manualTimers()
     const issuer = createSessionAttestationIssuer({
       bindingStore: h.bindingStore,
@@ -680,7 +680,7 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
       hermes_session_id: 'hs_child',
       claude_session_id: 'cs_compress',
       profile: 'default',
-      launch_seq: 2,
+      launch_seq: 2, resumed_unverified: false,
       hermes_lineage: ['hs_root', 'hs_parent']
     }
     const timers = manualTimers()
@@ -728,21 +728,21 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
       hermes_session_id: 'hs_c',
       claude_session_id: 'cs_explicit',
       profile: 'default',
-      launch_seq: 1,
+      launch_seq: 1, resumed_unverified: false,
       hermes_lineage: ['hs_p']
     }
     const walk: LaunchFeedEntry = {
       hermes_session_id: 'hs_leaf2',
       claude_session_id: 'cs_walk',
       profile: 'default',
-      launch_seq: 1,
+      launch_seq: 1, resumed_unverified: false,
       hermes_lineage: ['hs_root2', 'hs_mid2']
     }
     const otherProfile: LaunchFeedEntry = {
       hermes_session_id: 'hs_leaf3',
       claude_session_id: 'cs_other_profile',
       profile: 'work',
-      launch_seq: 1,
+      launch_seq: 1, resumed_unverified: false,
       hermes_lineage: ['hs_p']
     }
     const timers = manualTimers()
@@ -768,7 +768,7 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
   test('5a. a refresh in flight across an unbind + revoke cannot re-sign the old binding', async () => {
     const h = harness()
     h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_race', project_root: '/abs/race', repo_common_root: '/abs/race' })
-    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_race', claude_session_id: 'cs_race', profile: 'default', launch_seq: 1 }
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_race', claude_session_id: 'cs_race', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const timers = manualTimers()
     let gate: ReturnType<typeof deferred<{ seq: number; launches: unknown[] }>> | null = null
     const issuer = createSessionAttestationIssuer({
@@ -810,12 +810,12 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
   test('5b. a refresh in flight across a compression update cannot overwrite the child with the parent identity', async () => {
     const h = harness()
     h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_old', project_root: '/abs/cmp', repo_common_root: '/abs/cmp' })
-    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_old', claude_session_id: 'cs_cmp', profile: 'default', launch_seq: 1 }
+    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_old', claude_session_id: 'cs_cmp', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const childLaunch: LaunchFeedEntry = {
       hermes_session_id: 'hs_new',
       claude_session_id: 'cs_cmp',
       profile: 'default',
-      launch_seq: 2,
+      launch_seq: 2, resumed_unverified: false,
       hermes_lineage: ['hs_old']
     }
     const timers = manualTimers()
@@ -859,12 +859,12 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
   test('5c. a refresh re-signs from the feed view: a compression seen only in the snapshot moves to the child', async () => {
     const h = harness()
     h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_snap_old', project_root: '/abs/snap', repo_common_root: '/abs/snap' })
-    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_snap_old', claude_session_id: 'cs_snap', profile: 'default', launch_seq: 1 }
+    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_snap_old', claude_session_id: 'cs_snap', profile: 'default', launch_seq: 1, resumed_unverified: false }
     const childLaunch: LaunchFeedEntry = {
       hermes_session_id: 'hs_snap_new',
       claude_session_id: 'cs_snap',
       profile: 'default',
-      launch_seq: 2,
+      launch_seq: 2, resumed_unverified: false,
       hermes_lineage: ['hs_snap_old']
     }
     const timers = manualTimers()
@@ -888,6 +888,83 @@ describe('session-binding-issuer: b10 review — binding changes, compression an
     const p = newest(h.grantsDir, 'cs_snap')
     expect(p.hermes_session_id).toBe('hs_snap_new')
     expect(p.project_root).toBe('/abs/snap')
+    issuer.dispose()
+  })
+})
+
+describe('session-binding-issuer: b10 fix B — attest only launches with resumed_unverified === false', () => {
+  function attestCount(grantsDir: string, cid: string): number {
+    const dir = path.join(grantsDir, 'session-attest', cid)
+    return fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.json')).length : 0
+  }
+
+  function gateHarness(launches: unknown[]) {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_gate', project_root: '/abs/gate', repo_common_root: '/abs/gate' })
+    const pending: Array<() => void> = []
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches })),
+      now: h.now,
+      setTimeout: ((fn: () => void) => {
+        pending.push(fn)
+        return pending.length
+      }) as unknown as typeof setTimeout,
+      clearTimeout: (() => undefined) as unknown as typeof clearTimeout
+    })
+    return { h, issuer }
+  }
+
+  const base = { hermes_session_id: 'hs_gate', profile: 'default', launch_seq: 1 }
+
+  test('resumed_unverified: false signs (fresh, or resumed with a verified prior attestation)', async () => {
+    const { h, issuer } = gateHarness([
+      { ...base, claude_session_id: 'cs_fresh', sid_origin: 'fresh', resumed_unverified: false },
+      { ...base, claude_session_id: 'cs_resumed_ok', sid_origin: 'resumed', resumed_unverified: false }
+    ])
+    await issuer.pollOnce()
+    expect(attestCount(h.grantsDir, 'cs_fresh')).toBe(1)
+    expect(attestCount(h.grantsDir, 'cs_resumed_ok')).toBe(1)
+    expect(issuer.isAttestationLive('default', 'hs_gate')).toBe(true)
+    issuer.dispose()
+  })
+
+  test('resumed_unverified true, missing, or non-boolean never signs', async () => {
+    const { h, issuer } = gateHarness([
+      { ...base, claude_session_id: 'cs_true', sid_origin: 'resumed', resumed_unverified: true },
+      { ...base, claude_session_id: 'cs_missing', sid_origin: 'fresh' },
+      { ...base, claude_session_id: 'cs_string', sid_origin: 'fresh', resumed_unverified: 'false' },
+      { ...base, claude_session_id: 'cs_zero', sid_origin: 'fresh', resumed_unverified: 0 },
+      { ...base, claude_session_id: 'cs_null', sid_origin: 'fresh', resumed_unverified: null }
+    ])
+    await issuer.pollOnce()
+    for (const cid of ['cs_true', 'cs_missing', 'cs_string', 'cs_zero', 'cs_null']) {
+      expect(attestCount(h.grantsDir, cid)).toBe(0)
+      expect(issuer.getLiveLaunches().has(cid)).toBe(false)
+    }
+    expect(issuer.isAttestationLive('default', 'hs_gate')).toBe(false)
+
+    // A binding change can't sneak one in either.
+    await issuer.onBindingChanged('default', 'hs_gate')
+    await issuer.revoke('default', 'hs_gate')
+    expect(attestCount(h.grantsDir, 'cs_true')).toBe(0)
+    issuer.dispose()
+  })
+
+  test('a Claude sid that later shows up unverified stops being attested and refreshed', async () => {
+    const launches: unknown[] = [{ ...base, claude_session_id: 'cs_flip', resumed_unverified: false }]
+    const { h, issuer } = gateHarness(launches)
+    await issuer.pollOnce()
+    expect(attestCount(h.grantsDir, 'cs_flip')).toBe(1)
+
+    launches[0] = { ...base, claude_session_id: 'cs_flip', launch_seq: 2, sid_origin: 'resumed', resumed_unverified: true }
+    h.advanceTime(1000)
+    await issuer.pollOnce()
+    expect(attestCount(h.grantsDir, 'cs_flip')).toBe(1)
+    expect(issuer.getLiveLaunches().has('cs_flip')).toBe(false)
     issuer.dispose()
   })
 })
