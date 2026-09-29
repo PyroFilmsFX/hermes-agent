@@ -69,3 +69,43 @@ def test_auto_archive_uses_the_swept_profiles_own_retention_config(two_profile_h
 
     assert _archived(home_b / "state.db"), (
         "profile b's store was swept with another profile's sessions.auto_archive_days")
+
+
+def test_lane_only_sweep_on_a_read_poll_never_opens_the_store_writable_when_nothing_is_due(tmp_path, monkeypatch):
+    """GET session-list polls trigger the opportunistic sweep: with only the lane sweep on and no lane due,
+    the store is probed read-only and never opened writable (a writable open writes/checkpoints the WAL)."""
+    import time as _time
+
+    from hermes_state import SessionDB
+
+    home = tmp_path / "p"
+    home.mkdir()
+    (home / "config.yaml").write_text("sessions:\n  auto_archive: false\n  auto_archive_lanes: true\n", encoding="utf-8")
+    db = SessionDB(db_path=home / "state.db")
+    db.create_session("not-a-lane", "cli", cwd="/Users/me/code/app")
+    db.close()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(wss, "_session_db_path_for_profile", lambda profile: home / "state.db")
+    monkeypatch.setattr(wss, "_last_auto_archive_check", {})
+    opened = []
+    real_open = wss._open_session_db_for_profile
+    monkeypatch.setattr(wss, "_open_session_db_for_profile",
+                        lambda profile, *, read_only: opened.append(read_only) or real_open(profile, read_only=read_only))
+
+    wss._maybe_auto_archive_for_profile(None)
+    assert opened == [True]
+
+    # A lane that is due: the sweep opens writable and archives it.
+    db = SessionDB(db_path=home / "state.db")
+    db.create_session("lane", "cli", cwd="/tmp/lane-x")
+    db._write_sql("UPDATE sessions SET ended_at = ?, end_reason = 'normal' WHERE id = 'lane'", (_time.time() - 8 * 3600,))
+    db.close()
+    monkeypatch.setattr(wss, "_last_auto_archive_check", {})
+    opened.clear()
+    wss._maybe_auto_archive_for_profile(None)
+    assert opened == [True, False]
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        assert (db.get_session("lane") or {}).get("archived")
+    finally:
+        db.close()
