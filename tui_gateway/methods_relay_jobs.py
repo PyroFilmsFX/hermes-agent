@@ -34,7 +34,26 @@ def _parse_job_time(value) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _list_relay_jobs(session_cwd: str, *, now: datetime | None = None) -> list[dict]:
+_PUBLIC_JOB_KEYS = frozenset({
+    "job_id",
+    "worker",
+    "model",
+    "model_resolved",
+    "lane",
+    "role",
+    "status",
+    "spawned_at",
+    "heartbeat_at",
+    "duration_sec",
+})
+
+
+def _list_relay_jobs(
+    session_cwd: str,
+    *,
+    now: datetime | None = None,
+    internal: bool = False,
+) -> list[dict]:
     """Read only ``w_*.json`` records from the session workspace's job store."""
     import os
     import stat
@@ -131,7 +150,7 @@ def _list_relay_jobs(session_cwd: str, *, now: datetime | None = None) -> list[d
                 duration = float(record["duration_sec"]) if record.get("duration_sec") is not None else None
             except (TypeError, ValueError):
                 duration = None
-            rows.append((spawned_at, {
+            job_row = {
                 "job_id": job_id,
                 "worker": str(record.get("worker") or ""),
                 "model": str(record.get("model") or ""),
@@ -142,7 +161,24 @@ def _list_relay_jobs(session_cwd: str, *, now: datetime | None = None) -> list[d
                 "spawned_at": record["spawned_at"],
                 "heartbeat_at": str(record.get("heartbeat_at") or ""),
                 "duration_sec": duration,
-            }))
+            }
+            if internal:
+                job_row["served_seat"] = (
+                    str(record["served_seat"]) if record.get("served_seat") is not None else None
+                )
+                job_row["fallback_from"] = (
+                    str(record["fallback_from"]) if record.get("fallback_from") is not None else None
+                )
+                job_row["build_run_id"] = (
+                    str(record["build_run_id"]) if record.get("build_run_id") is not None else None
+                )
+                try:
+                    hb_epoch = float(record.get("heartbeat_epoch"))
+                except (TypeError, ValueError):
+                    hb_epoch = None
+                job_row["heartbeat_epoch"] = hb_epoch
+
+            rows.append((spawned_at, job_row))
             if len(rows) >= _RELAY_JOB_LIMIT:
                 break
     finally:
@@ -150,6 +186,11 @@ def _list_relay_jobs(session_cwd: str, *, now: datetime | None = None) -> list[d
 
     rows.sort(key=lambda item: item[0], reverse=True)
     return [row for _, row in rows[:_RELAY_JOB_LIMIT]]
+
+
+def _list_relay_jobs_internal(session_cwd: str, *, now: datetime | None = None) -> list[dict]:
+    """Read recent relay worker jobs exposing internal fields (served_seat, fallback_from, build_run_id)."""
+    return _list_relay_jobs(session_cwd, now=now, internal=True)
 
 
 @method("relay_jobs.list")

@@ -11,8 +11,8 @@ import stat
 import tempfile
 import time
 import unicodedata
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -859,4 +859,371 @@ def read_build_status(
 
     _STATUS_HIGH_WATER[hw_key] = (seq if seq is not None else 0, result_read)
     return result_read
+
+
+@dataclass
+class DerivedStatus:
+    """Status fields filled from status record when present/fresh, else derived fallbacks."""
+
+    phase: str | None = None
+    progress: dict[str, Any] | None = None
+    estimate: dict[str, Any] | None = None
+    gates: list[dict[str, Any]] = field(default_factory=list)
+    seats: dict[str, Any] = field(default_factory=dict)
+    other_names: list[str] = field(default_factory=list)
+    refusals: list[dict[str, Any]] = field(default_factory=list)
+    lanes: dict[str, Any] | None = None
+    ci: list[dict[str, Any]] = field(default_factory=list)
+    owner_blockers: list[dict[str, Any]] = field(default_factory=list)
+    last_activity: dict[str, Any] | None = None
+    last_activity_at: float | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
+    field_sources: dict[str, str] = field(default_factory=dict)
+    stale: bool = False
+    status: StatusRead | None = None
+    record: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.provenance and not self.field_sources:
+            object.__setattr__(self, "field_sources", dict(self.provenance))
+        elif self.field_sources and not self.provenance:
+            object.__setattr__(self, "provenance", dict(self.field_sources))
+        if self.record is not None and self.status is None:
+            object.__setattr__(self, "status", StatusRead(present=True, valid=True, record=self.record))
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    @property
+    def waves(self) -> dict[str, Any] | None:
+        if isinstance(self.progress, dict):
+            return self.progress.get("waves")
+        return None
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.owner_blockers)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "progress": self.progress,
+            "estimate": self.estimate,
+            "gates": self.gates,
+            "seats": self.seats,
+            "other_names": self.other_names,
+            "refusals": self.refusals,
+            "lanes": self.lanes,
+            "ci": self.ci,
+            "owner_blockers": self.owner_blockers,
+            "last_activity": self.last_activity,
+            "last_activity_at": self.last_activity_at,
+            "provenance": dict(self.provenance),
+            "field_sources": dict(self.field_sources),
+            "stale": self.stale,
+        }
+
+
+def derive_row_status(
+    marker: dict[str, Any],
+    status: StatusRead | None,
+    jobs: list[dict[str, Any]],
+    now: float,
+) -> DerivedStatus:
+    """Fill each status field from status record when present and fresh, else fallback."""
+    now_ts = float(now)
+
+    status_record: dict[str, Any] | None = None
+    is_stale = False
+    has_status = False
+
+    if isinstance(status, StatusRead):
+        if status.valid and isinstance(status.record, dict):
+            status_record = status.record
+            is_stale = status.stale or not status.fresh
+            has_status = True
+    elif isinstance(status, dict):
+        if "record" in status and isinstance(status.get("record"), dict):
+            if status.get("valid", True):
+                status_record = status["record"]
+                is_stale = bool(status.get("stale", False) or not status.get("fresh", True))
+                has_status = True
+        elif status.get("schema") == "tb-build-status/v1":
+            status_record = status
+            is_stale = False
+            has_status = True
+
+    # Filter jobs by build_run_id match (K3: job.build_run_id == marker.build_run_id or marker.run_id)
+    target_run_id = marker.get("build_run_id") or marker.get("run_id")
+    target_run_id_str = str(target_run_id) if target_run_id is not None and str(target_run_id) else None
+
+    matched_jobs: list[dict[str, Any]] = []
+    if target_run_id_str is not None:
+        for job in jobs:
+            if isinstance(job, dict):
+                job_brid = job.get("build_run_id")
+                if job_brid is not None and str(job_brid) == target_run_id_str:
+                    matched_jobs.append(job)
+
+    # 1. Gates fallback from marker waits[]
+    fallback_gates: list[dict[str, Any]] = []
+    marker_waits = marker.get("waits")
+    if isinstance(marker_waits, list):
+        for idx, w in enumerate(marker_waits):
+            if isinstance(w, dict):
+                k = w.get("kind")
+                kind_val = k if k in {"ci", "owner", "relaunch", "review", "external", "date"} else "other"
+                lbl = _clean_free_text(w.get("label") or w.get("what"), 120)
+                st_val = w.get("state")
+                state_val = st_val if st_val in {"waiting", "passed", "failed", "cancelled"} else "waiting"
+                waiter_val = w.get("waiter") if isinstance(w.get("waiter"), bool) else None
+                fallback_gates.append({
+                    "id": _clean_str(w.get("id"), 64) or f"g-{idx + 1}",
+                    "kind": kind_val,
+                    "label": lbl,
+                    "since": _clean_str(w.get("since") or w.get("at"), 64),
+                    "due": _clean_str(w.get("due"), 64),
+                    "ref": _clean_str(w.get("ref") or w.get("ci_ref"), 64),
+                    "state": state_val,
+                    "waiter": waiter_val,
+                })
+        fallback_gates = fallback_gates[:16]
+    elif marker.get("waiting_on") and marker.get("blocked") is not True:
+        lbl = _clean_free_text(marker.get("waiting_on"), 120)
+        fallback_gates.append({
+            "id": "g-1",
+            "kind": "other",
+            "label": lbl,
+            "since": _clean_str(marker.get("wait_since"), 64),
+            "due": None,
+            "ref": None,
+            "state": "waiting",
+            "waiter": None,
+        })
+
+    # 2. Seats and lanes fallback from matched relay jobs
+    standard_seats = ("agy", "muse", "codex", "sonnet", "opus", "other")
+    fallback_seats: dict[str, dict[str, int]] = {
+        s: {
+            "spawned": 0,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "refused": 0,
+            "refused_min": 0,
+        }
+        for s in standard_seats
+    }
+    fallback_other_names: list[str] = []
+    seen_other_names: set[str] = set()
+
+    for job in matched_jobs:
+        raw_seat = job.get("served_seat") or job.get("worker")
+        if isinstance(raw_seat, str) and raw_seat:
+            clean_s = raw_seat.lower().strip()
+            if clean_s == "gemini":
+                seat_key = "agy"
+            elif clean_s in standard_seats:
+                seat_key = clean_s
+            else:
+                seat_key = "other"
+                if clean_s not in seen_other_names and len(fallback_other_names) < 8:
+                    fallback_other_names.append(clean_s)
+                    seen_other_names.add(clean_s)
+        else:
+            seat_key = "other"
+
+        fallback_seats[seat_key]["spawned"] += 1
+        st = job.get("status")
+        if st == "running":
+            fallback_seats[seat_key]["running"] += 1
+        elif st == "succeeded":
+            fallback_seats[seat_key]["succeeded"] += 1
+        elif st == "failed":
+            fallback_seats[seat_key]["failed"] += 1
+
+    running_lanes = sum(1 for j in matched_jobs if j.get("status") == "running")
+    stale_lanes = sum(1 for j in matched_jobs if j.get("status") == "stale")
+    job_ids = [_clean_str(j.get("job_id"), 64) for j in matched_jobs if j.get("job_id")][:12]
+    fallback_lanes = {
+        "running": running_lanes,
+        "stale": stale_lanes,
+        "cap": None,
+        "job_ids": [jid for jid in job_ids if jid is not None],
+    }
+
+    # 3. Owner blockers fallback from marker blocked / blocked_reason
+    fallback_owner_blockers: list[dict[str, Any]] = []
+    is_blocked = marker.get("blocked") is True or bool(marker.get("blocked_reason"))
+    if is_blocked:
+        raw_label = marker.get("blocked_reason") or marker.get("waiting_on") or "Blocked"
+        lbl = _clean_free_text(raw_label, 120) or "Blocked"
+        fallback_owner_blockers.append({
+            "id": _clean_str(marker.get("blocked_id"), 64) or "ob-1",
+            "action": "do",
+            "label": lbl,
+            "since": _clean_str(marker.get("blocked_at") or marker.get("wait_since") or marker.get("armed_at"), 64),
+            "ref": None,
+        })
+
+    # 4. Progress fallback from marker waves_total / waves_done
+    total_val = marker.get("waves_total")
+    try:
+        waves_done_val = max(0, int(marker.get("waves_done", 0)))
+    except (TypeError, ValueError):
+        waves_done_val = 0
+
+    valid_tot = isinstance(total_val, (int, float)) and not isinstance(total_val, bool) and total_val > 0
+    if isinstance(total_val, float):
+        valid_tot = valid_tot and math.isfinite(total_val) and total_val.is_integer()
+
+    if valid_tot:
+        waves_tot_int = int(total_val)
+        current_w_idx = min(waves_done_val + 1, waves_tot_int)
+    else:
+        waves_tot_int = None
+        current_w_idx = None
+
+    stage_title = _clean_free_text(marker.get("wave_stage"), 80)
+    current_u_list = [{"id": None, "title": stage_title, "seat": None, "since": None}] if stage_title else []
+
+    fallback_progress = {
+        "waves": {"done": waves_done_val, "total": waves_tot_int} if valid_tot else None,
+        "units": None,
+        "current_wave": {
+            "index": current_w_idx,
+            "id": f"W{current_w_idx}" if current_w_idx is not None else None,
+            "title": None,
+        } if current_w_idx is not None else None,
+        "current_units": current_u_list,
+        "remaining_waves": [],
+    }
+
+    # 5. Last activity fallback: max of marker mtime, newest job update, status written_at
+    timestamps: list[float] = []
+
+    m_mtime = marker.get("mtime") if isinstance(marker.get("mtime"), (int, float)) else marker.get("_mtime")
+    if isinstance(m_mtime, (int, float)) and math.isfinite(m_mtime):
+        timestamps.append(float(m_mtime))
+    else:
+        armed_str = marker.get("armed_at")
+        if isinstance(armed_str, str):
+            try:
+                timestamps.append(datetime.fromisoformat(armed_str.replace("Z", "+00:00")).timestamp())
+            except (ValueError, OSError):
+                pass
+
+    for j in matched_jobs:
+        hb_ep = j.get("heartbeat_epoch")
+        if isinstance(hb_ep, (int, float)) and math.isfinite(hb_ep):
+            timestamps.append(float(hb_ep))
+        else:
+            time_str = j.get("heartbeat_at") or j.get("spawned_at")
+            if isinstance(time_str, str):
+                try:
+                    timestamps.append(datetime.fromisoformat(time_str.replace("Z", "+00:00")).timestamp())
+                except (ValueError, OSError):
+                    pass
+
+    if status_record is not None:
+        w_at_str = status_record.get("written_at")
+        if isinstance(w_at_str, str):
+            try:
+                timestamps.append(datetime.fromisoformat(w_at_str.replace("Z", "+00:00")).timestamp())
+            except (ValueError, OSError):
+                pass
+        la_dict = status_record.get("last_activity")
+        if isinstance(la_dict, dict) and isinstance(la_dict.get("at"), str):
+            try:
+                timestamps.append(datetime.fromisoformat(la_dict["at"].replace("Z", "+00:00")).timestamp())
+            except (ValueError, OSError):
+                pass
+    if isinstance(status, StatusRead) and status.status_at is not None and math.isfinite(status.status_at):
+        timestamps.append(float(status.status_at))
+
+    fallback_last_activity: dict[str, Any] | None = None
+    fallback_last_activity_at: float | None = None
+    if timestamps:
+        newest_ts = max(timestamps)
+        if newest_ts > now_ts:
+            newest_ts = now_ts
+        fallback_last_activity_at = newest_ts
+        iso_str = datetime.fromtimestamp(newest_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+        fallback_last_activity = {"at": iso_str, "what": None, "verb": None}
+
+    # 6. Phase fallback
+    if is_blocked:
+        fallback_phase = "blocked"
+    elif marker.get("waiting_on"):
+        fallback_phase = "waiting"
+    elif marker.get("wave_stage"):
+        fallback_phase = str(marker["wave_stage"])
+    else:
+        fallback_phase = "build"
+
+    # Field resolution
+    provenance: dict[str, str] = {}
+
+    def _resolve(field_name: str, fallback_val: Any) -> Any:
+        if has_status and status_record is not None:
+            val = status_record.get(field_name)
+            if val is not None:
+                provenance[field_name] = "status"
+                return val
+            if is_stale and val is not None:
+                provenance[field_name] = "status"
+                return val
+        provenance[field_name] = "derived"
+        return fallback_val
+
+    phase = _resolve("phase", fallback_phase)
+    progress = _resolve("progress", fallback_progress)
+    estimate = _resolve("estimate", None)
+    gates = _resolve("gates", fallback_gates)
+    seats = _resolve("seats", fallback_seats)
+    other_names = _resolve("other_names", fallback_other_names)
+    refusals = _resolve("refusals", [])
+    lanes = _resolve("lanes", fallback_lanes)
+    ci = _resolve("ci", [])
+    owner_blockers = _resolve("owner_blockers", fallback_owner_blockers)
+    last_activity = _resolve("last_activity", fallback_last_activity)
+
+    provenance["waves"] = provenance.get("progress", "derived")
+
+    last_act_at: float | None = None
+    if last_activity and isinstance(last_activity, dict) and isinstance(last_activity.get("at"), str):
+        try:
+            last_act_at = datetime.fromisoformat(last_activity["at"].replace("Z", "+00:00")).timestamp()
+        except (ValueError, OSError):
+            last_act_at = fallback_last_activity_at
+    else:
+        last_act_at = fallback_last_activity_at
+
+    return DerivedStatus(
+        phase=phase,
+        progress=progress,
+        estimate=estimate,
+        gates=gates,
+        seats=seats,
+        other_names=other_names,
+        refusals=refusals,
+        lanes=lanes,
+        ci=ci,
+        owner_blockers=owner_blockers,
+        last_activity=last_activity,
+        last_activity_at=last_act_at,
+        provenance=provenance,
+        field_sources=dict(provenance),
+        stale=bool(is_stale and has_status),
+        status=status if isinstance(status, StatusRead) else None,
+        record=status_record,
+    )
 

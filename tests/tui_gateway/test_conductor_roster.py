@@ -6,19 +6,22 @@ import json
 import os
 import pwd
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from tui_gateway.conductor_roster import (
+    DerivedStatus,
     IndexScan,
     StatusRead,
     _clear_cache,
     _clear_status_cache,
+    derive_row_status,
     read_build_status,
     read_marker_index,
 )
+from tui_gateway.methods_relay_jobs import _PUBLIC_JOB_KEYS, _list_relay_jobs
 
 
 @pytest.fixture
@@ -761,4 +764,518 @@ def test_read_build_status_missing(tmp_path):
     assert res.present is False
     assert res.valid is False
     assert res.reason == "missing"
+
+
+def test_derive_row_status_no_status_file_derives_all_fields_with_derived_provenance():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {
+        "run_id": "run-b4-test",
+        "session_id": "sess-b4-test",
+        "waves_total": 4,
+        "waves_done": 1,
+        "wave_stage": "impl",
+        "waits": [
+            {
+                "kind": "ci",
+                "ci_ref": "36533732367",
+                "waiter": True,
+                "what": "CI run 36533732367 on sync/land-b9",
+                "since": "2026-09-29T07:05:00Z",
+            }
+        ],
+        "blocked": True,
+        "blocked_reason": "Reinstall owner verifier (admin prompt)",
+        "armed_at": "2026-09-29T06:39:40Z",
+    }
+    jobs = [
+        {
+            "job_id": "w_01",
+            "worker": "codex",
+            "served_seat": "codex",
+            "fallback_from": None,
+            "build_run_id": "run-b4-test",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+            "heartbeat_at": "2026-09-29T07:10:00Z",
+        },
+        {
+            "job_id": "w_02",
+            "worker": "gemini",  # gemini counts as agy
+            "served_seat": "gemini",
+            "fallback_from": None,
+            "build_run_id": "run-b4-test",
+            "status": "succeeded",
+            "spawned_at": "2026-09-29T06:50:00Z",
+            "heartbeat_at": "2026-09-29T07:08:00Z",
+        },
+    ]
+
+    res = derive_row_status(marker, None, jobs, now=ref_time)
+    assert isinstance(res, DerivedStatus)
+    assert res.stale is False
+
+    # Every field derived from marker+jobs with provenance "derived"
+    expected_fields = [
+        "phase",
+        "progress",
+        "estimate",
+        "gates",
+        "seats",
+        "other_names",
+        "refusals",
+        "lanes",
+        "ci",
+        "owner_blockers",
+        "last_activity",
+    ]
+    for f in expected_fields:
+        assert res.provenance[f] == "derived", f"Expected {f} to have provenance 'derived'"
+    assert res.provenance["waves"] == "derived"
+    assert all(prov == "derived" for prov in res.provenance.values())
+
+    # Fallback values
+    assert res.progress["waves"] == {"done": 1, "total": 4}
+    assert res.progress["units"] is None
+    assert res.progress["current_wave"]["index"] == 2
+    assert res.progress["current_units"][0]["title"] == "impl"
+    assert res.waves == {"done": 1, "total": 4}
+
+    assert len(res.gates) == 1
+    assert res.gates[0]["kind"] == "ci"
+    assert res.gates[0]["ref"] == "36533732367"
+    assert res.gates[0]["waiter"] is True
+    assert res.gates[0]["label"] == "CI run 36533732367 on sync/land-b9"
+    assert res.gates[0]["since"] == "2026-09-29T07:05:00Z"
+
+    assert res.seats["codex"]["running"] == 1
+    assert res.seats["codex"]["spawned"] == 1
+    assert res.seats["agy"]["succeeded"] == 1  # gemini mapped to agy
+    assert res.seats["agy"]["spawned"] == 1
+
+    assert res.lanes["running"] == 1
+    assert res.lanes["stale"] == 0
+    assert res.lanes["job_ids"] == ["w_01", "w_02"]
+
+    assert len(res.owner_blockers) == 1
+    assert res.owner_blockers[0]["label"] == "Reinstall owner verifier (admin prompt)"
+    assert res.blocked is True
+
+    assert res.estimate is None
+    assert res.refusals == []
+    assert res.ci == []
+    assert res.phase == "blocked"
+
+    assert res.last_activity is not None
+    assert res.last_activity["at"] == "2026-09-29T07:10:00Z"
+
+
+def test_derive_row_status_fresh_status_wins_per_field():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    valid_data = _read_fixture("status_v1_valid.json")
+    status = StatusRead(
+        present=True,
+        valid=True,
+        fresh=True,
+        stale=False,
+        record=valid_data,
+        status_at=ref_time - 60,
+    )
+
+    marker = {
+        "run_id": valid_data["build"]["run_id"],
+        "session_id": valid_data["build"]["session_id"],
+        "waves_total": 10,
+        "waves_done": 9,
+        "waits": [{"kind": "external", "what": "Marker wait", "at": "2026-09-29T06:00:00Z"}],
+        "blocked": True,
+        "blocked_reason": "Marker blocked reason",
+    }
+    jobs = [
+        {
+            "job_id": "w_marker_lane",
+            "worker": "muse",
+            "build_run_id": valid_data["build"]["run_id"],
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        }
+    ]
+
+    res = derive_row_status(marker, status, jobs, now=ref_time)
+    assert res.stale is False
+
+    # Fresh status record values win
+    assert res.gates == valid_data["gates"]
+    assert res.provenance["gates"] == "status"
+
+    assert res.seats == valid_data["seats"]
+    assert res.provenance["seats"] == "status"
+
+    assert res.lanes == valid_data["lanes"]
+    assert res.provenance["lanes"] == "status"
+
+    assert res.progress == valid_data["progress"]
+    assert res.provenance["progress"] == "status"
+
+    assert res.estimate == valid_data["estimate"]
+    assert res.provenance["estimate"] == "status"
+
+    assert res.owner_blockers == valid_data["owner_blockers"]
+    assert res.provenance["owner_blockers"] == "status"
+
+    assert res.last_activity == valid_data["last_activity"]
+    assert res.provenance["last_activity"] == "status"
+
+    assert res.phase == valid_data["phase"]
+    assert res.provenance["phase"] == "status"
+
+    # Now verify missing field in status falls back per field
+    partial_data = dict(valid_data)
+    partial_data["estimate"] = None
+    partial_data["progress"] = None
+    status_partial = StatusRead(
+        present=True,
+        valid=True,
+        fresh=True,
+        stale=False,
+        record=partial_data,
+        status_at=ref_time - 60,
+    )
+
+    res_partial = derive_row_status(marker, status_partial, jobs, now=ref_time)
+    # Estimate and progress fell back
+    assert res_partial.estimate is None
+    assert res_partial.provenance["estimate"] == "derived"
+    assert res_partial.progress["waves"] == {"done": 9, "total": 10}
+    assert res_partial.provenance["progress"] == "derived"
+    # Gates and seats still won from status
+    assert res_partial.gates == valid_data["gates"]
+    assert res_partial.provenance["gates"] == "status"
+    assert res_partial.seats == valid_data["seats"]
+    assert res_partial.provenance["seats"] == "status"
+
+
+def test_derive_row_status_stale_status_kept_and_flagged():
+    ref_time = datetime.fromisoformat("2026-09-29T08:00:00+00:00").timestamp()
+    valid_data = _read_fixture("status_v1_valid.json")
+    status = StatusRead(
+        present=True,
+        valid=True,
+        fresh=False,
+        stale=True,
+        record=valid_data,
+        status_at=ref_time - 3600,
+    )
+
+    marker = {
+        "run_id": valid_data["build"]["run_id"],
+        "session_id": valid_data["build"]["session_id"],
+        "waves_total": 99,
+        "waves_done": 0,
+        "waits": [{"kind": "date", "what": "Marker wait", "at": "2026-09-29T06:00:00Z"}],
+        "blocked": True,
+        "blocked_reason": "Marker blocked",
+    }
+
+    res = derive_row_status(marker, status, [], now=ref_time)
+    # Flagged with stale=True
+    assert res.stale is True
+    assert res["stale"] is True
+
+    # Stale status fields kept, never hidden or overwritten by marker fallbacks
+    assert res.gates == valid_data["gates"]
+    assert res.provenance["gates"] == "status"
+    assert res.seats == valid_data["seats"]
+    assert res.provenance["seats"] == "status"
+    assert res.owner_blockers == valid_data["owner_blockers"]
+    assert res.provenance["owner_blockers"] == "status"
+    assert res.estimate == valid_data["estimate"]
+    assert res.provenance["estimate"] == "status"
+
+
+def test_derive_row_status_jobs_with_different_build_run_id_excluded():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {"run_id": "run-target", "waves_total": 2, "waves_done": 0}
+    jobs = [
+        {
+            "job_id": "w_matched",
+            "worker": "codex",
+            "build_run_id": "run-target",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+        {
+            "job_id": "w_other",
+            "worker": "codex",
+            "build_run_id": "run-other",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+    ]
+
+    res = derive_row_status(marker, None, jobs, now=ref_time)
+    assert res.lanes["running"] == 1
+    assert res.lanes["job_ids"] == ["w_matched"]
+    assert res.seats["codex"]["running"] == 1
+    assert res.seats["codex"]["spawned"] == 1
+
+
+def test_derive_row_status_jobs_without_build_run_id_excluded():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {"run_id": "run-target", "waves_total": 2, "waves_done": 0}
+    jobs = [
+        {
+            "job_id": "w_matched",
+            "worker": "codex",
+            "build_run_id": "run-target",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+        {
+            "job_id": "w_no_brid",
+            "worker": "codex",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+        {
+            "job_id": "w_none_brid",
+            "worker": "codex",
+            "build_run_id": None,
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+        {
+            "job_id": "w_empty_brid",
+            "worker": "codex",
+            "build_run_id": "",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+    ]
+
+    res = derive_row_status(marker, None, jobs, now=ref_time)
+    assert res.lanes["running"] == 1
+    assert res.lanes["job_ids"] == ["w_matched"]
+    assert res.seats["codex"]["running"] == 1
+    assert res.seats["codex"]["spawned"] == 1
+
+
+def test_derive_row_status_marker_build_run_id_precedence_for_jobs():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {
+        "build_run_id": "brid-primary",
+        "run_id": "legacy-run-id",
+        "waves_total": 1,
+        "waves_done": 0,
+    }
+    jobs = [
+        {
+            "job_id": "w_brid_matched",
+            "worker": "muse",
+            "build_run_id": "brid-primary",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+        {
+            "job_id": "w_legacy_excluded",
+            "worker": "muse",
+            "build_run_id": "legacy-run-id",
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        },
+    ]
+
+    res = derive_row_status(marker, None, jobs, now=ref_time)
+    assert res.lanes["running"] == 1
+    assert res.lanes["job_ids"] == ["w_brid_matched"]
+
+
+def test_derive_row_status_marker_waits_map_to_gates():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {
+        "run_id": "run-waits-test",
+        "waits": [
+            {
+                "id": "gate-1",
+                "kind": "ci",
+                "ci_ref": "36533732367",
+                "waiter": True,
+                "what": "CI run on branch",
+                "since": "2026-09-29T07:00:00Z",
+                "due": "2026-09-29T07:30:00Z",
+                "state": "waiting",
+            },
+            {
+                "id": "gate-2",
+                "kind": "owner",
+                "ref": "dec-1",
+                "waiter": False,
+                "label": "Owner approval needed",
+                "at": "2026-09-29T07:02:00Z",
+            },
+        ],
+    }
+
+    res = derive_row_status(marker, None, [], now=ref_time)
+    assert len(res.gates) == 2
+    assert res.gates[0]["id"] == "gate-1"
+    assert res.gates[0]["kind"] == "ci"
+    assert res.gates[0]["ref"] == "36533732367"
+    assert res.gates[0]["waiter"] is True
+    assert res.gates[0]["label"] == "CI run on branch"
+    assert res.gates[0]["since"] == "2026-09-29T07:00:00Z"
+    assert res.gates[0]["due"] == "2026-09-29T07:30:00Z"
+    assert res.gates[0]["state"] == "waiting"
+
+    assert res.gates[1]["id"] == "gate-2"
+    assert res.gates[1]["kind"] == "owner"
+    assert res.gates[1]["ref"] == "dec-1"
+    assert res.gates[1]["waiter"] is False
+    assert res.gates[1]["label"] == "Owner approval needed"
+    assert res.gates[1]["since"] == "2026-09-29T07:02:00Z"
+    assert res.gates[1]["state"] == "waiting"
+
+    assert res.provenance["gates"] == "derived"
+
+
+def test_derive_row_status_blocked_marker_maps_to_owner_blocker():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    # 1. Blocked with blocked_reason
+    marker_reason = {
+        "run_id": "run-b1",
+        "blocked": True,
+        "blocked_reason": "API key quota exhausted",
+        "blocked_at": "2026-09-29T07:01:00Z",
+    }
+    res1 = derive_row_status(marker_reason, None, [], now=ref_time)
+    assert len(res1.owner_blockers) == 1
+    assert res1.owner_blockers[0]["label"] == "API key quota exhausted"
+    assert res1.owner_blockers[0]["since"] == "2026-09-29T07:01:00Z"
+    assert res1.provenance["owner_blockers"] == "derived"
+    assert res1.blocked is True
+
+    # 2. Blocked without reason, falls back to waiting_on
+    marker_waiting_on = {
+        "run_id": "run-b2",
+        "blocked": True,
+        "waiting_on": "Review from security lead",
+        "wait_since": "2026-09-29T07:02:00Z",
+    }
+    res2 = derive_row_status(marker_waiting_on, None, [], now=ref_time)
+    assert len(res2.owner_blockers) == 1
+    assert res2.owner_blockers[0]["label"] == "Review from security lead"
+    assert res2.owner_blockers[0]["since"] == "2026-09-29T07:02:00Z"
+
+    # 3. Blocked without any label fields falls back to 'Blocked'
+    marker_bare_blocked = {"run_id": "run-b3", "blocked": True}
+    res3 = derive_row_status(marker_bare_blocked, None, [], now=ref_time)
+    assert len(res3.owner_blockers) == 1
+    assert res3.owner_blockers[0]["label"] == "Blocked"
+
+    # 4. Not blocked
+    marker_unblocked = {"run_id": "run-b4", "blocked": False}
+    res4 = derive_row_status(marker_unblocked, None, [], now=ref_time)
+    assert res4.owner_blockers == []
+    assert res4.blocked is False
+
+
+def test_derive_row_status_last_activity_max_calculation():
+    now = datetime.fromisoformat("2026-09-29T08:00:00+00:00").timestamp()
+    t_marker = now - 500
+    t_job = now - 200
+    t_status = now - 350
+
+    marker = {
+        "run_id": "r-act",
+        "mtime": t_marker,
+    }
+    jobs = [
+        {
+            "job_id": "w_act",
+            "build_run_id": "r-act",
+            "worker": "codex",
+            "heartbeat_epoch": t_job,
+            "status": "running",
+            "spawned_at": "2026-09-29T07:00:00Z",
+        }
+    ]
+    status = StatusRead(
+        present=True,
+        valid=False,  # invalid/unreadable -> status_at considered for fallback max
+        status_at=t_status,
+    )
+
+    # Job is newest (now - 200)
+    res = derive_row_status(marker, status, jobs, now=now)
+    assert res.last_activity is not None
+    assert res.last_activity_at == t_job
+    expected_iso = datetime.fromtimestamp(t_job, timezone.utc).isoformat().replace("+00:00", "Z")
+    assert res.last_activity["at"] == expected_iso
+
+
+def test_derive_row_status_hostile_strings_masked_in_fallbacks():
+    now = datetime.fromisoformat("2026-09-29T08:00:00+00:00").timestamp()
+    marker = {
+        "run_id": "r-hostile",
+        "blocked": True,
+        "blocked_reason": "Token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 and /secret/path",
+        "wave_stage": "\x1b[31mRed Alert\x07" + "A" * 200,
+        "waits": [
+            {
+                "kind": "ci",
+                "what": "Key sk-ant-api03-abcdef123456789012345678901234567890 and /private/tmp/secret.txt",
+            }
+        ],
+    }
+
+    res = derive_row_status(marker, None, [], now=now)
+    # Masked / cleaned
+    assert "eyJhbGci" not in res.owner_blockers[0]["label"]
+    assert "/secret/path" not in res.owner_blockers[0]["label"]
+
+    assert "\x1b" not in res.progress["current_units"][0]["title"]
+    assert len(res.progress["current_units"][0]["title"]) <= 80
+
+    assert "sk-ant-api03-" not in res.gates[0]["label"]
+    assert "/private/tmp/secret.txt" not in res.gates[0]["label"]
+
+
+def test_relay_jobs_served_seat_and_fallback_from_never_in_public_dict(tmp_path):
+    ws = tmp_path / "workspace"
+    jobs_dir = ws / ".claude" / "state" / "worker-spawn" / "jobs"
+    jobs_dir.mkdir(parents=True)
+
+    job_data = {
+        "job_id": "w_test_keys",
+        "worker": "codex",
+        "model": "gpt-6-sol",
+        "model_resolved": "gpt-6-sol",
+        "lane": "impl",
+        "role": "worker",
+        "status": "running",
+        "spawned_at": datetime.now(timezone.utc).isoformat(),
+        "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        "duration_sec": 10.0,
+        "served_seat": "codex",
+        "fallback_from": "sonnet",
+        "build_run_id": "run-test-keys",
+    }
+    (jobs_dir / "w_test_keys.json").write_text(json.dumps(job_data), encoding="utf-8")
+
+    # 1. Public listing (default internal=False)
+    public_jobs = _list_relay_jobs(str(ws), internal=False)
+    assert len(public_jobs) == 1
+    public_dict = public_jobs[0]
+    # Assert exact key set of the public projection
+    assert set(public_dict.keys()) == _PUBLIC_JOB_KEYS
+    assert "served_seat" not in public_dict
+    assert "fallback_from" not in public_dict
+    assert "build_run_id" not in public_dict
+
+    # 2. Internal listing
+    internal_jobs = _list_relay_jobs(str(ws), internal=True)
+    assert len(internal_jobs) == 1
+    internal_dict = internal_jobs[0]
+    assert internal_dict["served_seat"] == "codex"
+    assert internal_dict["fallback_from"] == "sonnet"
+    assert internal_dict["build_run_id"] == "run-test-keys"
 
