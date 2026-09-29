@@ -58,6 +58,9 @@ vi.mock('@/i18n', () => ({
           today: 'Today',
           yesterday: 'Yesterday'
         },
+        laneRollup: (active: number, done: number, running?: number) =>
+          `${active} active · ${done} done${running && running > 0 ? ` · ${running} running` : ''}`,
+        laneRollupDone: (count: number) => `Done (${count})`,
         nav: { 'new-session': 'New session' },
         newSessionIn: (label: string) => `New session in ${label}`,
         noSessions: 'No sessions yet',
@@ -151,6 +154,7 @@ function commitLatestDrag() {
 }
 
 function renderEnteredProjectWithLiveWorktree() {
+  workspaceOpen.value = true
   return render(
     <EnteredProjectContent
       project={project({ repos: [{ groups: [group()], id: '/repo', label: 'Repo', path: '/repo', sessionCount: 0 }] })}

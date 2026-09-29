@@ -81,6 +81,12 @@ vi.mock('@/i18n', () => ({
       },
       errors: { genericFailure: 'Something went wrong' },
       sidebar: {
+        gatewayGroups: {
+          groupName: 'Group name',
+          groupNameInvalid: 'Invalid group name',
+          moveToGroup: 'Move to group',
+          newGroup: 'New group…'
+        },
         messageCount: (count: number) => `${count} messages`,
         projects: {
           home: 'Home',
