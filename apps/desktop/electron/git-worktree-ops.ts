@@ -165,11 +165,15 @@ async function worktreeClean(gitBin, worktreePath) {
 // HEAD and HEAD reflog, and its top directory) and for at most CLEAN_CACHE_MAX_AGE_MS, which bounds a missed
 // untracked-file change deep in the tree. At most CLEAN_CONCURRENCY statuses run at once across all scans.
 const CLEAN_CACHE_MAX_AGE_MS = 10 * 60 * 1000
+// A cached `clean: true` is the dangerous verdict (a dirty lane must never be "done") and the fingerprint cannot
+// see an edit to a tracked file in a nested directory, so it is trusted for a minute only. A cached `false` only
+// keeps a lane visible, so it keeps the fingerprint + 10 min rule.
+const CLEAN_TRUE_MAX_AGE_MS = 60 * 1000
 const CLEAN_CACHE_MAX = 4096
 const CLEAN_CONCURRENCY = 2
 const cleanCache = new Map()
 let cleanRunning = 0
-const cleanWaiters = []
+const cleanWaiters: Array<() => void> = []
 
 async function worktreeFingerprint(worktreePath) {
   const stamp = async target => {
@@ -205,16 +209,22 @@ async function worktreeFingerprint(worktreePath) {
 
 async function withCleanSlot(fn) {
   if (cleanRunning >= CLEAN_CONCURRENCY) {
-    await new Promise(resolve => cleanWaiters.push(resolve))
+    // The finishing caller hands its slot straight to us (no decrement), so a newcomer cannot slip in between.
+    await new Promise<void>(resolve => cleanWaiters.push(resolve))
+  } else {
+    cleanRunning += 1
   }
-
-  cleanRunning += 1
 
   try {
     return await fn()
   } finally {
-    cleanRunning -= 1
-    cleanWaiters.shift()?.()
+    const next = cleanWaiters.shift()
+
+    if (next) {
+      next()
+    } else {
+      cleanRunning -= 1
+    }
   }
 }
 
@@ -222,7 +232,9 @@ async function cachedWorktreeClean(gitBin, worktreePath) {
   const fingerprint = await worktreeFingerprint(worktreePath)
   const cached = cleanCache.get(worktreePath)
 
-  if (cached && cached.fingerprint === fingerprint && Date.now() - cached.at < CLEAN_CACHE_MAX_AGE_MS) {
+  const maxAge = cached?.clean === true ? CLEAN_TRUE_MAX_AGE_MS : CLEAN_CACHE_MAX_AGE_MS
+
+  if (cached && cached.fingerprint === fingerprint && Date.now() - cached.at < maxAge) {
     return cached.clean
   }
 
@@ -305,6 +317,7 @@ function rememberMergeProof(key, value) {
 // and every caller in that window shares that one follow-up scan.
 const listingRunning = new Map()
 const listingQueued = new Map()
+const prMergedBranches = new Map<string, Set<string>>()
 
 function startListing(resolved, gitBin) {
   const scan = scanWorktrees(resolved, gitBin).finally(() => {
@@ -318,13 +331,27 @@ function startListing(resolved, gitBin) {
   return scan
 }
 
-async function listWorktrees(repoPath, gitBin) {
+async function listWorktrees(repoPath, gitBin, mergedPrBranches?: readonly string[]) {
   let resolved
 
   try {
     resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Worktree list' })
   } catch {
     return []
+  }
+
+  // Branches the renderer knows have a merged PR (a second proof of "done"). Accumulated per repo, so a queued
+  // scan shared by several callers still honours every caller's list; a merged PR never un-merges.
+  if (Array.isArray(mergedPrBranches) && mergedPrBranches.length) {
+    const known = prMergedBranches.get(resolved) ?? new Set<string>()
+
+    for (const branch of mergedPrBranches) {
+      if (typeof branch === 'string' && branch) {
+        known.add(branch)
+      }
+    }
+
+    prMergedBranches.set(resolved, known)
   }
 
   const running = listingRunning.get(resolved)
@@ -357,6 +384,7 @@ async function scanWorktrees(resolved, gitBin) {
     const trunk = await defaultBranch(gitBin, resolved)
     const trunkRefs = trunk ? await resolveTrunkRefs(gitBin, resolved, trunk) : []
     const ancestorMerged = await ancestorMergedBranches(gitBin, resolved, trunkRefs)
+    const prMerged = prMergedBranches.get(resolved)
 
     const evidence = await mapBounded(trees, ACCOUNTING_CONCURRENCY, async (tree, index) => {
       const lane = index > 0 && !tree.bare && tree.branch && !tree.detached && tree.branch !== trunk
@@ -399,7 +427,10 @@ async function scanWorktrees(resolved, gitBin) {
         }
       }
 
-      return { mergedVia, clean: mergedVia ? await cachedWorktreeClean(gitBin, tree.path) : null }
+      // A lane with a merged PR (no git proof) is also a done candidate, so it gets the status check too.
+      const candidate = mergedVia || prMerged?.has(tree.branch)
+
+      return { mergedVia, clean: candidate ? await cachedWorktreeClean(gitBin, tree.path) : null }
     })
 
     return trees.map((tree, index) => ({
@@ -899,6 +930,7 @@ export {
   listBaseBranches,
   listBranches,
   listWorktrees,
+  withCleanSlot,
   parseWorktrees,
   removeWorktreeAndForget as removeWorktree,
   sanitizeBranch,

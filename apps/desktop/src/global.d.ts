@@ -467,7 +467,7 @@ declare global {
       trashPath?: (path: string) => Promise<boolean>
       // Git-driven worktree management for the "Start work" flow.
       git?: {
-        worktreeList: (repoPath: string) => Promise<HermesGitWorktree[]>
+        worktreeList: (repoPath: string, mergedPrBranches?: string[]) => Promise<HermesGitWorktree[]>
         worktreeAdd: (
           repoPath: string,
           options?: { name?: string; branch?: string; base?: string; existingBranch?: string }

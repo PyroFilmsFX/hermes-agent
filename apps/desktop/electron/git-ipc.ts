@@ -39,7 +39,9 @@ export interface GitIpcDeps {
 export function registerGitIpc({ resolveGitBinary, resolveGhBinary }: GitIpcDeps) {
   // Git-driven worktree management ("Start work" flow). Errors surface to the
   // renderer as rejected promises so it can toast a friendly message.
-  ipcMain.handle('hermes:git:worktreeList', async (_event, repoPath) => listWorktrees(repoPath, resolveGitBinary()))
+  ipcMain.handle('hermes:git:worktreeList', async (_event, repoPath, mergedPrBranches) =>
+    listWorktrees(repoPath, resolveGitBinary(), mergedPrBranches)
+  )
 
   ipcMain.handle('hermes:git:worktreeAdd', async (_event, repoPath, options) =>
     addWorktree(repoPath, options || {}, resolveGitBinary())

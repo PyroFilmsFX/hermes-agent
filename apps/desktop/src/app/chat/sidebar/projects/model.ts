@@ -1,12 +1,13 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useState } from 'react'
 
-import type { HermesGitWorktree } from '@/global'
+import type { HermesBranchPullRequest, HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { desktopGit } from '@/lib/desktop-git'
 import { mapPool } from '@/lib/pool'
 import { $sidebarWorkspaceNodeOpen, toggleWorkspaceNodeCollapsed } from '@/store/layout'
 import { $worktreeRefreshToken } from '@/store/projects'
+import { $pullRequestsByBranch } from '@/store/pull-requests'
 
 import { sessionRecency, type SidebarProjectTree } from './workspace-groups'
 
@@ -146,6 +147,30 @@ export function orderProjectsByIds(projects: SidebarProjectTree[], orderIds: str
   ])
 }
 
+/** JSON `{repoPath: [branch, ...]}` of branches with a merged PR, sorted; '' when there are none. */
+export function mergedPrBranchesKey(
+  repoPaths: readonly string[],
+  pullRequests: Readonly<Record<string, HermesBranchPullRequest | undefined>>
+): string {
+  const byRepo: Record<string, string[]> = {}
+
+  for (const repoPath of repoPaths) {
+    const prefix = `${repoPath}\n`
+
+    const branches = Object.entries(pullRequests)
+      .filter(([key, pr]) => key.startsWith(prefix) && pr?.state?.toLowerCase() === 'merged')
+      .map(([key]) => key.slice(prefix.length))
+      .filter(branch => branch && !branch.startsWith('#'))
+      .sort()
+
+    if (branches.length) {
+      byRepo[repoPath] = branches
+    }
+  }
+
+  return Object.keys(byRepo).length ? JSON.stringify(byRepo) : ''
+}
+
 // Project drill-in lanes are git-driven: source them from `git worktree list` so
 // linked worktrees still appear even when their sessions aren't in the recents
 // payload currently loaded in memory.
@@ -158,6 +183,10 @@ export function useRepoWorktreeMap(
   const key = useMemo(() => pathListKey(repoPaths), [repoPaths])
   // Refetch when a worktree is added/removed so a new lane shows immediately.
   const refreshToken = useStore($worktreeRefreshToken)
+  // Branches whose PR is merged (the lane rollup's second proof of "done"): the scan runs its status check for
+  // these too. Keyed as a string so an unrelated PR-store update does not rescan.
+  const pullRequests = useStore($pullRequestsByBranch)
+  const mergedKey = useMemo(() => mergedPrBranchesKey(repoPaths, pullRequests), [repoPaths, pullRequests])
 
   // Keyed on the path SET, not the array: callers rebuild the array on
   // unrelated renders, and each rerun starts a full per-lane git scan.
@@ -178,7 +207,9 @@ export function useRepoWorktreeMap(
     // Bounded so a many-repo project doesn't spawn a `git` process per repo at once.
     void mapPool(paths, WORKTREE_PROBE_CONCURRENCY, async repoPath => {
       try {
-        return [repoPath, await git.worktreeList(repoPath)] as const
+        const merged = mergedKey ? (JSON.parse(mergedKey)[repoPath] as string[] | undefined) : undefined
+
+        return [repoPath, await git.worktreeList(repoPath, merged?.length ? merged : undefined)] as const
       } catch {
         return [repoPath, []] as const
       }
@@ -189,7 +220,7 @@ export function useRepoWorktreeMap(
     return () => {
       cancelled = true
     }
-  }, [enabled, key, refreshToken])
+  }, [enabled, key, mergedKey, refreshToken])
 
   return [map, loading]
 }

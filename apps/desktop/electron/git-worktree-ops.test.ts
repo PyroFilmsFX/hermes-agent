@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { test } from 'vitest'
+import { test, vi } from 'vitest'
 
 import {
   addWorktree,
@@ -14,7 +14,8 @@ import {
   listWorktrees,
   parseWorktrees,
   sanitizeBranch,
-  switchBranch
+  switchBranch,
+  withCleanSlot
 } from './git-worktree-ops'
 
 test('sanitizeBranch: spaces → hyphens, forbidden chars dropped, edges trimmed', () => {
@@ -871,6 +872,111 @@ test('listWorktrees walks `git status` only for merged lanes and reuses it while
     const third = await scan()
     assert.equal(statusCalls(), 2)
     assert.equal(third['feature/merged'].clean, false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('withCleanSlot: 10 concurrent callers never run more than 2 at once', async () => {
+  let inFlight = 0
+  let peak = 0
+  const gates = []
+
+  const runs = Array.from({ length: 10 }, () =>
+    withCleanSlot(async () => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise(resolve => gates.push(resolve))
+      inFlight -= 1
+    })
+  )
+
+  // Release one gated call at a time, letting every woken waiter and any newcomer race for the slot.
+  for (let done = 0; done < 10; done += 1) {
+    while (gates.length === 0) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+
+    assert.ok(inFlight <= 2)
+    gates.shift()()
+    await new Promise(resolve => setImmediate(resolve))
+    // A newcomer arriving right as a slot frees must queue behind the waiters.
+    if (done === 3) {
+      runs.push(withCleanSlot(async () => { inFlight += 1; peak = Math.max(peak, inFlight); await Promise.resolve(); inFlight -= 1 }))
+    }
+  }
+
+  while (gates.length) {
+    gates.shift()()
+  }
+
+  await Promise.all(runs)
+  assert.equal(peak, 2)
+  assert.equal(inFlight, 0)
+})
+
+test('listWorktrees: a nested tracked-file edit is seen as dirty once the 60 s clean cache expires', async () => {
+  const { commitFile, dir, git } = tempRepo('hermes-wt-nested-')
+  const realNow = Date.now.bind(Date)
+  let offset = 0
+
+  try {
+    commitFile(dir, 'README')
+    fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'a', 'b', 'deep.txt'), 'one\n')
+    git('add', '.')
+    git('commit', '-m', 'deep')
+    const lane = path.join(dir, 'nested-wt')
+
+    git('worktree', 'add', '-b', 'lane/nested', lane, 'main')
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset)
+
+    const first = (await listWorktrees(dir, 'git')).find(tree => tree.branch === 'lane/nested')
+
+    assert.equal(first.clean, true)
+
+    // Edit a tracked file two directories down: index, HEAD, logs/HEAD and the top dir mtimes do not move.
+    fs.writeFileSync(path.join(lane, 'a', 'b', 'deep.txt'), 'two\n')
+    const cachedClean = (await listWorktrees(dir, 'git')).find(tree => tree.branch === 'lane/nested')
+
+    assert.equal(cachedClean.clean, true)
+
+    offset = 61_000
+
+    const later = (await listWorktrees(dir, 'git')).find(tree => tree.branch === 'lane/nested')
+
+    assert.equal(later.clean, false)
+  } finally {
+    vi.restoreAllMocks()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees: a lane with no git merge proof gets clean evaluated only when listed as PR-merged', async () => {
+  const { commitFile, dir, git } = tempRepo('hermes-wt-prmerged-')
+
+  try {
+    commitFile(dir, 'README')
+    const listed = path.join(dir, 'listed-wt')
+    const unlisted = path.join(dir, 'unlisted-wt')
+
+    git('worktree', 'add', '-b', 'lane/listed', listed, 'main')
+    git('worktree', 'add', '-b', 'lane/unlisted', unlisted, 'main')
+    // Give both lanes their own commit so neither has a git merge proof.
+    for (const wt of [listed, unlisted]) {
+      fs.writeFileSync(path.join(wt, 'work.txt'), path.basename(wt))
+      execFileSync('git', ['add', '.'], { cwd: wt })
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'work'], { cwd: wt })
+    }
+
+    const byBranch = Object.fromEntries(
+      (await listWorktrees(dir, 'git', ['lane/listed'])).map(tree => [tree.branch, tree])
+    )
+
+    assert.equal(byBranch['lane/listed'].mergedVia, null)
+    assert.equal(byBranch['lane/listed'].clean, true)
+    assert.equal(byBranch['lane/unlisted'].mergedVia, null)
+    assert.equal(byBranch['lane/unlisted'].clean, null)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
