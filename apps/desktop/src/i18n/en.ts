@@ -3781,7 +3781,14 @@ export const en: Translations = {
     boundNotice: name => `Session bound to ${name}`,
     unboundNotice: 'Session unbound',
     failedTitle: "Couldn't update the binding",
-    failed: reason => `The binding was refused (${reason}).`
+    failed: reason => `The binding was refused (${reason}).`,
+    menuBind: 'Bind to project…',
+    menuBindToProject: 'Bind to project…',
+    menuUnbind: 'Unbind',
+    moveConfirmTitle: name => `Move this session to ${name} and re-bind?`,
+    moveConfirmDescription: path =>
+      `Moving will re-home the session in ${path} and re-bind it so conductor attributes future builds to this project.`,
+    moveConfirmLabel: 'Move & bind'
   },
   composer: {
     message: 'Message',

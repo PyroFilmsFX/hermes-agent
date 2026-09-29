@@ -3216,6 +3216,12 @@ export interface Translations {
     unboundNotice: string
     failedTitle: string
     failed: (reason: string) => string
+    menuBind: string
+    menuBindToProject: string
+    menuUnbind: string
+    moveConfirmTitle: (name: string) => string
+    moveConfirmDescription: (path: string) => string
+    moveConfirmLabel: string
   }
   composer: {
     message: string
