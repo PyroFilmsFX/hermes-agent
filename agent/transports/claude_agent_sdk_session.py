@@ -1654,10 +1654,9 @@ class ClaudeAgentSdkSession(
             # lane's own tool results routinely produce and overflowing it
             # kills the turn outright — see _configured_max_buffer_size.
             "max_buffer_size": getattr(self, "_max_buffer_size", None) or _configured_max_buffer_size(),
-            # AskUserQuestion has no native answer bridge. Native Read stays
-            # behind the protected-path-aware, bounded Hermes MCP surface in
-            # every supported SDK permission mode.
-            "disallowed_tools": ["AskUserQuestion", "Read"],
+            # Native Read stays behind the protected-path-aware, bounded Hermes MCP
+            # surface in every supported SDK permission mode.
+            "disallowed_tools": ["Read"],
         }
         # CLI-side hooks: compaction watchdog / status, plus tool and subagent
         # lifecycle passthrough to Hermes plugin hooks.

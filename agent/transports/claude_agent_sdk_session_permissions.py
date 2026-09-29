@@ -14,7 +14,9 @@ from agent.transports.claude_agent_sdk_session_sanitize import (
     _SDK_CALLBACK_CHOICE_MAX_UTF8_BYTES,
     _SDK_CALLBACK_REASON_MAX_UTF8_BYTES,
     _SDK_FIXED_LOG_TOOL_IDENTITIES,
+    _bounded_control_sanitized_text,
     _canonical_sdk_tool_request,
+    _control_sanitized_text,
     _is_bounded_sdk_callback_string,
     _safe_sdk_deny_log_reason,
     _safe_sdk_tool_use_id,
@@ -154,6 +156,14 @@ class ClaudeSdkPermissionsMixin:
                 return PermissionResultDeny(message="approval denied by callback")
         if tool_name in _SDK_AUTO_ALLOWED_MCP_TOOLS:
             return PermissionResultAllow(updated_input=frozen_tool_input)
+        if tool_name == "AskUserQuestion":
+            return await self._handle_ask_user_question(
+                frozen_tool_input,
+                approval_callback,
+                hermes_session_id,
+                PermissionResultAllow,
+                PermissionResultDeny,
+            )
         if self._sdk_approval_bypass_active():
             return PermissionResultAllow(updated_input=frozen_tool_input)
         if approval_callback is None:
@@ -288,3 +298,108 @@ class ClaudeSdkPermissionsMixin:
                 log_tool_identity, _safe_sdk_deny_log_reason(message),
             )
         return PermissionResultDeny(message=message)
+
+    async def _handle_ask_user_question(
+        self,
+        frozen_tool_input: dict,
+        approval_callback: Any,
+        hermes_session_id: Any,
+        PermissionResultAllow: Any,
+        PermissionResultDeny: Any,
+    ) -> Any:
+        questions = frozen_tool_input.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return PermissionResultDeny(message="malformed AskUserQuestion input: missing questions list")
+
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for q in questions:
+            if not isinstance(q, dict) or not isinstance(q.get("question"), str) or not q["question"].strip():
+                return PermissionResultDeny(message="malformed AskUserQuestion input: invalid question entry")
+            q_text = q["question"]
+            field_spec: dict[str, Any] = {"type": "string"}
+            desc = q.get("header") or q.get("description") or q_text
+            if isinstance(desc, str) and desc.strip():
+                field_spec["description"] = _control_sanitized_text(desc)
+            options = q.get("options")
+            if isinstance(options, list) and options:
+                enum_values: list[str] = []
+                for opt in options:
+                    if isinstance(opt, dict):
+                        label = opt.get("label")
+                        if isinstance(label, str):
+                            enum_values.append(label)
+                        else:
+                            enum_values.append(str(opt.get("value", label or "")))
+                    elif isinstance(opt, str):
+                        enum_values.append(opt)
+                    else:
+                        enum_values.append(str(opt))
+                if enum_values:
+                    field_spec["enum"] = enum_values
+            properties[q_text] = field_spec
+            required.append(q_text)
+
+        schema = {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
+        if len(questions) == 1:
+            raw_msg = questions[0].get("question", "Claude has a question for you")
+        else:
+            raw_msg = f"Claude has {len(questions)} questions for you"
+        message = _bounded_control_sanitized_text(raw_msg, 512)
+
+        class _AskUserQuestionElicitParams:
+            def __init__(self, msg: str, sch: dict):
+                self.mode = "form"
+                self.message = msg
+                self.requested_schema = sch
+                self.requestedSchema = sch
+
+        try:
+            from tools.mcp_tool_sampling import ElicitationHandler, _get_elicitation_timeout
+
+            timeout = _get_elicitation_timeout(300.0)
+            handler = ElicitationHandler("AskUserQuestion", {"timeout": timeout})
+            params = _AskUserQuestionElicitParams(message, schema)
+            result = await handler(None, params)
+        except asyncio.TimeoutError:
+            return PermissionResultDeny(message="approval timed out — no operator response")
+        except Exception as exc:
+            logger.warning("AskUserQuestion elicitation failed: %s", exc)
+            return PermissionResultDeny(message="elicitation failed")
+
+        action = getattr(result, "action", "decline")
+        if action == "accept":
+            content = getattr(result, "content", None)
+            content_dict = content if isinstance(content, dict) else {}
+            answers: dict[str, Any] = {}
+            for q in questions:
+                q_text = q["question"]
+                if q_text in content_dict:
+                    answers[q_text] = content_dict[q_text]
+                else:
+                    options = q.get("options")
+                    if isinstance(options, list) and options:
+                        first_opt = options[0]
+                        if isinstance(first_opt, dict):
+                            label = first_opt.get("label", first_opt.get("value", ""))
+                        else:
+                            label = str(first_opt)
+                        answers[q_text] = label
+                    else:
+                        answers[q_text] = "Yes"
+            for k, v in content_dict.items():
+                if k not in answers:
+                    answers[k] = v
+            updated_input = {**frozen_tool_input, "answers": answers}
+            return PermissionResultAllow(updated_input=updated_input)
+
+        if action == "cancel":
+            return PermissionResultDeny(message="approval timed out — no operator response")
+
+        return PermissionResultDeny(message="denied by user: questions declined")
+

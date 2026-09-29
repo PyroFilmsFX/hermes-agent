@@ -473,7 +473,8 @@ class TestSession:
         # MCP read surface under every supported SDK permission mode.
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         fields = session.build_option_fields()
-        assert fields["disallowed_tools"] == ["AskUserQuestion", "Read"]
+        assert fields["disallowed_tools"] == ["Read"]
+        assert "AskUserQuestion" not in fields["disallowed_tools"]
         assert "Bash" not in fields["disallowed_tools"]
         assert "Edit" not in fields["disallowed_tools"]
         assert "Write" not in fields["disallowed_tools"]
