@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _TABLE = "sdk_usage_parks"
 _DEFAULT_STAGGER_MAX_SECONDS = 90.0
+_RETRY_BACKOFF_SECONDS = 60.0
 
 
 def _db_path(home: Optional[Path] = None) -> Path:
@@ -181,6 +182,17 @@ def cancel(session_key: str, *, home: Optional[Path] = None) -> bool:
         return False
 
 
+def retry_later(session_key: str, *, home: Optional[Path] = None,
+                now: Optional[float] = None) -> None:
+    """Back off a refused due park without discarding its durable retry state."""
+    retry_at = (time.time() if now is None else now) + _RETRY_BACKOFF_SECONDS
+    with _connect(home) as conn:
+        conn.execute(
+            f"UPDATE {_TABLE} SET resume_at = MAX(resume_at, ?) WHERE session_key = ?",
+            (retry_at, session_key),
+        )
+
+
 def get(session_key: str, *, home: Optional[Path] = None) -> Optional[dict]:
     with _connect(home) as conn:
         conn.row_factory = sqlite3.Row
@@ -205,6 +217,7 @@ def dispatch_due(dispatch: Callable[[dict], bool], *, now: Optional[float] = Non
     A session that is not live in this process stays parked until it is (the
     desktop re-opens sessions after a backend restart)."""
     consumed = []
+    dispatch_now = time.time() if now is None else now
     for record in due(now=now, home=home):
         try:
             accepted = bool(dispatch(record))
@@ -214,6 +227,8 @@ def dispatch_due(dispatch: Callable[[dict], bool], *, now: Optional[float] = Non
         if accepted:
             cancel(record["session_key"], home=home)
             consumed.append(record["session_key"])
+        else:
+            retry_later(record["session_key"], home=home, now=dispatch_now)
     return consumed
 
 

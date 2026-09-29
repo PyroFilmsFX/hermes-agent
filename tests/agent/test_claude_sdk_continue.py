@@ -323,6 +323,18 @@ def test_stop_cancels_pause(park_db):
     assert fired == []
 
 
+def test_refused_continuation_keeps_park_and_backs_off(park_db):
+    now = time.time()
+    park_db.park("sess-refused", "sdk-refused", now - 10, "five_hour", stagger_max=0, now=now - 20)
+
+    assert park_db.dispatch_due(lambda _rec: False, now=now) == []
+
+    retained = park_db.get("sess-refused")
+    assert retained is not None
+    assert retained["resume_at"] > now
+    assert park_db.due(now=now) == []
+
+
 @pytest.mark.parametrize("failure", [
     _turn(error="You're out of extra usage", api_error_status=400, api_error_kind="invalid_request"),
     _turn(error="Claude API error (rate_limit): overage", api_error_status=429,

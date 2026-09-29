@@ -12,9 +12,8 @@ from .method_ctx import bind_module
 # finally; only a process death leaves it behind, so a marker at session.resume proves the turn never finished AND the
 # client never saw a terminal frame. Fresh: re-submit automatically (as the messaging gateway does). Stale: clear it
 # and let the partial transcript speak.
-# If the interruption is fresh, re-submit the interrupted prompt automatically (the messaging gateway has
-# done this for restart-interrupted sessions since #27856); if it's stale, clear the marker and let the
-# recovered partial transcript speak for itself — the user can ask to continue manually.
+# A fresh interruption continues the existing session without resending the prompt. Prompt replay is available only
+# through the explicit ``desktop.auto_continue.replay_interrupted_prompt`` opt-in; stale markers are cleared.
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 
 
@@ -47,11 +46,17 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
 
 
 def _auto_continue_note(prompt: str) -> str:
-    # Same opening as the gateway's recovery notes (transcript tooling recognizes both). The prompt is embedded: a hard
-    # crash persists nothing else of the turn.
+    # Explicit opt-in for installations that want cold resume to replay the interrupted prompt.
     return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process stopped before the turn could finish. "
             "Some of the work may already be complete; check the current state before redoing anything, then "
             f"finish the task. The interrupted request was:]\n\n{prompt}")
+
+
+def _auto_continue_replay_enabled() -> bool:
+    desktop = _load_cfg().get("desktop")
+    cfg = desktop.get("auto_continue") if isinstance(desktop, dict) else None
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return is_truthy_value(cfg.get("replay_interrupted_prompt"), default=False)
 
 
 def _continue_note(reason: str) -> str:
@@ -62,7 +67,7 @@ def _continue_note(reason: str) -> str:
             "effect.]")
 
 
-def _continue_session_turn(sid: str, session: dict, *, reason: str) -> dict | None:
+def _continue_session_turn(sid: str, session: dict, *, reason: str, on_admitted=None) -> dict | None:
     """D62: continue a session's interrupted work in its SAME Claude session (error-card Retry, usage-limit resume).
 
     Never re-sends the old prompt: the SDK runtime first lets the CLI re-run its own interrupted turn
@@ -81,28 +86,33 @@ def _continue_session_turn(sid: str, session: dict, *, reason: str) -> dict | No
             session["running"] = False
 
     def kickoff() -> None:
-        rid = f"__continue__{int(time.time() * 1000)}"
-        try:
-            _start_agent_build(sid, session)
-            err = _wait_agent(session, rid, timeout=120.0)
-        except Exception:
-            logger.warning("continue: agent build failed for %s", sid, exc_info=True)
-            err = {"error": {"message": "agent build failed"}}
-        if err or _ensure_active_session_slot(sid, session) is not None:
-            release()
-            return
-        agent = session.get("agent")
-        if agent is not None:
-            with contextlib.suppress(Exception):
-                agent._claude_sdk_continue_requested = True
-        try:
-            with _session_profile_runtime_scope(session):
+        with _session_profile_runtime_scope(session):
+            rid = f"__continue__{int(time.time() * 1000)}"
+            try:
+                _start_agent_build(sid, session)
+                err = _wait_agent(session, rid, timeout=120.0)
+            except Exception:
+                logger.warning("continue: agent build failed for %s", sid, exc_info=True)
+                err = {"error": {"message": "agent build failed"}}
+            if err or _ensure_active_session_slot(sid, session) is not None:
+                release()
+                return
+            if on_admitted is not None:
+                try:
+                    on_admitted()
+                except Exception:
+                    logger.warning("continue admission callback failed for %s", sid, exc_info=True)
+            agent = session.get("agent")
+            if agent is not None:
+                with contextlib.suppress(Exception):
+                    agent._claude_sdk_continue_requested = True
+            try:
                 _emit("status.update", sid, {"kind": "process", "text": "Interrupted, continuing…"})
                 _emit("message.start", sid)
                 _run_prompt_submit(rid, sid, session, _continue_note(reason), display_kind="auto_continue")
-        except Exception as exc:
-            _notif_log_failure("continue dispatch failed", exc)
-            _notif_release_turn(session)
+            except Exception as exc:
+                _notif_log_failure("continue dispatch failed", exc)
+                _notif_release_turn(session)
 
     if _start_session_work(kickoff, name=f"continue-{sid}") is None:
         release()
@@ -113,9 +123,18 @@ def _continue_session_turn(sid: str, session: dict, *, reason: str) -> dict | No
 def _usage_park_dispatch(record: dict) -> bool:
     """Scheduler callback: continue the parked session if it is live here (else it stays parked)."""
     key = str(record.get("session_key") or "")
+    home = Path(record.get("profile_home") or _hermes_home).resolve()
     for sid, session in list(_sessions.items()):
-        if isinstance(session, dict) and str(session.get("session_key") or "") == key:
-            return _continue_session_turn(sid, session, reason="usage limit reset") is not None
+        if (isinstance(session, dict) and str(session.get("session_key") or "") == key
+                and _session_home(session).resolve() == home):
+            from agent import claude_sdk_usage_park as usage_park
+
+            def admitted() -> None:
+                usage_park.cancel(key, home=home)
+
+            # Admission completes inside the worker, after agent build and the ownership fence.
+            _continue_session_turn(sid, session, reason="usage limit reset", on_admitted=admitted)
+            return False
     return False
 
 
@@ -151,9 +170,16 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
-    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    replay_prompt = _auto_continue_replay_enabled()
+    attempt = marker["attempts"] + 1
+    text = (_auto_continue_note(marker["prompt"]) if replay_prompt
+            else _continue_note("previous turn was interrupted"))
 
     def kickoff() -> None:
+        with _session_profile_runtime_scope(session):
+            run_kickoff()
+
+    def run_kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"
         try:
             _start_agent_build(sid, session)
@@ -184,16 +210,20 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
+        agent = session.get("agent")
+        if agent is not None and not replay_prompt:
+            with contextlib.suppress(Exception):
+                agent._claude_sdk_continue_requested = True
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"
-            with _session_profile_runtime_scope(session):
-                def announce():
-                    _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
-                    _emit("message.start", sid)
-                render_notification(announce, platform="tui", diagnostic=diagnostic)
-                _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue",
-                    **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
+
+            def announce():
+                _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
+                _emit("message.start", sid)
+            render_notification(announce, platform="tui", diagnostic=diagnostic)
+            _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue",
+                **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications

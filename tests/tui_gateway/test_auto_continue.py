@@ -92,6 +92,8 @@ def marker_home(monkeypatch, tmp_path):
 def turn_env(monkeypatch, tmp_path, marker_home):
     """Neutralize the turn pipeline's environment-heavy side paths."""
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    # The usage-park poller loops forever; under inline threads its start() would never return.
+    monkeypatch.setattr(server, "_ensure_usage_park_scheduler", lambda: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
     monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda sid, session: None)
     monkeypatch.setattr(server, "_session_cwd", lambda session: str(tmp_path))
@@ -358,6 +360,8 @@ def test_older_agent_still_gets_the_post_turn_stamp(emits, turn_env, marker_home
 @pytest.fixture()
 def schedule_env(monkeypatch, marker_home):
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    # The usage-park poller loops forever; under inline threads its start() would never return.
+    monkeypatch.setattr(server, "_ensure_usage_park_scheduler", lambda: None)
     monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
     monkeypatch.setattr(server, "_wait_agent", lambda session, rid, timeout=30.0: None)
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
@@ -370,7 +374,7 @@ def schedule_env(monkeypatch, marker_home):
     return submitted
 
 
-def test_fresh_marker_schedules_continuation(emits, schedule_env, marker_home):
+def test_fresh_marker_continues_without_replaying_original_prompt(emits, schedule_env, marker_home):
     record_turn_start(marker_home, "session-key", "fix the flaky test")
     session = _session()
 
@@ -382,7 +386,8 @@ def test_fresh_marker_schedules_continuation(emits, schedule_env, marker_home):
     assert session["_auto_continue_attempt"] == 1
     (text, kwargs), = schedule_env
     assert text.startswith("[System note: Your previous turn was interrupted")
-    assert "fix the flaky test" in text
+    assert "fix the flaky test" not in text
+    assert session["agent"]._claude_sdk_continue_requested is True
     assert kwargs["display_kind"] == "auto_continue"
     assert ("message.start", "sid", None) in [(e, s, p) for e, s, p in emits]
 

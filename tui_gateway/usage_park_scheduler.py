@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,21 @@ _stop = threading.Event()
 
 def poll_once(dispatch: Callable[[dict], bool], *, now: float | None = None) -> list[str]:
     from agent import claude_sdk_usage_park as usage_park
+    from tui_gateway import server
 
-    try:
-        return usage_park.dispatch_due(dispatch, now=now)
-    except Exception:
-        logger.warning("usage-park poll failed", exc_info=True)
-        return []
+    consumed = []
+    homes = dict.fromkeys((Path(server._hermes_home), *server._served_profile_homes))
+    for home in homes:
+        try:
+            profile_home = None if home.resolve() == Path(server._hermes_home).resolve() else str(home)
+            with server._session_profile_runtime_scope({"profile_home": profile_home}):
+                scoped_dispatch = lambda record, profile_home=home: dispatch(
+                    {**record, "profile_home": str(profile_home)}
+                )
+                consumed.extend(usage_park.dispatch_due(scoped_dispatch, now=now, home=home))
+        except Exception:
+            logger.warning("usage-park poll failed for %s", home, exc_info=True)
+    return consumed
 
 
 def ensure_started(dispatch: Callable[[dict], bool]) -> bool:
