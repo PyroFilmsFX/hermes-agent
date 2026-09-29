@@ -89,6 +89,9 @@ from agent.transports.claude_agent_sdk_session_billing import (
 from agent.transports.claude_agent_sdk_session_compaction import (
     ClaudeSdkCompactionMixin,
 )
+from agent.transports.claude_agent_sdk_session_hooks import (
+    ClaudeSdkHooksMixin,
+)
 from agent.transports.claude_agent_sdk_session_notify import (
     ClaudeSdkNotifyMixin,
 )
@@ -174,7 +177,15 @@ def _cli_model_id(model):
     return normalize_model_name(str(model))
 
 
-class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, ClaudeSdkNotifyMixin, ClaudeSdkCompactionMixin, ClaudeSdkBillingMixin, ClaudeSdkChildProcessMixin):
+class ClaudeAgentSdkSession(
+    ClaudeSdkTurnMixin,
+    ClaudeSdkPermissionsMixin,
+    ClaudeSdkNotifyMixin,
+    ClaudeSdkCompactionMixin,
+    ClaudeSdkHooksMixin,
+    ClaudeSdkBillingMixin,
+    ClaudeSdkChildProcessMixin,
+):
     """One SDK client per Hermes session, lifetime owned by AIAgent.
 
     Not thread-safe from the caller's side — one caller drives it at a time,
@@ -1648,12 +1659,19 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             # every supported SDK permission mode.
             "disallowed_tools": ["AskUserQuestion", "Read"],
         }
-        # The CLI owns compaction on this lane, so its PreCompact hook is the
-        # only honest signal that a turn stalled to compact. Registered only
-        # when a consumer asked for it, so the default option set is unchanged.
+        # CLI-side hooks: compaction watchdog / status, plus tool and subagent
+        # lifecycle passthrough to Hermes plugin hooks.
+        hooks: dict[str, list[Any]] = {}
         _compaction_hooks = self._build_compaction_hooks()
-        if _compaction_hooks is not None:
-            fields["hooks"] = _compaction_hooks
+        if _compaction_hooks:
+            for k, v in _compaction_hooks.items():
+                hooks.setdefault(k, []).extend(v)
+        _plugin_hooks = self._build_plugin_hooks()
+        if _plugin_hooks:
+            for k, v in _plugin_hooks.items():
+                hooks.setdefault(k, []).extend(v)
+        if hooks:
+            fields["hooks"] = hooks
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
         # Auto-mode classifier rules via the CLI's flag-settings layer
