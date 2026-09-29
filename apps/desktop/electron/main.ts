@@ -8118,7 +8118,10 @@ const sessionBindingIssuer = createSessionAttestationIssuer({
   keyStore: ownerGrantKeyStore,
   grantsDir: defaultOwnerGrantsDir(),
   ownerUid: process.getuid?.() ?? -1,
-  backend: ownerGrantBackendIds.get(primaryProfileKey()) ?? 'spawn-1',
+  // No eager `backend`: this runs at module load, before primaryProfilePin
+  // exists (TDZ crash on launch), and before any backend has an id, so it
+  // could only ever be the resolver's own 'spawn-1' default. getBackendId
+  // answers per profile at use time.
   getBackendId: (profile: string) => ownerGrantBackendIds.get(profile) ?? null,
   fetchJson: (path: string) => fetchJsonForRunningProfile(primaryProfileKey(), path),
   now: () => Date.now(),
