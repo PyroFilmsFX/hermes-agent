@@ -209,7 +209,7 @@ export function useRepoWorktreeMap(
       try {
         const merged = mergedKey ? (JSON.parse(mergedKey)[repoPath] as string[] | undefined) : undefined
 
-        return [repoPath, await git.worktreeList(repoPath, merged?.length ? merged : undefined)] as const
+        return [repoPath, await (merged?.length ? git.worktreeList(repoPath, merged) : git.worktreeList(repoPath))] as const
       } catch {
         return [repoPath, []] as const
       }
