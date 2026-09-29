@@ -76,7 +76,9 @@ def _continue_session_turn(sid: str, session: dict, *, reason: str, on_admitted=
     if session.get("source") == "bot_room":
         return None
     with session["history_lock"]:
-        if session.get("running") or session.get("_finalized"):
+        if (session.get("running") or session.get("_finalized") or session.get("_owner_stop_hold")
+                or _ac_sdk_woken(session)
+                or _ac_owner_pending(session)):
             return None
         session["running"] = True
         session["last_active"] = time.time()
@@ -167,7 +169,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
-    if session.get("_auto_continue_scheduled"):
+    if (session.get("_auto_continue_scheduled") or session.get("_owner_stop_hold")
+            or _ac_owner_pending(session) or _ac_sdk_woken(session)):
         return None
     session["_auto_continue_scheduled"] = True
     replay_prompt = _auto_continue_replay_enabled()
@@ -191,7 +194,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             session["_auto_continue_scheduled"] = False
             return
         with session["history_lock"]:
-            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
+            if (session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized")
+                    or session.get("_owner_stop_hold") or _ac_owner_pending(session) or _ac_sdk_woken(session)):
                 session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
                 return
             session["running"] = True
@@ -243,6 +247,25 @@ def _ac_queued_is_distinct(entry: dict) -> bool:
     """An envelope that must keep its own slot: attachments, a relayed author, or a display kind (a peer card, an
     owner-forward chip, a hidden widget send). Merging it would move its images, sender or kind onto other text."""
     return bool(entry.get("image_paths") or entry.get("turn_author") or entry.get("display_kind"))
+
+
+def _ac_is_owner_entry(entry: dict) -> bool:
+    return entry.get("display_kind") in (None, "owner_forward") and not str(entry.get("rid") or "").startswith(
+        "peer-mailbox:")
+
+
+def _ac_owner_pending(session: dict) -> bool:
+    return bool(session.get("_owner_submit_waiting")) or any(_ac_is_owner_entry(entry) for entry in
+               ([session["queued_prompt"]] if session.get("queued_prompt") else [])
+               + list(session.get("queued_prompts") or []))
+
+
+def _ac_sdk_woken(session: dict) -> bool:
+    from tui_gateway.session_mailbox import _live_claude_sdk
+
+    sdk_session = _live_claude_sdk(session)
+    check = getattr(sdk_session, "woken_turn_active", None)
+    return bool(check()) if callable(check) else False
 
 
 def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
@@ -415,9 +438,19 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
+        if _ac_sdk_woken(session):
+            return False
+        entries = [queued, *(session.get("queued_prompts") or [])]
+        owner_index = next((i for i, entry in enumerate(entries) if _ac_is_owner_entry(entry)), None)
+        if session.get("_owner_stop_hold") and owner_index is None:
+            return False
+        index = owner_index if owner_index is not None else 0
+        queued = entries.pop(index)
         queue_generation = int(session.get("_queued_prompt_generation", 0))
-        _ac_set_queue(session, session.get("queued_prompts") or [])
+        _ac_set_queue(session, entries)
         session["running"] = True
+        if _ac_is_owner_entry(queued):
+            session["_owner_stop_hold"] = False
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the

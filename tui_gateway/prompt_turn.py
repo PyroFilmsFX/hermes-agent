@@ -550,12 +550,13 @@ def _run_post_turn_followups(
     steer = result.get("pending_steer") if isinstance(result, dict) else None
     if isinstance(steer, str) and steer.strip():
         with session["history_lock"]:
-            _enqueue_prompt(session, steer, session.get("transport"))
+            if not session.get("_owner_stop_hold"):
+                _enqueue_prompt(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
     if goal_followup:
         with _session_turn_admission(session) as admitted:
-            if not admitted or session.get("running"):
+            if not admitted or session.get("running") or session.get("_owner_stop_hold") or _ac_owner_pending(session):
                 return  # user already sent something — their turn wins
             session["running"] = True
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")

@@ -116,14 +116,24 @@ def test_session_send_masks_secret_in_mailbox_and_native_envelope(gw):
     assert token not in origin["body"] and "[REDACTED:github-token:" in origin["body"]
 
 
-def test_busy_live_claude_target_uses_sdk_boundary_queue_once(gw):
+def test_busy_live_claude_target_uses_sdk_boundary_queue_once(gw, monkeypatch):
+    """Old contract injected into the busy SDK FIFO; that let peer turns starve owner input."""
     received = []
     gw.sessions["live-claude"] = _claude_live_session(
-        lambda body, origin: received.append((body, origin)) or True, running=True)
+        lambda body, origin: received.append((body, origin)) or True)
+    sdk = gw.sessions["live-claude"]["agent"]._claude_sdk_session
+    sdk.native_peer_idle = lambda: not sdk.busy
+    sdk.set_idle_boundary_callback = lambda callback: setattr(sdk, "boundary", callback)
+    monkeypatch.setattr(gw.mb, "_sdk_turn_boundary", lambda _sid, _session: gw.mb.drain_session("target"))
+    sdk.busy = True
 
     result = _send(gw)
-    assert result["status"] == "delivered-native"
-    assert len(received) == 1 and gw.submits == []
+    assert result["status"] == "queued"
+    assert received == [] and gw.submits == []
+    assert gw.db.peer_mailbox_get(result["message_id"])["status"] == "queued"
+    sdk.busy = False
+    sdk.boundary()
+    assert len(received) == 1
     assert gw.mb.drain_session("target") == 0
     assert gw.db.peer_mailbox_get(result["message_id"])["delivered_via"] == "native"
 

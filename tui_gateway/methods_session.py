@@ -2357,14 +2357,14 @@ def _(rid, params: dict) -> dict:
     sid = str(params.get("session_id") or "")
     if _session_uses_compute_host(session):
         try:
-            _interrupt_session_turn(sid, session, request_id=f"interrupt-{rid}")
+            _interrupt_session_turn(sid, session, request_id=f"interrupt-{rid}", hold_auto_started=True)
         except Exception as exc:
             return _err(rid, 5019, f"compute-host interrupt failed: {exc}")
         return _ok(rid, {"status": "interrupted", "turn_isolation": True})
     session, err = _sess(params, rid)
     if err:
         return err
-    _interrupt_session_turn(sid, session)
+    _interrupt_session_turn(sid, session, hold_auto_started=True)
     # D62: Stop also cancels a usage-limit pause (the parked session must not resume on its own).
     with contextlib.suppress(Exception):
         from agent import claude_sdk_usage_park as usage_park
@@ -2409,6 +2409,20 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
         if err:
             return err
         agent = session.get("agent")
+        if verb == "redirect" and not session.get("running"):
+            from tui_gateway.session_mailbox import _install_sdk_boundary, _live_claude_sdk, _sdk_turn_boundary
+            sdk_session = _live_claude_sdk(session)
+            if sdk_session is not None and callable(getattr(sdk_session, "woken_turn_active", None)):
+                _install_sdk_boundary(str(params.get("session_id") or ""), session, sdk_session)
+                if sdk_session.woken_turn_active():
+                    with session["history_lock"]:
+                        session["_owner_stop_hold"] = False
+                        _enqueue_prompt(session, text, current_transport() or _stdio_transport)
+                        session["last_active"] = time.time()
+                    sdk_session.interrupt_woken_turn()
+                    if not sdk_session.woken_turn_active():
+                        _sdk_turn_boundary(str(params.get("session_id") or ""), session)
+                    return _ok(rid, {"status": "queued", "text": text})
         # Redirect during the turn-build window (running=True, agent None): queue for the next turn instead of
         # a misleading 4010 the client swallows into a lost follow-up.
         if verb == "redirect" and agent is None and session.get("running"):

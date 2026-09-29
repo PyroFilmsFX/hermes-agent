@@ -404,6 +404,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # in flight; the reader keeps routing it to the background path even
         # after a host turn claims the stream (see _reader_loop).
         self._unsolicited_burst_open = False
+        self._native_peer_in_flight = False
+        self._native_peer_msg_id: Optional[str] = None
+        self._native_peer_seen = False
+        self._idle_boundary_callback: Optional[Callable[[], None]] = None
         self._unsolicited_items: list[dict] = []
         self._unsolicited_tool_items: dict[str, dict] = {}
         self._unsolicited_seen: set[str] = set()
@@ -1180,6 +1184,46 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     _safe_sdk_error_text(exc),
                 )
 
+    def woken_turn_active(self) -> bool:
+        with self._turn_callback_lock:
+            return bool(self._native_peer_in_flight or self._unsolicited_burst_open)
+
+    def interrupt_woken_turn(self) -> bool:
+        """Stop an unclaimed CLI turn without leaving a host-turn interrupt pending."""
+        with self._turn_callback_lock:
+            if not (self._native_peer_in_flight or self._unsolicited_burst_open):
+                return False
+            client, loop = self._client, self._loop
+        if client is None or loop is None:
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(client.interrupt(), loop)
+            future.add_done_callback(_swallow_interrupt_result)
+            return True
+        except Exception:
+            logger.debug("SDK woken-turn interrupt scheduling failed", exc_info=True)
+            return False
+
+    def set_idle_boundary_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        with self._turn_callback_lock:
+            self._idle_boundary_callback = callback
+
+    def _notify_idle_boundary(self) -> None:
+        callback = self._idle_boundary_callback
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                logger.debug("SDK idle-boundary callback failed", exc_info=True)
+
+    def native_peer_idle(self) -> bool:
+        with self._turn_callback_lock:
+            return not (self._turn_inbox is not None or self._turn_claim_requested
+                        or self._rename_claim_requested or getattr(self, "_resume_backlog", None) is not None
+                        or self._unsolicited_burst_open or self._native_peer_in_flight
+                        or self._pending_steer_results or self._closed or self._retiring
+                        or self._stream_ended is not None)
+
     def stop_task(self, task_id: str) -> bool:
         """Schedule Claude SDK's task stop on the session's loop thread."""
         client, loop = self._client, self._loop
@@ -1308,7 +1352,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         return True
 
     def send_peer_message(self, text: str, origin: dict[str, Any]) -> bool:
-        """Inject peer-origin input; the SDK holds it until the current CLI turn reaches a boundary."""
+        """Inject one peer-origin input only while the CLI is idle."""
         if not text or not text.strip():
             return False
         if not self.is_live():
@@ -1316,6 +1360,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         client, loop = self._client, self._loop
         if client is None or loop is None:
             return False
+        with self._turn_callback_lock:
+            if not self.native_peer_idle():
+                return False
+            self._native_peer_in_flight = True
+            self._native_peer_msg_id = str(origin.get("msg_id") or "")
+            self._native_peer_seen = False
         # A peer message starts a CLI turn without run_turn; its tool calls need a live capability too.
         if callable(refresh_capability := getattr(self, "refresh_session_spawn_capability", None)):
             refresh_capability()
@@ -1337,6 +1387,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 future.cancel()
                 raise
         except Exception:
+            with self._turn_callback_lock:
+                self._native_peer_in_flight = False
+                self._native_peer_msg_id = None
+                self._native_peer_seen = False
             if query is not None and hasattr(query, "close"):
                 query.close()
             logger.debug("SDK peer query scheduling failed", exc_info=True)

@@ -571,6 +571,8 @@ def _lock_in_submit_turn(
             if err is not None:
                 return err, {}
         session["running"] = True
+        if display_kind in (None, "owner_forward") and not str(rid).startswith("peer-mailbox:"):
+            session["_owner_stop_hold"] = False
         session["turn_started_at"] = time.time()
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
@@ -584,7 +586,32 @@ def _lock_in_submit_turn(
 _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 
+def _owner_waiting_submit(fn):
+    """Keep auto-start claims behind an owner RPC until it has queued or claimed its turn."""
+    def wrapped(rid, params):
+        kind, _metadata = _submit_display(params)
+        if kind not in (None, "owner_forward") or str(rid).startswith("peer-mailbox:"):
+            return fn(rid, params)
+        with _sessions_lock:
+            session = _sessions.get(params.get("session_id", ""))
+        if session is None:
+            return fn(rid, params)
+        with session["history_lock"]:
+            session["_owner_submit_waiting"] = int(session.get("_owner_submit_waiting", 0)) + 1
+        try:
+            return fn(rid, params)
+        finally:
+            with session["history_lock"]:
+                remaining = int(session.get("_owner_submit_waiting", 0)) - 1
+                if remaining > 0:
+                    session["_owner_submit_waiting"] = remaining
+                else:
+                    session.pop("_owner_submit_waiting", None)
+    return wrapped
+
+
 @method("prompt.submit")
+@_owner_waiting_submit
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     from tui_gateway.owner_forward import OwnerForwardStamp
@@ -692,6 +719,22 @@ def _(rid, params: dict) -> dict:
             return refusal
         if (t := current_transport()) is not None:
             _rebind_live_transport(sid, session, t)
+    owner_submit = display_kind in (None, "owner_forward") and not str(rid).startswith("peer-mailbox:")
+    if owner_submit:
+        from tui_gateway.session_mailbox import _install_sdk_boundary, _live_claude_sdk, _sdk_turn_boundary
+        sdk_session = _live_claude_sdk(session)
+        if sdk_session is not None and callable(getattr(sdk_session, "woken_turn_active", None)):
+            _install_sdk_boundary(sid, session, sdk_session)
+            if sdk_session.woken_turn_active():
+                with session["history_lock"]:
+                    _enqueue_prompt(session, text, t or session.get("transport"), turn_author=turn_author,
+                                    display_kind=display_kind, display_metadata=display_metadata)
+                    session["_owner_stop_hold"] = False
+                    session["last_active"] = time.time()
+                sdk_session.interrupt_woken_turn()
+                if not sdk_session.woken_turn_active():
+                    _sdk_turn_boundary(sid, session)
+                return _ok(rid, {"status": "queued"})
     # Claim the turn against a possibly-running session (busy/queued reply, else fall
     # through once ``running`` is observed False).  The provider interrupt happens after
     # history_lock is released (a non-interruptible tool may hold it); if the old turn

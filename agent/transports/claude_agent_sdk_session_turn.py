@@ -1658,6 +1658,7 @@ class ClaudeSdkTurnMixin:
                             if type(message).__name__ == "ResultMessage":
                                 self._unsolicited_burst_open = False
                                 self._apply_deferred_rename()
+                                self._notify_idle_boundary()
                     elif inbox is not None:
                         inbox.put_nowait(message)
                     elif getattr(self, "_resume_backlog", None) is not None:
@@ -1672,6 +1673,7 @@ class ClaudeSdkTurnMixin:
                         if type(message).__name__ == "ResultMessage":
                             self._unsolicited_burst_open = False
                             self._apply_deferred_rename()
+                            self._notify_idle_boundary()
                     # Message wins ties with a claim. Re-arm first, then loop:
                     # every immediately available pre-claim FIFO entry is
                     # classified unsolicited before the claim is acknowledged.
@@ -1878,6 +1880,10 @@ class ClaudeSdkTurnMixin:
             self._notify_tool_started(message)
             self._notify_tool_use(message)
         if name == "UserMessage":
+            origin = effective_origin(message)
+            if (isinstance(origin, dict) and origin.get("kind") == "peer"
+                    and str(origin.get("msg_id") or "") == getattr(self, "_native_peer_msg_id", None)):
+                self._native_peer_seen = True
             # Close what the line above opened. A woken turn (peer message, task
             # notification) opened a card per tool call but never closed one — the
             # foreground loop is the only other caller — so every tool it ran was
@@ -1885,6 +1891,10 @@ class ClaudeSdkTurnMixin:
             self._notify_tool_results(message)
         if name == "ResultMessage":
             self._unsolicited_results += 1
+            if getattr(self, "_native_peer_seen", False):
+                self._native_peer_in_flight = False
+                self._native_peer_msg_id = None
+                self._native_peer_seen = False
         if getattr(message, "parent_tool_use_id", None):
             # Subagent streams belong to the parent tool card, not to the
             # session-level unsolicited turn.

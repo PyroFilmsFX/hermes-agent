@@ -120,6 +120,14 @@ def _transport(turn_inbox, client=True, loop=True):
     fake_client = types.SimpleNamespace(query=lambda t: queried.append(t))
     stub = types.SimpleNamespace(
         _turn_inbox=turn_inbox,
+        _turn_callback_lock=threading.RLock(),
+        _turn_claim_requested=False,
+        _rename_claim_requested=False,
+        _unsolicited_burst_open=False,
+        _native_peer_in_flight=False,
+        _closed=False,
+        _retiring=False,
+        _stream_ended=None,
         _client=fake_client if client else None,
         _loop=object() if loop else None,
         _interrupt_commit_lock=threading.Lock(),
@@ -127,6 +135,7 @@ def _transport(turn_inbox, client=True, loop=True):
         _terminal_result_committed=False,
         is_live=lambda: True,
     )
+    stub.native_peer_idle = types.MethodType(mod.ClaudeAgentSdkSession.native_peer_idle, stub)
     return mod, stub, queried
 
 
@@ -201,9 +210,11 @@ def test_peer_message_uses_sdk_stream_with_peer_origin_when_idle(monkeypatch):
         "parent_tool_use_id": None, "origin": origin,
     }]
     assert len(scheduled) == 1
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "later", origin) is False
+    assert len(queried) == 1, "a second native peer waits for the first result"
 
 
-def test_peer_message_uses_sdk_queue_when_a_turn_is_in_flight(monkeypatch):
+def test_peer_message_declines_while_a_turn_is_in_flight(monkeypatch):
     mod, stub, queried = _transport(turn_inbox=object())
     scheduled = []
 
@@ -216,8 +227,8 @@ def test_peer_message_uses_sdk_queue_when_a_turn_is_in_flight(monkeypatch):
     monkeypatch.setattr(
         mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: _Fut(), raising=False,
     )
-    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer"}) is True
-    assert len(queried) == 1 and len(scheduled) == 1
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer"}) is False
+    assert queried == [] and scheduled == []
 
 
 def test_peer_message_declines_when_scheduled_query_fails(monkeypatch):

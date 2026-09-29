@@ -618,11 +618,14 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None) -> bool:
+def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None,
+                            hold_auto_started: bool = False) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
     channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics."""
     use_compute_host = _session_uses_compute_host(session)
     should_interrupt = bool(session.get("running"))
+    from tui_gateway.session_mailbox import _live_claude_sdk
+    sdk_session = _live_claude_sdk(session) if not use_compute_host else None
     run_thread_alive = False
     if use_compute_host:
         # The host owns the live turn (parent `running` can lag a blocked tool), so let it decide. Gate on
@@ -633,6 +636,8 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
     with session["history_lock"]:
         session["_turn_cancel_requested"] = True
+        if hold_auto_started:
+            session["_owner_stop_hold"] = True
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
@@ -652,6 +657,8 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         if should_interrupt:
             from agent.interrupt_compat import request_hard_interrupt
             request_hard_interrupt(session.get("agent"))
+        elif sdk_session is not None and callable(getattr(sdk_session, "interrupt_woken_turn", None)):
+            sdk_session.interrupt_woken_turn()
         # Background delegations are detached from the turn's interrupt fan-out; a stop ends them too
         # (own UI sid + spawner id only — a viewer tab must not kill gateway work). Each returns as an
         # interrupted completion with its partial output.

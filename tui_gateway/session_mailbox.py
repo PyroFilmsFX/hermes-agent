@@ -5,7 +5,7 @@ A message sent to a stored Hermes session is never dropped because the session h
 1. ``send_message`` writes it to the durable ``peer_mailbox`` table (``hermes_state_peer_mailbox``) FIRST.
 2. It then tries the target's live transport:
    - idle live Claude SDK target          -> native peer-origin SDK input -> ``delivered-native``
-   - busy live Claude SDK target          -> native SDK input, held to its next boundary
+   - busy live Claude SDK target          -> durable queue, drained at its next boundary
    - live non-Claude target               -> ``prompt.submit(queued=True)`` -> ``delivered-live``
    - target not live, resume allowed      -> ``session.resume`` (cold) + submit -> ``resumed-and-delivered``
    - resume capped / rate-limited / off   -> ``queued`` (delivered later, see 3)
@@ -349,13 +349,18 @@ def _peer_origin(row: dict) -> dict[str, Any]:
 def _deliver_native_claimed(db, row: dict, live: tuple[str, dict], *, pol: dict) -> tuple[str, str] | None:
     """Inject a peer-origin message into an idle, live Claude SDK session.
 
-    ``None`` means this is not a native target. The SDK holds input for a busy CLI turn
-    until its next boundary; a declined/failed native attempt falls through to the live prompt path.
+    ``None`` means this is not a native target. Busy input stays durable until the next boundary.
     """
     sid, session = live
     sdk_session = _live_claude_sdk(session)
     if sdk_session is None:
         return None
+    is_live = getattr(sdk_session, "is_live", None)
+    if callable(is_live) and not is_live():
+        return None
+    _install_sdk_boundary(sid, session, sdk_session)
+    if not _native_peer_idle(session, sdk_session):
+        return STATUS_QUEUED, "Claude session busy; queued until its next boundary"
     if not db.peer_mailbox_claim(row["id"], _OWNER):
         return STATUS_QUEUED, "another delivery of this message is in progress"
     try:
@@ -366,12 +371,50 @@ def _deliver_native_claimed(db, row: dict, live: tuple[str, dict], *, pol: dict)
         logger.debug("peer mailbox native delivery failed for %s", sid, exc_info=True)
         accepted = False
     if not accepted:
+        if not _native_peer_idle(session, sdk_session):
+            db.peer_mailbox_release(row["id"], _OWNER, "Claude session became busy", max_attempts=0)
+            return STATUS_QUEUED, "Claude session became busy; queued until its next boundary"
         # The same claimed row falls back to the Hermes queue; its dedupe key remains intact.
         return _submit_claimed(db, row, sid, via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
     if not db.peer_mailbox_mark_delivered(row["id"], _OWNER, "native"):
         logger.warning("peer mailbox: row %s accepted natively but its claim was lost before settlement", row["id"])
     emit_settled(row["id"], STATUS_DELIVERED_NATIVE, int(row.get("attempts") or 0), str(row.get("from_session_id") or ""))
     return STATUS_DELIVERED_NATIVE, "accepted by the live Claude session"
+
+
+def _native_peer_idle(session: dict, sdk_session: Any) -> bool:
+    if _mailbox_auto_blocked(session) or session.get("running") or session.get("_auto_continue_scheduled"):
+        return False
+    if getattr(session.get("agent"), "_pending_steer", None):
+        return False
+    check = getattr(sdk_session, "native_peer_idle", None)
+    return bool(check()) if callable(check) else True
+
+
+def _mailbox_auto_blocked(session: dict) -> bool:
+    from tui_gateway.session_auto_continue import _ac_owner_pending
+
+    with (session.get("history_lock") or contextlib.nullcontext()):
+        return bool(session.get("_owner_stop_hold") or _ac_owner_pending(session))
+
+
+def _install_sdk_boundary(sid: str, session: dict, sdk_session: Any) -> None:
+    setter = getattr(sdk_session, "set_idle_boundary_callback", None)
+    if callable(setter):
+        setter(lambda: _sdk_turn_boundary(sid, session))
+
+
+def _sdk_turn_boundary(sid: str, session: dict) -> None:
+    """After an unclaimed CLI turn, start a waiting owner turn before retrying peer rows."""
+    from tui_gateway import server
+
+    def run() -> None:
+        with server._session_profile_runtime_scope(session):
+            server._drain_queued_prompt(f"sdk-boundary:{sid}", sid, session)
+            if not session.get("running") and not session.get("_owner_stop_hold"):
+                drain_session(str(session.get("session_key") or ""), session.get("profile_home"))
+
+    server._start_session_work(run, name=f"sdk-boundary-{sid}")
 
 
 def _submit_claimed(db, row: dict, sid: str, *, via: str, ok_status: str, pol: dict) -> tuple[str, str]:
@@ -467,6 +510,8 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
     target = _tip(db, str(row["target_session_id"]))
     live = _find_live(target, profile_home)
     if live is not None:
+        if _mailbox_auto_blocked(live[1]):
+            return STATUS_QUEUED, "owner input pending or Stop hold active"
         native = _deliver_native_claimed(db, row, live, pol=pol)
         if native is not None:
             return native
@@ -609,11 +654,15 @@ def drain_session(session_key: str, profile_home: str | None = None) -> int:
                 live = _find_live(session_key, profile_home)
                 if live is None:
                     return delivered
+                if _mailbox_auto_blocked(live[1]):
+                    return delivered
                 if _unfit_for_delivery(db, row, pol) is not None:
                     continue
                 native = _deliver_native_claimed(db, row, live, pol=pol)
                 if native is not None:
                     status, _ = native
+                    if status == STATUS_QUEUED:
+                        return delivered
                 else:
                     if not db.peer_mailbox_claim(row["id"], _OWNER):
                         continue

@@ -182,7 +182,9 @@ def _notif_release_turn(session: dict) -> None:
 def _notif_claim_turn(session: dict) -> bool:
     """Claim the idle session (running=True) under history_lock; False if a turn is live."""
     with _session_turn_admission(session) as admitted:
-        if not admitted or session.get("running"):
+        if (not admitted or any(session.get(key) for key in (
+                "running", "queued_prompt", "queued_prompts", "_auto_continue_scheduled", "_owner_stop_hold"))
+                or _ac_owner_pending(session) or _ac_sdk_woken(session)):
             return False
         session["running"] = True
         session["turn_started_at"] = time.time()
