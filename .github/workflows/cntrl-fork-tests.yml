@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   classify:
-    if: github.repository == 'PyroFilmsFX/hermes-agent'
+    if: github.repository == 'ThinkBotHQ/hermes-agent'
     name: Classify changed paths
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -94,7 +94,7 @@ jobs:
           ' "$OUTPUT_JSON"
 
   test:
-    if: github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.outputs.mode != 'none'
+    if: github.repository == 'ThinkBotHQ/hermes-agent' && needs.classify.outputs.mode != 'none'
     needs: classify
     name: ${{ needs.classify.outputs.mode == 'selected' && fromJson(needs.classify.outputs.files_count) <= 60 && 'Tests (selected)' || format('Tests (slice {0}/10)', matrix.slice) }}
     runs-on: ubuntu-latest
@@ -162,7 +162,7 @@ jobs:
           path: test_durations.json
 
   durations:
-    if: always() && github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.result == 'success' && needs.classify.outputs.mode == 'full'
+    if: always() && github.repository == 'ThinkBotHQ/hermes-agent' && needs.classify.result == 'success' && needs.classify.outputs.mode == 'full'
     needs: [classify, test]
     name: Save merged test durations
     runs-on: ubuntu-latest
@@ -189,7 +189,7 @@ jobs:
   desktop:
     # Targeted only: runs the changed/sibling desktop tests when apps/desktop changes. The full
     # desktop suite is not gated here (upstream js-tests.yml owns it on a 32-core runner).
-    if: github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.outputs.desktop == 'true' && needs.classify.outputs.desktop_files != ''
+    if: github.repository == 'ThinkBotHQ/hermes-agent' && needs.classify.outputs.desktop == 'true' && needs.classify.outputs.desktop_files != ''
     needs: classify
     name: Desktop tests (changed)
     runs-on: ubuntu-latest
