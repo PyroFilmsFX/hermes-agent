@@ -34,6 +34,11 @@ export type OpenSessionIntent = 'in-place' | 'main' | 'stack' | 'tab' | 'window'
 export type OpenSessionNavigate = (to: string, options?: { replace?: boolean }) => void
 
 export interface OpenSessionWorkspaceScope {
+  /** Legacy profile-pool owner, for an opener that knows the session's profile
+   *  but not its registry connection (the Conductors page's cross-profile
+   *  rows). A new sessions-mode tile records it so its resume routes to that
+   *  profile instead of the ambient gateway. */
+  ownerProfile?: string
   ownerRoute?: SessionProfileRoute
   workspaceMode: WorkspaceMode
   workspaceOwnerKey?: string
@@ -183,6 +188,8 @@ export function openSession(
 
     if (botWorkspaceScope) {
       openSessionTile(storedSessionId, 'center', undefined, undefined, botWorkspaceScope)
+    } else if (workspaceScope.ownerProfile) {
+      openSessionTile(storedSessionId, 'center', undefined, undefined, workspaceScope)
     } else {
       openSessionTile(storedSessionId, 'center')
     }

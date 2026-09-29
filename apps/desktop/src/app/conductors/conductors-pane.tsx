@@ -1,8 +1,9 @@
 import { useStore } from '@nanostores/react'
-import { type KeyboardEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useInRouterContext, useNavigate } from 'react-router'
 
 import type { ConductorRow as ConductorRowData } from '@/api/conductors'
-import { openSession, openSessionIntentFromModifiers } from '@/app/open-session'
+import type { OpenSessionNavigate } from '@/app/open-session'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { Codicon } from '@/components/ui/codicon'
 import { SegmentedControl } from '@/components/ui/segmented-control'
@@ -13,7 +14,25 @@ import { cn } from '@/lib/utils'
 import { $conductors, $conductorsNow, acquireConductorsPoller, refreshConductors } from '@/store/conductors'
 import { $activeProfile } from '@/store/profile'
 
-import { ConductorRow, CONDUCTORS_GRID_TRACK } from './conductor-row'
+import {
+  type ConductorOpenEvent,
+  conductorOpenIntent,
+  conductorTarget,
+  copyConductorText,
+  openConductorExternal,
+  openConductorTarget,
+  sendToConductorTarget
+} from './conductor-actions'
+import { ConductorRow } from './conductor-row'
+import {
+  type ConductorColumn,
+  CONDUCTORS_GRID_MIN_WIDTH,
+  CONDUCTORS_HEADER_CELL_LAYOUT,
+  CONDUCTORS_HEADER_LAYOUT,
+  CONDUCTORS_MERGED_HEADER,
+  CONDUCTORS_PIECE,
+  CONDUCTORS_SKELETON_LAYOUT
+} from './conductors-layout'
 import {
   clockOf,
   type ConductorFilter,
@@ -26,23 +45,14 @@ import {
   sortConductorRows
 } from './conductors-model'
 
-type OpenRow = (row: ConductorRowData, event: KeyboardEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => void
+type OpenRow = (row: ConductorRowData, event: ConductorOpenEvent) => void
+type SendRow = (row: ConductorRowData, text: string) => void
 
-const noopNavigate = () => {}
-
-/** Open-on-click placeholder (R6 replaces it with the stack intent, the
- *  cross-profile route and Send…). `tab` needs no router handle. */
-const openRowAsTab: OpenRow = (row, event) => {
-  const sessionId = row.orchestrator.hermes_session_id
-
-  if (sessionId) {
-    openSession(sessionId, noopNavigate, openSessionIntentFromModifiers(event, 'tab'))
-  }
-}
+const noopNavigate: OpenSessionNavigate = () => {}
 
 const refreshFresh = () => void refreshConductors({ fresh: true })
 
-const COLUMN_KEYS = [
+const COLUMN_KEYS: readonly ConductorColumn[] = [
   'project',
   'session',
   'now',
@@ -53,7 +63,7 @@ const COLUMN_KEYS = [
   'ci',
   'blockers',
   'activity'
-] as const
+]
 
 function UpdatedAgo({ fetchedAt }: { fetchedAt: number }) {
   const { t } = useI18n()
@@ -64,20 +74,37 @@ function UpdatedAgo({ fetchedAt }: { fetchedAt: number }) {
 
 function HeaderRow() {
   const { t } = useI18n()
+  const c = t.conductors
 
   return (
     <div
       className={cn(
-        CONDUCTORS_GRID_TRACK,
+        CONDUCTORS_HEADER_LAYOUT,
         'sticky top-0 z-[1] border-b border-(--ui-stroke-secondary) bg-(--ui-panel-background) px-3 py-1 text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase'
       )}
       role="row"
     >
-      {COLUMN_KEYS.map(key => (
-        <div className="truncate" data-col={key} key={key} role="columnheader">
-          {t.conductors.columns[key]}
-        </div>
-      ))}
+      {COLUMN_KEYS.map(key => {
+        const merged = CONDUCTORS_MERGED_HEADER[key]
+
+        return (
+          <div
+            className={cn('truncate', CONDUCTORS_HEADER_CELL_LAYOUT[key])}
+            data-col={key}
+            key={key}
+            role="columnheader"
+          >
+            {merged ? (
+              <>
+                <span className={CONDUCTORS_PIECE.wideOnly}>{c.columns[key]}</span>
+                <span className={CONDUCTORS_PIECE.mediumOnly}>{c.mergedColumns[merged]}</span>
+              </>
+            ) : (
+              c.columns[key]
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -90,7 +117,7 @@ function SkeletonRows() {
         <div
           aria-hidden
           className={cn(
-            CONDUCTORS_GRID_TRACK,
+            CONDUCTORS_SKELETON_LAYOUT,
             'min-h-10 items-center border-b border-(--ui-stroke-tertiary) px-3 py-1.5'
           )}
           data-slot="conductors-skeleton-row"
@@ -105,12 +132,38 @@ function SkeletonRows() {
   )
 }
 
+const ROW_SELECTOR = '[role="row"][data-row-key]'
+
 export interface ConductorsPaneProps {
-  /** Override for the row-open door (tests, R6). */
+  /** Override for the row-open door (tests). Defaults to the §8 intents. */
   onOpenRow?: OpenRow
+  /** Override for Send… (tests). Defaults to stash-the-draft-and-open. */
+  onSendRow?: SendRow
 }
 
-export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps = {}) {
+/** useNavigate() throws outside a Router (bare test harnesses render the pane
+ *  router-free), so only the routed wrapper asks for it. */
+export function ConductorsPane(props: ConductorsPaneProps = {}) {
+  return useInRouterContext() ? (
+    <RoutedConductorsPane {...props} />
+  ) : (
+    <ConductorsPaneView {...props} navigate={noopNavigate} />
+  )
+}
+
+function RoutedConductorsPane(props: ConductorsPaneProps) {
+  const routerNavigate = useNavigate()
+
+  const navigate = useCallback<OpenSessionNavigate>((to, options) => void routerNavigate(to, options), [routerNavigate])
+
+  return <ConductorsPaneView {...props} navigate={navigate} />
+}
+
+function ConductorsPaneView({
+  navigate,
+  onOpenRow,
+  onSendRow
+}: ConductorsPaneProps & { navigate: OpenSessionNavigate }) {
   const { t } = useI18n()
   const c = t.conductors
   const visible = usePaneVisible()
@@ -118,6 +171,9 @@ export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps
   const activeProfile = useStore($activeProfile)
   const [filter, setFilter] = useState<ConductorFilter>('all')
   const [showAbandoned, setShowAbandoned] = useState(false)
+  const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const [focusKey, setFocusKey] = useState<null | string>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
 
   // §9: the poller runs only while this pane is mounted AND visible. An
   // inactive tab (keep-alive) releases it; the store ref-counts instances.
@@ -155,7 +211,96 @@ export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps
 
   const shownRows = useMemo(() => liveRows.filter(row => matchesFilter(row, filter)), [liveRows, filter])
   const needsYou = useMemo(() => liveRows.filter(needsOwner).length, [liveRows])
-  const openRow = useCallback<OpenRow>((row, event) => onOpenRow(row, event), [onOpenRow])
+
+  // R6 open intents (§8): plain = stack, ⌘ = tab, ⇧⌘ = window; a row owned by
+  // another profile opens under that profile.
+  const openRow = useCallback<OpenRow>(
+    (row, event) => {
+      if (onOpenRow) {
+        onOpenRow(row, event)
+
+        return
+      }
+
+      const target = conductorTarget(row, activeProfile)
+
+      if (target) {
+        openConductorTarget(target, conductorOpenIntent(event, target), navigate)
+      }
+    },
+    [activeProfile, navigate, onOpenRow]
+  )
+
+  const sendRow = useCallback<SendRow>(
+    (row, text) => {
+      if (onSendRow) {
+        onSendRow(row, text)
+
+        return
+      }
+
+      const target = conductorTarget(row, activeProfile)
+
+      if (target) {
+        sendToConductorTarget(target, text, navigate)
+      }
+    },
+    [activeProfile, navigate, onSendRow]
+  )
+
+  const toggleExpanded = useCallback((key: string) => {
+    setExpandedKeys(previous => {
+      const next = new Set(previous)
+
+      if (!next.delete(key)) {
+        next.add(key)
+      }
+
+      return next
+    })
+  }, [])
+
+  // Roving tabindex: exactly one row is the grid's tab stop — the last one
+  // focused while it is still shown, else the first shown row.
+  const visibleKeys = useMemo(
+    () => [...shownRows, ...(showAbandoned ? abandonedRows : [])].map(row => row.key),
+    [abandonedRows, showAbandoned, shownRows]
+  )
+
+  const tabStop = focusKey && visibleKeys.includes(focusKey) ? focusKey : (visibleKeys[0] ?? null)
+
+  const onGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement
+
+    // Only a focused row moves; keys inside a popover field or menu don't.
+    if (!target.matches?.(ROW_SELECTOR) || event.altKey || event.metaKey || event.ctrlKey) {
+      return
+    }
+
+    const rowEls = Array.from(gridRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])
+    const index = rowEls.indexOf(target)
+    let next = -1
+
+    if (event.key === 'ArrowDown') {
+      next = Math.min(rowEls.length - 1, index + 1)
+    } else if (event.key === 'ArrowUp') {
+      next = Math.max(0, index - 1)
+    } else if (event.key === 'Home') {
+      next = 0
+    } else if (event.key === 'End') {
+      next = rowEls.length - 1
+    } else {
+      return
+    }
+
+    event.preventDefault()
+    const el = rowEls[next]
+
+    if (el && el !== target) {
+      setFocusKey(el.dataset.rowKey ?? null)
+      el.focus()
+    }
+  }
 
   const firstLoad = !data && (state.status === 'idle' || state.status === 'loading')
   const firstError = !data && state.status === 'error'
@@ -169,6 +314,24 @@ export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps
         label: c.filters[id]
       })),
     [c]
+  )
+
+  const renderRow = (row: ConductorRowData, abandoned: boolean) => (
+    <ConductorRow
+      abandoned={abandoned}
+      activeProfile={activeProfile}
+      expanded={expandedKeys.has(row.key)}
+      key={row.key}
+      onCopy={copyConductorText}
+      onExternal={openConductorExternal}
+      onFocusRow={setFocusKey}
+      onOpen={openRow}
+      onRefresh={refreshFresh}
+      onSend={sendRow}
+      onToggleExpanded={toggleExpanded}
+      row={row}
+      tabbable={row.key === tabStop}
+    />
   )
 
   return (
@@ -241,12 +404,17 @@ export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto" data-slot="conductors-body">
-          <div aria-busy={firstLoad || undefined} aria-label={c.gridLabel} className="min-w-[68rem]" role="grid">
+          <div
+            aria-busy={firstLoad || undefined}
+            aria-label={c.gridLabel}
+            className={CONDUCTORS_GRID_MIN_WIDTH}
+            onKeyDown={onGridKeyDown}
+            ref={gridRef}
+            role="grid"
+          >
             <HeaderRow />
             {firstLoad && <SkeletonRows />}
-            {shownRows.map(row => (
-              <ConductorRow abandoned={false} activeProfile={activeProfile} key={row.key} onOpen={openRow} row={row} />
-            ))}
+            {shownRows.map(row => renderRow(row, false))}
             {data && shownRows.length === 0 && liveRows.length > 0 && (
               <div className="px-3 py-4 text-center text-(--ui-text-tertiary)" role="row">
                 <span role="gridcell">{c.emptyFilter}</span>
@@ -257,10 +425,7 @@ export function ConductorsPane({ onOpenRow = openRowAsTab }: ConductorsPaneProps
                 <span role="gridcell">{c.emptyTitle}</span>
               </div>
             )}
-            {showAbandoned &&
-              abandonedRows.map(row => (
-                <ConductorRow abandoned activeProfile={activeProfile} key={row.key} onOpen={openRow} row={row} />
-              ))}
+            {showAbandoned && abandonedRows.map(row => renderRow(row, true))}
           </div>
           {abandonedRows.length > 0 && (
             <button

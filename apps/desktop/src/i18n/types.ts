@@ -2898,6 +2898,32 @@ export interface Translations {
     blocked: string
     notHermesSession: string
     otherProfile: (profile: string) => string
+    /** Medium-width merged column headers (§8: 4+5 and 6+7). */
+    mergedColumns: Record<'crew' | 'plan', string>
+    lanesSuffix: string
+    expand: string
+    collapse: string
+    rowActions: string
+    openSession: string
+    send: string
+    sendTitle: (session: string) => string
+    sendPlaceholder: string
+    sendSubmit: string
+    sendHint: string
+    copySessionId: string
+    copyRunId: string
+    openPr: (pr: number) => string
+    openRun: string
+    detail: Record<
+      'attribution' | 'blockers' | 'currentUnits' | 'gates' | 'lanes' | 'otherBuilds' | 'refusals' | 'remainingWaves',
+      string
+    >
+    detailNone: string
+    detailLanes: (running: number, stale: number, cap: null | number) => string
+    detailUnits: (count: number) => string
+    attribution: Record<'bound' | 'db' | 'live' | 'none' | 'stamped' | 'workspace', string>
+    ownerLive: Record<'attached' | 'busy' | 'cli' | 'none', string>
+    recordHint: Record<'mismatched' | 'newer_schema', string>
     none: string
     ageNow: string
     ageSeconds: (seconds: number) => string
