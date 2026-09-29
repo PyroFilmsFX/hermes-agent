@@ -3247,6 +3247,24 @@
       }
     },
     {
+      "name": "session.continue",
+      "summary": "Continue a session's interrupted work in place (never replays the prompt); cancels a pending usage-limit pause.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionContinueResult"
+        }
+      }
+    },
+    {
       "name": "session.control",
       "summary": "Run one allowlisted goal / loop / subgoal / heartbeat action and return the exact resulting snapshot.",
       "params": [
@@ -3495,6 +3513,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SessionMostRecentResult"
+        }
+      }
+    },
+    {
+      "name": "session.pause.cancel",
+      "summary": "Cancel a session's pending usage-limit auto-resume.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionPauseCancelResult"
         }
       }
     },
@@ -29907,6 +29943,32 @@
         "title": "SessionContextBreakdownResult",
         "type": "object"
       },
+      "SessionContinueResult": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SessionContinueResult",
+        "type": "object"
+      },
       "SessionControlArgs": {
         "additionalProperties": false,
         "description": "``subgoal.add`` reads ``text``; ``subgoal.remove`` reads the 1-based ``index``.",
@@ -31711,6 +31773,20 @@
           "session_id"
         ],
         "title": "SessionParams",
+        "type": "object"
+      },
+      "SessionPauseCancelResult": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cancelled"
+        ],
+        "title": "SessionPauseCancelResult",
         "type": "object"
       },
       "SessionReclaimedPayload": {

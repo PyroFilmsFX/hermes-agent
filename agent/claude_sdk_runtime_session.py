@@ -93,6 +93,104 @@ def _configured_transient_retry_policy() -> tuple[int, tuple[float, ...], float]
     return retries, tuple(backoff), cap
 
 
+def _seconds_list(raw: Any, default: list) -> tuple[float, ...]:
+    """A non-negative seconds list from config (bools/garbage dropped; empty -> default)."""
+    if not isinstance(raw, (list, tuple)):
+        raw = default
+    out = []
+    for value in raw:
+        if isinstance(value, bool):
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if seconds >= 0 and math.isfinite(seconds):
+            out.append(seconds)
+    return tuple(out or (float(v) for v in default))
+
+
+def _configured_continue_policy() -> tuple[bool, int, tuple[float, ...], bool]:
+    """D62 "continue, don't replay" settings from config.yaml (agent.claude_agent_sdk).
+
+    ``(resume_interrupted_turn, continue_max_per_turn, continue_backoff_seconds,
+    transient_retry_replay)``: L2 on by default, at most N (default 2, clamped
+    0..5) automatic continues per user turn, and the legacy prompt replay
+    (#31/U8.2) opt-in only.
+    """
+    from agent.transports.claude_agent_sdk_session import _provider_config
+
+    config = _provider_config()
+
+    def _flag(key: str, default: bool) -> bool:
+        value = config.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes")
+        return bool(value)
+
+    count = config.get("continue_max_per_turn", 2)
+    if isinstance(count, bool) or not isinstance(count, int):
+        count = 2
+    return (
+        _flag("resume_interrupted_turn", True),
+        max(0, min(count, 5)),
+        _seconds_list(config.get("continue_backoff_seconds", [2, 8]), [2, 8]),
+        _flag("transient_retry_replay", False),
+    )
+
+
+def _continue_nudge(reason: str) -> str:
+    """The fallback continuation: ONE real user-role note on the same Claude session.
+
+    Appended as a new user message, so the cached prefix and strict role
+    alternation are untouched (the CLI merges it with an unanswered user tail).
+    The user's prompt is never re-sent."""
+    return (
+        f"[System note: your previous turn was interrupted ({reason}) before it finished. "
+        "Continue where you left off. Some steps may already be complete: check their "
+        "results before redoing anything, and do not repeat actions that already took effect.]"
+    )
+
+
+def _maybe_park_usage_limit(agent, turn: Any, state: Any, remaining_wait: float) -> bool:
+    """Park the session on a usage limit whose reset is beyond the in-turn window (D62)."""
+    from agent import claude_sdk_usage_park as usage_park
+
+    try:
+        enabled, stagger_max = usage_park.configured_policy()
+        if not enabled or not usage_park.real_rate_limit_signal(turn):
+            return False
+        now = time.time()
+        resets_at = usage_park.reset_time(turn, now)
+        if resets_at is None or resets_at - now <= remaining_wait:
+            return False
+        session_key = str(getattr(agent, "session_id", "") or "")
+        sdk_id = getattr(turn, "thread_id", None) or _persisted_sdk_session_id(agent)
+        if not session_key or not isinstance(sdk_id, str) or not sdk_id:
+            return False
+        rate_limit = getattr(turn, "rate_limit_rejected", None)
+        reason = str((rate_limit or {}).get("rate_limit_type") or "rate_limit") if isinstance(rate_limit, dict) else "rate_limit"
+        record = usage_park.park(session_key, sdk_id, resets_at, reason, stagger_max=stagger_max, now=now)
+    except Exception:
+        logger.warning("claude-agent-sdk: usage-limit park failed; failing as before", exc_info=True)
+        return False
+    _store_sdk_session_id(agent, sdk_id, cwd=state.turn_session_cwd)
+    text = usage_park.paused_status_text(record["resume_at"])
+    turn.usage_parked = record
+    turn.error = (
+        f"{text}. The Claude session is kept and continues automatically then; "
+        "Stop cancels the pause."
+    )
+    emit = getattr(agent, "_emit_status", None)
+    if callable(emit):
+        try:
+            emit(text)
+        except Exception:
+            logger.debug("failed to emit usage pause status", exc_info=True)
+    logger.warning("claude-agent-sdk: %s (session %s parked)", text, session_key)
+    return True
+
+
 def _projects_tool_use(turn: Any) -> bool:
     """Whether the failed attempt projected a tool call in any wire shape."""
     for message in getattr(turn, "projected_messages", None) or ():
@@ -762,6 +860,7 @@ def _create_session(
     resume_id: Optional[str],
     on_interim_assistant,
     on_tool_iteration,
+    resume_interrupted_turn: bool = False,
 ) -> Any:
     """Build the SDK session for this agent (session-creation work, not per turn)."""
     from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
@@ -846,6 +945,7 @@ def _create_session(
     agent._claude_sdk_task_store_root = str(task_store_root)
 
     session = ClaudeAgentSdkSession(
+        **({"resume_interrupted_turn": True} if resume_interrupted_turn else {}),
         cwd=cwd,
         model=getattr(agent, "model", None) or None,
         approval_callback=approval_callback,
@@ -1008,6 +1108,7 @@ def _intact_session_error(
     replayed: bool,
     after_transient_retry: bool = False,
     over_budget: bool = False,
+    continued: int = 0,
 ) -> str:
     """The user-facing error for a post-query CLI death that is not replayed.
 
@@ -1017,7 +1118,9 @@ def _intact_session_error(
     max_budget_usd. The recovery facts lead: gateways truncate the error
     near 200 chars.
     """
-    if over_budget:
+    if continued:
+        why = f"exited again after {continued} automatic continue{'s' if continued != 1 else ''}"
+    elif over_budget:
         why = "exited mid-turn and max_budget_usd leaves no room to replay it"
     elif not replayed:
         why = "exited mid-turn after tools ran or output was shown, so the turn was not replayed"
@@ -1084,6 +1187,79 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     transient_retries = 0
     total_retry_wait = 0.0
     force_fresh_retry = False
+    # D62 "continue, don't replay": a turn that dies mid-work continues the SAME
+    # Claude session: L2 (the CLI re-runs its interrupted turn itself), else ONE
+    # user-role nudge. Bounded per user turn; never after a user stop, auth,
+    # billing or startup failure. The prompt is never re-sent by this path.
+    from agent.transports.claude_agent_sdk_session_turn import RESUME_INTERRUPTED_TURN
+
+    l2_enabled, max_continues, continue_backoff, replay_opt_in = _configured_continue_policy()
+    continues = 0
+    continue_id: Optional[str] = None
+    continue_mode: Optional[str] = None
+    continue_reason = ""
+    nudge_input: Any = None
+    continued_projection: list = []
+    attempt_resume_id: Optional[str] = None
+    if getattr(agent, "_claude_sdk_continue_requested", False) is True:
+        # A gateway continue (error-card Retry / usage-limit resume): this
+        # turn's input IS the continuation note. Try L2 first on the persisted
+        # session; the note is the nudge when the CLI declines.
+        agent._claude_sdk_continue_requested = False
+        persisted = _persisted_sdk_session_id(agent)
+        if persisted:
+            continue_id, continue_reason = persisted, "retry"
+            continue_mode = "l2" if l2_enabled else "nudge"
+            nudge_input = user_input
+
+    def _schedule_continue(dead_turn: Any, dead_session: Any, reason: str) -> bool:
+        nonlocal continues, continue_id, continue_mode, continue_reason, nudge_input
+        if continues >= max_continues or getattr(agent, "_interrupt_requested", False):
+            return False
+        if getattr(dead_turn, "fatal_reason", None) is not None:
+            return False  # auth / startup stay terminal
+        sid = (
+            getattr(dead_turn, "thread_id", None)
+            or attempt_resume_id
+            or _persisted_sdk_session_id(agent)
+        )
+        if not isinstance(sid, str) or not sid:
+            return False  # nothing to continue: the CLI never announced a session
+        if dead_session is not None:
+            # The dead client may still hold the interrupted turn's frames.
+            try:
+                dead_session.close()
+            except Exception:
+                pass
+            _clear_claude_sdk_session_if_current(agent, dead_session)
+        _store_sdk_session_id(agent, sid, cwd=state.turn_session_cwd)
+        continues += 1
+        continue_id, continue_reason, nudge_input = sid, reason, None
+        continue_mode = "l2" if l2_enabled else "nudge"
+        # The dead attempt's projected work stays in the transcript: the
+        # continuation adds to it rather than redoing it.
+        continued_projection.extend(getattr(dead_turn, "projected_messages", None) or [])
+        emit = getattr(agent, "_emit_status", None)
+        if callable(emit):
+            try:
+                emit(f"Interrupted, continuing… ({continues}/{max_continues})")
+            except Exception:
+                logger.debug("failed to emit continue status", exc_info=True)
+        sink = _background_result_sink(agent)
+        if sink is not None:
+            sink.lifecycle("continuing", attempt=continues, reason=reason, mode=continue_mode)
+        logger.warning(
+            "claude-agent-sdk: turn interrupted (%s); continuing session (%s/%s, %s)",
+            reason, continues, max_continues, continue_mode,
+        )
+        wait = continue_backoff[min(continues - 1, len(continue_backoff) - 1)]
+        if wait:
+            time.sleep(wait)
+        if getattr(agent, "_interrupt_requested", False):
+            dead_turn.interrupted = True
+            return False
+        return True
+
     # Every attempt a later attempt superseded: its spend is folded into the
     # turn's accounting, and max_budget_usd applies to the turn's total.
     spent_attempts: list = []
@@ -1099,7 +1275,7 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
     # at most ONE legacy recovery (a pre-query retirement / stream end, or a
     # failed resume retried fresh), all gated on attempt 0. run_turn therefore
     # runs at most max(2, N + 2) times per user turn: the loop bound below.
-    for attempt in range(max(2, max_transient_retries + 2)):
+    for attempt in range(max(2, max_transient_retries + 2) + 2 * max_continues + 1):
         if turn is not None:
             spent_attempts.append(turn)
             turn = None
@@ -1151,9 +1327,12 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                     "error": None,
                 }
             live_session = None
-        attempt_resume_id: Optional[str] = None
+        attempt_resume_id = None
         if live_session is None:
-            if replaying_post_query_death:
+            if continue_id:
+                # D62: continue the same Claude session (never a fresh one).
+                resume_id = continue_id
+            elif replaying_post_query_death:
                 # The post-query-death replay resumes the dead attempt's own
                 # Claude session (None = the persisted id).
                 resume_id = replay_resume_id or _persisted_sdk_session_id(agent)
@@ -1202,6 +1381,11 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 resume_id=resume_id,
                 on_interim_assistant=state.on_interim_assistant,
                 on_tool_iteration=state.on_tool_iteration,
+                **(
+                    {"resume_interrupted_turn": True}
+                    if continue_id and continue_mode == "l2"
+                    else {}
+                ),
             )
             # Keep compatibility with narrow test seams and third-party
             # wrappers that perform the assignment but return nothing.
@@ -1209,6 +1393,14 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 session = agent._claude_sdk_session
         else:
             session = live_session
+        if continue_id:
+            # A freshly spawned L2 session consumes the CLI's own re-run and
+            # sends nothing; otherwise (L2 off or declined) ONE nudge.
+            send_input = (
+                RESUME_INTERRUPTED_TURN
+                if continue_mode == "l2" and live_session is None
+                else (nudge_input if nudge_input is not None else _continue_nudge(continue_reason))
+            )
 
         # Keep the exact object used for this attempt. Rotation/cleanup may
         # replace the agent slot while this turn is unwinding.
@@ -1305,6 +1497,12 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 "error": safe_exc,
             }
 
+        if continue_id and getattr(turn, "resume_declined", False):
+            # L2 not applicable (the CLI found no interrupted turn): nudge on
+            # the same live session. Not a new continue.
+            continue_mode = "nudge"
+            continue
+
         if getattr(turn, "retired_before_query", False):
             interrupted = bool(
                 getattr(turn, "interrupted", False)
@@ -1355,6 +1553,16 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
             _clear_claude_sdk_session_if_current(agent, session)
+            if (
+                getattr(turn, "watchdog_trip", False)
+                and not getattr(agent, "_interrupt_requested", False)
+            ):
+                # A hard watchdog kill is not a user stop: continue, not end.
+                if _schedule_continue(turn, None, "watchdog"):
+                    resumed = False
+                    continue
+                if getattr(turn, "interrupted", False) and getattr(agent, "_interrupt_requested", False):
+                    break
             if post_query_death:
                 # Never clear a resumable session on a CLI death: keep the id
                 # (refreshing it from the dead turn when it announced one) so
@@ -1374,7 +1582,13 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 # The shared budget is untouched only on the first attempt:
                 # a transient retry, a legacy recovery, or this replay itself
                 # all advance ``attempt``.
-                budget_untouched = attempt == 0 and transient_retries == 0
+                if not interrupted and _schedule_continue(turn, None, "cli_exit"):
+                    resumed = False
+                    continue
+                interrupted = interrupted or bool(getattr(agent, "_interrupt_requested", False))
+                budget_untouched = (
+                    attempt == 0 and transient_retries == 0 and continues == 0 and replay_opt_in
+                )
                 over_budget = (
                     budget_untouched
                     and replay_safe
@@ -1396,11 +1610,13 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                         replayed=replay_safe,
                         after_transient_retry=transient_retries > 0,
                         over_budget=over_budget,
+                        continued=continues,
                     )
                 break
             # A pre-query stream end did not touch the remote conversation, so
             # its persisted id remains valid for the replacement adapter.
-            if not stream_ended_before_query:
+            if not stream_ended_before_query and not getattr(turn, "watchdog_trip", False):
+                # A watchdog-killed session is resumable (D62): keep its id.
                 _store_sdk_session_id(agent, None)
             if (
                 stream_ended_before_query
@@ -1424,15 +1640,25 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 resumed = False
                 continue
 
-        # D0 classifies the SDK's structured API signals, but classification
-        # alone does not schedule a retry. Retry only failed turns whose
-        # output is still safe to replay; the transcript and prompt stay intact.
+        if (
+            getattr(turn, "watchdog_trip", False)
+            and not getattr(turn, "should_retire", False)
+            and not getattr(agent, "_interrupt_requested", False)
+        ):
+            # Clean-ack watchdog trip (partial transcript kept): continue it.
+            if _schedule_continue(turn, session, "watchdog"):
+                resumed = False
+                continue
+            break
+
+        # D0 classifies the SDK's structured API signals. A transient failure
+        # CONTINUES the same session (D62); a usage limit beyond the in-turn
+        # window parks it; the legacy prompt replay is an opt-in last resort.
         if (
             getattr(turn, "error", None)
             # The shared budget: a post-query-death replay already spent it.
             and not replaying_post_query_death
-            and transient_retries < max_transient_retries
-            and _sdk_attempt_replay_safe(agent, turn, state)
+            and not getattr(turn, "interrupted", False)
         ):
             api_signals = {
                 "api_error_kind": getattr(turn, "api_error_kind", None),
@@ -1452,6 +1678,10 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 "result_text": getattr(turn, "result_text", None) or turn.error,
                 **api_signals,
             })
+            if verdict == "transient" and error_class == "rate_limit" and _maybe_park_usage_limit(
+                agent, turn, state, max(0.0, max_retry_wait - total_retry_wait)
+            ):
+                break
             if verdict == "transient" and _resend_exceeds_budget(
                 spent_attempts, turn
             ):
@@ -1462,6 +1692,27 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 )
                 break
             if verdict == "transient":
+                hinted = min(
+                    max(0.0, float(wait_hint or 0.0)),
+                    max(0.0, max_retry_wait - total_retry_wait),
+                )
+                if hinted and continues < max_continues:
+                    time.sleep(hinted)
+                    total_retry_wait += hinted
+                if _schedule_continue(turn, session, error_class):
+                    resumed = False
+                    continue
+                if getattr(turn, "interrupted", False) or getattr(agent, "_interrupt_requested", False):
+                    turn.interrupted = True
+                    break
+            if (
+                verdict == "transient"
+                and replay_opt_in
+                and transient_retries < max_transient_retries
+                and _sdk_attempt_replay_safe(agent, turn, state)
+            ):
+                # Opt-in last resort (transient_retry_replay): the #31/U8.2
+                # prompt replay in a fresh CLI session, replay-safe only.
                 if getattr(agent, "_claude_sdk_session", None) is session:
                     try:
                         session.close()
@@ -1502,6 +1753,14 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         break
 
     _fold_attempt_spend(spent_attempts, turn)
+    if turn is not None and continued_projection:
+        turn.projected_messages = [
+            *continued_projection, *(getattr(turn, "projected_messages", None) or [])
+        ]
+    if turn is not None and continues and not getattr(turn, "error", None):
+        sink = _background_result_sink(agent)
+        if sink is not None:
+            sink.lifecycle("continued", attempts=continues, reason=continue_reason)
     state.turn = turn
     state.resumed = resumed
     return None

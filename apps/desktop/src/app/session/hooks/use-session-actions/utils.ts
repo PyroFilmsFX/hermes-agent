@@ -210,6 +210,7 @@ const COMPARED_FIELDS = [
   'role',
   'pending',
   'error',
+  'failedTurn',
   // Structured failure layer — drives the error card's title and action row,
   // so a change (e.g. resume replay attaching the descriptor) must repaint.
   'errorSurface',

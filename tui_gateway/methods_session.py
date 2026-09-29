@@ -2314,6 +2314,35 @@ def _(rid, params: dict, session: dict) -> dict:
 
 
 # ── interrupt / steer / redirect ─────────────────────────────────────
+@method("session.continue")
+def _(rid, params: dict) -> dict:
+    """D62: the error card's Retry. Continues the session's interrupted work in the same Claude session; it NEVER
+    re-sends the failed turn's prompt."""
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    sid = str(params.get("session_id") or "")
+    with contextlib.suppress(Exception):
+        from agent import claude_sdk_usage_park as usage_park
+        if key := str(session.get("session_key") or ""):
+            usage_park.cancel(key)  # a manual continue supersedes a pending usage-limit resume
+    started = _continue_session_turn(sid, session, reason="retry")
+    if started is None:
+        return _err(rid, 4009, "session is busy; wait for the current turn to finish")
+    return _ok(rid, started)
+
+
+@method("session.pause.cancel")
+def _(rid, params: dict) -> dict:
+    """D62: cancel a usage-limit pause (the session then waits for the user's next message)."""
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    from agent import claude_sdk_usage_park as usage_park
+    key = str(session.get("session_key") or "")
+    return _ok(rid, {"cancelled": bool(key) and usage_park.cancel(key)})
+
+
 @method("session.interrupt")
 def _(rid, params: dict) -> dict:
     _tts_stream_stop()  # keypress barge-in also silences streaming TTS (voice is process-global)
@@ -2336,6 +2365,11 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     _interrupt_session_turn(sid, session)
+    # D62: Stop also cancels a usage-limit pause (the parked session must not resume on its own).
+    with contextlib.suppress(Exception):
+        from agent import claude_sdk_usage_park as usage_park
+        if key := str(session.get("session_key") or ""):
+            usage_park.cancel(key)
     # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
     # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
     # rotating session_key mid-turn).

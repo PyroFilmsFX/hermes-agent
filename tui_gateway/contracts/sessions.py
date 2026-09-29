@@ -710,6 +710,25 @@ class SessionInterruptResult(Result):
     turn_isolation: bool | None = None
 
 
+class SessionContinueResult(Result):
+    status: str  # "continuing"
+    reason: str | None = None
+
+
+# D62: the error card's Retry continues the interrupted work in the same Claude session (L2 resume, else a
+# continuation note); it never re-sends the failed turn's prompt. 4009 while a turn is running.
+method("session.continue", params=SessionParams, result=SessionContinueResult,
+       doc="Continue a session's interrupted work in place (never replays the prompt); cancels a pending usage-limit pause.")
+
+
+class SessionPauseCancelResult(Result):
+    cancelled: bool
+
+
+method("session.pause.cancel", params=SessionParams, result=SessionPauseCancelResult,
+       doc="Cancel a session's pending usage-limit auto-resume.")
+
+
 method("session.interrupt", params=SessionInterruptParams, result=SessionInterruptResult,
        doc="Stop the running turn (and streaming TTS); retires the crash-recovery marker.")
 

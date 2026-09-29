@@ -124,6 +124,12 @@ def _sdk_env_overrides(
         dict(task_env) if task_env is not None
         else _effective_sdk_task_env(task_list_id=task_list_id)
     )
+    if sdk_cwd and _provider_flag("retry_watchdog", True):
+        # D62 L1 (agent.claude_agent_sdk.retry_watchdog, default on): the CLI
+        # keeps retrying 429/529/no-response INSIDE the same API call (bool
+        # env, verified in CLI 2.1.284). Real sessions only (they pass their
+        # cwd); aux one-shots keep the bounded default. Operator env still wins.
+        overrides["CLAUDE_CODE_RETRY_WATCHDOG"] = "1"
     from tools.environments.local_env_policy import (
         desktop_control_plane_env_blanks, is_desktop_control_plane_env)
     for key, value in _configured_sdk_env().items():

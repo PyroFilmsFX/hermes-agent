@@ -36,6 +36,8 @@ export type ChatMessage = {
   completedAt?: number
   pending?: boolean
   error?: string
+  /** Hermes' durable close of a failed turn (DB `display_kind='failed_turn'`, shown as a system row). */
+  failedTurn?: boolean
   /** Structured layer descriptor for a failed turn (parsed error_surface).
    *  Drives the error card's layer label + actions; absent on older
    *  backends, where the card falls back to generic copy. */

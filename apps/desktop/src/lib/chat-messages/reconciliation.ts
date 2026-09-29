@@ -244,6 +244,82 @@ function hydratedIdResolver(mergedNextMessages: ChatMessage[]): (message: ChatMe
         : hydratedIdByRowId.get(message.rowId)
 }
 
+const isCommittedReply = (message: ChatMessage): boolean =>
+  message.role === 'assistant' && !message.error && !message.pending && !message.hidden && !message.recovered
+
+// #46: a turn's persisted failure is a role-system failed_turn row (never an
+// assistant match), and its user row's image refs differ from the stored
+// `@image:` lines, so a local error used to survive every refresh and, with its
+// anchor outside the windowed page, re-project at the tail. A failed_turn row
+// for that prompt, or a later committed reply past an out-of-window anchor,
+// makes the local error stale.
+function localErrorIsStale(
+  mergedNextMessages: ChatMessage[],
+  currentMessages: ChatMessage[],
+  errorIndex: number,
+  hydratedIdFor: (message: ChatMessage) => string | undefined
+): boolean {
+  const mergedIndexOf = (message: ChatMessage): number => {
+    const id = hydratedIdFor(message)
+
+    return id === undefined ? -1 : mergedNextMessages.findIndex(candidate => candidate.id === id)
+  }
+
+  let anchorIndex = -1
+  let localUser: ChatMessage | undefined
+
+  for (let probe = errorIndex - 1; probe >= 0; probe -= 1) {
+    const candidate = currentMessages[probe]
+
+    if (!localUser && candidate.role === 'user' && !candidate.hidden) {
+      localUser = candidate
+    }
+
+    anchorIndex = mergedIndexOf(candidate)
+
+    if (anchorIndex !== -1) {
+      break
+    }
+  }
+
+  let successorIndex = -1
+
+  for (let probe = errorIndex + 1; probe < currentMessages.length && successorIndex === -1; probe += 1) {
+    successorIndex = mergedIndexOf(currentMessages[probe])
+  }
+
+  const gapEnd = successorIndex === -1 ? mergedNextMessages.length : successorIndex
+
+  if (mergedNextMessages.slice(anchorIndex + 1, gapEnd).some(message => message.failedTurn)) {
+    return true
+  }
+
+  if (localUser) {
+    const promptText = normalizedMessageText(localUser)
+
+    const failedPrompt = mergedNextMessages.some((message, index) => {
+      if (!message.failedTurn) {
+        return false
+      }
+
+      const user = mergedNextMessages.slice(0, index).findLast(candidate => candidate.role === 'user' && !candidate.hidden)
+
+      return Boolean(user) && normalizedMessageText(user as ChatMessage) === promptText
+    })
+
+    if (failedPrompt) {
+      return true
+    }
+  }
+
+  // A later committed reply retires an error whose own predecessor fell outside
+  // the refreshed window (the only case that could re-project at the tail). An
+  // in-window error keeps its timeline position (#118002, #119326).
+  return (
+    anchorIndex === -1 && successorIndex !== -1 && mergedNextMessages.slice(successorIndex).some(isCommittedReply)
+  )
+}
+
 function localAssistantErrorIdsToPreserve(
   mergedNextMessages: ChatMessage[],
   currentMessages: ChatMessage[]
@@ -274,6 +350,10 @@ function localAssistantErrorIdsToPreserve(
       hydratedId === undefined
         ? tailTurnAssistantMatchIndex(mergedNextMessages, currentMessages, index)
         : mergedNextMessages.findIndex(candidate => candidate.id === hydratedId && candidate.role === 'assistant')
+
+    if (hydratedAssistantIndex === -1 && localErrorIsStale(mergedNextMessages, currentMessages, index, hydratedIdFor)) {
+      continue
+    }
 
     if (hydratedAssistantIndex !== -1) {
       mergedNextMessages[hydratedAssistantIndex] = {
@@ -348,6 +428,15 @@ function insertPreservedErrorRuns(
 
   const indexOf = (id?: string) => mergedNextMessages.findIndex(message => message.id === id)
   const keptAfter = new Map<string | undefined, ChatMessage[]>()
+  const keptBefore = new Map<string, ChatMessage[]>()
+
+  // #46: an anchorless run is never appended below rows newer than it.
+  const latestUserTimestamp = Math.max(
+    -Infinity,
+    ...mergedNextMessages.flatMap(message =>
+      message.role === 'user' && typeof message.timestamp === 'number' ? [message.timestamp] : []
+    )
+  )
 
   for (const { after, before, rows } of runs) {
     const gap = before === undefined ? [] : mergedNextMessages.slice(indexOf(after) + 1, indexOf(before))
@@ -356,11 +445,31 @@ function insertPreservedErrorRuns(
       continue
     }
 
+    if (after === undefined && before !== undefined) {
+      // Its predecessor is outside the refreshed window: keep it in place,
+      // ahead of the refreshed row that followed it locally.
+      keptBefore.set(before, [...(keptBefore.get(before) ?? []), ...rows])
+
+      continue
+    }
+
+    if (
+      after === undefined &&
+      rows.some(row => typeof row.timestamp === 'number') &&
+      Math.max(...rows.map(row => row.timestamp ?? -Infinity)) < latestUserTimestamp
+    ) {
+      continue
+    }
+
     keptAfter.set(after, [...(keptAfter.get(after) ?? []), ...rows])
   }
 
   return [
-    ...mergedNextMessages.flatMap(message => [message, ...(keptAfter.get(message.id) ?? [])]),
+    ...mergedNextMessages.flatMap(message => [
+      ...(keptBefore.get(message.id) ?? []),
+      message,
+      ...(keptAfter.get(message.id) ?? [])
+    ]),
     ...(keptAfter.get(undefined) ?? [])
   ]
 }

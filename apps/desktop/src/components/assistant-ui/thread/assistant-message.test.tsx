@@ -323,7 +323,9 @@ describe('scheduled retry at the usage-limit reset (#98852)', () => {
     vi.useRealTimers()
   })
 
-  it('fires the same reload as Retry exactly once, at resets_at and not before', async () => {
+  // D62: the scheduled Retry CONTINUES the session (session.continue, like Retry) and
+  // never reloads, which would re-send the failed prompt.
+  it('fires the continue (never a prompt reload) once, at resets_at and not before', async () => {
     const onReload = vi.fn(async () => {})
     const resetsAt = Math.floor(Date.now() / 1000) + 600
 
@@ -341,10 +343,11 @@ describe('scheduled retry at the usage-limit reset (#98852)', () => {
     expect(onReload).not.toHaveBeenCalled()
 
     await act(async () => vi.advanceTimersByTime(1_000))
-    expect(onReload).toHaveBeenCalledTimes(1)
+    expect(onReload).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('error-retry-scheduled')).toBeNull()
 
     await act(async () => vi.advanceTimersByTime(3_600_000))
-    expect(onReload).toHaveBeenCalledTimes(1)
+    expect(onReload).not.toHaveBeenCalled()
   })
 
   it('never fires after Cancel or unmount, and hides the button once the reset has passed', async () => {

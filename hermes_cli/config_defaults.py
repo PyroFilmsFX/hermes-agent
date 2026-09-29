@@ -343,11 +343,31 @@ DEFAULT_CONFIG = {
             # error_max_budget_usd once exceeded (surfaced honestly in the reply). null = no budget;
             # non-numeric / non-positive values are ignored with a warning.
             "max_budget_usd": None,
-            # Replay-safe transient API failures only. Retries always stay on
-            # the Claude SDK provider; total backoff is capped at 60 seconds.
+            # D62 "continue, don't replay" (owner ruling). L1: CLAUDE_CODE_RETRY_WATCHDOG=1 in
+            # the CLI env, so 429/529/no-response are retried INSIDE the same API call.
+            "retry_watchdog": True,
+            # A turn that dies mid-work (watchdog kill, CLI death, transient API error after the
+            # CLI's own retries) CONTINUES the same Claude session: L2 respawns with
+            # CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 so the CLI re-runs its interrupted turn
+            # itself; when the CLI declines (or this is false) ONE "continue where you left off"
+            # user note is sent instead. Never after a user stop, auth, billing or startup failure.
+            "resume_interrupted_turn": True,
+            # At most N automatic continues per user turn (0..5), with this backoff between them.
+            "continue_max_per_turn": 2,
+            "continue_backoff_seconds": [2, 8],
+            # The legacy #31/U8.2 PROMPT REPLAY in a fresh CLI session (replay-safe attempts
+            # only) is an opt-in last resort after continuing is impossible; off by default.
+            "transient_retry_replay": False,
+            # Retry settings for that opt-in replay (and the in-turn wait bound for a
+            # transient API error's own wait hint); total wait is capped at 60 seconds.
             "transient_retry_max_retries": 2,
             "transient_retry_backoff_seconds": [2, 8],
             "transient_retry_max_wait_seconds": 60,
+            # A real usage limit (429 / rate_limit_rejected, not a billing/overage denial) whose
+            # reset is beyond that window PARKS the session in state.db and continues it at the
+            # reset plus a per-session stagger (0..N seconds). Stop cancels the pause.
+            "usage_limit_auto_resume": True,
+            "usage_limit_resume_stagger_max_seconds": 90,
             # Max size of one NDJSON message read from the Claude CLI. null = Hermes' built-in
             # 10 MiB instead of the SDK's 1 MiB default, which can kill a turn on a large tool
             # result. Invalid values warn and fall back to 10 MiB rather than disabling the OOM

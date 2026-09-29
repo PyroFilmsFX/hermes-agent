@@ -526,6 +526,11 @@ def _lifecycle_label(metadata: dict) -> str:
             if isinstance(count, int) and count > 0
             else "session resumed"
         )
+    if event == "continuing":
+        # D62: a turn died mid-work and is being continued in the same Claude session.
+        return "interrupted, continuing…"
+    if event == "continued":
+        return "recovered, continued"
     if event == "woken":
         source = _lifecycle_source_label(metadata.get("source"))
         by = str(metadata.get("by") or metadata.get("from") or "unknown")

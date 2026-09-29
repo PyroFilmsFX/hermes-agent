@@ -3,7 +3,6 @@ import {
   BranchPickerPrimitive,
   ErrorPrimitive,
   MessagePrimitive,
-  useAui,
   useAuiState,
   useMessageRuntime,
   useThreadRuntime
@@ -72,9 +71,11 @@ import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
 import { sessionApprovalRequest } from '@/store/prompts'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
+import { requestGatewayForProfile } from '@/store/gateway'
 import { $connection, $currentModel, setModelPickerOpen } from '@/store/session'
 import { sessionTileDelegate } from '@/store/session-states'
 import { notifyThreadEditOpen } from '@/store/thread-scroll'
+import { $continueCards, continueTurn } from '@/store/turn-continue'
 import { $voicePlayback } from '@/store/voice-playback'
 
 // Stable empty identity for the settled-parts selector — a fresh [] per render
@@ -298,6 +299,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
             <AssistantStatusSlot />
             <AssistantPreviewEmbeds />
             <MessagePrimitive.Error>
+              <ContinueAwareError messageId={messageId}>
               <ErrorPrimitive.Root
                 className="mt-1.5 flex flex-col gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--dt-destructive)_35%,transparent)] bg-[color-mix(in_srgb,var(--dt-destructive)_7%,transparent)] px-3 py-2 text-[0.78rem] leading-5 text-[color-mix(in_srgb,var(--dt-destructive)_78%,var(--ui-text-secondary))]"
                 role="alert"
@@ -319,6 +321,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
                 </div>
                 <ErrorRecoveryActions />
               </ErrorPrimitive.Root>
+              </ContinueAwareError>
             </MessagePrimitive.Error>
           </div>
           <MessageTimelineTimestamp className="px-(--message-text-indent) pt-0.5" suppressIfDuplicatePart />
@@ -533,6 +536,77 @@ const useErrorText = () =>
     return status?.type === 'incomplete' && typeof status.error === 'string' ? status.error : ''
   })
 
+// D62 "continue, don't replay": after Retry (= session.continue) the card reads
+// "interrupted, continuing…"; once the continuation streams output or completes
+// it collapses to a quiet "recovered, continued" marker with Details kept.
+// TODO(i18n): English copy until the continue strings land in every locale.
+const ContinueAwareError: FC<{ children: ReactNode; messageId: string }> = ({ children, messageId }) => {
+  const card = useStore($continueCards)[messageId]
+  const errorText = useErrorText()
+
+  if (card?.phase === 'continuing') {
+    return (
+      <div className="mt-1.5 text-[0.78rem] leading-5 text-muted-foreground" data-testid="error-continuing" role="status">
+        Interrupted, continuing…
+      </div>
+    )
+  }
+
+  if (card?.phase === 'recovered') {
+    return (
+      <details className="mt-1 min-w-0 text-[0.72rem] text-muted-foreground" data-testid="error-recovered">
+        <summary className="cursor-pointer select-none">Recovered, continued</summary>
+        {errorText && <div className="wrap-anywhere mt-0.5 whitespace-pre-wrap font-mono">{errorText}</div>}
+      </details>
+    )
+  }
+
+  return <>{children}</>
+}
+
+/** Retry = continue the session's interrupted work (gateway `session.continue`);
+ *  never a reload that re-sends the failed turn's prompt. */
+const useContinueThisTurn = () => {
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const messageId = useAuiState(s => s.message.id)
+  const gatewayProfile = useStore($activeGatewayProfile)
+
+  return useCallback(
+    (failedMessage: string) => {
+      if (!sessionId) {
+        notifyError(new Error('session unavailable'), failedMessage)
+
+        return
+      }
+
+      void continueTurn(sessionId, messageId, (method, params) =>
+        requestGatewayForProfile(normalizeProfileKey(gatewayProfile), method, params)
+      ).catch(error => notifyError(error, failedMessage))
+    },
+    [gatewayProfile, messageId, sessionId]
+  )
+}
+
+const ContinueRetryAction: FC<{ label: string }> = ({ label }) => {
+  const continueThisTurn = useContinueThisTurn()
+
+  return (
+    <button
+      className="aui-error-action"
+      data-testid="error-retry-continue"
+      onClick={() => {
+        triggerHaptic('submit')
+        continueThisTurn(label)
+      }}
+      type="button"
+    >
+      <RefreshCwIcon className="size-3" />
+      {label}
+    </button>
+  )
+}
+
 const ErrorCardHeadline: FC = () => {
   const { t } = useI18n()
   const surface = useErrorSurface()
@@ -688,7 +762,7 @@ const CompressConversationAction: FC<{ label: string }> = ({ label }) => {
 const ScheduledRetryAction: FC<{ resetsAt: number }> = ({ resetsAt }) => {
   const { t } = useI18n()
   const copy = t.assistant.thread
-  const aui = useAui()
+  const continueThisTurn = useContinueThisTurn()
 
   // Armed once the user clicks; `fireAt` is the wall-clock ms the timer targets.
   const [fireAt, setFireAt] = useState<null | number>(null)
@@ -707,7 +781,8 @@ const ScheduledRetryAction: FC<{ resetsAt: number }> = ({ resetsAt }) => {
     const timer = window.setTimeout(
       () => {
         setFireAt(null)
-        aui.message().reload()
+        // D62: the scheduled Retry continues the session too; never a prompt reload.
+        continueThisTurn(copy.errorRetry)
       },
       Math.max(0, fireAt - Date.now())
     )
@@ -718,7 +793,7 @@ const ScheduledRetryAction: FC<{ resetsAt: number }> = ({ resetsAt }) => {
       window.clearTimeout(timer)
       window.clearInterval(tick)
     }
-  }, [aui, fireAt, stale])
+  }, [continueThisTurn, copy.errorRetry, fireAt, stale])
 
   useEffect(() => {
     if (stale) {
@@ -903,14 +978,7 @@ const ErrorRecoveryActions: FC = () => {
           {copy.errorOpenHermesFolder}
         </button>
       )}
-      {plan.retry && (
-        <ActionBarPrimitive.Reload asChild>
-          <button className="aui-error-action" onClick={() => triggerHaptic('submit')} type="button">
-            <RefreshCwIcon className="size-3" />
-            {copy.errorRetry}
-          </button>
-        </ActionBarPrimitive.Reload>
-      )}
+      {plan.retry && <ContinueRetryAction label={copy.errorRetry} />}
       {plan.retry && limitReset && (
         <span className="px-1 text-xs text-muted-foreground" data-testid="error-limit-reset">
           {copy.errorLimitResets(limitReset)}

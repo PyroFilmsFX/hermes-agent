@@ -27,6 +27,7 @@ import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control
 import { markBackgroundSessionFinished, setBackgroundDeliveryActive } from '@/store/session-states'
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
+import { noteContinuationProgress } from '@/store/turn-continue'
 
 import { duplicateTailAssistantIndex, settleableInterimIndex } from '../utils'
 
@@ -412,6 +413,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
   if (event.type === 'message.delta') {
     if (sessionId) {
       appendAssistantDelta(sessionId, coerceGatewayText(payload?.text), occurredAt)
+      noteContinuationProgress(sessionId)
     }
 
     return true
@@ -574,6 +576,8 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     if (!sessionId) {
       return true
     }
+
+    noteContinuationProgress(sessionId, 'complete')
 
     const isBackground = Boolean(payload && 'background' in payload && (payload as Record<string, unknown>).background)
 

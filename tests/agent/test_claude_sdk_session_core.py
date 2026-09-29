@@ -644,7 +644,7 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR"):  # per-session, independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG"):  # per-session / D62 L1 default, independent of this
             env.pop(per_session, None)
         assert env == {}
 
@@ -667,7 +667,7 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR"):  # per-session, independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG"):  # per-session / D62 L1 default, independent of this
             env.pop(per_session, None)
         assert env == {}
 

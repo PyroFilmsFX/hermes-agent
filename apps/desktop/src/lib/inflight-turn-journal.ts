@@ -753,6 +753,53 @@ function journalTailAlreadyCommitted(tailAssistants: ChatMessage[], baseMessages
   )
 }
 
+/** #46: a journaled ERROR run whose prompt Hermes already closed (a failed_turn
+ *  row, which never matches an assistant base row, for the same prompt text), or
+ *  that is older than the latest committed user row / reply, is stale. Image refs
+ *  are ignored: the stored row carries `@image:` lines, the journal attachmentRefs. */
+function journalErrorRunIsStale(tail: ChatMessage[], baseMessages: ChatMessage[]): boolean {
+  const recoverable = tail.filter(assistantHasRecoverableContent)
+
+  if (recoverable.length === 0 || !recoverable.every(message => Boolean(message.error))) {
+    return false
+  }
+
+  const tailUser = tail.findLast(message => message.role === 'user')
+  const promptText = tailUser ? normalizedText(chatMessageText(tailUser)) : null
+
+  const closedByFailedTurn = baseMessages.some((message, index) => {
+    if (!message.failedTurn) {
+      return false
+    }
+
+    if (promptText === null) {
+      return true
+    }
+
+    const user = baseMessages.slice(0, index).findLast(candidate => candidate.role === 'user')
+
+    return Boolean(user) && normalizedText(chatMessageText(user as ChatMessage)) === promptText
+  })
+
+  if (closedByFailedTurn) {
+    return true
+  }
+
+  const errorAt = Math.max(...recoverable.map(message => message.timestamp ?? -Infinity))
+
+  return (
+    Number.isFinite(errorAt) &&
+    baseMessages.some(
+      message =>
+        isCommittedRow(message) &&
+        !message.hidden &&
+        (message.role === 'user' || (message.role === 'assistant' && !message.error)) &&
+        typeof message.timestamp === 'number' &&
+        message.timestamp > errorAt
+    )
+  )
+}
+
 export function mergeInFlightMessages(
   baseMessages: ChatMessage[],
   tailMessages: ChatMessage[],
@@ -805,7 +852,7 @@ export function mergeInFlightMessages(
     // stale — appending it would re-render the same replies at the end of the
     // conversation. Otherwise, the base never saw this turn at all: append the
     // whole tail (the crash-recovery path the journal exists for).
-    if (journalTailAlreadyCommitted(tailAssistants, baseMessages)) {
+    if (journalTailAlreadyCommitted(tailAssistants, baseMessages) || journalErrorRunIsStale(tail, baseMessages)) {
       return { ...noop, caughtUp: true }
     }
 

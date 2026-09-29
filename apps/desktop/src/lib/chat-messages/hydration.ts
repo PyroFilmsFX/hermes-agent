@@ -194,6 +194,15 @@ export function sessionLifecycleLabel(metadata: SessionMessage['display_metadata
       : 'session resumed'
   }
 
+  // D62: a turn that died mid-work continues the same Claude session.
+  if (event === 'continuing') {
+    return 'interrupted, continuing…'
+  }
+
+  if (event === 'continued') {
+    return 'recovered, continued'
+  }
+
   if (event === 'woken') {
     const by = parsed.by ?? parsed.from ?? 'unknown'
 
@@ -849,6 +858,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: asyncResultBody(displayContentForMessage(message.role, message.content || content)) }
         : {}),
       ...(message.display_kind === 'process_complete' ? { asyncResultKind: 'process' as const } : {}),
+      ...(effectiveDisplayKind === 'failed_turn' ? { failedTurn: true } : {}),
       ...(isPeerMessage
         ? { asyncResult: peerBody }
         : message.display_kind === 'peer_message'

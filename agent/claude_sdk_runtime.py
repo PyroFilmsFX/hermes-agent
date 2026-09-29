@@ -298,6 +298,11 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
         "interrupted": state.user_interrupted,
         "sdk_effects": state.effects.as_result_dict(),
         **(
+            {"usage_parked": dict(turn.usage_parked)}
+            if isinstance(getattr(turn, "usage_parked", None), dict)
+            else {}
+        ),
+        **(
             {"failover_reason": state.failover_reason.value}
             if state.failover_reason is not None
             else {}

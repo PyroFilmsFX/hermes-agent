@@ -204,6 +204,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         on_unsolicited_result: Optional[Callable[[list[str], Optional[list[dict]]], None]] = None,
         on_unsolicited_start: Optional[Callable[[str], None]] = None,
         on_unsolicited_header: Optional[Callable[[str, list[dict]], None]] = None,
+        resume_interrupted_turn: bool = False,
         on_compaction: Optional[Callable[[str], None]] = None,
         on_compact_boundary: Optional[Callable[[str], None]] = None,
         # Hybrid MCP bridge (ported from PR #56413): the explicit config
@@ -392,6 +393,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._pending_unsolicited_deliveries: list[tuple[list[str], list[dict], Optional[str]]] = []
         self._on_unsolicited_start = on_unsolicited_start
         self._on_unsolicited_header = on_unsolicited_header
+        # D62 L2: spawn with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (see _build_options).
+        self._resume_interrupted_turn = bool(resume_interrupted_turn)
         self._unsolicited_delivery_id: Optional[str] = None
         self._unsolicited_header_emitted = False
         self._unsolicited_start_notified = False
@@ -1480,6 +1483,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             hermes_session_id=self._hermes_session_id,
             sdk_cwd=self._cwd,
         )
+        if getattr(self, "_resume_interrupted_turn", False):
+            # D62 L2, verified in CLI 2.1.284: on --resume, headless startup
+            # re-runs the transcript's interrupted turn by itself.
+            env_overrides["CLAUDE_CODE_RESUME_INTERRUPTED_TURN"] = "1"
 
         fields = {
             "model": _cli_model_id(self._model),

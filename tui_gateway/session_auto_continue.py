@@ -54,10 +54,86 @@ def _auto_continue_note(prompt: str) -> str:
             f"finish the task. The interrupted request was:]\n\n{prompt}")
 
 
+def _continue_note(reason: str) -> str:
+    # D62: a continuation, never a replay: the interrupted prompt is NOT embedded (the Claude session still holds
+    # it). Same opening as the recovery notes, so history renders it as an auto_continue row.
+    return (f"{_AUTO_CONTINUE_NOTE_PREFIX} ({reason}). Continue where you left off. Some steps may already be "
+            "complete: check their results before redoing anything, and do not repeat actions that already took "
+            "effect.]")
+
+
+def _continue_session_turn(sid: str, session: dict, *, reason: str) -> dict | None:
+    """D62: continue a session's interrupted work in its SAME Claude session (error-card Retry, usage-limit resume).
+
+    Never re-sends the old prompt: the SDK runtime first lets the CLI re-run its own interrupted turn
+    (CLAUDE_CODE_RESUME_INTERRUPTED_TURN), and only when the CLI declines is the continuation note the turn's input.
+    Returns a descriptor when a continuation turn was started, else None (busy, finalized, hosted room)."""
+    if session.get("source") == "bot_room":
+        return None
+    with session["history_lock"]:
+        if session.get("running") or session.get("_finalized"):
+            return None
+        session["running"] = True
+        session["last_active"] = time.time()
+
+    def release() -> None:
+        with session["history_lock"]:
+            session["running"] = False
+
+    def kickoff() -> None:
+        rid = f"__continue__{int(time.time() * 1000)}"
+        try:
+            _start_agent_build(sid, session)
+            err = _wait_agent(session, rid, timeout=120.0)
+        except Exception:
+            logger.warning("continue: agent build failed for %s", sid, exc_info=True)
+            err = {"error": {"message": "agent build failed"}}
+        if err or _ensure_active_session_slot(sid, session) is not None:
+            release()
+            return
+        agent = session.get("agent")
+        if agent is not None:
+            with contextlib.suppress(Exception):
+                agent._claude_sdk_continue_requested = True
+        try:
+            with _session_profile_runtime_scope(session):
+                _emit("status.update", sid, {"kind": "process", "text": "Interrupted, continuing…"})
+                _emit("message.start", sid)
+                _run_prompt_submit(rid, sid, session, _continue_note(reason), display_kind="auto_continue")
+        except Exception as exc:
+            _notif_log_failure("continue dispatch failed", exc)
+            _notif_release_turn(session)
+
+    if _start_session_work(kickoff, name=f"continue-{sid}") is None:
+        release()
+        return None
+    return {"status": "continuing", "reason": reason}
+
+
+def _usage_park_dispatch(record: dict) -> bool:
+    """Scheduler callback: continue the parked session if it is live here (else it stays parked)."""
+    key = str(record.get("session_key") or "")
+    for sid, session in list(_sessions.items()):
+        if isinstance(session, dict) and str(session.get("session_key") or "") == key:
+            return _continue_session_turn(sid, session, reason="usage limit reset") is not None
+    return False
+
+
+def _ensure_usage_park_scheduler() -> None:
+    from agent import claude_sdk_usage_park as usage_park
+    from tui_gateway import usage_park_scheduler
+
+    with contextlib.suppress(Exception):
+        if usage_park.configured_policy()[0]:
+            usage_park_scheduler.ensure_started(_usage_park_dispatch)
+
+
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
     build via _run_prompt_submit, so the client that just resumed streams it."""
+    # A parked usage-limit session resumes from the scheduler (state.db survives restarts); resume paths start it.
+    _ensure_usage_park_scheduler()
     # Hosted room turns are recovered by their durable task/lease state machine; generic auto-continue would bypass
     # its execution generation and duplicate work.
     if session.get("source") == "bot_room":

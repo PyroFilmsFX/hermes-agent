@@ -3462,6 +3462,13 @@ export interface CompressionSummary {
   note?: string | null
   [key: string]: unknown
 }
+export interface SessionContinueResult {
+  status: string
+  reason?: string | null
+}
+export interface SessionPauseCancelResult {
+  cancelled: boolean
+}
 export interface SessionInterruptParams {
   session_id: string
   profile?: string | null
@@ -5304,6 +5311,8 @@ export interface RpcMethods {
   'session.compress': { params: SessionCompressParams; result: SessionCompressResult }
   /** Cursor-style split of the context window by category. */
   'session.context_breakdown': { params: SessionContextBreakdownParams; result: SessionContextBreakdownResult }
+  /** Continue a session's interrupted work in place (never replays the prompt); cancels a pending usage-limit pause. */
+  'session.continue': { params: SessionParams; result: SessionContinueResult }
   /** Run one allowlisted goal / loop / subgoal / heartbeat action and return the exact resulting snapshot. */
   'session.control': { params: SessionControlParams; result: SessionControlResult }
   /** Stable, allowlisted snapshot of one live session's goal / loop / heartbeat state. */
@@ -5332,6 +5341,8 @@ export interface RpcMethods {
   'session.list': { params: SessionListParams; result: SessionListResult }
   /** Most recent human-facing session; errors fold into a null session_id. */
   'session.most_recent': { params: SessionMostRecentParams; result: SessionMostRecentResult }
+  /** Cancel a session's pending usage-limit auto-resume. */
+  'session.pause.cancel': { params: SessionParams; result: SessionPauseCancelResult }
   /** Redirect the active turn (queued for the next turn while the agent is still building). */
   'session.redirect': { params: SessionCorrectionParams; result: SessionCorrectionResult }
   /** Attach to a stored session: reuse it if live here, else lazy / deferred / cold / eager rebuild. */
@@ -5625,6 +5636,7 @@ export const RPC_METHODS = [
   'session.close',
   'session.compress',
   'session.context_breakdown',
+  'session.continue',
   'session.control',
   'session.control.read',
   'session.create',
@@ -5639,6 +5651,7 @@ export const RPC_METHODS = [
   'session.interrupt',
   'session.list',
   'session.most_recent',
+  'session.pause.cancel',
   'session.redirect',
   'session.resume',
   'session.save',

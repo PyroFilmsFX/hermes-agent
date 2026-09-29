@@ -30,6 +30,17 @@ def _isolate_provider_config(monkeypatch):
     """Provider config, gateway contextvars and the CLI approval callback are
     reset around every test in this module — carried explicitly, never hoisted
     to a conftest (see ``isolate_provider_config``)."""
+    # These cases pin the legacy #31/U8.2 prompt-replay path, which D62 keeps as an
+    # opt-in last resort (transient_retry_replay: true) with continuing disabled.
+    # The continue path itself is covered by test_claude_sdk_continue.py.
+    import agent.claude_sdk_runtime_session as runtime_session
+
+    import agent.claude_sdk_usage_park as usage_park
+
+    monkeypatch.setattr(
+        runtime_session, "_configured_continue_policy", lambda: (False, 0, (0.0,), True)
+    )
+    monkeypatch.setattr(usage_park, "configured_policy", lambda: (False, 90.0))
     yield from isolate_provider_config(monkeypatch)
 
 

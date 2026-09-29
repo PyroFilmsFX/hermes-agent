@@ -126,6 +126,34 @@ def _prefold_peer_items(session: Any) -> list:
             if isinstance(item, dict) and item.get("kind") == "peer_in"]
 
 
+class _ResumeInterruptedTurn:
+    """``run_turn`` input that sends NOTHING (D62 L2).
+
+    The CLI was spawned with ``CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`` on
+    ``--resume``: at startup it re-runs the transcript's interrupted turn by
+    itself (a meta "Continue from where you left off." after an interrupted
+    tool round, or the unanswered prompt under its own uuid). The turn only
+    claims the stream and consumes that re-run; when the CLI declines (nothing
+    interrupted), ``resume_declined`` comes back with no API call.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "RESUME_INTERRUPTED_TURN"
+
+
+RESUME_INTERRUPTED_TURN = _ResumeInterruptedTurn()
+# How long a resume-only turn waits for the CLI's own re-run to start before it
+# concludes the CLI declined (the re-run is queued at CLI startup, before stdin).
+_RESUME_START_WAIT_SECONDS = 20.0
+
+
 def _clear_unsolicited_projection(session: Any) -> None:
     """Discard the current unsolicited burst's text and structured projections."""
     session._unsolicited_text.clear()
@@ -231,9 +259,10 @@ class ClaudeSdkTurnMixin:
         the partial transcript and the resumable session id (no retire);
         only a grace expiry hard-cancels and retires."""
         result = TurnResult()
-        prompt = _coerce_turn_input(user_input)
+        resume_only = user_input is RESUME_INTERRUPTED_TURN
+        prompt = user_input if resume_only else _coerce_turn_input(user_input)
         max_buffer_size = getattr(self, "_max_buffer_size", None)
-        if max_buffer_size:
+        if max_buffer_size and not resume_only:
             prompt = fit_sdk_turn_blocks(prompt, max_buffer_size=max_buffer_size)
         if isinstance(prompt, str) and not prompt.strip():
             self.consume_interrupt()
@@ -649,6 +678,9 @@ class ClaudeSdkTurnMixin:
             # fallback for a genuinely unresponsive CLI).
             self.consume_interrupt()
             result.interrupted = True
+            # D62: a watchdog kill is not a user stop; the runtime continues it.
+            result.watchdog_trip = True
+            result.thread_id = getattr(self, "_session_id", None)
             result.error = self._format_trip_error(
                 trip, budget, quiet, trip_elapsed, trip_idle, max_seconds
             )
@@ -691,6 +723,7 @@ class ClaudeSdkTurnMixin:
         # from one after it by this marker; without it neither stream-death
         # recovery path in _run_sdk_attempts can see that the stream died.
         result.stream_ended = bool(turn_data.get("stream_ended", False))
+        result.resume_declined = bool(turn_data.get("resume_declined", False))
         result.interrupted = bool(turn_data.get("interrupt_observed", False))
         # A non-terminal turn can spend time releasing foreground ownership
         # after the stream consumer's last snapshot. Restore the live read for
@@ -754,6 +787,7 @@ class ClaudeSdkTurnMixin:
                     trip, budget, quiet, trip_elapsed, trip_idle, max_seconds
                 )
             result.interrupted = True
+            result.watchdog_trip = True
         return result
 
     def _format_trip_error(
@@ -945,8 +979,10 @@ class ClaudeSdkTurnMixin:
                 out["stream_ended"] = True
                 out["interrupt_observed"] = interrupted
                 return out
+            resume_only = prompt is RESUME_INTERRUPTED_TURN
             query_input = (
-                _sdk_user_message_stream(prompt)
+                None if resume_only
+                else _sdk_user_message_stream(prompt)
                 if isinstance(prompt, list)
                 else prompt
             )
@@ -961,7 +997,21 @@ class ClaudeSdkTurnMixin:
                     out["api_call_made"] = False
                     return out
                 out["query_submitted"] = True
-            await self._client.query(query_input)
+            if resume_only:
+                # D62 L2: send nothing. The CLI's own re-run (queued at its
+                # startup) is already on, or about to reach, this inbox; the
+                # reader held any pre-claim frames for it (_resume_backlog).
+                deadline = time.monotonic() + float(
+                    getattr(self, "_resume_start_wait", _RESUME_START_WAIT_SECONDS)
+                )
+                while inbox.empty() and self._stream_ended is None:
+                    if time.monotonic() >= deadline:
+                        out["resume_declined"] = True
+                        out["api_call_made"] = False
+                        return out
+                    await asyncio.sleep(0.1)
+            else:
+                await self._client.query(query_input)
             while True:
                 message = await inbox.get()
                 watch = self._turn_watch
@@ -1593,6 +1643,11 @@ class ClaudeSdkTurnMixin:
                                 self._apply_deferred_rename()
                     elif inbox is not None:
                         inbox.put_nowait(message)
+                    elif getattr(self, "_resume_backlog", None) is not None:
+                        # D62 L2: the CLI's own re-run of the interrupted turn
+                        # can start before run_turn claims the stream; it is
+                        # that turn's output, not an unsolicited burst.
+                        self._resume_backlog.append(message)
                     else:
                         if _starts_injected_turn(message):
                             self._unsolicited_burst_open = True
@@ -1619,6 +1674,11 @@ class ClaudeSdkTurnMixin:
                         continue
                     self._host_prompt_folded = False
                     self._turn_inbox = inbox
+                    backlog = getattr(self, "_resume_backlog", None)
+                    if backlog is not None:
+                        self._resume_backlog = None
+                        for held in backlog:
+                            inbox.put_nowait(held)
                 elif operation == "rename":
                     if self._unsolicited_burst_open:
                         claim_ack.set_exception(
@@ -2122,6 +2182,8 @@ class ClaudeSdkTurnMixin:
 
         async def _spawn() -> Any:
             self._turn_claims = asyncio.Queue()
+            # Armed only for a D62 L2 spawn; the first turn claim disarms it.
+            self._resume_backlog = [] if getattr(self, "_resume_interrupted_turn", False) else None
             return asyncio.ensure_future(self._reader_loop())
 
         self._reader_task = self._run_coro(_spawn(), timeout=10.0)

@@ -624,7 +624,7 @@ export type TimelineDisplayMetadata =
       completed_at?: number | string
     }
   | {
-      event: 'woken' | 'child_exited' | 'resumed'
+      event: 'woken' | 'child_exited' | 'resumed' | 'continuing' | 'continued'
       source?: string
       by?: string
       uuid?: string

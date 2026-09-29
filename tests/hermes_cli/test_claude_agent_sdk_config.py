@@ -115,6 +115,15 @@ class TestClaudeAgentSdkDefaults:
             "transient_retry_max_retries": 2,
             "transient_retry_backoff_seconds": [2, 8],
             "transient_retry_max_wait_seconds": 60,
+            # D62 continue-don't-replay: L1/L2 on, 2 continues, prompt replay opt-in only,
+            # usage-limit auto-resume on with a 90 s stagger.
+            "retry_watchdog": True,
+            "resume_interrupted_turn": True,
+            "continue_max_per_turn": 2,
+            "continue_backoff_seconds": [2, 8],
+            "transient_retry_replay": False,
+            "usage_limit_auto_resume": True,
+            "usage_limit_resume_stagger_max_seconds": 90,
         }
         for key, expected in fork_truthy.items():
             assert block[key] == expected, f"fork default for {key!r} drifted"
