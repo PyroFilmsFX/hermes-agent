@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from .base import JsonValue, Params, Result, WireEnum
+from .base import JsonValue, Params, Payload, Result, WireEnum
 from .common import OpenModel, ProfileParams, SessionLiveInfo
 from .connectors_operation import CatalogAppState, CatalogTier
-from .registry import method
+from .registry import event, method
 
 
 class _SessionScoped(Params):
@@ -671,6 +671,44 @@ method("mcp.resources.subscribe", params=McpResourceSubscriptionParams, result=M
 
 method("mcp.resources.unsubscribe", params=McpResourceSubscriptionParams, result=McpResourceSubscriptionResult,
        doc="Unsubscribe from updates for an MCP resource on a connected server.")
+
+
+# ── MCP elicitation ──────────────────────────────────────────────────────────────────────────
+
+
+class McpElicitationRequestPayload(Payload):
+    """MCP server requested user input mid-call (elicitation/create)."""
+
+    request_id: str
+    server: str
+    message: str
+    mode: str = "form"
+    requestedSchema: dict[str, JsonValue] | None = None
+    url: str | None = None
+
+
+event("mcp.elicitation.request", McpElicitationRequestPayload,
+      doc="MCP server requested user input (form or URL mode).")
+
+
+class McpElicitationAction(WireEnum):
+    ACCEPT = "accept"
+    DECLINE = "decline"
+    CANCEL = "cancel"
+
+
+class McpElicitationRespondParams(Params):
+    request_id: str
+    action: McpElicitationAction
+    content: dict[str, JsonValue] | None = None
+
+
+class McpElicitationRespondResult(Result):
+    ok: bool = True
+
+
+method("mcp.elicitation.respond", params=McpElicitationRespondParams, result=McpElicitationRespondResult,
+       doc="Complete a pending MCP elicitation request with accept, decline, or cancel.")
 
 
 # ── plugins ───────────────────────────────────────────────────────────────────────────────────

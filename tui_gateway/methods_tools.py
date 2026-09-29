@@ -1733,6 +1733,32 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5024, str(exc))
 
 
+# ─── MCP elicitation (mcp.elicitation.*) ───────────────────────────────────
+
+def emit_elicitation_request(payload: dict) -> None:
+    """Forward an MCP elicitation request to connected desktop clients."""
+    from tui_gateway.server import _broadcast_global_event
+    _broadcast_global_event("mcp.elicitation.request", payload)
+
+
+@_scoped_rpc("mcp.elicitation.respond", required=(("request_id", _stripped), ("action", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Complete a pending MCP elicitation request with accept, decline, or cancel."""
+    request_id = _str_arg(params, "request_id")
+    action = _str_arg(params, "action")
+    content = params.get("content")
+    mcp_sampling = _tools_mod("tools.mcp_tool_sampling")
+    try:
+        result = mcp_sampling.respond_elicitation(request_id, action, content)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4000, str(exc))
+    except KeyError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
 # ─── Plugins ─────────────────────────────────────────────────────────────────
 def _plugin_server_rows(plugin_dir: Path | None, key: str, *, portable: bool) -> list[dict]:
     if not portable or plugin_dir is None:

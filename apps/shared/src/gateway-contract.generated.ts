@@ -4323,6 +4323,15 @@ export interface McpResourceSubscriptionResult {
   server: string
   uri: string
 }
+export interface McpElicitationRespondParams {
+  request_id: string
+  action: McpElicitationAction
+  content?: Record<string, unknown> | null
+}
+export type McpElicitationAction = 'accept' | 'decline' | 'cancel'
+export interface McpElicitationRespondResult {
+  ok?: boolean
+}
 export type PluginsListParams = Record<string, never>
 export interface PluginsListResult {
   plugins: LegacyPluginRow[]
@@ -5032,6 +5041,15 @@ export interface PluginEventPayload {
   name: string
   payload?: Record<string, unknown>
 }
+/** MCP server requested user input mid-call (elicitation/create). */
+export interface McpElicitationRequestPayload {
+  request_id: string
+  server: string
+  message: string
+  mode?: string
+  requestedSchema?: Record<string, unknown> | null
+  url?: string | null
+}
 export type ConnectorErrorReason = 'INVALID_PARAMS' | 'NOT_OWNER' | 'UNSUPPORTED_RUNTIME' | 'CONNECTOR_REQUEST_FAILED' | 'INVALID_CONNECTOR_RESPONSE' | 'UNKNOWN_TARGET' | 'LINK_STILL_VALID' | 'REISSUE_REFUSED' | 'UNKNOWN_OPERATION' | 'INVALID_ANSWER' | 'NEEDS_NOUS_AUTH' | 'CONNECTOR_NOT_FOUND' | 'TOOLS_UNAVAILABLE' | 'CONNECTORS_UNAVAILABLE' | 'CATALOG_UNAVAILABLE' | 'ACCOUNTS_UNAVAILABLE' | 'CONNECTION_NOT_FOUND' | 'POLICY_UNAVAILABLE' | 'POLICY_CONFLICT' | 'FORBIDDEN_SCOPE' | 'ORG_REQUIRED' | 'ORG_ACCESS_DENIED' | 'INVALID_POLICY'
 
 // ── Client→server methods ──
@@ -5224,6 +5242,8 @@ export interface RpcMethods {
   'llm.oneshot': { params: LlmOneshotParams; result: LlmOneshotResult }
   /** Curated MCP presets with per-profile installed/enabled state and the env keys each needs. */
   'mcp.catalog': { params: ProfileParams; result: McpCatalogResult }
+  /** Complete a pending MCP elicitation request with accept, decline, or cancel. */
+  'mcp.elicitation.respond': { params: McpElicitationRespondParams; result: McpElicitationRespondResult }
   /** Fetch and render an MCP prompt template with filled arguments. */
   'mcp.prompts.get': { params: McpPromptsGetParams; result: McpPromptsGetResult }
   /** List prompt templates advertised by connected MCP servers. */
@@ -5647,6 +5667,7 @@ export const RPC_METHODS = [
   'learning.frames',
   'llm.oneshot',
   'mcp.catalog',
+  'mcp.elicitation.respond',
   'mcp.prompts.get',
   'mcp.prompts.list',
   'mcp.resources.list',
@@ -5896,6 +5917,8 @@ export interface BackendGatewayEventMap {
   'gateway.ready': GatewayReadyPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
+  /** MCP server requested user input (form or URL mode). */
+  'mcp.elicitation.request': McpElicitationRequestPayload
   /** The turn ended: final text, usage and outcome. */
   'message.complete': MessageCompletePayload
   /** One streamed chunk of the assistant reply. */
@@ -6033,6 +6056,7 @@ export const GATEWAY_EVENT_TYPES = [
   'error',
   'gateway.ready',
   'layout.apply',
+  'mcp.elicitation.request',
   'message.complete',
   'message.delta',
   'message.interim',

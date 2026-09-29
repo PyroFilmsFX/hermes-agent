@@ -1699,6 +1699,24 @@
       }
     },
     {
+      "name": "mcp.elicitation.respond",
+      "summary": "Complete a pending MCP elicitation request with accept, decline, or cancel.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpElicitationRespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpElicitationRespondResult"
+        }
+      }
+    },
+    {
       "name": "mcp.prompts.get",
       "summary": "Fetch and render an MCP prompt template with filled arguments.",
       "params": [
@@ -17567,6 +17585,113 @@
           "servers"
         ],
         "title": "McpCatalogResult",
+        "type": "object"
+      },
+      "McpElicitationAction": {
+        "enum": [
+          "accept",
+          "decline",
+          "cancel"
+        ],
+        "title": "McpElicitationAction",
+        "type": "string"
+      },
+      "McpElicitationRequestPayload": {
+        "additionalProperties": false,
+        "description": "MCP server requested user input mid-call (elicitation/create).",
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "mode": {
+            "default": "form",
+            "title": "Mode",
+            "type": "string"
+          },
+          "requestedSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requestedschema"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          }
+        },
+        "required": [
+          "request_id",
+          "server",
+          "message"
+        ],
+        "title": "McpElicitationRequestPayload",
+        "type": "object"
+      },
+      "McpElicitationRespondParams": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/McpElicitationAction"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Content"
+          }
+        },
+        "required": [
+          "request_id",
+          "action"
+        ],
+        "title": "McpElicitationRespondParams",
+        "type": "object"
+      },
+      "McpElicitationRespondResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "McpElicitationRespondResult",
         "type": "object"
       },
       "McpOauthCallbackParams": {
@@ -40868,6 +40993,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/LayoutApplyPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mcp.elicitation.request",
+      "summary": "MCP server requested user input (form or URL mode).",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/McpElicitationRequestPayload"
           }
         }
       ]
