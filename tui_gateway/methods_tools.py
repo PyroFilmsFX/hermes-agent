@@ -1733,6 +1733,128 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5024, str(exc))
 
 
+# ─── MCP tool execution (mcp.tools.call) ───────────────────────────────────
+
+
+@method("mcp.tools.call")
+def _(rid, params: dict) -> dict:
+    """Execute an MCP tool on a connected server under the calling session's approval context."""
+    import json
+    from tools.approval_context import reset_current_session_key, set_current_session_key
+
+    session_id = _str_arg(params, "session_id")
+    if not session_id:
+        return _err(rid, 4001, "session_id required")
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    if session.get("closing") or session.get("finalized"):
+        return _err(rid, 4001, f"session '{session_id}' not found")
+
+    server_name = _str_arg(params, "server")
+    if not server_name:
+        return _err(rid, 4000, "server required")
+
+    tool_name = _str_arg(params, "name")
+    if not tool_name:
+        return _err(rid, 4000, "name required")
+
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    elif not isinstance(arguments, dict):
+        return _err(rid, 4000, "arguments must be a JSON object")
+
+    try:
+        raw_args = json.dumps(arguments, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return _err(rid, 4000, f"arguments could not be serialized to JSON: {exc}")
+
+    if len(raw_args) > 64 * 1024:
+        return _err(rid, 4000, f"arguments exceed 64 KiB limit ({len(raw_args)} bytes)")
+
+    _discovery = _tools_mod("tools.mcp_tool_discovery")
+    server_task = _discovery._get_connected_server_for_call(server_name)
+    if server_task is None or getattr(server_task, "session", None) is None:
+        return _err(rid, 4018, f"MCP server '{server_name}' is not connected")
+
+    exposed_tools = getattr(server_task, "_tools", ()) or ()
+    is_exposed = False
+    for t in exposed_tools:
+        tname = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        if tname == tool_name:
+            is_exposed = True
+            break
+    if not is_exposed:
+        return _err(rid, 4018, f"Tool '{tool_name}' is not exposed by server '{server_name}'")
+
+    schema_mod = _tools_mod("tools.mcp_tool_schema")
+    prefixed_name = schema_mod.mcp_prefixed_tool_name(server_name, tool_name)
+    registry = _tools_mod("tools.registry").registry
+    entry = registry.get_entry(prefixed_name, scope=session.get("profile_home"))
+    if entry is None or not entry.handler:
+        return _err(rid, 4018, f"Tool handler '{prefixed_name}' not found")
+
+    session_key = session.get("session_key") or session.get("id") or session_id
+    approval_token = set_current_session_key(session_key)
+    tokens = _set_session_context(
+        session_key,
+        cwd=str(session.get("cwd") or ""),
+        ui_session_id=session_id
+    )
+    profile_scope = _session_profile_runtime_scope(session)
+
+    try:
+        with profile_scope:
+            raw_result = entry.handler(arguments)
+    except Exception as exc:
+        return _ok(rid, {
+            "content": [{"type": "text", "text": str(exc)}],
+            "isError": True,
+        })
+    finally:
+        _clear_session_context(tokens)
+        reset_current_session_key(approval_token)
+
+    if isinstance(raw_result, str):
+        try:
+            parsed = json.loads(raw_result)
+        except Exception:
+            parsed = {"result": raw_result}
+    elif isinstance(raw_result, dict):
+        parsed = raw_result
+    else:
+        parsed = {"result": str(raw_result)}
+
+    if "error" in parsed:
+        err_text = str(parsed["error"])
+        return _ok(rid, {
+            "content": [{"type": "text", "text": err_text}],
+            "isError": True,
+        })
+
+    content = parsed.get("content")
+    if content is None:
+        res = parsed.get("result")
+        if isinstance(res, list):
+            content = res
+        elif isinstance(res, str):
+            content = [{"type": "text", "text": res}]
+        elif isinstance(res, dict):
+            content = [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]
+        elif res is not None:
+            content = [{"type": "text", "text": str(res)}]
+        else:
+            content = []
+
+    out: dict = {"content": content}
+    if "structuredContent" in parsed:
+        out["structuredContent"] = parsed["structuredContent"]
+    if parsed.get("isError"):
+        out["isError"] = True
+    return _ok(rid, out)
+
+
 # ─── MCP elicitation (mcp.elicitation.*) ───────────────────────────────────
 
 def emit_elicitation_request(payload: dict) -> None:

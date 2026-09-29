@@ -4323,6 +4323,17 @@ export interface McpResourceSubscriptionResult {
   server: string
   uri: string
 }
+export interface McpToolsCallParams {
+  session_id: string
+  server: string
+  name: string
+  arguments?: Record<string, unknown>
+}
+export interface McpToolsCallResult {
+  content?: unknown[]
+  structuredContent?: unknown | null
+  isError?: boolean | null
+}
 export interface McpElicitationRespondParams {
   request_id: string
   action: McpElicitationAction
@@ -5276,6 +5287,8 @@ export interface RpcMethods {
   'mcp.servers.status': { params: ProfileParams; result: McpServersStatusResult }
   /** Connect, list tools, disconnect — an OAuth server with no token on disk is reported as not ok. */
   'mcp.servers.test': { params: McpServerNameParams; result: McpServersTestResult }
+  /** Execute an MCP tool on a connected server under the calling session's approval context. */
+  'mcp.tools.call': { params: McpToolsCallParams; result: McpToolsCallResult }
   /** Set/clear one author's emoji reaction on a message; returns the row's full reaction list. */
   'message.react': { params: MessageReactParams; result: MessageReactResult }
   /** Remove every credential (env keys and OAuth state) for a provider. */
@@ -5684,6 +5697,7 @@ export const RPC_METHODS = [
   'mcp.servers.set_api_key',
   'mcp.servers.status',
   'mcp.servers.test',
+  'mcp.tools.call',
   'message.react',
   'model.disconnect',
   'model.options',

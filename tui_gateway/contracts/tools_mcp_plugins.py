@@ -673,6 +673,26 @@ method("mcp.resources.unsubscribe", params=McpResourceSubscriptionParams, result
        doc="Unsubscribe from updates for an MCP resource on a connected server.")
 
 
+# ── MCP tool execution (M9b) ───────────────────────────────────────────────────
+
+
+class McpToolsCallParams(Params):
+    session_id: str
+    server: str
+    name: str
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class McpToolsCallResult(Result):
+    content: list[JsonValue] = Field(default_factory=list)
+    structuredContent: JsonValue | None = None
+    isError: bool | None = None
+
+
+method("mcp.tools.call", params=McpToolsCallParams, result=McpToolsCallResult,
+       doc="Execute an MCP tool on a connected server under the calling session's approval context.")
+
+
 # ── MCP elicitation ──────────────────────────────────────────────────────────────────────────
 
 

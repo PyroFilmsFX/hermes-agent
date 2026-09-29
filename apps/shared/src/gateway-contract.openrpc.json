@@ -2005,6 +2005,24 @@
       }
     },
     {
+      "name": "mcp.tools.call",
+      "summary": "Execute an MCP tool on a connected server under the calling session's approval context.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpToolsCallParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpToolsCallResult"
+        }
+      }
+    },
+    {
       "name": "message.react",
       "summary": "Set/clear one author's emoji reaction on a message; returns the row's full reaction list.",
       "params": [
@@ -19116,6 +19134,69 @@
           "oauth_needed"
         ],
         "title": "McpServersTestResult",
+        "type": "object"
+      },
+      "McpToolsCallParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          }
+        },
+        "required": [
+          "session_id",
+          "server",
+          "name"
+        ],
+        "title": "McpToolsCallParams",
+        "type": "object"
+      },
+      "McpToolsCallResult": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "items": {},
+            "title": "Content",
+            "type": "array"
+          },
+          "structuredContent": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Structuredcontent"
+          },
+          "isError": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Iserror"
+          }
+        },
+        "title": "McpToolsCallResult",
         "type": "object"
       },
       "MessageCompletePayload": {

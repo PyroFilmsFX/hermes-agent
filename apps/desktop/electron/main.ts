@@ -240,6 +240,7 @@ import {
   stopFind
 } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
+import { shouldBlockFrameNavigation } from './frame-navigation'
 import { registerFsIpc } from './fs-ipc'
 import type {
   GatewayFileSaveContext,
@@ -13242,6 +13243,11 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
 
     event.preventDefault()
     void openExternalUrl(url)
+  })
+  win.webContents.on('will-frame-navigate', (event) => {
+    if (shouldBlockFrameNavigation(event.isMainFrame, event.url)) {
+      event.preventDefault()
+    }
   })
 }
 
