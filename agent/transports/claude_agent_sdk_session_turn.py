@@ -1643,6 +1643,9 @@ class ClaudeSdkTurnMixin:
                             # attach to a later unrelated result.
                             self._host_prompt_folded = True
                             self._unsolicited_burst_open = False
+                            self._native_peer_in_flight = False
+                            self._native_peer_msg_id = None
+                            self._native_peer_seen = False
                             self._deliver_prefold_peer_items()
                             if self._unsolicited_text or self._unsolicited_items:
                                 logger.warning(
@@ -1891,10 +1894,11 @@ class ClaudeSdkTurnMixin:
             self._notify_tool_results(message)
         if name == "ResultMessage":
             self._unsolicited_results += 1
-            if getattr(self, "_native_peer_seen", False):
-                self._native_peer_in_flight = False
-                self._native_peer_msg_id = None
-                self._native_peer_seen = False
+            # Any unsolicited result ends the CLI turn; don't gate the release on
+            # recognising the echo, or a missed echo holds owner input forever.
+            self._native_peer_in_flight = False
+            self._native_peer_msg_id = None
+            self._native_peer_seen = False
         if getattr(message, "parent_tool_use_id", None):
             # Subagent streams belong to the parent tool card, not to the
             # session-level unsolicited turn.

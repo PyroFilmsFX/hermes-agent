@@ -135,7 +135,12 @@ def _transport(turn_inbox, client=True, loop=True):
         _terminal_result_committed=False,
         is_live=lambda: True,
     )
-    stub.native_peer_idle = types.MethodType(mod.ClaudeAgentSdkSession.native_peer_idle, stub)
+    stub._native_peer_since = 0.0
+    stub._native_peer_msg_id = None
+    stub._native_peer_seen = False
+    for name in ("native_peer_idle", "woken_turn_active", "_native_peer_pending_locked",
+                 "_clear_native_peer_locked"):
+        setattr(stub, name, types.MethodType(getattr(mod.ClaudeAgentSdkSession, name), stub))
     return mod, stub, queried
 
 
@@ -250,7 +255,10 @@ def test_peer_message_declines_when_scheduled_query_fails(monkeypatch):
     ) is False
 
 
-def test_peer_message_declines_and_cancels_when_scheduled_query_times_out(monkeypatch):
+def test_slow_peer_query_counts_as_delivered_and_keeps_the_cli_claimed(monkeypatch):
+    """A query() still writing after the timeout may already sit in the CLI's queue.
+
+    Reporting failure would send the same mailbox row down a second delivery path."""
     mod, stub, queried = _transport(turn_inbox=None)
 
     class _Fut:
@@ -270,8 +278,35 @@ def test_peer_message_declines_and_cancels_when_scheduled_query_times_out(monkey
     )
     assert mod.ClaudeAgentSdkSession.send_peer_message(
         stub, "hello", {"kind": "peer", "msg_id": "row-2"}
-    ) is False
-    assert future.cancelled is True
+    ) is True
+    assert future.cancelled is False
+    assert stub.woken_turn_active() is True
+    assert mod.ClaudeAgentSdkSession.send_peer_message(
+        stub, "second", {"kind": "peer", "msg_id": "row-3"}
+    ) is False, "one native peer in flight at a time"
+
+
+def test_peer_claim_expires_when_the_cli_never_starts_a_turn(monkeypatch):
+    """An injected input that never became a CLI turn cannot hold owner input back forever."""
+    mod, stub, _queried = _transport(turn_inbox=None)
+    stub._native_peer_in_flight = True
+    stub._native_peer_since = mod.time.monotonic()
+    assert stub.woken_turn_active() is True
+    assert stub.native_peer_idle() is False
+
+    stub._native_peer_since -= mod._NATIVE_PEER_ADMIT_GRACE_SECONDS + 1
+    assert stub.woken_turn_active() is False
+    assert stub.native_peer_idle() is True
+    assert stub._native_peer_in_flight is False
+
+
+def test_open_burst_keeps_the_peer_claim_past_the_grace(monkeypatch):
+    mod, stub, _queried = _transport(turn_inbox=None)
+    stub._native_peer_in_flight = True
+    stub._native_peer_since = mod.time.monotonic() - mod._NATIVE_PEER_ADMIT_GRACE_SECONDS - 1
+    stub._unsolicited_burst_open = True
+    assert stub.woken_turn_active() is True
+    assert stub._native_peer_in_flight is True
 
 
 def test_peer_message_declines_when_cli_stream_has_ended(monkeypatch):

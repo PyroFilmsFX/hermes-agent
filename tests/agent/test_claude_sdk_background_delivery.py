@@ -830,3 +830,36 @@ def test_session_deduplication_id_sets_keep_only_the_newest_entries():
         assert f"peer-{count - 1}" in session._host_peer_seen
     finally:
         session.close()
+
+
+def test_unsolicited_result_releases_the_native_peer_claim_without_a_recognised_echo():
+    """Review P0 (b9): the claim must not depend on parsing the peer echo.
+
+    A peer turn whose UserMessage lost its origin still ends with a ResultMessage;
+    that result has to free the CLI for owner input and the next mailbox row."""
+    import time as _time
+
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
+    )
+
+    session, holder = _make_session(script=[], on_unsolicited_result=lambda *a, **k: None)
+    try:
+        session.ensure_started()
+        with session._turn_callback_lock:
+            session._native_peer_in_flight = True
+            session._native_peer_msg_id = "row-9"
+            session._native_peer_since = _time.monotonic()
+        client = holder["client"]
+        echo = UserMessage(content="wrapped peer text")  # origin stripped by the CLI
+        echo.uuid = "peer-in-9"
+        result = ResultMessage(result="done", uuid="peer-res-9")
+        client.feed(echo, AssistantMessage(content=[TextBlock("done")]), result)
+        deadline = _time.time() + 2
+        while session._native_peer_in_flight and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session._native_peer_in_flight is False
+        assert session.woken_turn_active() is False
+        assert session.native_peer_idle() is True
+    finally:
+        session.close()

@@ -516,3 +516,24 @@ def test_failed_agent_build_leaves_marker_for_retry(
 
 # ── End to end: continuation runs a real turn and clears the marker ────
 
+
+
+def test_pause_cancel_clears_a_park_in_the_sessions_profile_home(monkeypatch, tmp_path):
+    """Review P1 (b9): the poller walks every served profile home, so a cancel that only
+    looked in the launch home left a named-profile pause to resume on its own."""
+    from agent import claude_sdk_usage_park as usage_park
+
+    launch_home, profile_home = tmp_path / "launch", tmp_path / "profiles" / "work"
+    launch_home.mkdir()
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(server, "_hermes_home", launch_home)
+    usage_park.park("sess-work", "sdk-work", 10**10, "five_hour", stagger_max=0, home=profile_home)
+    monkeypatch.setitem(server._sessions, "sid-work", {
+        "session_key": "sess-work", "profile_home": str(profile_home),
+        "history_lock": threading.RLock(), "running": False,
+    })
+
+    response = server._methods["session.pause.cancel"]("r", {"session_id": "sid-work"})
+
+    assert response["result"]["cancelled"] is True
+    assert usage_park.get("sess-work", home=profile_home) is None

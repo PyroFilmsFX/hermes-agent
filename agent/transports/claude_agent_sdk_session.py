@@ -103,6 +103,7 @@ from agent.transports import claude_sdk_peer_name_lease as _peer_lease
 logger = logging.getLogger(__name__)
 _RENAME_ACK_TIMEOUT_SECONDS = 10.0
 _NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
+_NATIVE_PEER_ADMIT_GRACE_SECONDS = 120.0
 
 
 class _RenameClaimDeferred(RuntimeError):
@@ -407,6 +408,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._native_peer_in_flight = False
         self._native_peer_msg_id: Optional[str] = None
         self._native_peer_seen = False
+        self._native_peer_since = 0.0
         self._idle_boundary_callback: Optional[Callable[[], None]] = None
         self._unsolicited_items: list[dict] = []
         self._unsolicited_tool_items: dict[str, dict] = {}
@@ -1184,14 +1186,33 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     _safe_sdk_error_text(exc),
                 )
 
+    def _native_peer_pending_locked(self) -> bool:
+        """An injected peer input still owns the CLI. Caller holds _turn_callback_lock.
+
+        Once its burst opens, the burst flag carries the claim; an input the CLI never
+        turned into a turn expires, so it can't hold owner input back forever."""
+        if not self._native_peer_in_flight:
+            return False
+        if self._unsolicited_burst_open:
+            return True
+        if time.monotonic() - self._native_peer_since < _NATIVE_PEER_ADMIT_GRACE_SECONDS:
+            return True
+        self._clear_native_peer_locked()
+        return False
+
+    def _clear_native_peer_locked(self) -> None:
+        self._native_peer_in_flight = False
+        self._native_peer_msg_id = None
+        self._native_peer_seen = False
+
     def woken_turn_active(self) -> bool:
         with self._turn_callback_lock:
-            return bool(self._native_peer_in_flight or self._unsolicited_burst_open)
+            return bool(self._native_peer_pending_locked() or self._unsolicited_burst_open)
 
     def interrupt_woken_turn(self) -> bool:
         """Stop an unclaimed CLI turn without leaving a host-turn interrupt pending."""
         with self._turn_callback_lock:
-            if not (self._native_peer_in_flight or self._unsolicited_burst_open):
+            if not (self._native_peer_pending_locked() or self._unsolicited_burst_open):
                 return False
             client, loop = self._client, self._loop
         if client is None or loop is None:
@@ -1220,7 +1241,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         with self._turn_callback_lock:
             return not (self._turn_inbox is not None or self._turn_claim_requested
                         or self._rename_claim_requested or getattr(self, "_resume_backlog", None) is not None
-                        or self._unsolicited_burst_open or self._native_peer_in_flight
+                        or self._unsolicited_burst_open or self._native_peer_pending_locked()
                         or self._pending_steer_results or self._closed or self._retiring
                         or self._stream_ended is not None)
 
@@ -1366,6 +1387,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             self._native_peer_in_flight = True
             self._native_peer_msg_id = str(origin.get("msg_id") or "")
             self._native_peer_seen = False
+            self._native_peer_since = time.monotonic()
         # A peer message starts a CLI turn without run_turn; its tool calls need a live capability too.
         if callable(refresh_capability := getattr(self, "refresh_session_spawn_capability", None)):
             refresh_capability()
@@ -1378,14 +1400,20 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 try:
                     done.result()
                 except Exception:
-                    logger.debug("SDK peer query failed after scheduling", exc_info=True)
+                    logger.warning("SDK peer query failed after it was accepted", exc_info=True)
+                    with self._turn_callback_lock:
+                        self._clear_native_peer_locked()
 
             future.add_done_callback(_finish_peer)
             try:
                 future.result(timeout=_NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
             except TimeoutError:
-                future.cancel()
-                raise
+                # The write may already sit in the CLI's queue: treat it as delivered (a
+                # second path would run the same mailbox row twice). The admission grace
+                # releases the claim if no turn ever starts.
+                logger.info("claude-agent-sdk: native peer query still writing after %ss; treating as delivered",
+                            _NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
+                return True
         except Exception:
             with self._turn_callback_lock:
                 self._native_peer_in_flight = False

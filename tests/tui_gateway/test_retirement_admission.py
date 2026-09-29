@@ -91,5 +91,8 @@ def test_prompt_claim_and_automatic_continuations_cannot_cross_prepare(runtime, 
                        "active_session_lease": SimpleNamespace(lease_id="l", released=False)}
     assert server._poll_bot_live_delivery_once("s", mailbox_session) is False
     assert fence.cancel(token) == {"ok": True}
+    # The queued prompt still outranks a background claim once the fence lifts.
+    assert server._notif_claim_turn(session) is False
+    session.pop("queued_prompt")
     assert server._notif_claim_turn(session) is True
     assert session["running"] is True
