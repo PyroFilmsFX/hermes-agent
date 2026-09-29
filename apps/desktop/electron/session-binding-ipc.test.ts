@@ -342,6 +342,57 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     }
   })
 
+  test('status reads never spend the confirm budget the owner bind click needs', async () => {
+    const h = harness()
+    const repo = initGitRepo(path.join(h.base, 'repoStatus'))
+
+    for (let i = 0; i < 25; i++) {
+      const res = await h.handlers.status(h.event(), { profile: 'default', hermes_session_id: `s_${i}` })
+      expect(res.ok).toBe(true)
+    }
+
+    const bound = await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_after', path: repo })
+    expect('state' in bound && bound.state).toBe('bound')
+  })
+
+  test('status still refuses an untrusted sender', async () => {
+    const h = harness()
+    const res = await h.handlers.status(h.event(false), { profile: 'default', hermes_session_id: 's1' })
+    expect(res).toEqual({ ok: false, reason: 'untrusted_sender' })
+  })
+
+  test('unbinding a live-attested build asks the native confirm and keeps the binding on cancel', async () => {
+    let isLive = false
+    const confirmRebind = vi.fn(async () => false)
+    const h = harness({ isAttestationLive: () => isLive, confirmRebind })
+    const repo = initGitRepo(path.join(h.base, 'repoUnbind'))
+
+    await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_u', path: repo })
+    isLive = true
+
+    const refused = await h.handlers.clear(h.event(), { profile: 'default', hermes_session_id: 's_u' })
+    expect(refused).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirmRebind).toHaveBeenCalledWith(expect.objectContaining({ newProjectRoot: null }))
+    expect(h.store.get('default', 's_u')?.state).toBe('bound')
+
+    confirmRebind.mockResolvedValueOnce(true)
+    h.advanceTime(10_000)
+    const cleared = await h.handlers.clear(h.event(), { profile: 'default', hermes_session_id: 's_u' })
+    expect(cleared.ok).toBe(true)
+    expect(h.store.get('default', 's_u')?.state).toBe('unbound')
+  })
+
+  test('unbinding without a live build needs no native confirm', async () => {
+    const confirmRebind = vi.fn(async () => false)
+    const h = harness({ confirmRebind })
+    const repo = initGitRepo(path.join(h.base, 'repoUnbind2'))
+    await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_v', path: repo })
+
+    const cleared = await h.handlers.clear(h.event(), { profile: 'default', hermes_session_id: 's_v' })
+    expect(cleared.ok).toBe(true)
+    expect(confirmRebind).not.toHaveBeenCalled()
+  })
+
   test('re-bind of a live-attested binding asks confirmRebind and aborts on false', async () => {
     let isLive = false
     const confirmRebind = vi.fn(async () => false)

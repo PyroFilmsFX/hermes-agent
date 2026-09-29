@@ -15503,15 +15503,20 @@ async function confirmSessionRebind(details: {
   profile: string
   hermes_session_id: string
   currentProjectRoot: string | null
-  newProjectRoot: string
+  newProjectRoot: string | null
   event?: unknown
 }): Promise<boolean> {
+  const unbinding = details.newProjectRoot === null
   const options = {
     type: 'warning' as const,
-    title: 'Re-bind session project',
-    message: 'This session has an active build with another project binding. Re-bind to new project?',
-    detail: `Current project: ${details.currentProjectRoot ?? '(none)'}\nNew project: ${details.newProjectRoot}`,
-    buttons: ['Re-bind', 'Cancel'],
+    title: unbinding ? 'Unbind session project' : 'Re-bind session project',
+    message: unbinding
+      ? 'This session has an active build bound to this project. Unbind it?'
+      : 'This session has an active build with another project binding. Re-bind to new project?',
+    detail: unbinding
+      ? `Current project: ${details.currentProjectRoot ?? '(none)'}`
+      : `Current project: ${details.currentProjectRoot ?? '(none)'}\nNew project: ${details.newProjectRoot}`,
+    buttons: [unbinding ? 'Unbind' : 'Re-bind', 'Cancel'],
     defaultId: 1,
     cancelId: 1,
     noLink: true

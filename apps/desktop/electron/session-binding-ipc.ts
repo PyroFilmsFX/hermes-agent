@@ -31,7 +31,8 @@ export interface RebindConfirmDetails {
   profile: string
   hermes_session_id: string
   currentProjectRoot: string | null
-  newProjectRoot: string
+  /** null = unbind */
+  newProjectRoot: string | null
   event?: unknown
 }
 
@@ -310,6 +311,7 @@ export function createSessionBindingIpcHandlers(deps: SessionBindingIpcDeps): Se
       return { ok: false, reason: slot.reason }
     }
 
+    let cancelled = false
     try {
       const params = input as Record<string, unknown> | null | undefined
       const profile = params?.profile
@@ -317,6 +319,22 @@ export function createSessionBindingIpcHandlers(deps: SessionBindingIpcDeps): Se
 
       if (!isValidPathComponent(profile) || !isValidPathComponent(hermes_session_id)) {
         return { ok: false, reason: 'bad_input' }
+      }
+
+      const existing = deps.store.get(profile, hermes_session_id)
+      if (existing && existing.state === 'bound' && isAttestationLiveFn(profile, hermes_session_id) && deps.confirmRebind) {
+        // Owner O2: unbinding a session with a live build gets the same native confirm as a re-bind.
+        const confirmed = await deps.confirmRebind({
+          profile,
+          hermes_session_id,
+          currentProjectRoot: existing.project_root,
+          newProjectRoot: null,
+          event
+        })
+        if (!confirmed) {
+          cancelled = true
+          return { ok: false, reason: 'cancelled' }
+        }
       }
 
       try {
@@ -327,7 +345,7 @@ export function createSessionBindingIpcHandlers(deps: SessionBindingIpcDeps): Se
         return { ok: false, reason: 'signing_off', error: err }
       }
     } finally {
-      gate.close(false)
+      gate.close(cancelled)
     }
   }
 
@@ -337,12 +355,9 @@ export function createSessionBindingIpcHandlers(deps: SessionBindingIpcDeps): Se
       return { ok: false, reason: 'untrusted_sender' }
     }
 
-    const slot = gate.tryOpen()
-    if ('reason' in slot) {
-      return { ok: false, reason: slot.reason }
-    }
-
-    try {
+    // Read-only: status never takes the confirm gate, so session switches can't spend the
+    // budget the owner's own bind click needs.
+    {
       const params = input as Record<string, unknown> | null | undefined
       const profile = params?.profile
       const hermes_session_id = params?.hermes_session_id
@@ -387,8 +402,6 @@ export function createSessionBindingIpcHandlers(deps: SessionBindingIpcDeps): Se
         verified: false,
         record: null
       }
-    } finally {
-      gate.close(false)
     }
   }
 
