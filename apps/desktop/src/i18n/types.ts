@@ -4370,6 +4370,18 @@ export interface Translations {
       sendEdited: string
       attachingFile: string
     }
+    mcpApp: {
+      badge: string
+      frameTitle: (app: string, server: string) => string
+      loading: string
+      loadFailed: string
+      notHtml: string
+      tooLarge: (kib: number) => string
+      navigatedAway: string
+      wantsToRun: (tool: string) => string
+      allowOnce: string
+      deny: string
+    }
     approval: {
       gatewayDisconnected: string
       sendFailed: string

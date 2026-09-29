@@ -5609,6 +5609,18 @@ export const deOverrides = {
       sendEdited: 'Bearbeitete Nachricht senden',
       attachingFile: 'Hängt an…'
     },
+    mcpApp: {
+      badge: 'App',
+      frameTitle: (app, server) => `${app} von ${server}`,
+      loading: 'App wird geladen…',
+      loadFailed: 'Diese App konnte nicht geladen werden.',
+      notHtml: 'Diese Ressource ist keine HTML-App.',
+      tooLarge: kib => `Diese App ist zu groß für die Anzeige (über ${kib} KiB).`,
+      navigatedAway: 'Diese App wollte ihre Seite verlassen und wurde geschlossen.',
+      wantsToRun: tool => `Die App möchte „${tool}“ ausführen. Nichts läuft ohne deine Zustimmung.`,
+      allowOnce: 'Einmal erlauben',
+      deny: 'Ablehnen'
+    },
     approval: {
       gatewayDisconnected: 'Hermes-Gateway ist nicht verbunden',
       sendFailed: 'Genehmigungsantwort konnte nicht gesendet werden',

@@ -53,6 +53,7 @@ import { useI18n } from '@/i18n'
 import { connectorCalls, mcpTargets } from '@/lib/connector-tools'
 import { PrettyLink, LinkifiedText as SharedLinkifiedText, urlSlugTitleLabel } from '@/lib/external-link'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
+import { findMcpAppUri } from '@/lib/mcp-apps/resolve'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
 import { toolResultRecord } from '@/lib/tool-result-metadata'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
@@ -90,6 +91,7 @@ import {
   type ToolStatus,
   type ToolTitleAction
 } from './fallback-model'
+import { McpAppCard } from './mcp-app-frame'
 import { isToolCallPart, summarizeToolRun } from './run-summary'
 import { ToolRunTicker } from './run-ticker'
 
@@ -1233,16 +1235,32 @@ export const ToolFallback = ({
     [contributions, part.toolName, part.outputSchema, resolvedStructured]
   )
 
-  if (matchingContrib) {
-    return (
-      <ToolCardHost
-        contribution={matchingContrib}
-        fallback={<ToolEntry part={part} />}
-        part={part}
-        structuredContent={resolvedStructured}
-      />
-    )
-  }
+  // MCP Apps (M9): a completed MCP tool result that references a `ui://` app
+  // gets the sandboxed app card under its row. Only MCP tools qualify, so a
+  // web or shell result carrying look-alike metadata cannot mount an app.
+  const appUri = useMemo(
+    () =>
+      part.toolName.startsWith('mcp__') && !part.isError && part.result !== undefined
+        ? findMcpAppUri(part.result)
+        : null,
+    [part.toolName, part.isError, part.result]
+  )
 
-  return <ToolEntry part={part} />
+  const entry = matchingContrib ? (
+    <ToolCardHost
+      contribution={matchingContrib}
+      fallback={<ToolEntry part={part} />}
+      part={part}
+      structuredContent={resolvedStructured}
+    />
+  ) : (
+    <ToolEntry part={part} />
+  )
+
+  return (
+    <>
+      {entry}
+      {appUri ? <McpAppCard key={appUri} toolName={part.toolName} uri={appUri} /> : null}
+    </>
+  )
 }

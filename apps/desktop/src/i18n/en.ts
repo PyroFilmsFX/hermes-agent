@@ -5237,6 +5237,18 @@ export const en: Translations = {
       sendEdited: 'Send edited message',
       attachingFile: 'Attaching…'
     },
+    mcpApp: {
+      badge: 'App',
+      frameTitle: (app, server) => `${app} from ${server}`,
+      loading: 'Loading app…',
+      loadFailed: 'Could not load this app.',
+      notHtml: 'This resource is not an HTML app.',
+      tooLarge: kib => `This app is too large to show (over ${kib} KiB).`,
+      navigatedAway: 'This app tried to leave its page, so it was closed.',
+      wantsToRun: tool => `The app wants to run “${tool}”. Nothing runs until you allow it.`,
+      allowOnce: 'Allow once',
+      deny: 'Deny'
+    },
     approval: {
       gatewayDisconnected:
         'Hermes is offline right now. The command is still waiting for your answer (until the approval timeout). Reconnect, then send it again.',

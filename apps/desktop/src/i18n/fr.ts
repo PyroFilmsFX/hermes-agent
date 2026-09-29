@@ -5620,6 +5620,18 @@ export const frOverrides = {
       sendEdited: 'Envoyer le message modifié',
       attachingFile: 'Ajout en cours…'
     },
+    mcpApp: {
+      badge: 'App',
+      frameTitle: (app, server) => `${app} de ${server}`,
+      loading: 'Chargement de l’app…',
+      loadFailed: 'Impossible de charger cette app.',
+      notHtml: 'Cette ressource n’est pas une app HTML.',
+      tooLarge: kib => `Cette app est trop volumineuse pour être affichée (plus de ${kib} Kio).`,
+      navigatedAway: 'Cette app a tenté de quitter sa page ; elle a été fermée.',
+      wantsToRun: tool => `L’app veut exécuter « ${tool} ». Rien ne s’exécute sans votre accord.`,
+      allowOnce: 'Autoriser une fois',
+      deny: 'Refuser'
+    },
     approval: {
       gatewayDisconnected: "La Gateway Hermes n'est pas connectée",
       sendFailed: "Impossible d'envoyer la réponse d'approbation",

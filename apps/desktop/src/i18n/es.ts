@@ -5600,6 +5600,18 @@ export const esOverrides = {
       sendEdited: 'Enviar edición',
       attachingFile: 'Adjuntando…'
     },
+    mcpApp: {
+      badge: 'App',
+      frameTitle: (app, server) => `${app} de ${server}`,
+      loading: 'Cargando la app…',
+      loadFailed: 'No se pudo cargar esta app.',
+      notHtml: 'Este recurso no es una app HTML.',
+      tooLarge: kib => `Esta app es demasiado grande para mostrarla (más de ${kib} KiB).`,
+      navigatedAway: 'Esta app intentó salir de su página, así que se cerró.',
+      wantsToRun: tool => `La app quiere ejecutar «${tool}». No se ejecuta nada hasta que lo permitas.`,
+      allowOnce: 'Permitir una vez',
+      deny: 'Denegar'
+    },
     approval: {
       gatewayDisconnected:
         'Hermes está sin conexión ahora mismo. El comando sigue esperando tu respuesta (hasta que se agote el tiempo de aprobación). Reconéctate y vuelve a enviarla.',
