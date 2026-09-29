@@ -14,7 +14,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+import hashlib
+from typing import Any, Callable
 
 from agent.secret_hygiene import mask_stored_text
 from .methods_conductor_build import _BUILD_ID_RE
@@ -1226,4 +1227,746 @@ def derive_row_status(
         status=status if isinstance(status, StatusRead) else None,
         record=status_record,
     )
+
+
+# ---------------------------------------------------------------------------
+# Attribution ladder and row grouping (§5, §2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AttributionContext:
+    """Injected runtime context for build attribution and grouping."""
+
+    live_cli_map: dict[str, tuple[str, str]] | Callable[[str], tuple[str, str] | None] = field(default_factory=dict)
+    bindings: dict[str, tuple[str, str]] | Callable[[str], tuple[str, str] | None] = field(default_factory=dict)
+    sessions: Any = field(default_factory=dict)
+    claude_sid_to_session: dict[str, tuple[str, str]] | Callable[[str], tuple[str, str] | None] = field(default_factory=dict)
+    workspace_sessions: list[dict[str, Any]] = field(default_factory=list)
+    common_repo_root: Callable[[Path | str], str | Path | None] | None = None
+    lane_branches: dict[str, str] = field(default_factory=dict)
+    get_branch: Callable[[Path | str], str | None] | None = None
+    live_cli_lookup: Callable[[str], tuple[str, str] | None] | None = None
+    now: float | None = None
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """Result of attributing a conductor build to a Hermes session."""
+
+    via: str  # live_cli | binding | stamped | statedb | workspace | unattributed
+    profile: str | None = None
+    hermes_session_id: str | None = None
+    project: str | None = None
+    branch: str | None = None
+    is_nested: bool = False
+    lane: str | None = None
+    nested_in: str | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    @property
+    def session_id(self) -> str | None:
+        return self.hermes_session_id
+
+    @property
+    def attributed(self) -> bool:
+        return self.via != "unattributed" and self.hermes_session_id is not None
+
+    @property
+    def via_short(self) -> str:
+        mapping = {
+            "live_cli": "live",
+            "binding": "bound",
+            "stamped": "stamped",
+            "statedb": "db",
+            "workspace": "workspace",
+            "unattributed": "none",
+        }
+        return mapping.get(self.via, self.via)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "via": self.via,
+            "via_short": self.via_short,
+            "profile": self.profile,
+            "hermes_session_id": self.hermes_session_id,
+            "session_id": self.session_id,
+            "project": self.project,
+            "branch": self.branch,
+            "is_nested": self.is_nested,
+            "lane": self.lane,
+            "nested_in": self.nested_in,
+            "attributed": self.attributed,
+        }
+
+
+@dataclass
+class Build:
+    """A build row item before or after grouping."""
+
+    marker: dict[str, Any] = field(default_factory=dict)
+    marker_path: Path | str = ""
+    status: StatusRead | None = None
+    attribution: Attribution | None = None
+    derived: DerivedStatus | None = None
+    last_activity_at: float | None = None
+    armed_at: float | str | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+@dataclass
+class Row:
+    """An orchestrator row grouping one or more builds."""
+
+    primary: Any
+    extra_builds: list[Any] = field(default_factory=list)
+    attribution: Attribution | None = None
+    profile: str | None = None
+    hermes_session_id: str | None = None
+    key: str | None = None
+    all_builds: list[Any] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.all_builds:
+            self.all_builds = [self.primary, *self.extra_builds]
+        if self.attribution is None:
+            if isinstance(self.primary, dict):
+                self.attribution = self.primary.get("attribution")
+            else:
+                self.attribution = getattr(self.primary, "attribution", None)
+        if self.attribution:
+            if self.profile is None:
+                self.profile = self.attribution.profile
+            if self.hermes_session_id is None:
+                self.hermes_session_id = self.attribution.hermes_session_id
+        if self.key is None:
+            p = None
+            if isinstance(self.primary, dict):
+                p = self.primary.get("marker_path") or self.primary.get("marker", {}).get("marker_path")
+            else:
+                p = getattr(self.primary, "marker_path", None)
+            if p:
+                self.key = hashlib.sha256(str(p).encode()).hexdigest()[:16]
+
+    @property
+    def build(self) -> Any:
+        return self.primary
+
+    @property
+    def primary_build(self) -> Any:
+        return self.primary
+
+    @property
+    def extras(self) -> list[Any]:
+        return self.extra_builds
+
+    @property
+    def other_builds(self) -> list[Any]:
+        return self.extra_builds
+
+    @property
+    def builds(self) -> list[Any]:
+        return self.all_builds
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "primary": self.primary,
+            "extra_builds": self.extra_builds,
+            "other_builds": self.extra_builds,
+            "attribution": self.attribution.to_dict() if self.attribution else None,
+            "profile": self.profile,
+            "hermes_session_id": self.hermes_session_id,
+        }
+
+
+def collect_live_cli_map(
+    gateway_sessions: dict[str, Any] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Collect {claude_sid: (profile_name, hermes_session_id)} for all live Claude CLI sessions.
+
+    Reuses hermes_cli/web_routers/sessions.py:_live_claude_cli logic without importing the router.
+    """
+    result: dict[str, tuple[str, str]] = {}
+    if gateway_sessions is None:
+        try:
+            from tui_gateway import server as gateway_server
+            gateway_sessions = getattr(gateway_server, "_sessions", None)
+        except Exception:
+            gateway_sessions = None
+    if not gateway_sessions:
+        return result
+
+    try:
+        from agent.claude_sdk_runtime_continuity import live_claude_cli_session
+        from hermes_constants import profile_name_for_home
+        from tui_gateway import server as gateway_server
+
+        current_profile = gateway_server._current_profile_name() if hasattr(gateway_server, "_current_profile_name") else "default"
+        for rt_sid, session in list(gateway_sessions.items()):
+            if not isinstance(session, dict):
+                continue
+            if session.get("_finalized"):
+                continue
+            session_id = gateway_server._session_lookup_key(session, fallback=rt_sid) if hasattr(gateway_server, "_session_lookup_key") else rt_sid
+            owner = profile_name_for_home(session.get("profile_home")) or current_profile
+            state, cli_id = live_claude_cli_session(session.get("agent"))
+            if state == "live" and cli_id:
+                result[cli_id] = (owner, session_id)
+    except Exception:
+        pass
+    return result
+
+
+def _detect_nested_worktree(marker_path: Path | str) -> tuple[bool, str | None, Path | None]:
+    p = Path(marker_path)
+    parts = p.parts
+    for i in range(len(parts) - 1):
+        if parts[i] in (".claude", "_claude") and parts[i + 1] == "worktrees" and i + 2 < len(parts):
+            lane = parts[i + 2]
+            lane_dir = Path(*parts[:i + 3])
+            return True, lane, lane_dir
+    for i in range(len(parts) - 1):
+        if parts[i] == "worktrees" and i + 1 < len(parts):
+            lane = parts[i + 1]
+            lane_dir = Path(*parts[:i + 2])
+            return True, lane, lane_dir
+    return False, None, None
+
+
+def _norm_path(p: Any) -> str:
+    if not p:
+        return ""
+    try:
+        return str(Path(p).resolve()).replace("\\", "/")
+    except Exception:
+        return os.path.normpath(str(p)).replace("\\", "/")
+
+
+def _parse_ts(val: Any) -> float:
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val) if math.isfinite(val) else 0.0
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace("Z", "+00:00")).timestamp()
+        except (ValueError, OSError):
+            return 0.0
+    return 0.0
+
+
+def _get_activity_ts(b: Any) -> float:
+    if isinstance(b, dict):
+        if "last_activity_at" in b and b["last_activity_at"] is not None:
+            return _parse_ts(b["last_activity_at"])
+        if "last_activity" in b and isinstance(b["last_activity"], dict):
+            return _parse_ts(b["last_activity"].get("at"))
+        derived = b.get("derived")
+        if isinstance(derived, DerivedStatus) and derived.last_activity_at is not None:
+            return float(derived.last_activity_at)
+        status = b.get("status")
+        if isinstance(status, StatusRead) and status.status_at is not None:
+            return float(status.status_at)
+        elif isinstance(status, dict):
+            if "last_activity_at" in status:
+                return _parse_ts(status["last_activity_at"])
+            if "last_activity" in status and isinstance(status["last_activity"], dict):
+                return _parse_ts(status["last_activity"].get("at"))
+        marker = b.get("marker", b)
+        if isinstance(marker, dict):
+            return _parse_ts(marker.get("mtime") or marker.get("_mtime") or marker.get("armed_at"))
+    else:
+        if hasattr(b, "last_activity_at") and b.last_activity_at is not None:
+            return _parse_ts(b.last_activity_at)
+        if hasattr(b, "last_activity") and isinstance(b.last_activity, dict):
+            return _parse_ts(b.last_activity.get("at"))
+        derived = getattr(b, "derived", None)
+        if isinstance(derived, DerivedStatus) and derived.last_activity_at is not None:
+            return float(derived.last_activity_at)
+        status = getattr(b, "status", None)
+        if isinstance(status, StatusRead) and status.status_at is not None:
+            return float(status.status_at)
+        marker = getattr(b, "marker", None)
+        if isinstance(marker, dict):
+            return _parse_ts(marker.get("mtime") or marker.get("_mtime") or marker.get("armed_at"))
+    return 0.0
+
+
+def _get_armed_at_ts(b: Any) -> float:
+    if isinstance(b, dict):
+        if "armed_at" in b and b["armed_at"] is not None:
+            return _parse_ts(b["armed_at"])
+        marker = b.get("marker", b)
+        if isinstance(marker, dict) and "armed_at" in marker:
+            return _parse_ts(marker["armed_at"])
+        status = b.get("status")
+        if isinstance(status, StatusRead) and status.record and isinstance(status.record, dict):
+            return _parse_ts(status.record.get("build", {}).get("armed_at"))
+    else:
+        if hasattr(b, "armed_at") and b.armed_at is not None:
+            return _parse_ts(b.armed_at)
+        marker = getattr(b, "marker", None)
+        if isinstance(marker, dict) and "armed_at" in marker:
+            return _parse_ts(marker["armed_at"])
+    return 0.0
+
+
+def _lookup_live_cli(ctx: AttributionContext, marker_sid: str) -> tuple[str, str] | None:
+    if not marker_sid:
+        return None
+    val = None
+    if callable(ctx.live_cli_lookup):
+        val = ctx.live_cli_lookup(marker_sid)
+    if val is None and callable(ctx.live_cli_map):
+        val = ctx.live_cli_map(marker_sid)
+    elif val is None and isinstance(ctx.live_cli_map, dict):
+        val = ctx.live_cli_map.get(marker_sid)
+    if val is None:
+        return None
+    if isinstance(val, (tuple, list)) and len(val) >= 2:
+        return str(val[0]), str(val[1])
+    if isinstance(val, str):
+        return "default", val
+    if isinstance(val, dict):
+        p = val.get("profile", "default")
+        s = val.get("session_id") or val.get("hermes_session_id") or val.get("id")
+        if s:
+            return str(p), str(s)
+    if hasattr(val, "profile") and hasattr(val, "session_id"):
+        return str(val.profile), str(val.session_id)
+    return None
+
+
+def _lookup_binding(ctx: AttributionContext, nonce: str) -> tuple[str, str] | None:
+    if not nonce:
+        return None
+    val = None
+    if callable(ctx.bindings):
+        val = ctx.bindings(nonce)
+    elif isinstance(ctx.bindings, dict):
+        val = ctx.bindings.get(nonce)
+    if val is None:
+        return None
+    if isinstance(val, (tuple, list)) and len(val) >= 2:
+        return str(val[0]), str(val[1])
+    if isinstance(val, str):
+        return "default", val
+    if isinstance(val, dict):
+        p = val.get("profile", "default")
+        s = val.get("session_id") or val.get("hermes_session_id") or val.get("id")
+        if s:
+            return str(p), str(s)
+    if hasattr(val, "profile") and hasattr(val, "session_id"):
+        return str(val.profile), str(val.session_id)
+    return None
+
+
+def _find_stamped_session_profile(
+    sessions: Any,
+    stamped_hsid: str,
+    specified_profile: str | None = None,
+) -> str | None:
+    if not sessions or not stamped_hsid:
+        return None
+
+    matching_profiles: list[str] = []
+
+    if isinstance(sessions, dict):
+        for k in sessions.keys():
+            if isinstance(k, tuple) and len(k) >= 2 and k[1] == stamped_hsid:
+                matching_profiles.append(str(k[0]))
+        if not matching_profiles:
+            for prof, sids in sessions.items():
+                if isinstance(sids, (list, tuple, set)):
+                    for s in sids:
+                        if s == stamped_hsid:
+                            matching_profiles.append(str(prof))
+                        elif isinstance(s, dict) and (s.get("session_id") == stamped_hsid or s.get("hermes_session_id") == stamped_hsid or s.get("id") == stamped_hsid):
+                            matching_profiles.append(str(prof))
+                elif isinstance(sids, dict):
+                    if stamped_hsid in sids:
+                        matching_profiles.append(str(prof))
+        if not matching_profiles and stamped_hsid in sessions:
+            val = sessions[stamped_hsid]
+            if isinstance(val, str):
+                matching_profiles.append(val)
+            elif isinstance(val, dict):
+                matching_profiles.append(val.get("profile", "default"))
+            elif hasattr(val, "profile"):
+                matching_profiles.append(getattr(val, "profile", "default"))
+    elif isinstance(sessions, (set, tuple)):
+        for item in sessions:
+            if isinstance(item, tuple) and len(item) >= 2 and item[1] == stamped_hsid:
+                matching_profiles.append(str(item[0]))
+            elif item == stamped_hsid:
+                matching_profiles.append(specified_profile or "default")
+    elif isinstance(sessions, list):
+        for item in sessions:
+            if isinstance(item, tuple) and len(item) >= 2 and item[1] == stamped_hsid:
+                matching_profiles.append(str(item[0]))
+            elif isinstance(item, dict):
+                sid = item.get("session_id") or item.get("hermes_session_id") or item.get("id")
+                if sid == stamped_hsid:
+                    matching_profiles.append(item.get("profile", "default"))
+            elif hasattr(item, "session_id") or hasattr(item, "hermes_session_id"):
+                sid = getattr(item, "session_id", None) or getattr(item, "hermes_session_id", None)
+                if sid == stamped_hsid:
+                    matching_profiles.append(getattr(item, "profile", "default"))
+
+    unique_profiles = list(dict.fromkeys(matching_profiles))
+    if specified_profile:
+        return specified_profile if specified_profile in unique_profiles else None
+    if len(unique_profiles) == 1:
+        return unique_profiles[0]
+    return None
+
+
+def _lookup_statedb(ctx: AttributionContext, marker_sid: str) -> tuple[str, str] | None:
+    if not marker_sid:
+        return None
+    val = None
+    if callable(ctx.claude_sid_to_session):
+        val = ctx.claude_sid_to_session(marker_sid)
+    elif isinstance(ctx.claude_sid_to_session, dict):
+        val = ctx.claude_sid_to_session.get(marker_sid)
+    if val is None:
+        return None
+    if isinstance(val, (tuple, list)) and len(val) >= 2:
+        return str(val[0]), str(val[1])
+    if isinstance(val, str):
+        return "default", val
+    if isinstance(val, dict):
+        p = val.get("profile", "default")
+        s = val.get("session_id") or val.get("hermes_session_id") or val.get("id")
+        if s:
+            return str(p), str(s)
+    if hasattr(val, "profile") and hasattr(val, "session_id"):
+        return str(val.profile), str(val.session_id)
+    return None
+
+
+def _get_workspace_candidate_sessions(ctx: AttributionContext) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if ctx.workspace_sessions:
+        for s in ctx.workspace_sessions:
+            if isinstance(s, dict):
+                candidates.append(s)
+            elif hasattr(s, "__dict__"):
+                candidates.append(vars(s))
+    if not candidates and ctx.sessions:
+        if isinstance(ctx.sessions, list):
+            for s in ctx.sessions:
+                if isinstance(s, dict) and ("cwd" in s or "workspace" in s):
+                    candidates.append(s)
+        elif isinstance(ctx.sessions, dict):
+            for k, v in ctx.sessions.items():
+                if isinstance(v, dict) and ("cwd" in v or "workspace" in v):
+                    cand = dict(v)
+                    if "profile" not in cand:
+                        cand["profile"] = k[0] if isinstance(k, tuple) else "default"
+                    if "session_id" not in cand:
+                        cand["session_id"] = k[1] if isinstance(k, tuple) else k
+                    candidates.append(cand)
+    return candidates
+
+
+def _find_workspace_sessions(
+    ctx: AttributionContext,
+    marker_root: str,
+    crr_fn: Callable[[Path | str], str | Path | None],
+) -> list[tuple[str, str]]:
+    candidates = _get_workspace_candidate_sessions(ctx)
+    now = ctx.now if ctx.now is not None else time.time()
+    norm_marker = _norm_path(marker_root)
+    matches: list[tuple[str, str]] = []
+
+    for s in candidates:
+        last_act = s.get("last_active_at") or s.get("active_at") or s.get("updated_at")
+        if last_act is not None:
+            ts = _parse_ts(last_act)
+            if (now - ts) > 24 * 3600:
+                continue
+
+        cwd = s.get("cwd") or s.get("workspace")
+        if not cwd:
+            continue
+        ws_root = crr_fn(cwd) or s.get("repo_root")
+        if not ws_root:
+            continue
+        if _norm_path(ws_root) == norm_marker:
+            prof = str(s.get("profile", "default"))
+            sid = str(s.get("session_id") or s.get("hermes_session_id") or s.get("id"))
+            if sid:
+                matches.append((prof, sid))
+
+    return list(dict.fromkeys(matches))
+
+
+def attribute_build(
+    marker: dict[str, Any],
+    marker_path: Path | str,
+    status: StatusRead | dict[str, Any] | None,
+    ctx: AttributionContext,
+) -> Attribution:
+    """Attribute a conductor build to a Hermes session via the attribution ladder."""
+    p = Path(marker_path)
+    crr_fn = ctx.common_repo_root
+    if crr_fn is None:
+        from . import git_probe
+        crr_fn = git_probe.common_repo_root
+
+    is_nested, lane, lane_dir = _detect_nested_worktree(p)
+    if marker.get("is_nested") is True:
+        is_nested = True
+    if is_nested and not lane and marker.get("lane"):
+        lane = str(marker["lane"])
+
+    context_path = marker.get("context_path") or (str(lane_dir) if lane_dir else str(p.parent))
+    raw_project = crr_fn(context_path)
+    if not raw_project and lane_dir:
+        raw_project = crr_fn(str(lane_dir))
+    if not raw_project and p.parent:
+        raw_project = crr_fn(str(p.parent))
+    project = str(raw_project) if raw_project else None
+
+    # Resolve branch
+    branch: str | None = None
+    status_build: dict[str, Any] | None = None
+    if isinstance(status, StatusRead):
+        if status.record and isinstance(status.record, dict):
+            status_build = status.record.get("build")
+    elif isinstance(status, dict):
+        status_build = status.get("build") if isinstance(status.get("build"), dict) else status
+
+    if is_nested:
+        if lane and lane in ctx.lane_branches:
+            branch = ctx.lane_branches[lane]
+        elif lane_dir and str(lane_dir) in ctx.lane_branches:
+            branch = ctx.lane_branches[str(lane_dir)]
+        elif ctx.get_branch is not None:
+            branch = (ctx.get_branch(lane) if lane else None) or (ctx.get_branch(lane_dir) if lane_dir else None)
+        if not branch and status_build and isinstance(status_build, dict):
+            branch = status_build.get("branch")
+        if not branch and marker.get("branch"):
+            branch = marker.get("branch")
+        if not branch and lane_dir and os.path.isdir(lane_dir) and ctx.get_branch is None:
+            try:
+                from . import git_probe
+                branch = git_probe.branch(str(lane_dir)) or None
+            except Exception:
+                pass
+    else:
+        if status_build and isinstance(status_build, dict) and status_build.get("branch"):
+            branch = status_build.get("branch")
+        elif marker.get("branch"):
+            branch = marker.get("branch")
+        elif ctx.get_branch is not None:
+            branch = ctx.get_branch(context_path)
+        elif context_path and os.path.isdir(context_path):
+            try:
+                from . import git_probe
+                branch = git_probe.branch(str(context_path)) or None
+            except Exception:
+                pass
+
+    marker_sid = marker.get("session_id")
+
+    # 1. Rung: live_cli
+    if marker_sid:
+        live_match = _lookup_live_cli(ctx, marker_sid)
+        if live_match:
+            return Attribution(
+                via="live_cli",
+                profile=live_match[0],
+                hermes_session_id=live_match[1],
+                project=project,
+                branch=branch,
+                is_nested=is_nested,
+                lane=lane,
+                nested_in=lane if is_nested else None,
+            )
+
+    # 2. Rung: binding
+    binding_nonce = None
+    if status_build and isinstance(status_build, dict):
+        binding_nonce = status_build.get("binding_nonce")
+    if not binding_nonce and marker.get("binding_nonce"):
+        binding_nonce = marker.get("binding_nonce")
+    if binding_nonce:
+        binding_match = _lookup_binding(ctx, str(binding_nonce))
+        if binding_match:
+            return Attribution(
+                via="binding",
+                profile=binding_match[0],
+                hermes_session_id=binding_match[1],
+                project=project,
+                branch=branch,
+                is_nested=is_nested,
+                lane=lane,
+                nested_in=lane if is_nested else None,
+            )
+
+    # 3. Rung: stamped
+    stamped_hsid = None
+    if status_build and isinstance(status_build, dict):
+        stamped_hsid = status_build.get("hermes_session_id")
+    if stamped_hsid:
+        marker_prof = marker.get("profile") or (status_build.get("profile") if isinstance(status_build, dict) else None)
+        stamped_prof = _find_stamped_session_profile(ctx.sessions, str(stamped_hsid), marker_prof)
+        if stamped_prof:
+            return Attribution(
+                via="stamped",
+                profile=stamped_prof,
+                hermes_session_id=str(stamped_hsid),
+                project=project,
+                branch=branch,
+                is_nested=is_nested,
+                lane=lane,
+                nested_in=lane if is_nested else None,
+            )
+
+    # 4. Rung: statedb
+    if marker_sid:
+        statedb_match = _lookup_statedb(ctx, marker_sid)
+        if statedb_match:
+            return Attribution(
+                via="statedb",
+                profile=statedb_match[0],
+                hermes_session_id=statedb_match[1],
+                project=project,
+                branch=branch,
+                is_nested=is_nested,
+                lane=lane,
+                nested_in=lane if is_nested else None,
+            )
+
+    # 5. Rung: workspace
+    marker_root = project
+    if not marker_root:
+        marker_root_res = crr_fn(marker.get("context_path") or str(p.parent))
+        if marker_root_res:
+            marker_root = str(marker_root_res)
+    if marker_root:
+        matched_ws = _find_workspace_sessions(ctx, marker_root, crr_fn)
+        if len(matched_ws) == 1:
+            ws_match = matched_ws[0]
+            return Attribution(
+                via="workspace",
+                profile=ws_match[0],
+                hermes_session_id=ws_match[1],
+                project=project,
+                branch=branch,
+                is_nested=is_nested,
+                lane=lane,
+                nested_in=lane if is_nested else None,
+            )
+
+    # 6. Rung: unattributed
+    return Attribution(
+        via="unattributed",
+        profile=None,
+        hermes_session_id=None,
+        project=project,
+        branch=branch,
+        is_nested=is_nested,
+        lane=lane,
+        nested_in=lane if is_nested else None,
+    )
+
+
+def group_rows(
+    builds: list[Any],
+    ctx: AttributionContext | None = None,
+) -> list[Row]:
+    """Group builds by attributed (profile, hermes_session_id) or marker session_id when unattributed."""
+    groups: dict[tuple[str, ...], list[Any]] = {}
+
+    for b in builds:
+        attr = None
+        if isinstance(b, dict):
+            attr = b.get("attribution")
+        else:
+            attr = getattr(b, "attribution", None)
+
+        if attr is None and ctx is not None:
+            marker = b.get("marker", b) if isinstance(b, dict) else (getattr(b, "marker", None) or b)
+            m_path = b.get("marker_path", Path("")) if isinstance(b, dict) else getattr(b, "marker_path", Path(""))
+            status = b.get("status") if isinstance(b, dict) else getattr(b, "status", None)
+            if isinstance(marker, dict):
+                attr = attribute_build(marker, m_path, status, ctx)
+                if isinstance(b, dict):
+                    b["attribution"] = attr
+                else:
+                    try:
+                        b.attribution = attr
+                    except AttributeError:
+                        pass
+
+        if attr is not None and attr.via != "unattributed" and attr.hermes_session_id:
+            group_key = ("attributed", str(attr.profile or "default"), str(attr.hermes_session_id))
+        else:
+            marker = b.get("marker", b) if isinstance(b, dict) else (getattr(b, "marker", None) or b)
+            sid = marker.get("session_id") if isinstance(marker, dict) else getattr(marker, "session_id", None)
+            group_key = ("unattributed", str(sid or ""))
+
+        groups.setdefault(group_key, []).append(b)
+
+    rows: list[Row] = []
+    for group_key, group_builds in groups.items():
+        sorted_builds = sorted(
+            group_builds,
+            key=lambda item: (_get_activity_ts(item), _get_armed_at_ts(item)),
+            reverse=True,
+        )
+        primary = sorted_builds[0]
+        extras = sorted_builds[1:]
+        primary_attr = primary.get("attribution") if isinstance(primary, dict) else getattr(primary, "attribution", None)
+        row = Row(
+            primary=primary,
+            extra_builds=extras,
+            attribution=primary_attr,
+            profile=primary_attr.profile if primary_attr else None,
+            hermes_session_id=primary_attr.hermes_session_id if primary_attr else None,
+            all_builds=sorted_builds,
+        )
+        rows.append(row)
+
+    rows.sort(
+        key=lambda r: (_get_activity_ts(r.primary), _get_armed_at_ts(r.primary)),
+        reverse=True,
+    )
+    return rows
+
 

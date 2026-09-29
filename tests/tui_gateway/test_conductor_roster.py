@@ -12,12 +12,18 @@ from pathlib import Path
 import pytest
 
 from tui_gateway.conductor_roster import (
+    Attribution,
+    AttributionContext,
+    Build,
     DerivedStatus,
     IndexScan,
+    Row,
     StatusRead,
     _clear_cache,
     _clear_status_cache,
+    attribute_build,
     derive_row_status,
+    group_rows,
     read_build_status,
     read_marker_index,
 )
@@ -1278,4 +1284,382 @@ def test_relay_jobs_served_seat_and_fallback_from_never_in_public_dict(tmp_path)
     assert internal_dict["served_seat"] == "codex"
     assert internal_dict["fallback_from"] == "sonnet"
     assert internal_dict["build_run_id"] == "run-test-keys"
+
+
+# ---------------------------------------------------------------------------
+# B5 Attribution Ladder and Row Grouping Tests (§5, §2)
+# ---------------------------------------------------------------------------
+
+
+def test_attribution_rung_live_cli_in_isolation():
+    marker = {"session_id": "claude-live-01", "run_id": "r1"}
+    ctx = AttributionContext(
+        live_cli_map={"claude-live-01": ("default", "hermes-live-01")},
+    )
+    attr = attribute_build(marker, Path("/repos/p/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "live_cli"
+    assert attr.profile == "default"
+    assert attr.hermes_session_id == "hermes-live-01"
+    assert attr.attributed is True
+
+
+def test_attribution_rung_binding_in_isolation():
+    marker = {"session_id": "other-sid", "run_id": "r2"}
+    status = StatusRead(
+        present=True,
+        valid=True,
+        record={"build": {"binding_nonce": "nonce-alpha-42"}},
+    )
+    ctx = AttributionContext(
+        bindings={"nonce-alpha-42": ("work", "hermes-bound-02")},
+    )
+    attr = attribute_build(marker, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr.via == "binding"
+    assert attr.profile == "work"
+    assert attr.hermes_session_id == "hermes-bound-02"
+    assert attr.attributed is True
+
+
+def test_attribution_rung_stamped_in_isolation():
+    marker = {"session_id": "other-sid", "run_id": "r3"}
+    status = StatusRead(
+        present=True,
+        valid=True,
+        record={"build": {"hermes_session_id": "hermes-stamped-03"}},
+    )
+    ctx = AttributionContext(
+        sessions={("default", "hermes-stamped-03"): True},
+    )
+    attr = attribute_build(marker, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr.via == "stamped"
+    assert attr.profile == "default"
+    assert attr.hermes_session_id == "hermes-stamped-03"
+    assert attr.attributed is True
+
+
+def test_attribution_rung_statedb_in_isolation():
+    marker = {"session_id": "claude-db-04", "run_id": "r4"}
+    ctx = AttributionContext(
+        claude_sid_to_session={"claude-db-04": ("research", "hermes-statedb-04")},
+    )
+    attr = attribute_build(marker, Path("/repos/p/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "statedb"
+    assert attr.profile == "research"
+    assert attr.hermes_session_id == "hermes-statedb-04"
+    assert attr.attributed is True
+
+
+def test_attribution_rung_workspace_in_isolation():
+    marker = {"session_id": "claude-other", "run_id": "r5", "context_path": "/repos/proj"}
+    now = 1790670000.0
+    ctx = AttributionContext(
+        workspace_sessions=[
+            {
+                "profile": "default",
+                "session_id": "hermes-ws-05",
+                "cwd": "/repos/proj",
+                "last_active_at": now - 3600.0,
+            }
+        ],
+        common_repo_root=lambda p: "/repos/proj" if "proj" in str(p) else "",
+        now=now,
+    )
+    attr = attribute_build(marker, Path("/repos/proj/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "workspace"
+    assert attr.profile == "default"
+    assert attr.hermes_session_id == "hermes-ws-05"
+    assert attr.attributed is True
+
+
+def test_attribution_rung_unattributed_in_isolation():
+    marker = {"session_id": "claude-unknown", "run_id": "r6", "context_path": "/repos/unmatched"}
+    ctx = AttributionContext(
+        common_repo_root=lambda p: "",
+    )
+    attr = attribute_build(marker, Path("/repos/unmatched/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "unattributed"
+    assert attr.profile is None
+    assert attr.hermes_session_id is None
+    assert attr.attributed is False
+
+
+def test_attribution_precedence_when_several_match():
+    now = 1790670000.0
+    marker = {"session_id": "claude-shared", "run_id": "r_prec", "context_path": "/repos/proj"}
+    status = StatusRead(
+        present=True,
+        valid=True,
+        record={"build": {"binding_nonce": "nonce-shared", "hermes_session_id": "h_stamp"}},
+    )
+    m_path = Path("/repos/proj/.claude/state/tb-build-active.json")
+
+    # Step 1: All active -> live_cli wins
+    ctx1 = AttributionContext(
+        live_cli_map={"claude-shared": ("p_live", "h_live")},
+        bindings={"nonce-shared": ("p_bind", "h_bind")},
+        sessions={("p_stamp", "h_stamp"): True},
+        claude_sid_to_session={"claude-shared": ("p_db", "h_db")},
+        workspace_sessions=[{"profile": "p_ws", "session_id": "h_ws", "cwd": "/repos/proj", "last_active_at": now}],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr1 = attribute_build(marker, m_path, status, ctx1)
+    assert attr1.via == "live_cli"
+    assert attr1.hermes_session_id == "h_live"
+
+    # Step 2: Remove live_cli -> binding wins
+    ctx2 = AttributionContext(
+        bindings={"nonce-shared": ("p_bind", "h_bind")},
+        sessions={("p_stamp", "h_stamp"): True},
+        claude_sid_to_session={"claude-shared": ("p_db", "h_db")},
+        workspace_sessions=[{"profile": "p_ws", "session_id": "h_ws", "cwd": "/repos/proj", "last_active_at": now}],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr2 = attribute_build(marker, m_path, status, ctx2)
+    assert attr2.via == "binding"
+    assert attr2.hermes_session_id == "h_bind"
+
+    # Step 3: Remove binding -> stamped wins
+    ctx3 = AttributionContext(
+        sessions={("p_stamp", "h_stamp"): True},
+        claude_sid_to_session={"claude-shared": ("p_db", "h_db")},
+        workspace_sessions=[{"profile": "p_ws", "session_id": "h_ws", "cwd": "/repos/proj", "last_active_at": now}],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr3 = attribute_build(marker, m_path, status, ctx3)
+    assert attr3.via == "stamped"
+    assert attr3.hermes_session_id == "h_stamp"
+
+    # Step 4: Remove stamped -> statedb wins
+    ctx4 = AttributionContext(
+        claude_sid_to_session={"claude-shared": ("p_db", "h_db")},
+        workspace_sessions=[{"profile": "p_ws", "session_id": "h_ws", "cwd": "/repos/proj", "last_active_at": now}],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr4 = attribute_build(marker, m_path, None, ctx4)
+    assert attr4.via == "statedb"
+    assert attr4.hermes_session_id == "h_db"
+
+    # Step 5: Remove statedb -> workspace wins
+    ctx5 = AttributionContext(
+        workspace_sessions=[{"profile": "p_ws", "session_id": "h_ws", "cwd": "/repos/proj", "last_active_at": now}],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr5 = attribute_build(marker, m_path, None, ctx5)
+    assert attr5.via == "workspace"
+    assert attr5.hermes_session_id == "h_ws"
+
+
+def test_attribution_ambiguous_workspace_unattributed():
+    now = 1790670000.0
+    marker = {"session_id": "claude-ambig", "run_id": "r_ambig", "context_path": "/repos/proj"}
+    ctx = AttributionContext(
+        workspace_sessions=[
+            {"profile": "default", "session_id": "session-A", "cwd": "/repos/proj", "last_active_at": now - 100},
+            {"profile": "work", "session_id": "session-B", "cwd": "/repos/proj", "last_active_at": now - 200},
+        ],
+        common_repo_root=lambda p: "/repos/proj" if "proj" in str(p) else "",
+        now=now,
+    )
+    attr = attribute_build(marker, Path("/repos/proj/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "unattributed"
+    assert attr.profile is None
+    assert attr.hermes_session_id is None
+
+
+def test_attribution_workspace_old_session_ignored():
+    now = 1790670000.0
+    marker = {"session_id": "claude-old", "run_id": "r_old", "context_path": "/repos/proj"}
+    ctx = AttributionContext(
+        workspace_sessions=[
+            {"profile": "default", "session_id": "session-old", "cwd": "/repos/proj", "last_active_at": now - 25 * 3600},
+        ],
+        common_repo_root=lambda p: "/repos/proj",
+        now=now,
+    )
+    attr = attribute_build(marker, Path("/repos/proj/.claude/state/tb-build-active.json"), None, ctx)
+    assert attr.via == "unattributed"
+
+
+def test_attribution_untrusted_context_rejection():
+    marker = {"session_id": "claude-attacker", "run_id": "r_bad"}
+    status = StatusRead(
+        present=True,
+        valid=True,
+        record={"build": {"hermes_session_id": "hsid-unconfirmed", "binding_nonce": "nonce-unregistered"}},
+    )
+    ctx = AttributionContext(
+        sessions={("default", "real-session"): True},
+        bindings={"registered-nonce": ("default", "real-session")},
+    )
+    attr = attribute_build(marker, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr.via == "unattributed"
+
+
+def test_attribution_stamped_profile_isolation():
+    marker_no_profile = {"session_id": "claude-x", "run_id": "r_p1"}
+    status = StatusRead(
+        present=True,
+        valid=True,
+        record={"build": {"hermes_session_id": "shared-hsid"}},
+    )
+    ctx = AttributionContext(
+        sessions={
+            ("profile_a", "shared-hsid"): True,
+            ("profile_b", "shared-hsid"): True,
+        }
+    )
+    attr_ambig = attribute_build(marker_no_profile, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr_ambig.via == "unattributed"
+
+    marker_with_prof = {"session_id": "claude-x", "run_id": "r_p2", "profile": "profile_a"}
+    attr_matched = attribute_build(marker_with_prof, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr_matched.via == "stamped"
+    assert attr_matched.profile == "profile_a"
+    assert attr_matched.hermes_session_id == "shared-hsid"
+
+    marker_wrong_prof = {"session_id": "claude-x", "run_id": "r_p3", "profile": "profile_c"}
+    attr_rejected = attribute_build(marker_wrong_prof, Path("/repos/p/.claude/state/tb-build-active.json"), status, ctx)
+    assert attr_rejected.via == "unattributed"
+
+
+def test_attribution_nested_marker_project_and_branch():
+    nested_path = Path("/Users/dev/repos/myproj/.claude/worktrees/lane-362/.claude/state/tb-build-active.json")
+    marker = {
+        "session_id": "claude-nested",
+        "run_id": "r_nested",
+        "context_path": "/Users/dev/repos/myproj/.claude/worktrees/lane-362",
+    }
+    ctx = AttributionContext(
+        live_cli_map={"claude-nested": ("default", "hermes-nested-worker")},
+        common_repo_root=lambda p: "/Users/dev/repos/myproj" if "myproj" in str(p) else "",
+        lane_branches={"lane-362": "cntrl-hermes-worker"},
+    )
+    attr = attribute_build(marker, nested_path, None, ctx)
+    assert attr.is_nested is True
+    assert attr.lane == "lane-362"
+    assert attr.project == "/Users/dev/repos/myproj"
+    assert attr.branch == "cntrl-hermes-worker"
+    assert attr.via == "live_cli"
+    assert attr.hermes_session_id == "hermes-nested-worker"
+
+
+def test_group_rows_nested_marker_separate_when_owned_by_another_session():
+    b_enclosing = {
+        "marker": {"session_id": "claude-1", "run_id": "r_enc", "armed_at": "2026-09-29T06:00:00Z"},
+        "marker_path": Path("/repos/myproj/.claude/state/tb-build-active.json"),
+        "attribution": Attribution(via="live_cli", profile="default", hermes_session_id="session-1"),
+        "last_activity_at": 1000.0,
+    }
+    b_nested = {
+        "marker": {"session_id": "claude-2", "run_id": "r_nest", "armed_at": "2026-09-29T06:30:00Z"},
+        "marker_path": Path("/repos/myproj/.claude/worktrees/lane-362/.claude/state/tb-build-active.json"),
+        "attribution": Attribution(via="live_cli", profile="default", hermes_session_id="session-2", is_nested=True),
+        "last_activity_at": 2000.0,
+    }
+
+    rows = group_rows([b_enclosing, b_nested])
+    assert len(rows) == 2
+    row_sessions = {r.hermes_session_id for r in rows}
+    assert row_sessions == {"session-1", "session-2"}
+    for r in rows:
+        assert len(r.extra_builds) == 0
+
+
+def test_group_rows_nested_marker_grouped_when_same_session():
+    b_enclosing = {
+        "marker": {"session_id": "claude-1", "run_id": "r_enc", "armed_at": "2026-09-29T06:00:00Z"},
+        "marker_path": Path("/repos/myproj/.claude/state/tb-build-active.json"),
+        "attribution": Attribution(via="live_cli", profile="default", hermes_session_id="session-1"),
+        "last_activity_at": 1000.0,
+    }
+    b_nested = {
+        "marker": {"session_id": "claude-1", "run_id": "r_nest", "armed_at": "2026-09-29T06:30:00Z"},
+        "marker_path": Path("/repos/myproj/.claude/worktrees/lane-362/.claude/state/tb-build-active.json"),
+        "attribution": Attribution(via="live_cli", profile="default", hermes_session_id="session-1", is_nested=True),
+        "last_activity_at": 2000.0,
+    }
+
+    rows = group_rows([b_enclosing, b_nested])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.hermes_session_id == "session-1"
+    assert row.primary["marker"]["run_id"] == "r_nest"
+    assert len(row.extra_builds) == 1
+    assert row.extra_builds[0]["marker"]["run_id"] == "r_enc"
+
+
+def test_group_rows_picks_primary_by_activity_then_armed_at():
+    b1 = {
+        "marker": {"session_id": "c1", "run_id": "b1", "armed_at": "2026-09-29T05:00:00Z"},
+        "attribution": Attribution(via="stamped", profile="default", hermes_session_id="h1"),
+        "last_activity_at": 1000.0,
+    }
+    b2 = {
+        "marker": {"session_id": "c1", "run_id": "b2", "armed_at": "2026-09-29T01:00:00Z"},
+        "attribution": Attribution(via="stamped", profile="default", hermes_session_id="h1"),
+        "last_activity_at": 2000.0,
+    }
+    b3 = {
+        "marker": {"session_id": "c1", "run_id": "b3", "armed_at": "2026-09-29T06:00:00Z"},
+        "attribution": Attribution(via="stamped", profile="default", hermes_session_id="h1"),
+        "last_activity_at": 1000.0,
+    }
+
+    rows = group_rows([b1, b2, b3])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.primary["marker"]["run_id"] == "b2"
+    assert len(row.extra_builds) == 2
+    assert row.extra_builds[0]["marker"]["run_id"] == "b3"
+    assert row.extra_builds[1]["marker"]["run_id"] == "b1"
+
+    t1 = {
+        "marker": {"session_id": "c2", "run_id": "t1", "armed_at": "2026-09-29T02:00:00Z"},
+        "attribution": Attribution(via="stamped", profile="default", hermes_session_id="h2"),
+        "last_activity_at": 3000.0,
+    }
+    t2 = {
+        "marker": {"session_id": "c2", "run_id": "t2", "armed_at": "2026-09-29T04:00:00Z"},
+        "attribution": Attribution(via="stamped", profile="default", hermes_session_id="h2"),
+        "last_activity_at": 3000.0,
+    }
+    tie_rows = group_rows([t1, t2])
+    assert len(tie_rows) == 1
+    assert tie_rows[0].primary["marker"]["run_id"] == "t2"
+    assert tie_rows[0].extra_builds[0]["marker"]["run_id"] == "t1"
+
+
+def test_group_rows_unattributed_grouped_by_marker_session_id():
+    u1 = {
+        "marker": {"session_id": "marker-sid-A", "run_id": "u1", "armed_at": "2026-09-29T01:00:00Z"},
+        "attribution": Attribution(via="unattributed"),
+        "last_activity_at": 100.0,
+    }
+    u2 = {
+        "marker": {"session_id": "marker-sid-A", "run_id": "u2", "armed_at": "2026-09-29T02:00:00Z"},
+        "attribution": Attribution(via="unattributed"),
+        "last_activity_at": 200.0,
+    }
+    u3 = {
+        "marker": {"session_id": "marker-sid-B", "run_id": "u3", "armed_at": "2026-09-29T03:00:00Z"},
+        "attribution": Attribution(via="unattributed"),
+        "last_activity_at": 150.0,
+    }
+
+    rows = group_rows([u1, u2, u3])
+    assert len(rows) == 2
+    row_a = next(r for r in rows if r.primary["marker"]["session_id"] == "marker-sid-A")
+    assert row_a.primary["marker"]["run_id"] == "u2"
+    assert len(row_a.extra_builds) == 1
+    assert row_a.extra_builds[0]["marker"]["run_id"] == "u1"
+
+    row_b = next(r for r in rows if r.primary["marker"]["session_id"] == "marker-sid-B")
+    assert row_b.primary["marker"]["run_id"] == "u3"
+    assert len(row_b.extra_builds) == 0
+
 
