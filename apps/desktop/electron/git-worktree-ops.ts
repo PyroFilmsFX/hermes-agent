@@ -159,6 +159,87 @@ async function worktreeClean(gitBin, worktreePath) {
   }
 }
 
+// `git status` walks the whole tree, so it is the expensive probe of a scan. It only feeds the "done" verdict,
+// which also needs a merge proof, so it runs for merged lanes only (an unmerged lane is active whatever its
+// status). A verdict is reused while a cheap fingerprint of the worktree is unchanged (mtimes of its git index,
+// HEAD and HEAD reflog, and its top directory) and for at most CLEAN_CACHE_MAX_AGE_MS, which bounds a missed
+// untracked-file change deep in the tree. At most CLEAN_CONCURRENCY statuses run at once across all scans.
+const CLEAN_CACHE_MAX_AGE_MS = 10 * 60 * 1000
+const CLEAN_CACHE_MAX = 4096
+const CLEAN_CONCURRENCY = 2
+const cleanCache = new Map()
+let cleanRunning = 0
+const cleanWaiters = []
+
+async function worktreeFingerprint(worktreePath) {
+  const stamp = async target => {
+    try {
+      return String((await fs.promises.stat(target)).mtimeMs)
+    } catch {
+      return '-'
+    }
+  }
+
+  let gitDir = path.join(worktreePath, '.git')
+
+  try {
+    const pointer = await fs.promises.readFile(gitDir, 'utf8')
+    const match = /^gitdir:\s*(.+)\s*$/m.exec(pointer)
+
+    if (match) {
+      gitDir = path.resolve(worktreePath, match[1])
+    }
+  } catch {
+    // A regular .git directory (or none): stamp it as is.
+  }
+
+  const parts = await Promise.all([
+    stamp(worktreePath),
+    stamp(path.join(gitDir, 'index')),
+    stamp(path.join(gitDir, 'HEAD')),
+    stamp(path.join(gitDir, 'logs', 'HEAD'))
+  ])
+
+  return parts.join('|')
+}
+
+async function withCleanSlot(fn) {
+  if (cleanRunning >= CLEAN_CONCURRENCY) {
+    await new Promise(resolve => cleanWaiters.push(resolve))
+  }
+
+  cleanRunning += 1
+
+  try {
+    return await fn()
+  } finally {
+    cleanRunning -= 1
+    cleanWaiters.shift()?.()
+  }
+}
+
+async function cachedWorktreeClean(gitBin, worktreePath) {
+  const fingerprint = await worktreeFingerprint(worktreePath)
+  const cached = cleanCache.get(worktreePath)
+
+  if (cached && cached.fingerprint === fingerprint && Date.now() - cached.at < CLEAN_CACHE_MAX_AGE_MS) {
+    return cached.clean
+  }
+
+  const clean = await withCleanSlot(() => worktreeClean(gitBin, worktreePath))
+
+  if (clean !== null) {
+    // A failed status (null) is not a verdict: never cached, retried next scan.
+    if (cleanCache.size >= CLEAN_CACHE_MAX) {
+      cleanCache.delete(cleanCache.keys().next().value)
+    }
+
+    cleanCache.set(worktreePath, { fingerprint, clean, at: Date.now() })
+  }
+
+  return clean
+}
+
 // Bounded parallel map: with ~200 worktrees an unbounded fan-out would spawn
 // ~400 git processes at once. Kept low: each lane's `git status` walks the
 // whole tree (~0.6 s of kernel time on a large repo), and the sidebar may
@@ -197,7 +278,8 @@ async function listWorktreeRecords(resolved, gitBin) {
 //    local trunk or origin/<trunk>; 'merged-squash' when `git cherry` shows
 //    every one of its commits already in the trunk; null when neither is
 //    proven; absent for the main checkout, the trunk itself and detached trees.
-//  - `clean`: `git status --porcelain` is empty; null when it could not run.
+//  - `clean`: `git status --porcelain` is empty; null when it could not run or the lane is not merged (only a
+//    merged lane can be "done", so an unmerged one never pays for a status walk).
 // `merged` stays the boolean the "merged" badge reads (either proof).
 // Every probe fails toward "not merged" / "unknown", never toward done.
 // A merge proof depends only on the lane's head and the trunk tips, so it is
@@ -317,7 +399,7 @@ async function scanWorktrees(resolved, gitBin) {
         }
       }
 
-      return { mergedVia, clean: await worktreeClean(gitBin, tree.path) }
+      return { mergedVia, clean: mergedVia ? await cachedWorktreeClean(gitBin, tree.path) : null }
     })
 
     return trees.map((tree, index) => ({

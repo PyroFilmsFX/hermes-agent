@@ -777,7 +777,8 @@ test('listWorktrees: overlapping calls for one repo share at most one follow-up 
     // The first call scans; the nine that arrive while it runs share ONE
     // follow-up scan that starts after it, so none gets a stale listing.
     assert.equal(git.calls('worktree list'), 2)
-    assert.equal(git.calls(' status '), 2)
+    // The follow-up scan reuses the lane's cached status verdict (worktree unchanged), so only one walk ran.
+    assert.equal(git.calls(' status '), 1)
 
     for (const result of results) {
       assert.deepEqual(result, results[0])
@@ -817,6 +818,59 @@ test('listWorktrees: a lane added by raw git while a scan runs shows in the next
 
     await first
     assert.equal(second.some(tree => tree.branch === 'feature/next'), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees walks `git status` only for merged lanes and reuses it while the worktree is unchanged', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-worktrees-status-'))
+  const git = (...args) => execFileSync('git', args, { cwd: dir }).toString().trim()
+  const log = path.join(dir, 'status-calls.log')
+  const counting = path.join(dir, 'git-counting.sh')
+
+  fs.writeFileSync(
+    counting,
+    `#!/bin/sh\ncase " $* " in *" status "*) echo status >> "${log}" ;; esac\nexec git "$@"\n`,
+    { mode: 0o755 }
+  )
+  const statusCalls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length : 0)
+
+  try {
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Hermes Test')
+    git('config', 'user.email', 'hermes@example.test')
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'status-calls.log\ngit-counting.sh\n')
+    fs.writeFileSync(path.join(dir, 'README'), 'root\n')
+    git('add', 'README', '.gitignore')
+    git('commit', '-m', 'root')
+    const root = git('rev-parse', 'HEAD')
+
+    git('switch', '-c', 'feature/merged')
+    fs.writeFileSync(path.join(dir, 'merged.txt'), 'merged\n')
+    git('add', 'merged.txt')
+    git('commit', '-m', 'merged change')
+    git('switch', 'main')
+    git('merge', '--ff-only', 'feature/merged')
+    git('worktree', 'add', path.join(dir, 'merged-wt'), 'feature/merged')
+    git('worktree', 'add', '-b', 'feature/unmerged', path.join(dir, 'unmerged-wt'), root)
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'unmerged'], { cwd: path.join(dir, 'unmerged-wt') })
+
+    const scan = async () => Object.fromEntries((await listWorktrees(dir, counting)).map(tree => [tree.branch, tree]))
+
+    const first = await scan()
+    assert.equal(first['feature/merged'].clean, true)
+    assert.equal(first['feature/unmerged'].clean, null) // unmerged: never "done", so no status walk
+    assert.equal(statusCalls(), 1)
+
+    await scan()
+    assert.equal(statusCalls(), 1) // unchanged worktree: cached verdict, no second walk
+
+    fs.writeFileSync(path.join(dir, 'merged-wt', 'merged.txt'), 'edited\n')
+    execFileSync('git', ['add', 'merged.txt'], { cwd: path.join(dir, 'merged-wt') }) // index mtime changes
+    const third = await scan()
+    assert.equal(statusCalls(), 2)
+    assert.equal(third['feature/merged'].clean, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
