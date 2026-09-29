@@ -1851,6 +1851,15 @@ export { type BudgetedLoop, type BudgetedLoopOptions, createBudgetedLoop } from 
 /** The blank transcript as a contribution area: claim the sessions you own and
  *  render what stands in the gap. Core's own splash keeps a fresh draft. */
 export { CHAT_EMPTY_AREA, type ChatEmptyContribution, type ChatEmptyProps } from '@/lib/chat-empty'
+/** Tool card contribution area: custom card renderer for structured MCP tool output. */
+export {
+  TOOL_CARD_AREA,
+  type ToolCardContribution,
+  type ToolCardProps,
+  candidateToolCardKeys,
+  extractStructuredContent,
+  findToolCardContribution
+} from '@/lib/tool-cards'
 /** THE confirm flow for guarded model switches — when a gateway model-switch
  *  RPC answers `confirm_required` (data-policy / expensive-model guard),
  *  route it through this shared applier instead of forking a per-surface

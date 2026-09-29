@@ -4683,6 +4683,7 @@ export interface ToolStartPayload {
   name: string
   context?: string | null
   title?: string | null
+  outputSchema?: Record<string, unknown> | null
   args?: Record<string, unknown> | null
   args_text?: string | null
   preview?: string | null
@@ -4704,6 +4705,8 @@ export interface ToolCompletePayload {
   args?: Record<string, unknown> | null
   duration_s?: number | null
   result?: unknown
+  structuredContent?: unknown
+  outputSchema?: Record<string, unknown> | null
   summary?: string | null
   result_text?: string | null
   inline_diff?: string | null

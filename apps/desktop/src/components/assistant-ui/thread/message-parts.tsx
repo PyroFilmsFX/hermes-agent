@@ -39,7 +39,21 @@ import { cn } from '@/lib/utils'
 import { $reasoningCollapsedByDefault, $showReasoning } from '@/store/reasoning-disclosure'
 import { useForcedTextDirection } from '@/store/text-direction'
 
-type TimelineToolCallProps = ToolCallMessagePartProps & { completedAt?: number; timestamp?: number }
+import type { ToolPart } from '@/components/assistant-ui/tool/fallback-model/types'
+
+type TimelineToolCallProps = ToolCallMessagePartProps &
+  Partial<
+    Pick<
+      ToolPart,
+      | 'completedAt'
+      | 'timestamp'
+      | 'toolTitle'
+      | 'progressPreview'
+      | 'structuredContent'
+      | 'outputSchema'
+      | 'toolResultMetadata'
+    >
+  >
 
 // A call sealed without a result (turn stopped, completion event lost) is
 // neither pending nor successful; only the generic row can say so.

@@ -283,6 +283,7 @@ class ToolStartPayload(Payload):
     name: str
     context: str | None = None
     title: str | None = None
+    outputSchema: dict[str, JsonValue] | None = None
     args: dict[str, JsonValue] | None = None
     args_text: str | None = None
     preview: str | None = None
@@ -314,6 +315,8 @@ class ToolCompletePayload(Payload):
     args: dict[str, JsonValue] | None = None  # mirrored child rows / room relays omit it
     duration_s: float | None = None
     result: JsonValue = None
+    structuredContent: JsonValue = None
+    outputSchema: dict[str, JsonValue] | None = None
     summary: str | None = None
     result_text: str | None = None
     inline_diff: str | None = None

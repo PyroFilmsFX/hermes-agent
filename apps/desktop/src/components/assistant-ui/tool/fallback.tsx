@@ -19,6 +19,15 @@ import {
 
 import { useSessionView } from '@/app/chat/session-view'
 import { AnsiText } from '@/components/assistant-ui/ansi-text'
+import { ErrorBoundary } from '@/components/error-boundary'
+import { type Contribution, useContributions } from '@/contrib'
+import {
+  extractStructuredContent,
+  findToolCardContribution,
+  TOOL_CARD_AREA,
+  type ToolCardContribution,
+  type ToolCardProps
+} from '@/lib/tool-cards'
 import { MarkdownImage } from '@/components/assistant-ui/markdown-text'
 import { TimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
@@ -1094,13 +1103,70 @@ export const ToolGroupSlot: FC<PropsWithChildren<{ endIndex: number; startIndex:
 }
 
 /**
- * Per-tool fallback. Now strictly returns a single ToolEntry — the
- * grouping decision lives in ToolGroupSlot above, so this never swaps
- * its return type and the underlying ToolEntry stays mounted across
- * group-shape changes.
+ * Per-tool fallback. Renders a custom card if a contribution in `tool.card` matches
+ * the tool's `server/tool` or `outputSchema` `$id` and receives `structuredContent`.
+ * Otherwise falls back to ToolEntry unchanged.
  */
 type TimelineToolCallProps = ToolCallMessagePartProps &
-  Pick<ToolPart, 'completedAt' | 'interrupted' | 'timestamp' | 'toolResultMetadata'>
+  Partial<
+    Pick<
+      ToolPart,
+      | 'completedAt'
+      | 'interrupted'
+      | 'timestamp'
+      | 'toolResultMetadata'
+      | 'toolTitle'
+      | 'progressPreview'
+      | 'structuredContent'
+      | 'outputSchema'
+    >
+  >
+
+function ToolCardLeaf({
+  fallback,
+  props,
+  renderFn
+}: {
+  fallback: ReactNode
+  props: ToolCardProps
+  renderFn?: ToolCardContribution['render']
+}) {
+  if (!renderFn) {
+    return <>{fallback}</>
+  }
+  return <>{renderFn(props)}</>
+}
+
+const ToolCardHost: FC<{
+  contribution: Contribution
+  fallback: ReactNode
+  part: ToolPart
+  structuredContent: unknown
+}> = ({ contribution, fallback, part, structuredContent }) => {
+  const data = (contribution.data || {}) as ToolCardContribution
+  const renderFn = data.render || (contribution.render as unknown as ToolCardContribution['render'])
+
+  const cardProps: ToolCardProps = useMemo(
+    () => ({
+      structuredContent,
+      toolName: part.toolName,
+      toolCallId: part.toolCallId,
+      args: part.args,
+      result: part.result,
+      isError: part.isError,
+      completedAt: part.completedAt,
+      timestamp: part.timestamp,
+      part
+    }),
+    [structuredContent, part]
+  )
+
+  return (
+    <ErrorBoundary fallback={() => fallback} label={`tool.card:${contribution.id}`}>
+      <ToolCardLeaf fallback={fallback} props={cardProps} renderFn={renderFn} />
+    </ErrorBoundary>
+  )
+}
 
 export const ToolFallback = ({
   toolCallId,
@@ -1111,19 +1177,71 @@ export const ToolFallback = ({
   isError,
   result,
   toolResultMetadata,
-  timestamp
+  timestamp,
+  toolTitle,
+  progressPreview,
+  structuredContent,
+  outputSchema
 }: TimelineToolCallProps) => {
-  const part: ToolPart = {
-    args,
-    completedAt,
-    interrupted,
-    isError,
-    result,
-    toolResultMetadata,
-    timestamp,
-    toolCallId,
-    toolName,
-    type: 'tool-call'
+  const contributions = useContributions(TOOL_CARD_AREA)
+
+  const part: ToolPart = useMemo(
+    () => ({
+      args,
+      completedAt,
+      interrupted,
+      isError,
+      result,
+      toolResultMetadata,
+      timestamp,
+      toolCallId,
+      toolName,
+      type: 'tool-call',
+      toolTitle,
+      progressPreview,
+      structuredContent:
+        structuredContent !== undefined
+          ? structuredContent
+          : result && typeof result === 'object' && 'structuredContent' in result
+            ? (result as Record<string, unknown>).structuredContent
+            : undefined,
+      outputSchema
+    }),
+    [
+      args,
+      completedAt,
+      interrupted,
+      isError,
+      result,
+      toolResultMetadata,
+      timestamp,
+      toolCallId,
+      toolName,
+      toolTitle,
+      progressPreview,
+      structuredContent,
+      outputSchema
+    ]
+  )
+
+  const resolvedStructured = extractStructuredContent(part)
+  const matchingContrib = useMemo(
+    () =>
+      resolvedStructured !== undefined
+        ? findToolCardContribution(contributions, part.toolName, part.outputSchema)
+        : undefined,
+    [contributions, part.toolName, part.outputSchema, resolvedStructured]
+  )
+
+  if (matchingContrib) {
+    return (
+      <ToolCardHost
+        contribution={matchingContrib}
+        fallback={<ToolEntry part={part} />}
+        part={part}
+        structuredContent={resolvedStructured}
+      />
+    )
   }
 
   return <ToolEntry part={part} />

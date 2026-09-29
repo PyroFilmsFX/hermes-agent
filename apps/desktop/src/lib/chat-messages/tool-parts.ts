@@ -408,6 +408,18 @@ export function upsertToolPart(
       : prev && 'progressPreview' in prev && prev.progressPreview
         ? { progressPreview: prev.progressPreview }
         : {}),
+    ...(payload && 'outputSchema' in payload && payload.outputSchema !== undefined
+      ? { outputSchema: payload.outputSchema as Record<string, unknown> | null }
+      : prev && 'outputSchema' in prev && (prev as unknown as { outputSchema?: Record<string, unknown> | null }).outputSchema
+        ? { outputSchema: (prev as unknown as { outputSchema?: Record<string, unknown> | null }).outputSchema }
+        : {}),
+    ...(payload && 'structuredContent' in payload && payload.structuredContent !== undefined
+      ? { structuredContent: payload.structuredContent }
+      : payload?.result && typeof payload.result === 'object' && 'structuredContent' in payload.result
+        ? { structuredContent: (payload.result as Record<string, unknown>).structuredContent }
+        : prev && 'structuredContent' in prev && (prev as unknown as { structuredContent?: unknown }).structuredContent
+          ? { structuredContent: (prev as unknown as { structuredContent?: unknown }).structuredContent }
+          : {}),
     ...(phase === 'complete' && {
       completedAt: occurredAt,
       result: payload?.result !== undefined ? payload.result : prevResult,

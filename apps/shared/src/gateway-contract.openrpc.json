@@ -36373,6 +36373,23 @@
             "default": null,
             "title": "Result"
           },
+          "structuredContent": {
+            "default": null,
+            "title": "Structuredcontent"
+          },
+          "outputSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outputschema"
+          },
           "summary": {
             "anyOf": [
               {
@@ -36748,6 +36765,19 @@
             ],
             "default": null,
             "title": "Title"
+          },
+          "outputSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outputschema"
           },
           "args": {
             "anyOf": [

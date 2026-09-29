@@ -70,6 +70,13 @@ def _tool_display_title(registry_name: str) -> str | None:
     return _tool_metadata(server_name, tool_name).get("title") if server_name and tool_name else None
 
 
+def _tool_output_schema(registry_name: str) -> dict | None:
+    """outputSchema captured at discovery for a registered MCP tool."""
+    server_name = _core._mcp_tool_server_names.get(registry_name)
+    tool_name = _core._tool_raw_names.get(registry_name)
+    return _tool_metadata(server_name, tool_name).get("outputSchema") if server_name and tool_name else None
+
+
 def _traceparent(value: str | None) -> str:
     """Use a valid caller trace context or create a W3C version-00 parent for this RPC."""
     if isinstance(value, str):
@@ -625,7 +632,9 @@ def _render_call_tool_result(result, server_name: str) -> str:
     # (#56059). When the serialized form exceeds the hard cap, replace it with the truncated string (head +
     # tail preserved) so it degrades gracefully instead of flooding downstream.
     if structured is not None:
-        payload["structuredContent" if text_result else "result"] = structured
+        payload["structuredContent"] = structured
+        if not text_result:
+            payload["result"] = structured
     if meta is not None:
         payload["_meta"] = meta
     payload.setdefault("result", text_result)
