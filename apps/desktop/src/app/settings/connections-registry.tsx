@@ -512,8 +512,8 @@ export function ConnectionsRegistrySection() {
     remote: { desc: s.kindRemoteDesc, label: s.kindRemote },
     ssh: { desc: s.kindSshDesc, label: s.kindSsh },
     'ssh-attach': {
-      desc: 'Host runs hermes serve under its own supervisor; the desktop never starts or stops it.',
-      label: 'SSH (attach to host backend)'
+      desc: s.kindSshAttachDesc,
+      label: s.kindSshAttach
     }
   }
 

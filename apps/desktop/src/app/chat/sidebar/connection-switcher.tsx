@@ -51,8 +51,7 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
     local: t.settings.connections.kindLocal,
     remote: t.settings.connections.kindRemote,
     ssh: t.settings.connections.kindSsh,
-    // Prototype label (HX-1); move to i18n with kindMeta in connections-registry.tsx.
-    'ssh-attach': 'SSH (attach)'
+    'ssh-attach': t.settings.connections.kindSshAttachShort
   }
 
   const displayedConnections = searchable

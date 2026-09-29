@@ -1199,6 +1199,9 @@ export interface Translations {
       kindRemoteDesc: string
       kindCloudDesc: string
       kindSshDesc: string
+      kindSshAttach: string
+      kindSshAttachShort: string
+      kindSshAttachDesc: string
       labelTitle: string
       labelDesc: string
       labelPlaceholder: string
