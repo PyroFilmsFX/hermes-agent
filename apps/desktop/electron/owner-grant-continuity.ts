@@ -386,7 +386,7 @@ export function createOwnerGrantContinuityIssuer(ports: ContinuityIssuerPorts): 
         }
 
         ports.log?.(
-          `[owner-grant] continuity ${outcome.issued ? `issued ${outcome.grantId}` : `refused (${outcome.reason})`} for ${before.profile}:${before.sid}`
+          `[owner-grant] continuity ${'reason' in outcome ? `refused (${outcome.reason})` : `issued ${outcome.grantId}`} for ${before.profile}:${before.sid}`
         )
 
         return outcome
