@@ -276,6 +276,10 @@ def test_inode_change_triggers_full_reread(env):
     index_file.unlink()
     row2 = json.dumps(_open_row(m2, run_id="r2")) + "\n"
     index_file.write_text(row2, encoding="utf-8")
+    # Linux may hand the new file the freed inode, the row is the same length, and a coarse
+    # mtime clock can repeat within one tick. A real rewrite lands on a later tick; model that.
+    st = index_file.stat()
+    os.utime(index_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
 
     scan2 = read_marker_index(index_file)
     assert len(scan2.entries) == 1
