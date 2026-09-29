@@ -4283,6 +4283,46 @@ export interface McpOauthCallbackResult {
   session_id?: string | null
   error_message?: string | null
 }
+export interface McpResourcesListParams {
+  profile?: string | null
+  server?: string | null
+}
+export interface McpResourcesListResult {
+  resources?: McpResourceItem[]
+}
+export interface McpResourceItem {
+  server: string
+  uri: string
+  name: string
+  description?: string | null
+  mimeType?: string | null
+}
+export interface McpResourceReadParams {
+  profile?: string | null
+  uri: string
+  server?: string | null
+}
+export interface McpResourceReadResult {
+  server: string
+  uri: string
+  contents?: McpResourceContentBlock[]
+}
+export interface McpResourceContentBlock {
+  uri: string
+  mimeType?: string | null
+  text?: string | null
+  blob?: string | null
+}
+export interface McpResourceSubscriptionParams {
+  profile?: string | null
+  server: string
+  uri: string
+}
+export interface McpResourceSubscriptionResult {
+  ok: boolean
+  server: string
+  uri: string
+}
 export type PluginsListParams = Record<string, never>
 export interface PluginsListResult {
   plugins: LegacyPluginRow[]
@@ -5182,6 +5222,14 @@ export interface RpcMethods {
   'mcp.prompts.get': { params: McpPromptsGetParams; result: McpPromptsGetResult }
   /** List prompt templates advertised by connected MCP servers. */
   'mcp.prompts.list': { params: McpPromptsListParams; result: McpPromptsListResult }
+  /** List resources from connected MCP servers. */
+  'mcp.resources.list': { params: McpResourcesListParams; result: McpResourcesListResult }
+  /** Read an MCP resource by URI from a connected server. */
+  'mcp.resources.read': { params: McpResourceReadParams; result: McpResourceReadResult }
+  /** Subscribe to updates for an MCP resource on a connected server. */
+  'mcp.resources.subscribe': { params: McpResourceSubscriptionParams; result: McpResourceSubscriptionResult }
+  /** Unsubscribe from updates for an MCP resource on a connected server. */
+  'mcp.resources.unsubscribe': { params: McpResourceSubscriptionParams; result: McpResourceSubscriptionResult }
   /** Add a server to the profile's config from a catalog preset and/or an explicit config. */
   'mcp.servers.add': { params: McpServersAddParams; result: McpServersAddResult }
   /** Configured MCP servers for the (scoped) profile, secrets redacted to env-key names. */
@@ -5595,6 +5643,10 @@ export const RPC_METHODS = [
   'mcp.catalog',
   'mcp.prompts.get',
   'mcp.prompts.list',
+  'mcp.resources.list',
+  'mcp.resources.read',
+  'mcp.resources.subscribe',
+  'mcp.resources.unsubscribe',
   'mcp.servers.add',
   'mcp.servers.list',
   'mcp.servers.oauth.callback',

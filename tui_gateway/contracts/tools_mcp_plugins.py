@@ -610,6 +610,69 @@ method("mcp.servers.oauth.callback", params=McpOauthCallbackParams, result=McpOa
        doc="Relay a client-captured redirect into a client_redirect_uri flow.")
 
 
+# ── MCP resources (M6) ─────────────────────────────────────────────────────────
+
+
+class McpResourceItem(Result):
+    server: str
+    uri: str
+    name: str
+    description: str | None = None
+    mimeType: str | None = None
+
+
+class McpResourcesListParams(ProfileParams):
+    server: str | None = None
+
+
+class McpResourcesListResult(Result):
+    resources: list[McpResourceItem] = Field(default_factory=list)
+
+
+method("mcp.resources.list", params=McpResourcesListParams, result=McpResourcesListResult,
+       doc="List resources from connected MCP servers.")
+
+
+class McpResourceReadParams(ProfileParams):
+    uri: str
+    server: str | None = None
+
+
+class McpResourceContentBlock(Result):
+    uri: str
+    mimeType: str | None = None
+    text: str | None = None
+    blob: str | None = None
+
+
+class McpResourceReadResult(Result):
+    server: str
+    uri: str
+    contents: list[McpResourceContentBlock] = Field(default_factory=list)
+
+
+method("mcp.resources.read", params=McpResourceReadParams, result=McpResourceReadResult,
+       doc="Read an MCP resource by URI from a connected server.")
+
+
+class McpResourceSubscriptionParams(ProfileParams):
+    server: str
+    uri: str
+
+
+class McpResourceSubscriptionResult(Result):
+    ok: bool
+    server: str
+    uri: str
+
+
+method("mcp.resources.subscribe", params=McpResourceSubscriptionParams, result=McpResourceSubscriptionResult,
+       doc="Subscribe to updates for an MCP resource on a connected server.")
+
+method("mcp.resources.unsubscribe", params=McpResourceSubscriptionParams, result=McpResourceSubscriptionResult,
+       doc="Unsubscribe from updates for an MCP resource on a connected server.")
+
+
 # ── plugins ───────────────────────────────────────────────────────────────────────────────────
 
 

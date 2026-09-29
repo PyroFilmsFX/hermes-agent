@@ -1672,6 +1672,67 @@ def _(rid, params: dict) -> dict:
         iss=iss))
 
 
+# ─── MCP resources (mcp.resources.*) ─────────────────────────────────────────
+
+@_scoped_rpc("mcp.resources.list", required=())
+def _(rid, params: dict) -> dict:
+    """List resources from connected MCP servers."""
+    server = _str_arg(params, "server") or None
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        resources = mcp_res.list_mcp_resources(server_name=server)
+        return _ok(rid, {"resources": resources})
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.read", required=(("uri", _stripped),))
+def _(rid, params: dict) -> dict:
+    """Read an MCP resource by URI."""
+    uri = _str_arg(params, "uri")
+    server = _str_arg(params, "server") or None
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.read_mcp_resource(uri, server_name=server)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.subscribe", required=(("server", _stripped), ("uri", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Subscribe to updates for an MCP resource."""
+    server = _str_arg(params, "server")
+    uri = _str_arg(params, "uri")
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.subscribe_mcp_resource(server, uri)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.unsubscribe", required=(("server", _stripped), ("uri", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Unsubscribe from updates for an MCP resource."""
+    server = _str_arg(params, "server")
+    uri = _str_arg(params, "uri")
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.unsubscribe_mcp_resource(server, uri)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
 # ─── Plugins ─────────────────────────────────────────────────────────────────
 def _plugin_server_rows(plugin_dir: Path | None, key: str, *, portable: bool) -> list[dict]:
     if not portable or plugin_dir is None:

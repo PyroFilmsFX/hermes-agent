@@ -1735,6 +1735,78 @@
       }
     },
     {
+      "name": "mcp.resources.list",
+      "summary": "List resources from connected MCP servers.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourcesListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourcesListResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.read",
+      "summary": "Read an MCP resource by URI from a connected server.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceReadParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceReadResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.subscribe",
+      "summary": "Subscribe to updates for an MCP resource on a connected server.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceSubscriptionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceSubscriptionResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.unsubscribe",
+      "summary": "Unsubscribe from updates for an MCP resource on a connected server.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceSubscriptionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceSubscriptionResult"
+        }
+      }
+    },
+    {
       "name": "mcp.servers.add",
       "summary": "Add a server to the profile's config from a catalog preset and/or an explicit config.",
       "params": [
@@ -18077,6 +18149,268 @@
           }
         },
         "title": "McpPromptsListResult",
+        "type": "object"
+      },
+      "McpResourceContentBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "mimeType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mimetype"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          },
+          "blob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Blob"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "title": "McpResourceContentBlock",
+        "type": "object"
+      },
+      "McpResourceItem": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "mimeType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mimetype"
+          }
+        },
+        "required": [
+          "server",
+          "uri",
+          "name"
+        ],
+        "title": "McpResourceItem",
+        "type": "object"
+      },
+      "McpResourceReadParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Server"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "title": "McpResourceReadParams",
+        "type": "object"
+      },
+      "McpResourceReadResult": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "contents": {
+            "items": {
+              "$ref": "#/components/schemas/McpResourceContentBlock"
+            },
+            "title": "Contents",
+            "type": "array"
+          }
+        },
+        "required": [
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceReadResult",
+        "type": "object"
+      },
+      "McpResourceSubscriptionParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceSubscriptionParams",
+        "type": "object"
+      },
+      "McpResourceSubscriptionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceSubscriptionResult",
+        "type": "object"
+      },
+      "McpResourcesListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Server"
+          }
+        },
+        "title": "McpResourcesListParams",
+        "type": "object"
+      },
+      "McpResourcesListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/McpResourceItem"
+            },
+            "title": "Resources",
+            "type": "array"
+          }
+        },
+        "title": "McpResourcesListResult",
         "type": "object"
       },
       "McpRuntimeStatus": {

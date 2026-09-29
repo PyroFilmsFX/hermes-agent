@@ -546,6 +546,11 @@ class MCPServerRunMixin:
                 task.cancel()
             await asyncio.gather(*self._pending_refresh_tasks, return_exceptions=True)
             self._pending_refresh_tasks.clear()
+        try:
+            from tools.mcp_tool_resources import cleanup_server_subscriptions_async
+            await cleanup_server_subscriptions_async(self.name)
+        except Exception:
+            pass
         self._deregister_tools()
         self.session = None
 
