@@ -377,6 +377,9 @@ import {
 } from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
+import { createSessionBindingIpcHandlers } from './session-binding-ipc'
+import { createSessionAttestationIssuer } from './session-binding-issuer'
+import { createSessionBindingStore } from './session-binding-store'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -8102,6 +8105,42 @@ const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
   log: message => rememberLog(message)
 })
 
+// b10 H7a/H7b: session-binding store and launch-attestation issuer. Both stay idle at module init:
+// the store verifies records against the owner key + anchor, which only loadOwnerGrantKeyAtLaunch()
+// loads, so loadAll() and the issuer start run from startSessionBindingsAfterOwnerKey() there.
+const sessionBindingStore = createSessionBindingStore({
+  store: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir()
+})
+
+const sessionBindingIssuer = createSessionAttestationIssuer({
+  bindingStore: sessionBindingStore,
+  keyStore: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir(),
+  ownerUid: process.getuid?.() ?? -1,
+  backend: ownerGrantBackendIds.get(primaryProfileKey()) ?? 'spawn-1',
+  getBackendId: (profile: string) => ownerGrantBackendIds.get(profile) ?? null,
+  fetchJson: (path: string) => fetchJsonForRunningProfile(primaryProfileKey(), path),
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+
+/** b10 review: bindings load (and verify) only once the owner key and anchor are loaded; a load
+ *  before that would surface every verified binding as needs_reconfirm for the whole run. */
+function startSessionBindingsAfterOwnerKey(): void {
+  try {
+    const loaded = sessionBindingStore.loadAll()
+
+    if (loaded.refused.length > 0) {
+      rememberLog(`[session-binding] refused ${loaded.refused.length} binding file(s) at load`)
+    }
+  } catch (error) {
+    rememberLog(`[session-binding] load failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  sessionBindingIssuer.start()
+}
+
 /** The session's live Claude CLI id as its backend announces it (never the state.db column). */
 async function ownerGrantLiveClaudeId(backendProfile: string, profile: string, sessionId: string): Promise<string | null> {
   const row: any = await fetchJsonForRunningProfile(
@@ -8154,6 +8193,9 @@ function loadOwnerGrantKeyAtLaunch(): void {
   if (status.state !== 'off' && status.state !== 'ready' && status.state !== 'unsupported') {
     rememberLog(`[owner-grant] signing off at launch: ${status.state}${status.refusal ? ` (${status.refusal})` : ''}`)
   }
+
+  // After the key and anchor: load bindings against them, then start the attestation issuer.
+  startSessionBindingsAfterOwnerKey()
 }
 
 /**
@@ -15489,6 +15531,75 @@ const handleOwnerGrantAction = createOwnerGrantActionHandler({
 })
 
 ipcMain.handle('hermes:owner-grant:action', async (event: any, action: any) => handleOwnerGrantAction(event, action))
+
+// b10 H8: session-binding IPC handlers (set/clear/status).
+async function confirmSessionRebind(details: {
+  profile: string
+  hermes_session_id: string
+  currentProjectRoot: string | null
+  newProjectRoot: string | null
+  event?: unknown
+}): Promise<boolean> {
+  const unbinding = details.newProjectRoot === null
+  const options = {
+    type: 'warning' as const,
+    title: unbinding ? 'Unbind session project' : 'Re-bind session project',
+    message: unbinding
+      ? 'This session has an active build bound to this project. Unbind it?'
+      : 'This session has an active build with another project binding. Re-bind to new project?',
+    detail: unbinding
+      ? `Current project: ${details.currentProjectRoot ?? '(none)'}`
+      : `Current project: ${details.currentProjectRoot ?? '(none)'}\nNew project: ${details.newProjectRoot}`,
+    buttons: [unbinding ? 'Unbind' : 'Re-bind', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  }
+
+  const sender = (details.event as { sender?: unknown } | null | undefined)?.sender
+  const asking = sender ? BrowserWindow.fromWebContents(sender as Electron.WebContents) : null
+
+  const parent =
+    asking && !asking.isDestroyed() && asking.isVisible()
+      ? asking
+      : mainWindow && !mainWindow.isDestroyed()
+        ? mainWindow
+        : null
+
+  const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options)
+
+  return response === 0
+}
+
+const sessionBindingHandlers = createSessionBindingIpcHandlers({
+  isTrustedSender: isOwnerAppChromeSender,
+  store: sessionBindingStore,
+  confirmRebind: confirmSessionRebind,
+  isAttestationLive: (profile, hermes_session_id) => sessionBindingIssuer.isAttestationLive(profile, hermes_session_id),
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+
+ipcMain.handle('hermes:session-binding:set', async (event: any, params: any) => {
+  const result = await sessionBindingHandlers.set(event, params)
+  // A committed bind / re-bind re-issues the session's live launches now, not at the next refresh.
+  if (result.ok && 'binding_nonce' in result && typeof result.profile === 'string') {
+    await sessionBindingIssuer.onBindingChanged(result.profile, result.hermes_session_id)
+  }
+  return result
+})
+ipcMain.handle('hermes:session-binding:clear', async (event: any, params: any) => {
+  const result = await sessionBindingHandlers.clear(event, params)
+  if (result.ok && params && typeof params === 'object') {
+    const profile = (params as any).profile
+    const hermes_session_id = (params as any).hermes_session_id
+    if (typeof profile === 'string' && typeof hermes_session_id === 'string') {
+      await sessionBindingIssuer.revoke(profile, hermes_session_id)
+    }
+  }
+  return result
+})
+ipcMain.handle('hermes:session-binding:status', async (event: any, params: any) => sessionBindingHandlers.status(event, params))
 
 const OWNER_SOURCE_ROLES = new Set(['assistant', 'peer', 'user'])
 const CLAUDE_SESSION_STATES = new Set(['live', 'not_running', 'starting'])

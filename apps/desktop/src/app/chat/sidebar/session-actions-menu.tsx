@@ -1,7 +1,8 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
+import { bindingPickerSections } from '@/app/chat/binding-pill'
 import { openSession } from '@/app/open-session'
 import {
   closeAllTreeTabs,
@@ -23,17 +24,30 @@ import { ColorSwatches } from '@/components/ui/color-swatches'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { dropdownMenuSectionLabel } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { renameSession, setSessionRole } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { isDesktopFsRemoteMode, selectDesktopPaths } from '@/lib/desktop-fs'
+import { pathLeaf } from '@/lib/display-path'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSubmitEnter } from '@/lib/ime'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
 import { isSessionRole, SESSION_ROLES, type SessionRole } from '@/lib/session-role'
+import { cn } from '@/lib/utils'
+import { confirm } from '@/store/confirm'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
-import { $projectTree, moveSessionToProject, projectIdForCwd, projectRootCwd } from '@/store/projects'
+import { normalizeProfileKey } from '@/store/profile'
+import {
+  $projectTree,
+  $projectTreeLoaded,
+  moveSessionToProject,
+  projectIdForCwd,
+  projectRootCwd,
+  refreshProjectTree
+} from '@/store/projects'
 import {
   $activeSessionId,
   $connection,
@@ -45,11 +59,24 @@ import {
   sessionPinId,
   setSessions
 } from '@/store/session'
+import {
+  $sessionBindings,
+  $sessionBindingSuggestions,
+  clearSessionBinding,
+  ensureSessionBinding,
+  ensureSessionBindingSuggestion,
+  refreshSessionBinding,
+  sessionBindingAvailable,
+  sessionBindingKey,
+  type SessionBindingResolvedRoot,
+  setSessionBinding
+} from '@/store/session-binding'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
 import { $sessionTiles, closeAllOpenSessionTiles } from '@/store/session-states'
 import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
 
+import { normalizePath } from './projects/workspace-groups'
 import type { SessionTitleResponse } from '../../types'
 
 import { $cntrlGroups, $cntrlGroupsAvailable, tagCntrlGroup } from './cntrl-groups'
@@ -201,11 +228,25 @@ export async function applySessionRole(sessionId: string, role: SessionRole | nu
 function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; sessionId: string; profile?: string }) {
   const { t } = useI18n()
   const p = t.sidebar.projects
+  const copy = t.sessionBinding ?? {
+    moveConfirmTitle: (name: string) => `Move this session to ${name} and re-bind?`,
+    moveConfirmDescription: (path: string) =>
+      `Moving will re-home the session in ${path} and re-bind it so conductor attributes future builds to this project.`,
+    moveConfirmLabel: 'Move & bind',
+    failedTitle: "Couldn't update the binding",
+    failed: (reason: string) => `The binding was refused (${reason}).`
+  }
   const tree = useStore($projectTree)
   const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
   const cwd = session?.cwd?.trim() || ''
   const currentProjectId = cwd ? projectIdForCwd(cwd) : null
   const targets = tree.filter(node => node.id !== currentProjectId && !node.isNoProject && projectRootCwd(node))
+
+  const profileKey = normalizeProfileKey(profile ?? session?.profile)
+  const bindingKey = sessionBindingKey(profileKey, sessionId)
+  const bindingEntry = useStore($sessionBindings)[bindingKey]
+  const bindingRecord = bindingEntry?.record ?? null
+  const isBound = Boolean(bindingRecord && bindingRecord.state !== 'unbound')
 
   if (targets.length === 0) {
     return <kit.Item disabled>{p.moveNoProjects}</kit.Item>
@@ -218,14 +259,242 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
           key={node.id}
           onSelect={() => {
             triggerHaptic('selection')
-            moveSessionToProject(sessionId, node.id, profile)
-              .then(() => notify({ durationMs: 2_000, kind: 'success', message: p.movedTo(node.label) }))
-              .catch(err => notifyError(err, p.moveFailed))
+            const targetCwd = projectRootCwd(node)
+
+            if (!targetCwd) {
+              return
+            }
+
+            const runMove = async () => {
+              if (isBound) {
+                const ok = await confirm({
+                  title: copy.moveConfirmTitle(node.label),
+                  description: copy.moveConfirmDescription(targetCwd),
+                  confirmLabel: copy.moveConfirmLabel
+                })
+
+                if (!ok) {
+                  return
+                }
+              }
+
+              await moveSessionToProject(sessionId, node.id, profile)
+
+              if (isBound) {
+                const outcome = await setSessionBinding({
+                  profile: profileKey,
+                  hermes_session_id: sessionId,
+                  path: targetCwd
+                })
+
+                if (!outcome.ok && outcome.reason !== 'cancelled') {
+                  notify({ kind: 'error', title: copy.failedTitle, message: copy.failed(outcome.reason) })
+                }
+              }
+
+              notify({ durationMs: 2_000, kind: 'success', message: p.movedTo(node.label) })
+            }
+
+            runMove().catch(err => notifyError(err, p.moveFailed))
           }}
         >
           {node.label}
         </kit.Item>
       ))}
+    </>
+  )
+}
+
+function BindToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; sessionId: string; profile?: string }) {
+  const { t } = useI18n()
+  const copy = t.sessionBinding ?? {
+    pickerSuggested: 'Suggested',
+    pickerProjects: 'Projects',
+    pickerOtherFolder: 'Other folder…',
+    pickerOtherFolderTitle: 'Bind this session to a folder',
+    pickerUnbind: 'Unbind',
+    pickerEmpty: 'No projects yet',
+    confirmTitle: (name: string) => `Bind this session to ${name}?`,
+    confirmDescription: (path: string) =>
+      `Conductor will treat builds from this session as work on ${path}. You can unbind or re-bind at any time.`,
+    confirmLabel: 'Bind',
+    failedTitle: "Couldn't update the binding",
+    failed: (reason: string) => `The binding was refused (${reason}).`
+  }
+  const tree = useStore($projectTree)
+  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const profileKey = normalizeProfileKey(profile ?? session?.profile)
+  const key = sessionBindingKey(profileKey, sessionId)
+  const entry = useStore($sessionBindings)[key]
+  const suggestion = useStore($sessionBindingSuggestions)[key] ?? null
+  const record = entry?.record ?? null
+
+  const sections = useMemo(() => bindingPickerSections(tree, suggestion?.path ?? null), [tree, suggestion?.path])
+
+  useEffect(() => {
+    if (entry?.status === 'error') {
+      void refreshSessionBinding(profileKey, sessionId)
+    }
+
+    if (!$projectTreeLoaded.get()) {
+      void refreshProjectTree()
+    }
+  }, [entry?.status, profileKey, sessionId])
+
+  const boundRoot = record && record.state !== 'unbound' ? record.project_root : null
+  const isCurrent = (path: string) => Boolean(boundRoot) && normalizePath(path) === normalizePath(boundRoot || '')
+  const firstBind = !record || record.state === 'unbound'
+
+  const bindTo = async (path: string, name: string) => {
+    triggerHaptic('selection')
+    // A first bind's in-app confirm names the exact root main resolved and will sign (b10 review).
+    const confirmRoot = firstBind
+      ? (resolved: SessionBindingResolvedRoot) =>
+          confirm({
+            title: copy.confirmTitle(name),
+            description: copy.confirmDescription(resolved.project_root),
+            confirmLabel: copy.confirmLabel
+          })
+      : undefined
+
+    const outcome = await setSessionBinding({ profile: profileKey, hermes_session_id: sessionId, path }, { confirmRoot })
+
+    if (!outcome.ok && outcome.reason !== 'cancelled') {
+      notify({ kind: 'error', title: copy.failedTitle, message: copy.failed(outcome.reason) })
+    }
+  }
+
+  const pickOtherFolder = async () => {
+    triggerHaptic('selection')
+    const [path] = await selectDesktopPaths({
+      title: copy.pickerOtherFolderTitle,
+      defaultPath: suggestion?.path || undefined,
+      directories: true,
+      multiple: false
+    })
+
+    if (path) {
+      await bindTo(path, pathLeaf(path) || path)
+    }
+  }
+
+  return (
+    <>
+      {suggestion && (
+        <>
+          <kit.Label className={dropdownMenuSectionLabel}>{copy.pickerSuggested}</kit.Label>
+          <kit.Item
+            data-binding-path={suggestion.path}
+            data-slot="session-binding-option"
+            onSelect={() => void bindTo(suggestion.path, suggestion.name)}
+          >
+            <Codicon name="link" size="0.75rem" />
+            <span className="min-w-0 truncate">
+              {suggestion.branch ? `${suggestion.name} · ${suggestion.branch}` : suggestion.name}
+            </span>
+            {isCurrent(suggestion.path) && <Codicon className="ml-auto" name="check" size="0.75rem" />}
+          </kit.Item>
+          <kit.Separator />
+        </>
+      )}
+
+      <kit.Label className={dropdownMenuSectionLabel}>{copy.pickerProjects}</kit.Label>
+      {sections.length === 0 && (
+        <kit.Item disabled>
+          <span className="text-(--ui-text-tertiary)">{copy.pickerEmpty}</span>
+        </kit.Item>
+      )}
+      {sections.map(section => (
+        <Fragment key={section.id}>
+          {section.options.map(option => (
+            <kit.Item
+              data-binding-path={option.path}
+              data-slot="session-binding-option"
+              key={option.key}
+              onSelect={() => void bindTo(option.path, option.label)}
+              title={option.path}
+            >
+              <Codicon
+                className={cn('shrink-0', option.depth === 1 && 'ml-2.5', option.depth === 2 && 'ml-5')}
+                name={option.icon}
+                size="0.75rem"
+              />
+              <span className="min-w-0 truncate">{option.label}</span>
+              {option.detail && option.detail !== option.label && (
+                <span className="min-w-0 truncate text-(--ui-text-tertiary)">{option.detail}</span>
+              )}
+              {isCurrent(option.path) && <Codicon className="ml-auto" name="check" size="0.75rem" />}
+            </kit.Item>
+          ))}
+        </Fragment>
+      ))}
+
+      <kit.Separator />
+      <kit.Item data-slot="session-binding-other" onSelect={() => void pickOtherFolder()}>
+        <Codicon name="folder-opened" size="0.75rem" />
+        <span>{copy.pickerOtherFolder}</span>
+      </kit.Item>
+    </>
+  )
+}
+
+function SessionBindingMenuItems({ kit, sessionId, profile }: { kit: MenuKit; sessionId: string; profile?: string }) {
+  const { t } = useI18n()
+  const copy = t.sessionBinding ?? {
+    menuBind: 'Bind to project…',
+    menuUnbind: 'Unbind',
+    failedTitle: "Couldn't update the binding",
+    failed: (reason: string) => `The binding was refused (${reason}).`
+  }
+  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const profileKey = normalizeProfileKey(profile ?? session?.profile)
+  const key = sessionBindingKey(profileKey, sessionId)
+  const entry = useStore($sessionBindings)[key]
+  const record = entry?.record ?? null
+  const isBound = Boolean(record && record.state !== 'unbound')
+  const available = sessionBindingAvailable() && !isDesktopFsRemoteMode()
+
+  useEffect(() => {
+    if (!available || !sessionId) {
+      return
+    }
+
+    ensureSessionBinding(profileKey, sessionId)
+    if (session) {
+      ensureSessionBindingSuggestion({ ...session, profile: profileKey })
+    }
+  }, [available, profileKey, sessionId, session])
+
+  if (!available || !sessionId) {
+    return null
+  }
+
+  const unbind = async () => {
+    triggerHaptic('selection')
+    const outcome = await clearSessionBinding({ profile: profileKey, hermes_session_id: sessionId })
+
+    if (!outcome.ok && outcome.reason !== 'cancelled') {
+      notify({ kind: 'error', title: copy.failedTitle, message: copy.failed(outcome.reason) })
+    }
+  }
+
+  return (
+    <>
+      <kit.Sub>
+        <kit.SubTrigger disabled={!sessionId}>
+          <Codicon name="link" size="0.875rem" />
+          <span>{copy.menuBind}</span>
+        </kit.SubTrigger>
+        <kit.SubContent className="max-h-80 min-w-56 max-w-80 overflow-y-auto">
+          <BindToProjectItems kit={kit} profile={profileKey} sessionId={sessionId} />
+        </kit.SubContent>
+      </kit.Sub>
+      {isBound && (
+        <kit.Item data-slot="session-binding-unbind" onSelect={() => void unbind()}>
+          <Codicon name="debug-disconnect" size="0.875rem" />
+          <span>{copy.menuUnbind}</span>
+        </kit.Item>
+      )}
     </>
   )
 }
@@ -624,6 +893,7 @@ function useSessionActions({
           <MoveToProjectItems kit={kit} profile={profile} sessionId={sessionId} />
         </kit.SubContent>
       </kit.Sub>
+      <SessionBindingMenuItems kit={kit} profile={profile} sessionId={sessionId} />
       {tabItems.length > 0 && (
         <>
           <kit.Separator />

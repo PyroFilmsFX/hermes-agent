@@ -56,6 +56,7 @@ import { isAuxiliaryWindow, isWatchWindow } from '@/store/windows'
 import { primaryRouteSelectedSessionId, routeSessionId } from '../routes'
 import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
 
+import { SessionBindingPill } from './binding-pill'
 import { ChatDropOverlay } from './chat-drop-overlay'
 import { ChatSwapOverlay, ChatSyncBadge } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
@@ -171,7 +172,7 @@ function ChatHeader({
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, (showProfileTag || activeStoredSession) && 'flex items-center')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'
@@ -190,6 +191,8 @@ function ChatHeader({
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
         <SessionMailboxPopover className="pointer-events-auto ml-1" sessionId={selectedSessionId || activeSessionId || ''} />
+        {/* b10 H9a: per-session project binding, beside the profile tag / title cluster. */}
+        {activeStoredSession && <SessionBindingPill className="ml-1.5" session={activeStoredSession} />}
       </div>
     </header>
   )

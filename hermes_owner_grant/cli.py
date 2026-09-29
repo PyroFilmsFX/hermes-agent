@@ -78,6 +78,11 @@ def _parser() -> argparse.ArgumentParser:
     listing = commands.add_parser("list")
     _add_request_args(listing, session_required=True)
 
+    attest = commands.add_parser("verify-attestation")
+    attest.add_argument("--claude-session")
+    attest.add_argument("--session")
+    attest.add_argument("--claude-session-stdin", action="store_true")
+
     commands.add_parser("anchor-status")
     return parser
 
@@ -205,6 +210,51 @@ def main(
             },
         )
         return verify_mod.EXIT_OK
+
+    if args.command == "verify-attestation":
+        from . import attest as attest_mod
+
+        caller_uid = os.getuid() if uid is None else uid
+        checked_at = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+        claude_session = args.claude_session
+        session = args.session
+        if not claude_session or args.claude_session_stdin:
+            content = input_stream.read().strip()
+            if content:
+                if content.startswith("{") and content.endswith("}"):
+                    try:
+                        data = json.loads(content)
+                        if isinstance(data, dict):
+                            claude_session = data.get("claude_session_id") or data.get("session_id")
+                            if not session and data.get("hermes_session_id"):
+                                session = data.get("hermes_session_id")
+                    except Exception:
+                        claude_session = content
+                else:
+                    claude_session = content
+        if not claude_session:
+            _write(output_stream, _usage_result("pass --claude-session or provide Claude session id on stdin"))
+            return verify_mod.EXIT_USAGE
+
+        try:
+            result = attest_mod.verify_attestation(
+                claude_session=claude_session,
+                session=session,
+                uid=caller_uid,
+                now=checked_at,
+                anchor=anchor,
+            )
+        except attest_mod.AttestUsageError as exc:
+            _write(output_stream, _usage_result(str(exc)))
+            return verify_mod.EXIT_USAGE
+        except Exception as exc:
+            _write(
+                output_stream,
+                _usage_result("%s: %s" % (type(exc).__name__, exc), "internal_error"),
+            )
+            return verify_mod.EXIT_INTERNAL
+        _write(output_stream, result.to_dict())
+        return result.exit_code
 
     try:
         caller_uid = os.getuid() if uid is None else uid

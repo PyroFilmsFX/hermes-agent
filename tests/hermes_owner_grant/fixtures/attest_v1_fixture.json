@@ -1,0 +1,193 @@
+{
+  "schema": "hermes-owner-grant-attest-vectors/v1",
+  "note": "Deterministic crosslang vectors for b10 session binding and launch attestation (spec \u00a70, \u00a73).",
+  "anchor_key": {
+    "alg": "Ed25519",
+    "kid": "ok_5540ee3de4e09522",
+    "not_before": 0,
+    "pub": "C7w0aldmfDgBIL2cf9flHSxf3-o3zS9b9AWyxr9vLXg",
+    "retired_at": null,
+    "status": "active"
+  },
+  "claude_session": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+  "session": "20260926_101500_a1b2c3",
+  "owner_uid": 501,
+  "profile": "default",
+  "project_root": "/Users/justin/Documents/Projects/Business/hermes-cntrl",
+  "binding_nonce": "4NW6Y7T2K5J3Z4X8",
+  "domains": {
+    "grant": {
+      "format": "hermes-owner-grant/v1",
+      "prefix": "hermes-owner-grant/v1\u0000",
+      "audience": [
+        "hermes-owner-forward",
+        "hermes-owner-verify"
+      ]
+    },
+    "binding": {
+      "format": "hermes-session-binding/v1",
+      "prefix": "hermes-session-binding/v1\u0000",
+      "audience": [
+        "hermes-main"
+      ]
+    },
+    "attestation": {
+      "format": "hermes-launch-attestation/v1",
+      "prefix": "hermes-launch-attestation/v1\u0000",
+      "audience": [
+        "conductor:session-binding"
+      ]
+    }
+  },
+  "envelope": {
+    "format": "hermes-launch-attestation/v1",
+    "kid": "ok_5540ee3de4e09522",
+    "payload": "eyJhdWQiOlsiY29uZHVjdG9yOnNlc3Npb24tYmluZGluZyJdLCJiYWNrZW5kIjoic3Bhd24tMSIsImJpbmRpbmdfbm9uY2UiOiI0Tlc2WTdUMks1SjNaNFg4IiwiYmluZGluZ19zZXEiOjcsImNsYXVkZV9zZXNzaW9uX2lkIjoiNWIwZDhhM2UtMGM3ZS00YzJlLTlkNWYtM2YxZjdkOWEwYjExIiwiZXhwaXJlc19hdCI6MTc5MDAwMTc0MDAwMCwiaGVybWVzX3Nlc3Npb25faWQiOiIyMDI2MDkyNl8xMDE1MDBfYTFiMmMzIiwiaXNzdWVkX2F0IjoxNzg5OTk5OTQwMDAwLCJsYXVuY2hfc2VxIjozLCJvd25lcl91aWQiOjUwMSwicHJvZmlsZSI6ImRlZmF1bHQiLCJwcm9qZWN0X3Jvb3QiOiIvVXNlcnMvanVzdGluL0RvY3VtZW50cy9Qcm9qZWN0cy9CdXNpbmVzcy9oZXJtZXMtY250cmwiLCJyZXBvX3JlbW90ZSI6ImdpdEBnaXRodWIuY29tOm5vdXNyZXNlYXJjaC9oZXJtZXMtYWdlbnQuZ2l0IiwidiI6MX0",
+    "sig": "KY_pmgZI_CjupfGEjaGhRk8nwah83tUvNzdYNqn_iTvHg1gFyDr4Hb3K9qsEfX2k_UqO4RckndSyPqmBSaxKBQ"
+  },
+  "binding_envelope": {
+    "format": "hermes-session-binding/v1",
+    "kid": "ok_5540ee3de4e09522",
+    "payload": "eyJhdWQiOlsiaGVybWVzLW1haW4iXSwiYmluZGluZ19ub25jZSI6IjROVzZZN1QySzVKM1o0WDgiLCJib3VuZF9hdCI6MTc4OTk5OTk0MDAwMCwiY2FycmllZF9mcm9tIjpudWxsLCJoZXJtZXNfc2Vzc2lvbl9pZCI6IjIwMjYwOTI2XzEwMTUwMF9hMWIyYzMiLCJvd25lcl91aWQiOjUwMSwicHJvZmlsZSI6ImRlZmF1bHQiLCJwcm9qZWN0X2lkIjoicF9kZWFkYmVlZiIsInByb2plY3Rfcm9vdCI6Ii9Vc2Vycy9qdXN0aW4vRG9jdW1lbnRzL1Byb2plY3RzL0J1c2luZXNzL2hlcm1lcy1jbnRybCIsInJlcG9fY29tbW9uX3Jvb3QiOiIvVXNlcnMvanVzdGluL0RvY3VtZW50cy9Qcm9qZWN0cy9CdXNpbmVzcy9oZXJtZXMtY250cmwiLCJyZXBvX3JlbW90ZSI6ImdpdEBnaXRodWIuY29tOm5vdXNyZXNlYXJjaC9oZXJtZXMtYWdlbnQuZ2l0Iiwic2VxIjo3LCJzdGF0ZSI6ImJvdW5kIiwidiI6MX0",
+    "sig": "t2JQTDzu0_G9SKg0ySLsp5mI4jGyaeAU6JXvJlnbZYpIBYiNPNb-1l1hwu3hhPVKwI5kadiQ9LPk5IjHMH7oBg"
+  },
+  "unbound_envelope": {
+    "format": "hermes-launch-attestation/v1",
+    "kid": "ok_5540ee3de4e09522",
+    "payload": "eyJhdWQiOlsiY29uZHVjdG9yOnNlc3Npb24tYmluZGluZyJdLCJiYWNrZW5kIjoic3Bhd24tMSIsImJpbmRpbmdfbm9uY2UiOm51bGwsImJpbmRpbmdfc2VxIjo4LCJjbGF1ZGVfc2Vzc2lvbl9pZCI6IjViMGQ4YTNlLTBjN2UtNGMyZS05ZDVmLTNmMWY3ZDlhMGIxMSIsImV4cGlyZXNfYXQiOjE3OTAwMDE4MDAwMDAsImhlcm1lc19zZXNzaW9uX2lkIjoiMjAyNjA5MjZfMTAxNTAwX2ExYjJjMyIsImlzc3VlZF9hdCI6MTc5MDAwMDAwMDAwMCwibGF1bmNoX3NlcSI6NCwib3duZXJfdWlkIjo1MDEsInByb2ZpbGUiOiJkZWZhdWx0IiwicHJvamVjdF9yb290IjpudWxsLCJyZXBvX3JlbW90ZSI6bnVsbCwidiI6MX0",
+    "sig": "RWnH6-yZnUuYpaqWX9wLD0bhgbXwUMBsmv1xs4bRbBNn--HVnTVNQalH93ySPP7QQL7ZzwUOHRv5cdjrGhyaAQ"
+  },
+  "grant_envelope": {
+    "format": "hermes-owner-grant/v1",
+    "kid": "ok_5540ee3de4e09522",
+    "payload": "eyJhdWQiOlsiaGVybWVzLW93bmVyLWZvcndhcmQiLCJoZXJtZXMtb3duZXItdmVyaWZ5Il0sImJhY2tlbmQiOiJzcGF3bi0xIiwiY29uZmlybSI6Im5hdGl2ZV9kaWFsb2ciLCJkZWNpc2lvbl9pZCI6Im9kX2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiZGVsaXZlcl9ieSI6MTc5MDAwMDAwMDAwMCwiZXhwaXJlc19hdCI6MTc5MDA0MzE0MDAwMCwiZ2VzdHVyZSI6InByb3Bvc2FsIiwiaXNzdWVkX2F0IjoxNzg5OTk5OTQwMDAwLCJub25jZSI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUEiLCJvd25lcl91aWQiOjUwMSwic2NvcGUiOlsiY29uZHVjdG9yOmdhdGU6cmV2aWV3LWJ1ZGdldC1lbmFibGUiXSwic2luZ2xlX3VzZSI6W10sInNvdXJjZV9zZXNzaW9uIjp7Im1lc3NhZ2VfaWQiOiJtMSIsInJvbGUiOiJ1c2VyIiwic2Vzc2lvbl9pZCI6Im1nciJ9LCJzdWJqZWN0Ijp7fSwidGFyZ2V0cyI6W3siY2xhdWRlX3Nlc3Npb25faWQiOiI1YjBkOGEzZS0wYzdlLTRjMmUtOWQ1Zi0zZjFmN2Q5YTBiMTEiLCJzZXNzaW9uX2lkIjoiMjAyNjA5MjZfMTAxNTAwX2ExYjJjMyJ9XSwidGV4dCI6IkVuYWJsZSB0aGUgcmV2aWV3IGJ1ZGdldCBnYXRlIGZvciB0aGlzIGxhbmUuXG5EbyBub3QgbWVyZ2UgdW50aWwgQ0kgaXMgZ3JlZW4uIFRoZW4gc2hpcCBpdC4iLCJ0ZXh0X2xlbiI6OTAsInRleHRfc2hhMjU2IjoiMDMyMWFjNDIxNWIyZjI0MGI5MzRiN2U5ZDdkOWQxNzgxMzE1ZWYyN2MwOTcxNjdkYzRhYjIxMWVhMDlhNmE5NSIsInYiOjF9",
+    "sig": "_a4d9v6l4jtteAlHxGak3odOaplxSo0hbJjr3QkkSW8l64xfdvaaNpPIbqPlHRz9prlVWQ8G8tka6a9D77MlCw"
+  },
+  "vectors": {
+    "session_binding": {
+      "format": "hermes-session-binding/v1",
+      "payload": {
+        "v": 1,
+        "aud": [
+          "hermes-main"
+        ],
+        "owner_uid": 501,
+        "profile": "default",
+        "hermes_session_id": "20260926_101500_a1b2c3",
+        "state": "bound",
+        "seq": 7,
+        "binding_nonce": "4NW6Y7T2K5J3Z4X8",
+        "bound_at": 1789999940000,
+        "project_root": "/Users/justin/Documents/Projects/Business/hermes-cntrl",
+        "repo_common_root": "/Users/justin/Documents/Projects/Business/hermes-cntrl",
+        "repo_remote": "git@github.com:nousresearch/hermes-agent.git",
+        "project_id": "p_deadbeef",
+        "carried_from": null
+      },
+      "envelope": {
+        "format": "hermes-session-binding/v1",
+        "kid": "ok_5540ee3de4e09522",
+        "payload": "eyJhdWQiOlsiaGVybWVzLW1haW4iXSwiYmluZGluZ19ub25jZSI6IjROVzZZN1QySzVKM1o0WDgiLCJib3VuZF9hdCI6MTc4OTk5OTk0MDAwMCwiY2FycmllZF9mcm9tIjpudWxsLCJoZXJtZXNfc2Vzc2lvbl9pZCI6IjIwMjYwOTI2XzEwMTUwMF9hMWIyYzMiLCJvd25lcl91aWQiOjUwMSwicHJvZmlsZSI6ImRlZmF1bHQiLCJwcm9qZWN0X2lkIjoicF9kZWFkYmVlZiIsInByb2plY3Rfcm9vdCI6Ii9Vc2Vycy9qdXN0aW4vRG9jdW1lbnRzL1Byb2plY3RzL0J1c2luZXNzL2hlcm1lcy1jbnRybCIsInJlcG9fY29tbW9uX3Jvb3QiOiIvVXNlcnMvanVzdGluL0RvY3VtZW50cy9Qcm9qZWN0cy9CdXNpbmVzcy9oZXJtZXMtY250cmwiLCJyZXBvX3JlbW90ZSI6ImdpdEBnaXRodWIuY29tOm5vdXNyZXNlYXJjaC9oZXJtZXMtYWdlbnQuZ2l0Iiwic2VxIjo3LCJzdGF0ZSI6ImJvdW5kIiwidiI6MX0",
+        "sig": "t2JQTDzu0_G9SKg0ySLsp5mI4jGyaeAU6JXvJlnbZYpIBYiNPNb-1l1hwu3hhPVKwI5kadiQ9LPk5IjHMH7oBg"
+      }
+    },
+    "launch_attestation": {
+      "format": "hermes-launch-attestation/v1",
+      "payload": {
+        "v": 1,
+        "aud": [
+          "conductor:session-binding"
+        ],
+        "owner_uid": 501,
+        "profile": "default",
+        "backend": "spawn-1",
+        "hermes_session_id": "20260926_101500_a1b2c3",
+        "claude_session_id": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+        "launch_seq": 3,
+        "project_root": "/Users/justin/Documents/Projects/Business/hermes-cntrl",
+        "repo_remote": "git@github.com:nousresearch/hermes-agent.git",
+        "binding_nonce": "4NW6Y7T2K5J3Z4X8",
+        "binding_seq": 7,
+        "issued_at": 1789999940000,
+        "expires_at": 1790001740000
+      },
+      "envelope": {
+        "format": "hermes-launch-attestation/v1",
+        "kid": "ok_5540ee3de4e09522",
+        "payload": "eyJhdWQiOlsiY29uZHVjdG9yOnNlc3Npb24tYmluZGluZyJdLCJiYWNrZW5kIjoic3Bhd24tMSIsImJpbmRpbmdfbm9uY2UiOiI0Tlc2WTdUMks1SjNaNFg4IiwiYmluZGluZ19zZXEiOjcsImNsYXVkZV9zZXNzaW9uX2lkIjoiNWIwZDhhM2UtMGM3ZS00YzJlLTlkNWYtM2YxZjdkOWEwYjExIiwiZXhwaXJlc19hdCI6MTc5MDAwMTc0MDAwMCwiaGVybWVzX3Nlc3Npb25faWQiOiIyMDI2MDkyNl8xMDE1MDBfYTFiMmMzIiwiaXNzdWVkX2F0IjoxNzg5OTk5OTQwMDAwLCJsYXVuY2hfc2VxIjozLCJvd25lcl91aWQiOjUwMSwicHJvZmlsZSI6ImRlZmF1bHQiLCJwcm9qZWN0X3Jvb3QiOiIvVXNlcnMvanVzdGluL0RvY3VtZW50cy9Qcm9qZWN0cy9CdXNpbmVzcy9oZXJtZXMtY250cmwiLCJyZXBvX3JlbW90ZSI6ImdpdEBnaXRodWIuY29tOm5vdXNyZXNlYXJjaC9oZXJtZXMtYWdlbnQuZ2l0IiwidiI6MX0",
+        "sig": "KY_pmgZI_CjupfGEjaGhRk8nwah83tUvNzdYNqn_iTvHg1gFyDr4Hb3K9qsEfX2k_UqO4RckndSyPqmBSaxKBQ"
+      }
+    },
+    "launch_attestation_unbound": {
+      "format": "hermes-launch-attestation/v1",
+      "payload": {
+        "v": 1,
+        "aud": [
+          "conductor:session-binding"
+        ],
+        "owner_uid": 501,
+        "profile": "default",
+        "backend": "spawn-1",
+        "hermes_session_id": "20260926_101500_a1b2c3",
+        "claude_session_id": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+        "launch_seq": 4,
+        "project_root": null,
+        "repo_remote": null,
+        "binding_nonce": null,
+        "binding_seq": 8,
+        "issued_at": 1790000000000,
+        "expires_at": 1790001800000
+      },
+      "envelope": {
+        "format": "hermes-launch-attestation/v1",
+        "kid": "ok_5540ee3de4e09522",
+        "payload": "eyJhdWQiOlsiY29uZHVjdG9yOnNlc3Npb24tYmluZGluZyJdLCJiYWNrZW5kIjoic3Bhd24tMSIsImJpbmRpbmdfbm9uY2UiOm51bGwsImJpbmRpbmdfc2VxIjo4LCJjbGF1ZGVfc2Vzc2lvbl9pZCI6IjViMGQ4YTNlLTBjN2UtNGMyZS05ZDVmLTNmMWY3ZDlhMGIxMSIsImV4cGlyZXNfYXQiOjE3OTAwMDE4MDAwMDAsImhlcm1lc19zZXNzaW9uX2lkIjoiMjAyNjA5MjZfMTAxNTAwX2ExYjJjMyIsImlzc3VlZF9hdCI6MTc5MDAwMDAwMDAwMCwibGF1bmNoX3NlcSI6NCwib3duZXJfdWlkIjo1MDEsInByb2ZpbGUiOiJkZWZhdWx0IiwicHJvamVjdF9yb290IjpudWxsLCJyZXBvX3JlbW90ZSI6bnVsbCwidiI6MX0",
+        "sig": "RWnH6-yZnUuYpaqWX9wLD0bhgbXwUMBsmv1xs4bRbBNn--HVnTVNQalH93ySPP7QQL7ZzwUOHRv5cdjrGhyaAQ"
+      }
+    },
+    "owner_grant": {
+      "format": "hermes-owner-grant/v1",
+      "payload": {
+        "v": 1,
+        "aud": [
+          "hermes-owner-forward",
+          "hermes-owner-verify"
+        ],
+        "backend": "spawn-1",
+        "confirm": "native_dialog",
+        "decision_id": "od_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deliver_by": 1790000000000,
+        "expires_at": 1790043140000,
+        "gesture": "proposal",
+        "issued_at": 1789999940000,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+        "owner_uid": 501,
+        "scope": [
+          "conductor:gate:review-budget-enable"
+        ],
+        "single_use": [],
+        "source_session": {
+          "message_id": "m1",
+          "role": "user",
+          "session_id": "mgr"
+        },
+        "subject": {},
+        "targets": [
+          {
+            "claude_session_id": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+            "session_id": "20260926_101500_a1b2c3"
+          }
+        ],
+        "text": "Enable the review budget gate for this lane.\nDo not merge until CI is green. Then ship it.",
+        "text_len": 90,
+        "text_sha256": "0321ac4215b2f240b934b7e9d7d9d1781315ef27c097167dc4ab211ea09a6a95"
+      },
+      "envelope": {
+        "format": "hermes-owner-grant/v1",
+        "kid": "ok_5540ee3de4e09522",
+        "payload": "eyJhdWQiOlsiaGVybWVzLW93bmVyLWZvcndhcmQiLCJoZXJtZXMtb3duZXItdmVyaWZ5Il0sImJhY2tlbmQiOiJzcGF3bi0xIiwiY29uZmlybSI6Im5hdGl2ZV9kaWFsb2ciLCJkZWNpc2lvbl9pZCI6Im9kX2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiZGVsaXZlcl9ieSI6MTc5MDAwMDAwMDAwMCwiZXhwaXJlc19hdCI6MTc5MDA0MzE0MDAwMCwiZ2VzdHVyZSI6InByb3Bvc2FsIiwiaXNzdWVkX2F0IjoxNzg5OTk5OTQwMDAwLCJub25jZSI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUEiLCJvd25lcl91aWQiOjUwMSwic2NvcGUiOlsiY29uZHVjdG9yOmdhdGU6cmV2aWV3LWJ1ZGdldC1lbmFibGUiXSwic2luZ2xlX3VzZSI6W10sInNvdXJjZV9zZXNzaW9uIjp7Im1lc3NhZ2VfaWQiOiJtMSIsInJvbGUiOiJ1c2VyIiwic2Vzc2lvbl9pZCI6Im1nciJ9LCJzdWJqZWN0Ijp7fSwidGFyZ2V0cyI6W3siY2xhdWRlX3Nlc3Npb25faWQiOiI1YjBkOGEzZS0wYzdlLTRjMmUtOWQ1Zi0zZjFmN2Q5YTBiMTEiLCJzZXNzaW9uX2lkIjoiMjAyNjA5MjZfMTAxNTAwX2ExYjJjMyJ9XSwidGV4dCI6IkVuYWJsZSB0aGUgcmV2aWV3IGJ1ZGdldCBnYXRlIGZvciB0aGlzIGxhbmUuXG5EbyBub3QgbWVyZ2UgdW50aWwgQ0kgaXMgZ3JlZW4uIFRoZW4gc2hpcCBpdC4iLCJ0ZXh0X2xlbiI6OTAsInRleHRfc2hhMjU2IjoiMDMyMWFjNDIxNWIyZjI0MGI5MzRiN2U5ZDdkOWQxNzgxMzE1ZWYyN2MwOTcxNjdkYzRhYjIxMWVhMDlhNmE5NSIsInYiOjF9",
+        "sig": "_a4d9v6l4jtteAlHxGak3odOaplxSo0hbJjr3QkkSW8l64xfdvaaNpPIbqPlHRz9prlVWQ8G8tka6a9D77MlCw"
+      }
+    }
+  }
+}

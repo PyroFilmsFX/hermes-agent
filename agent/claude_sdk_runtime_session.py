@@ -956,6 +956,7 @@ def _create_session(
         on_tool_result=functools.partial(_on_tool_result, agent),
         system_prompt_append=append,
         hermes_session_id=getattr(agent, "session_id", None),
+        hermes_lineage=getattr(agent, "_claude_sdk_hermes_lineage", None),
         task_list_id=task_list_id,
         task_env=task_env,
         # Peer-addressable CLI session name (ListAgents/SendMessage).

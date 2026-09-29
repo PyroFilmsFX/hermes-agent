@@ -289,6 +289,15 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     verify: (check: { envelope: unknown; text: string; sessionId: string }) =>
       ipcRenderer.invoke('hermes:owner-grant:verify', check)
   },
+  // b10 H8: session-binding IPC (set/clear/status) over the H7a store.
+  sessionBinding: {
+    set: (params: { profile: string; hermes_session_id: string; path: string }) =>
+      ipcRenderer.invoke('hermes:session-binding:set', params),
+    clear: (params: { profile: string; hermes_session_id: string }) =>
+      ipcRenderer.invoke('hermes:session-binding:clear', params),
+    status: (params: { profile: string; hermes_session_id: string }) =>
+      ipcRenderer.invoke('hermes:session-binding:status', params)
+  },
   // #60 owner-forward: main resolves titles, shows the native "Send as you?" confirm, signs, and
   // returns the envelope. Only the Forward sheet, a typed /to and ⌘⇧↩ call this.
   ownerForward: {
