@@ -1,0 +1,224 @@
+#!/bin/zsh
+# Start the Hermes desktop (dev mode) after syncing the live checkout to the
+# worker's ship branch. Fast-forward only: refuses on local edits or divergence
+# and starts on whatever is checked out, with a loud warning.
+#
+# Launch guard (before the fast-forward): the target commit T must
+#   1. build in the ship worktree: `npm run typecheck --workspace apps/desktop` plus the
+#      Electron main bundle (bundle-electron-main.mjs --dev into a temp dir); a pass is cached
+#      in $REPO/.git/hermes-dev-guard/<T>.ok so a relaunch doesn't rebuild;
+#   2. have a completed, successful "Desktop launch smoke" check on GitHub
+#      (.github/workflows/cntrl-fork-tests.yml): a crash at launch never reaches the live app.
+# Any failure: no fast-forward; start on the current HEAD (the last good commit) and say why.
+# `hermes-dev --skip-guard` fast-forwards without the guard (loud warning).
+#
+# Installed by the host to ~/bin/hermes-dev from scripts/cntrl/hermes-dev.
+# scripts/cntrl/test_hermes_dev_guard.sh sources this file with HERMES_DEV_SOURCE_ONLY=1
+# to exercise hermes_dev_guard without launching anything.
+set -u
+export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+REPO=${HERMES_DEV_REPO:-/Users/justin/Documents/Projects/Business/hermes-cntrl}  # override: test harness only
+SHIP=${HERMES_SHIP_BRANCH:-cntrl-hermes-worker}
+SHIP_WORKTREE=${HERMES_SHIP_WORKTREE:-$REPO/.worktrees/cntrl-hermes-worker}
+GUARD_DIR=${HERMES_DEV_GUARD_DIR:-$REPO/.git/hermes-dev-guard}
+GUARD_GH_REPO=ThinkBotHQ/hermes-agent
+GUARD_CHECK_NAME='Desktop launch smoke'
+GUARD_REASON=''
+GUARD_LOG=''
+
+guard_red() { print -P "%F{red}hermes-dev: ${1//\%/%%}%f" }  # reasons can carry a literal %
+
+# Files whose change can alter what the desktop launches. A skipped launch smoke at T only
+# counts when HEAD..T touches none of them (the classifier skips the job for non-desktop pushes).
+guard_desktop_paths() {
+  git -C "$SHIP_WORKTREE" diff --name-only "$1" "$2" -- \
+    apps/desktop apps/shared package.json package-lock.json scripts/build 2>/dev/null
+}
+
+# guard_build <T>: typecheck + Electron main bundle in the ship worktree, cached per sha.
+guard_build() {
+  local T=$1 head
+  head=$(git -C "$SHIP_WORKTREE" rev-parse HEAD 2>/dev/null)
+  if [[ "$head" != "$T" ]]; then
+    GUARD_REASON="build check: ship worktree $SHIP_WORKTREE is at ${head:0:10}, not ${T:0:10}"
+    return 1
+  fi
+  if [[ -f "$GUARD_DIR/$T.ok" ]]; then
+    print "hermes-dev: guard: ${T:0:10} built before (cached)"
+    return 0
+  fi
+  if [[ -n "$(git -C "$SHIP_WORKTREE" status --porcelain --untracked-files=no)" ]]; then
+    GUARD_REASON="build check: ship worktree has local edits, so a build there does not prove ${T:0:10}"
+    return 1
+  fi
+  GUARD_LOG="$GUARD_DIR/$T.build.log"
+  local out
+  out=$(mktemp -d "${TMPDIR:-/tmp}/hermes-dev-guard-bundle.XXXXXX")
+  print "hermes-dev: guard: building ${T:0:10} (desktop typecheck + electron main bundle; log $GUARD_LOG)"
+  if ! (cd "$SHIP_WORKTREE" && npm run typecheck --workspace apps/desktop) >"$GUARD_LOG" 2>&1; then
+    rm -rf "$out"
+    GUARD_REASON="build check: desktop typecheck failed at ${T:0:10}"
+    return 1
+  fi
+  if ! (cd "$SHIP_WORKTREE" && node apps/desktop/scripts/bundle-electron-main.mjs --dev \
+      --source "$SHIP_WORKTREE" --out "$out") >>"$GUARD_LOG" 2>&1; then
+    rm -rf "$out"
+    GUARD_REASON="build check: electron main bundle failed at ${T:0:10}"
+    return 1
+  fi
+  rm -rf "$out"
+  print -r -- "$(date -u +%FT%TZ) typecheck+bundle ok" >"$GUARD_DIR/$T.ok"
+  return 0
+}
+
+# guard_ci <T> <base>: the CI launch smoke for T must have completed successfully.
+guard_ci() {
+  local T=$1 base=$2 json verdict
+  if ! command -v gh >/dev/null 2>&1; then
+    GUARD_REASON="launch check: gh is not installed, cannot confirm the launch smoke for ${T:0:10}"
+    return 1
+  fi
+  GUARD_LOG="$GUARD_DIR/$T.ci.json"
+  if ! json=$(gh api "repos/$GUARD_GH_REPO/commits/$T/check-runs?per_page=100" 2>"$GUARD_DIR/$T.ci.err"); then
+    GUARD_LOG="$GUARD_DIR/$T.ci.err"
+    GUARD_REASON="launch check: gh api failed (offline or not signed in?), cannot confirm the launch smoke for ${T:0:10}"
+    return 1
+  fi
+  print -r -- "$json" >"$GUARD_LOG"
+  # -> "<status> <conclusion> <html_url>" of the newest run named $GUARD_CHECK_NAME, or "none".
+  verdict=$(GUARD_CHECK_NAME="$GUARD_CHECK_NAME" node -e '
+    let raw = ""
+    process.stdin.on("data", d => (raw += d)).on("end", () => {
+      let runs
+      try { runs = JSON.parse(raw).check_runs } catch { console.log("unreadable"); return }
+      if (!Array.isArray(runs)) { console.log("unreadable"); return }
+      const mine = runs.filter(r => r && r.name === process.env.GUARD_CHECK_NAME)
+        .sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id || 0) - (a.id || 0))
+      const r = mine[0]
+      console.log(r ? `${r.status} ${r.conclusion || "-"} ${r.html_url || "-"}` : "none")
+    })' <<<"$json")
+  local -a v=(${=verdict})
+  case "${v[1]:-unreadable}" in
+    none)
+      GUARD_REASON="launch check: no \"$GUARD_CHECK_NAME\" check for ${T:0:10} yet (not pushed, or CI has not started)"
+      return 1 ;;
+    unreadable)
+      GUARD_REASON="launch check: unreadable check-runs response for ${T:0:10}"
+      return 1 ;;
+    completed) ;;
+    *)
+      GUARD_REASON="launch check: launch smoke still running for ${T:0:10} (${v[1]})"
+      return 1 ;;
+  esac
+  case "${v[2]}" in
+    success)
+      return 0 ;;
+    skipped)
+      local touched
+      touched=$(guard_desktop_paths "$base" "$T")
+      if [[ -z "$touched" ]]; then
+        print "hermes-dev: guard: launch smoke skipped at ${T:0:10}, and ${base:0:10}..${T:0:10} changes no desktop files"
+        return 0
+      fi
+      GUARD_REASON="launch check: launch smoke was skipped at ${T:0:10} but ${base:0:10}..${T:0:10} changes desktop files (run the workflow on $SHIP, or --skip-guard)"
+      return 1 ;;
+    *)
+      GUARD_REASON="launch check: launch smoke ${v[2]} for ${T:0:10} (${v[3]:-no url})"
+      return 1 ;;
+  esac
+}
+
+# hermes_dev_guard <T> [base]: 0 = T may go live; 1 = refuse (GUARD_REASON, GUARD_LOG set).
+hermes_dev_guard() {
+  local T=$1 base=${2:-$1}
+  GUARD_REASON='' GUARD_LOG=''
+  mkdir -p "$GUARD_DIR" || { GUARD_REASON="cannot create $GUARD_DIR"; return 1 }
+  guard_build "$T" || return 1
+  guard_ci "$T" "$base" || return 1
+  return 0
+}
+
+guard_refuse() {
+  local T=$1 before=$2
+  guard_red "LAUNCH GUARD refused ${T:0:10}: $GUARD_REASON"
+  if [[ -n "$GUARD_LOG" ]]; then
+    guard_red "  log: $GUARD_LOG"
+    if [[ "$GUARD_LOG" == *.log ]]; then
+      # tsc colours its output even into a file; strip ANSI before matching (a colored
+      # "error TS" never matches a plain grep). Errors first, then the tail.
+      local plain
+      plain=$(sed $'s/\x1b\\[[0-9;]*m//g' "$GUARD_LOG")
+      print -r -- "$plain" | grep -E 'error TS[0-9]+|\[ERROR\]|Error:' | head -n 8 | sed 's/^/    ! /'
+      print -r -- "$plain" | tail -n 6 | sed 's/^/    | /'
+    fi
+  fi
+  guard_red "NOT syncing — starting on the last good commit ${before:0:10} (hermes-dev --skip-guard overrides)"
+}
+
+[[ "${HERMES_DEV_SOURCE_ONLY:-}" == 1 ]] && return 0
+
+script=dev
+skip_guard=0
+for arg in "$@"; do
+  case "$arg" in
+    # `hermes-dev --prod`: production renderer bundle (vite build, no dev server, no StrictMode
+    # double-render); costs a build on each launch. Default stays the dev server.
+    # It is served by `vite preview` on the dev server's origin (http://127.0.0.1:5174) under the
+    # dev-mode main, NOT `npm run start`: that loads file:// (a different origin, so every
+    # localStorage key -- projects, worktrees, workspace cwd -- is empty) and bakes IS_PACKAGED.
+    --prod) script=dev:prod ;;
+    --skip-guard) skip_guard=1 ;;
+    *) print -P "%F{yellow}hermes-dev: ignoring unknown argument $arg%f" ;;
+  esac
+done
+
+cd "$REPO" || exit 1
+
+before=$(git rev-parse HEAD)
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  print -P "%F{yellow}hermes-dev: local edits in $REPO — NOT syncing, starting on ${before:0:10}%f"
+elif git merge-base --is-ancestor HEAD "$SHIP"; then
+  target=$(git rev-parse "$SHIP")
+  guard_ok=1
+  if [[ "$target" != "$before" ]]; then
+    if (( skip_guard )); then
+      print -P "%F{red}%B!!! hermes-dev: --skip-guard — fast-forwarding to ${target:0:10} WITHOUT the build check or the CI launch smoke. A launch crash will hit the live app. !!!%b%f"
+    elif ! hermes_dev_guard "$target" "$before"; then
+      guard_refuse "$target" "$before"
+      guard_ok=0
+    fi
+  fi
+  if (( guard_ok )); then
+    git merge --ff-only --quiet "$SHIP" || { print -P "%F{red}hermes-dev: sync failed (see git error above)%f"; exit 1; }
+    after=$(git rev-parse HEAD)
+    if [[ "$before" != "$after" ]]; then
+      print "hermes-dev: ${before:0:10} -> ${after:0:10} ($(git rev-list --count $before..$after) commits from $SHIP)"
+      changed=$(git diff --name-only "$before" "$after")
+      if print -r -- "$changed" | grep -qE '^(pyproject\.toml|uv\.lock|\.python-version)$'; then
+        # uv sync is exact: every extra the live app uses must be named here or it is
+        # uninstalled (a .python-version bump also recreates .venv from scratch).
+        # psycopg/psycopg-pool are for the profile's pgvector memory plugin, not in any extra.
+        print "hermes-dev: python deps changed -> uv sync (SDK + live extras + dev) + pgvector deps"
+        env -u VIRTUAL_ENV -u PYTHONPATH uv sync --quiet --extra claude-agent-sdk --extra all \
+          --extra voice --extra edge-tts --extra bedrock --extra modal --group dev || exit 1
+        env -u VIRTUAL_ENV -u PYTHONPATH uv pip install --quiet --python .venv/bin/python \
+          "psycopg[binary]" psycopg-pool || exit 1
+        .venv/bin/python scripts/cntrl/venv_guard.py || print -P "%F{red}hermes-dev: venv_guard failed (see above)%f"
+      fi
+      if print -r -- "$changed" | grep -qE '(^|/)(package\.json|bun\.lock|package-lock\.json)$'; then
+        print "hermes-dev: js deps changed -> npm install"; npm install --no-audit --no-fund || exit 1
+      fi
+    else
+      print "hermes-dev: already at $SHIP (${before:0:10})"
+    fi
+  fi
+else
+  print -P "%F{red}hermes-dev: HEAD is not behind $SHIP (diverged) — NOT syncing, starting on ${before:0:10}%f"
+fi
+
+# Same launch the owner types by hand (kitty "hermes desk" tab).
+exec env -u ANTHROPIC_API_KEY \
+  HERMES_HOME="$REPO/.hermes-test" \
+  HERMES_DESKTOP_HERMES_ROOT="$REPO" \
+  HERMES_DESKTOP_CDP_PORT=off \
+  npm run "$script" --workspace apps/desktop
