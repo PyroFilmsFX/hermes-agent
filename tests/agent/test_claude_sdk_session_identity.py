@@ -7,6 +7,7 @@ stand-ins, fake clients and shared builders live in
 
 import asyncio
 import threading
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -1499,6 +1500,62 @@ class TestSessionResumeField:
         finally:
             session.close()
         assert "resume" not in holder["client"].options
+
+
+class TestPlannedCliSessionId:
+    def test_fresh_session_options_carry_planned_uuid_and_no_resume(self):
+        session, holder = _make_session(script=[ResultMessage(result="ok")])
+        planned = session.planned_cli_session_id()
+        assert str(uuid.UUID(planned)) == planned
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        options = holder["client"].options
+        assert options["session_id"] == planned
+        assert "resume" not in options
+
+    def test_resumed_session_options_carry_resume_and_no_session_id(self):
+        resume_id = "sdk-old-1"
+        session, holder = _make_session(
+            script=[ResultMessage(result="ok")], resume_session_id=resume_id
+        )
+        assert session.planned_cli_session_id() == resume_id
+        try:
+            session.run_turn("ping")
+        finally:
+            session.close()
+        options = holder["client"].options
+        assert options["resume"] == resume_id
+        assert "session_id" not in options
+        assert session.planned_cli_session_id() == resume_id
+
+    def test_live_cli_session_id_stays_none_until_stream_reports(self):
+        session_unannounced, _holder = _make_session(
+            script=[ResultMessage(result="ok", session_id=None)]
+        )
+        try:
+            assert session_unannounced.live_cli_session_id() is None
+            session_unannounced.ensure_started()
+            assert session_unannounced.live_cli_session_id() is None
+            session_unannounced.run_turn("ping")
+            assert session_unannounced.live_cli_session_id() is None
+        finally:
+            session_unannounced.close()
+
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok", session_id="sdk-stream-1")]
+        )
+        try:
+            assert session.live_cli_session_id() is None
+            session.ensure_started()
+            assert session.live_cli_session_id() is None
+            turn = session.run_turn("ping")
+            assert turn.error is None
+            assert session.live_cli_session_id() == "sdk-stream-1"
+        finally:
+            session.close()
+        assert session.live_cli_session_id() is None
 
 
 class TestTaskListIdentity:

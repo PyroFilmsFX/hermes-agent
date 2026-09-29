@@ -2,9 +2,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type { DesktopSessionBindingRecord } from '@/global'
 import { setSessionRole } from '@/hermes'
+import * as confirmStore from '@/store/confirm'
 import { notifyError } from '@/store/notifications'
-import { setSessions } from '@/store/session'
+import { $projectTree, moveSessionToProject, projectRootCwd } from '@/store/projects'
+import { $sessions, sessionMatchesStoredId, setSessions } from '@/store/session'
+import { resetSessionBindingsForTests } from '@/store/session-binding'
 
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
@@ -92,6 +96,8 @@ vi.mock('@/store/gateway', () => ({ activeGateway: vi.fn(() => null) }))
 vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() }))
 vi.mock('@/store/projects', () => ({
   $projectTree: atom<unknown[]>([]),
+  $projectTreeLoaded: atom(true),
+  refreshProjectTree: vi.fn(async () => undefined),
   moveSessionToProject: vi.fn(),
   projectIdForCwd: vi.fn(() => null),
   projectRootCwd: vi.fn(() => '')
@@ -122,6 +128,7 @@ vi.mock('@/store/windows', () => ({
   canOpenSessionInTerminal: () => false,
   canOpenSessionWindow: () => false,
   isBrowserWindow: () => false,
+  isHudWindow: () => false,
   isSecondaryWindow: () => false,
   openSessionInNewWindow: vi.fn(),
   openSessionInTerminal: vi.fn()
@@ -364,5 +371,215 @@ describe('Role submenu', () => {
 
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(expect.any(Error), 'Could not set role'))
     expect(setSessions).not.toHaveBeenCalled()
+  })
+})
+
+describe('Session binding menu entries and move-and-rebind', () => {
+  let statusMock: ReturnType<typeof vi.fn>
+  let setMock: ReturnType<typeof vi.fn>
+  let clearMock: ReturnType<typeof vi.fn>
+  let confirmSpy: ReturnType<typeof vi.spyOn>
+
+  const TREE = [
+    {
+      id: 'p_1',
+      label: 'Proj',
+      path: '/r/proj',
+      repos: [
+        {
+          id: 'repo',
+          label: 'proj',
+          path: '/r/proj',
+          groups: [
+            { id: 'home', label: 'main', path: '/r/proj', sessions: [], branch: 'main', isHome: true },
+            { id: 'lane', label: 'a', path: '/r/proj/.worktrees/a', sessions: [], branch: 'lane/a' },
+            { id: 'kanban', label: 'tasks', path: '/r/proj/.worktrees/t_1', sessions: [], isKanban: true }
+          ],
+          sessionCount: 0
+        }
+      ],
+      sessionCount: 0
+    }
+  ]
+
+  const SESSION = {
+    id: 's1',
+    profile: 'default',
+    cwd: '/r/app',
+    git_repo_root: '/r/app',
+    git_branch: 'main'
+  }
+
+  function record(overrides: Partial<DesktopSessionBindingRecord> = {}): DesktopSessionBindingRecord {
+    return {
+      ok: true,
+      state: 'unbound',
+      profile: 'default',
+      hermes_session_id: 's1',
+      seq: 0,
+      binding_nonce: null,
+      bound_at: null,
+      project_root: null,
+      repo_common_root: null,
+      repo_remote: null,
+      ...overrides
+    }
+  }
+
+  beforeEach(() => {
+    resetSessionBindingsForTests()
+    vi.mocked(sessionMatchesStoredId).mockImplementation((s: any, id: string) => s.id === id)
+    vi.mocked(projectRootCwd).mockImplementation((node: any) => node?.path ?? '')
+    vi.mocked(moveSessionToProject).mockImplementation(async () => undefined)
+    $projectTree.set(TREE as any)
+    $sessions.set([SESSION])
+
+    statusMock = vi.fn(async () => record())
+    setMock = vi.fn(async () => record({ state: 'bound', seq: 1 }))
+    clearMock = vi.fn(async () => record({ seq: 2 }))
+    ;(window as any).hermesDesktop = { sessionBinding: { set: setMock, clear: clearMock, status: statusMock } }
+
+    confirmSpy = vi.spyOn(confirmStore, 'confirm').mockImplementation(async () => true)
+  })
+
+  afterEach(() => {
+    delete (window as any).hermesDesktop
+    resetSessionBindingsForTests()
+    confirmSpy?.mockRestore()
+    vi.mocked(sessionMatchesStoredId).mockReset()
+    vi.mocked(projectRootCwd).mockReset()
+    vi.mocked(moveSessionToProject).mockReset()
+  })
+
+  async function openDropdown() {
+    render(
+      <SessionActionsMenu profile="default" sessionId="s1" title="My session">
+        <button aria-label="Session actions" type="button">
+          ⋮
+        </button>
+      </SessionActionsMenu>
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Session actions' })
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(trigger)
+    await screen.findByRole('menu')
+  }
+
+  it('entries render per state: Unbind hidden when not bound', async () => {
+    statusMock.mockResolvedValue(record({ state: 'unbound' }))
+    await openDropdown()
+
+    expect(await screen.findByRole('menuitem', { name: /bind to project/i })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: /unbind/i })).toBeNull()
+  })
+
+  it('entries render per state: Unbind visible when bound', async () => {
+    statusMock.mockResolvedValue(
+      record({ state: 'bound', project_root: '/r/proj', repo_common_root: '/r/proj' })
+    )
+    await openDropdown()
+
+    expect(await screen.findByRole('menuitem', { name: /bind to project/i })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: /unbind/i })).toBeTruthy()
+  })
+
+  it('Unbind calls clear with {profile, hermes_session_id}', async () => {
+    statusMock.mockResolvedValue(
+      record({ state: 'bound', project_root: '/r/proj', repo_common_root: '/r/proj' })
+    )
+    await openDropdown()
+
+    const unbindItem = await screen.findByRole('menuitem', { name: /unbind/i })
+    fireEvent.click(unbindItem)
+
+    await waitFor(() => expect(clearMock).toHaveBeenCalledTimes(1))
+    expect(clearMock).toHaveBeenCalledWith({ profile: 'default', hermes_session_id: 's1' })
+    expect(setMock).not.toHaveBeenCalled()
+  })
+
+  it('choosing a target calls the store set with only {profile, hermes_session_id, path}', async () => {
+    statusMock.mockResolvedValue(record({ state: 'unbound' }))
+    await openDropdown()
+
+    const bindTrigger = await screen.findByRole('menuitem', { name: /bind to project/i })
+    fireEvent.click(bindTrigger)
+    fireEvent.keyDown(bindTrigger, { key: 'ArrowRight' })
+
+    const targetOption = await screen.findByRole('menuitem', { name: /lane\/a/i })
+    fireEvent.click(targetOption)
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledTimes(1))
+    expect(setMock).toHaveBeenCalledWith({
+      profile: 'default',
+      hermes_session_id: 's1',
+      path: '/r/proj/.worktrees/a'
+    })
+  })
+
+  it('move of a bound session asks one confirm and re-binds after the move', async () => {
+    statusMock.mockResolvedValue(
+      record({ state: 'bound', project_root: '/r/app', repo_common_root: '/r/app' })
+    )
+    await openDropdown()
+
+    const moveTrigger = await screen.findByRole('menuitem', { name: /move to project/i })
+    fireEvent.click(moveTrigger)
+    fireEvent.keyDown(moveTrigger, { key: 'ArrowRight' })
+
+    const projOption = await screen.findByRole('menuitem', { name: 'Proj' })
+    fireEvent.click(projOption)
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1))
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining('Proj'),
+        description: expect.stringContaining('/r/proj')
+      })
+    )
+
+    await waitFor(() => expect(moveSessionToProject).toHaveBeenCalledWith('s1', 'p_1', 'default'))
+    await waitFor(() => expect(setMock).toHaveBeenCalledTimes(1))
+    expect(setMock).toHaveBeenCalledWith({
+      profile: 'default',
+      hermes_session_id: 's1',
+      path: '/r/proj'
+    })
+  })
+
+  it('move of a bound session: cancel does neither move nor re-bind', async () => {
+    confirmSpy.mockResolvedValueOnce(false)
+    statusMock.mockResolvedValue(
+      record({ state: 'bound', project_root: '/r/app', repo_common_root: '/r/app' })
+    )
+    await openDropdown()
+
+    const moveTrigger = await screen.findByRole('menuitem', { name: /move to project/i })
+    fireEvent.click(moveTrigger)
+    fireEvent.keyDown(moveTrigger, { key: 'ArrowRight' })
+
+    const projOption = await screen.findByRole('menuitem', { name: 'Proj' })
+    fireEvent.click(projOption)
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1))
+    expect(moveSessionToProject).not.toHaveBeenCalled()
+    expect(setMock).not.toHaveBeenCalled()
+  })
+
+  it('move of an unbound session does not ask confirm and does not re-bind', async () => {
+    statusMock.mockResolvedValue(record({ state: 'unbound' }))
+    await openDropdown()
+
+    const moveTrigger = await screen.findByRole('menuitem', { name: /move to project/i })
+    fireEvent.click(moveTrigger)
+    fireEvent.keyDown(moveTrigger, { key: 'ArrowRight' })
+
+    const projOption = await screen.findByRole('menuitem', { name: 'Proj' })
+    fireEvent.click(projOption)
+
+    await waitFor(() => expect(moveSessionToProject).toHaveBeenCalledWith('s1', 'p_1', 'default'))
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(setMock).not.toHaveBeenCalled()
   })
 })

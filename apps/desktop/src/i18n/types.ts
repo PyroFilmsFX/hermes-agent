@@ -3192,6 +3192,37 @@ export interface Translations {
     sendToServiceOff: string
     sendToServiceUnavailable: string
   }
+  /** b10 H9a: the session -> project binding pill in the session titlebar. */
+  sessionBinding: {
+    unbound: string
+    suggested: (name: string) => string
+    unboundTip: string
+    suggestedTip: (path: string) => string
+    boundTip: (path: string, remoteHost: null | string) => string
+    needsReconfirm: (name: string) => string
+    needsReconfirmTip: (path: string) => string
+    signingOffTip: string
+    statusUnavailableTip: string
+    pickerSuggested: string
+    pickerProjects: string
+    pickerOtherFolder: string
+    pickerOtherFolderTitle: string
+    pickerUnbind: string
+    pickerEmpty: string
+    confirmTitle: (name: string) => string
+    confirmDescription: (path: string) => string
+    confirmLabel: string
+    boundNotice: (name: string) => string
+    unboundNotice: string
+    failedTitle: string
+    failed: (reason: string) => string
+    menuBind: string
+    menuBindToProject: string
+    menuUnbind: string
+    moveConfirmTitle: (name: string) => string
+    moveConfirmDescription: (path: string) => string
+    moveConfirmLabel: string
+  }
   composer: {
     message: string
     wakingProfile: (profile: string) => string

@@ -207,6 +207,7 @@ class ClaudeAgentSdkSession(
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
+        hermes_lineage: Optional[list[str]] = None,
         task_list_id: Optional[str] = None,
         task_env: Optional[dict[str, str]] = None,
         session_name: str = "",
@@ -292,6 +293,7 @@ class ClaudeAgentSdkSession(
             except Exception:
                 pass
         self._hermes_session_id = hermes_session_id
+        self._hermes_lineage = [str(x) for x in (hermes_lineage or []) if x][-16:]
         self._task_list_id = task_list_id
         self._task_env = dict(task_env) if task_env is not None else None
         # Peer-addressable name for the spawned CLI session (see
@@ -316,6 +318,7 @@ class ClaudeAgentSdkSession(
         # stale id fails the session start (the caller retires + retries
         # fresh).
         self._resume_session_id = resume_session_id
+        self._planned_session_id = resume_session_id or str(uuid.uuid4())
         # Display-only partial-text consumer (W4 streaming). Deltas never
         # enter the projected transcript; the gateway's stream consumer
         # handles rate limiting and the already_sent final-send dedup.
@@ -454,6 +457,10 @@ class ClaudeAgentSdkSession(
                 return None
             sid = self._session_id
         return sid if isinstance(sid, str) and sid and sid != "pending" else None
+
+    def planned_cli_session_id(self) -> str:
+        """Pre-assigned Claude session id (--session-id UUID, or the resumed id)."""
+        return self._planned_session_id
 
     def _admission_retired(self) -> bool:
         """Return whether this session must reject a new SDK turn."""
@@ -594,6 +601,99 @@ class ClaudeAgentSdkSession(
     def generation(self) -> str:
         return getattr(self, "_instance_generation", "")
 
+    # Upper bound on the pre-spawn wait for main's attestation file (#49 / b10 H3).
+    _ATTEST_BARRIER_S = 1.5
+    # Upper bound on the resumed-id provenance check before recording the launch.
+    _RESUME_PROVENANCE_TIMEOUT_S = 1.0
+
+    def _wait_for_attestation_barrier(self) -> None:
+        """Wait up to 1.5 s for main's attestation before spawning the CLI (#49 / b10 H3).
+
+        The attestation directory is agent-writable, so the probe (a) refuses a planned sid
+        that is not a single safe path component, (b) opens ``session-attest`` and the sid dir
+        with ``O_NOFOLLOW`` (a symlink never counts as present), and (c) runs on a daemon
+        thread: a probe blocked on FUSE/NFS/a fifo is abandoned at the deadline and the CLI is
+        spawned anyway. The barrier is a sync aid, never a gate.
+        """
+        try:
+            from agent.claude_sdk_launch_table import has_recent_consumer
+
+            if not has_recent_consumer(60.0):
+                return
+        except Exception:
+            return
+
+        try:
+            from hermes_owner_grant.anchor import load_trusted_anchor
+
+            anchor = load_trusted_anchor()
+            grants_dir = getattr(anchor, "grants_dir", None)
+            if not grants_dir:
+                return
+        except Exception:
+            return
+
+        try:
+            from agent.claude_sdk_launch_table import attestation_files_present
+            from hermes_owner_grant.attest import is_safe_session_component
+
+            planned_sid = self.planned_cli_session_id()
+            if not is_safe_session_component(planned_sid):
+                logger.warning("attestation barrier skipped: planned Claude sid is not a safe id")
+                return
+            grants_root = str(grants_dir)
+            found = threading.Event()
+            stop = threading.Event()
+
+            def _probe() -> None:
+                while not stop.is_set():
+                    try:
+                        if attestation_files_present(grants_root, planned_sid):
+                            found.set()
+                            return
+                    except Exception:
+                        pass
+                    stop.wait(0.05)
+
+            threading.Thread(target=_probe, name="sdk-attest-barrier", daemon=True).start()
+            deadline = time.monotonic() + self._ATTEST_BARRIER_S
+            first = True
+            try:
+                while True:
+                    if self._startup_is_retired():
+                        break
+                    # Real-time wait on the probe; the monotonic deadline below bounds the loop.
+                    if found.wait(0.05 if first else 0.02):
+                        break
+                    first = False
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    step = min(0.05, max(0.0, deadline - now))
+                    time.sleep(step)
+            finally:
+                stop.set()
+        except Exception:
+            pass
+
+    def _resume_is_authenticated(self, profile: str) -> bool:
+        """Bounded provenance check for a resumed Claude sid (b10 review finding 1)."""
+        try:
+            from agent.claude_sdk_launch_table import authenticated_resume, run_bounded
+
+            claude_sid = str(self._resume_session_id or "")
+            hermes_sid = str(self._hermes_session_id or "")
+            lineage = list(self._hermes_lineage or [])
+            finished, value = run_bounded(
+                lambda: authenticated_resume(claude_sid, hermes_sid, lineage, profile=profile),
+                self._RESUME_PROVENANCE_TIMEOUT_S,
+                name="sdk-resume-provenance",
+            )
+            return bool(finished and value is True)
+        except Exception:
+            logger.debug("resume provenance check failed", exc_info=True)
+            return False
+
     def ensure_started(self) -> Optional[str]:
         """Start the loop thread, build the SDK client, connect. Idempotent —
         returns the session marker (SDK session ids arrive on first result)."""
@@ -673,6 +773,35 @@ class ClaudeAgentSdkSession(
                 )
                 return None
             self._claim_peer_name()
+            profile = "default"
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+
+                profile = str(get_active_profile_name() or "default")
+            except Exception:
+                pass
+            try:
+                from agent.claude_sdk_launch_table import (
+                    SID_ORIGIN_FRESH,
+                    SID_ORIGIN_RESUMED,
+                    record_launch,
+                )
+
+                # A resumed id was read from agent-writable session state: main may attest it
+                # only when it already signed that id for this session (or a lineage ancestor).
+                resumed = bool(self._resume_session_id)
+                record_launch(
+                    hermes_session_id=str(self._hermes_session_id or ""),
+                    claude_session_id=self.planned_cli_session_id(),
+                    profile=profile,
+                    lineage=self._hermes_lineage,
+                    sid_origin=SID_ORIGIN_RESUMED if resumed else SID_ORIGIN_FRESH,
+                    resume_authenticated=(
+                        self._resume_is_authenticated(profile) if resumed else False
+                    ),
+                )
+            except Exception:
+                logger.debug("recording launch table entry failed", exc_info=True)
             startup_client = self._build_client()
             # Assign BEFORE connect: a connect timeout/cancel leaves a
             # half-connected client whose CLI subprocess close() must still reap
@@ -689,6 +818,12 @@ class ClaudeAgentSdkSession(
                     else:
                         refused = True
             if retired or refused:
+                try:
+                    from agent.claude_sdk_launch_table import retire
+
+                    retire(self.planned_cli_session_id())
+                except Exception:
+                    pass
                 self._cleanup_startup_resources(
                     client=startup_client,
                     loop=startup_loop,
@@ -697,6 +832,7 @@ class ClaudeAgentSdkSession(
                 if refused:
                     raise SdkShuttingDownError()
                 return None
+            self._wait_for_attestation_barrier()
             self._run_coro(startup_client.connect(), timeout=60.0)
             self._record_peer_cli(startup_client)
             with self._turn_callback_lock:
@@ -1146,6 +1282,14 @@ class ClaudeAgentSdkSession(
         _forget_sdk_session(self)
         # After the CLI is gone: the name is free only once nobody carries it.
         self._release_peer_names()
+        try:
+            from agent.claude_sdk_launch_table import retire
+
+            planned_id = getattr(self, "_planned_session_id", None)
+            if planned_id:
+                retire(str(planned_id))
+        except Exception:
+            logger.debug("retiring launch table entry failed", exc_info=True)
 
     def __enter__(self) -> "ClaudeAgentSdkSession":
         return self
@@ -1673,6 +1817,8 @@ class ClaudeAgentSdkSession(
             fields["hooks"] = hooks
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
+        else:
+            fields["session_id"] = self._planned_session_id
         # Auto-mode classifier rules via the CLI's flag-settings layer
         # (--settings), which the CLI keeps enabled even with
         # setting_sources=[] — so ONLY {"autoMode": ...} crosses and the

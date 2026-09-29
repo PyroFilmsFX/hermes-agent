@@ -1,0 +1,24 @@
+{
+  "schema": "hermes-owner-grant-attest-vector/v1",
+  "anchor_key": {
+    "alg": "Ed25519",
+    "kid": "ok_3e5164e1da277f9f",
+    "not_before": 0,
+    "pub": "t4fEs4EaJQE6Z0QNZrt-mvMQY5Ujb53YEoAFf60tnck",
+    "retired_at": null,
+    "status": "active"
+  },
+  "owner_uid": 501,
+  "claude_session_id": "claude_session_crosslang_1",
+  "hermes_session_id": "20260929_issuer_session",
+  "project_root": "/Users/justin/Documents/Projects/Business/hermes-cntrl",
+  "binding_nonce": "5GWV4AZTF2WA62JMAHUN46ZE6Y",
+  "issued_at": 1790000000000,
+  "expires_at": 1790001800000,
+  "envelope": {
+    "format": "hermes-launch-attestation/v1",
+    "kid": "ok_3e5164e1da277f9f",
+    "payload": "eyJhdWQiOlsiY29uZHVjdG9yOnNlc3Npb24tYmluZGluZyJdLCJiYWNrZW5kIjoic3Bhd24tY3Jvc3NsYW5nLTEiLCJiaW5kaW5nX25vbmNlIjoiNUdXVjRBWlRGMldBNjJKTUFIVU40NlpFNlkiLCJiaW5kaW5nX3NlcSI6MSwiY2xhdWRlX3Nlc3Npb25faWQiOiJjbGF1ZGVfc2Vzc2lvbl9jcm9zc2xhbmdfMSIsImV4cGlyZXNfYXQiOjE3OTAwMDE4MDAwMDAsImhlcm1lc19saW5lYWdlIjpbInBhcmVudF9saW5lYWdlXzAiXSwiaGVybWVzX3Nlc3Npb25faWQiOiIyMDI2MDkyOV9pc3N1ZXJfc2Vzc2lvbiIsImlzc3VlZF9hdCI6MTc5MDAwMDAwMDAwMCwibGF1bmNoX3NlcSI6MSwib3duZXJfdWlkIjo1MDEsInByb2ZpbGUiOiJkZWZhdWx0IiwicHJvamVjdF9yb290IjoiL1VzZXJzL2p1c3Rpbi9Eb2N1bWVudHMvUHJvamVjdHMvQnVzaW5lc3MvaGVybWVzLWNudHJsIiwicmVwb19jb21tb25fcm9vdCI6Ii9Vc2Vycy9qdXN0aW4vRG9jdW1lbnRzL1Byb2plY3RzL0J1c2luZXNzL2hlcm1lcy1jbnRybCIsInJlcG9fcmVtb3RlIjoiZ2l0QGdpdGh1Yi5jb206bm91c3Jlc2VhcmNoL2hlcm1lcy1hZ2VudC5naXQiLCJ2IjoxfQ",
+    "sig": "MfCba9dywZdq58RDj3ihw0qWg_q0XZNjE21KY5AC7Ykfv8XHzdZ1XJSZV3Wwwiz34CMJwg16UheG5sGe5sfgCQ"
+  }
+}

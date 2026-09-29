@@ -3756,6 +3756,40 @@ export const en: Translations = {
     sendToServiceOff: 'Owner forwarding is off. Turn on "Let conductor verify owner decisions" in Settings → Gateways.',
     sendToServiceUnavailable: 'Owner forwarding is unavailable here. See Settings → Gateways.'
   },
+  sessionBinding: {
+    unbound: 'Bind to project',
+    suggested: name => `Bind to ${name}?`,
+    unboundTip: 'Not bound to a project. Conductor attributes builds only from a bound session.',
+    suggestedTip: path => `This session works in ${path}. Click to bind it.`,
+    boundTip: (path, remoteHost) => (remoteHost ? `Bound to ${path} (${remoteHost})` : `Bound to ${path}`),
+    needsReconfirm: name => `Re-confirm ${name}`,
+    needsReconfirmTip: path =>
+      `The binding to ${path} needs your confirmation again (the signing key changed or the workspace moved).`,
+    signingOffTip:
+      'Binding needs owner signing. Turn on "Let conductor verify owner decisions" in Settings → Gateways.',
+    statusUnavailableTip: 'Binding status is unavailable right now. Open the picker to try again.',
+    pickerSuggested: 'Suggested',
+    pickerProjects: 'Projects',
+    pickerOtherFolder: 'Other folder…',
+    pickerOtherFolderTitle: 'Bind this session to a folder',
+    pickerUnbind: 'Unbind',
+    pickerEmpty: 'No projects yet',
+    confirmTitle: name => `Bind this session to ${name}?`,
+    confirmDescription: path =>
+      `Conductor will treat builds from this session as work on ${path}. You can unbind or re-bind at any time.`,
+    confirmLabel: 'Bind',
+    boundNotice: name => `Session bound to ${name}`,
+    unboundNotice: 'Session unbound',
+    failedTitle: "Couldn't update the binding",
+    failed: reason => `The binding was refused (${reason}).`,
+    menuBind: 'Bind to project…',
+    menuBindToProject: 'Bind to project…',
+    menuUnbind: 'Unbind',
+    moveConfirmTitle: name => `Move this session to ${name} and re-bind?`,
+    moveConfirmDescription: path =>
+      `Moving will re-home the session in ${path} and re-bind it so conductor attributes future builds to this project.`,
+    moveConfirmLabel: 'Move & bind'
+  },
   composer: {
     message: 'Message',
     wakingProfile: profile => `Waking up ${profile}…`,

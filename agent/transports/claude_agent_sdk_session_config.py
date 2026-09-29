@@ -95,6 +95,7 @@ def _sdk_env_overrides(
     task_env: Optional[dict[str, str]] = None,
     hermes_session_id: Optional[str] = None,
     sdk_cwd: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> dict[str, str]:
     """The full env override set handed to the spawned CLI.
 
@@ -171,6 +172,22 @@ def _sdk_env_overrides(
                 overrides["HERMES_SESSION_ID"] = ""
         except Exception:
             pass
+
+    # HERMES_SESSION_ATTEST_DIR hint = <grants_dir>/session-attest (spec §0.4, §4, §8 row H4).
+    # It is a hint only; nothing trusts it.
+    anchor = None
+    try:
+        from hermes_owner_grant.anchor import load_trusted_anchor
+        anchor = load_trusted_anchor()
+    except Exception:
+        anchor = None
+
+    if "HERMES_SESSION_ATTEST_DIR" not in _configured_sdk_env():
+        if anchor is not None:
+            grants_dir = getattr(anchor, "grants_dir", None)
+            if grants_dir:
+                overrides["HERMES_SESSION_ATTEST_DIR"] = os.path.join(str(grants_dir), "session-attest")
+
     # Conductor's worker-spawn hook honors TB_STATE_ROOT. Keep its artifacts
     # out of the checked-out project and scope them to the active Hermes
     # profile; a cwd hash gives each project a stable, filesystem-safe root.
@@ -188,11 +205,72 @@ def _sdk_env_overrides(
     # agent.claude_agent_sdk.env entry still wins.
     if "CLAUDE_PROJECT_DIR" not in _configured_sdk_env():
         overrides["CLAUDE_PROJECT_DIR"] = str(project_cwd)
-    cwd_hash = hashlib.sha256(os.fsencode(project_cwd)).hexdigest()[:16]
-    state_dir = get_hermes_home() / "sdk-state" / cwd_hash
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    state_dir.chmod(0o700)
-    overrides["TB_STATE_ROOT"] = str(state_dir)
+
+    # TB_STATE_ROOT: when the session has a BOUND binding, set it to the binding's project_root,
+    # but ONLY after verifying main's signed binding record (spec §0.4, §4, §6 C1, §8 row H4).
+    # Any failure -> fall back to cwd behavior. Operator-configured TB_STATE_ROOT wins.
+    if "TB_STATE_ROOT" not in _configured_sdk_env():
+        bound_project_root = None
+        effective_session_id = overrides.get("HERMES_SESSION_ID") or hermes_session_id
+        effective_profile = profile
+        if not effective_profile:
+            try:
+                from gateway.session_context import _SESSION_PROFILE, _UNSET
+                p_val = _SESSION_PROFILE.get()
+                if p_val is not _UNSET and p_val:
+                    effective_profile = str(p_val)
+            except Exception:
+                pass
+        if not effective_profile:
+            try:
+                from hermes_cli.profiles import current_profile_name
+                effective_profile = current_profile_name(default="default") or "default"
+            except Exception:
+                effective_profile = os.environ.get("HERMES_PROFILE") or "default"
+
+        if anchor is not None and effective_session_id and effective_profile:
+            try:
+                grants_dir = getattr(anchor, "grants_dir", None)
+                if (
+                    grants_dir
+                    and "/" not in str(effective_profile)
+                    and "\\" not in str(effective_profile)
+                    and str(effective_profile) not in (".", "..")
+                    and "/" not in str(effective_session_id)
+                    and "\\" not in str(effective_session_id)
+                    and str(effective_session_id) not in (".", "..")
+                ):
+                    binding_path = os.path.join(
+                        str(grants_dir), "session-bindings", str(effective_profile), f"{effective_session_id}.json"
+                    )
+                    from hermes_owner_grant.attest import read_binding_file, verify_binding_envelope
+                    binding_env = read_binding_file(binding_path)
+                    res = verify_binding_envelope(
+                        binding_env,
+                        expected_profile=str(effective_profile),
+                        expected_session=str(effective_session_id),
+                        anchor=anchor,
+                    )
+                    if res.ok and res.project_root:
+                        bound_project_root = res.project_root
+            except Exception:
+                bound_project_root = None
+
+        # The state root is ALWAYS a hashed dir under HERMES_HOME, never the project itself:
+        # conductor state inside the checkout is agent-writable and committable. A verified
+        # binding only changes which path is hashed (the bound project instead of the launch
+        # cwd), so cwd moves, subfolders and lanes of a bound session share one state root.
+        state_key = project_cwd
+        if bound_project_root:
+            try:
+                state_key = Path(str(bound_project_root)).resolve()
+            except (OSError, RuntimeError, ValueError):
+                state_key = project_cwd
+        state_hash = hashlib.sha256(os.fsencode(state_key)).hexdigest()[:16]
+        state_dir = get_hermes_home() / "sdk-state" / state_hash
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_dir.chmod(0o700)
+        overrides["TB_STATE_ROOT"] = str(state_dir)
     return overrides
 
 

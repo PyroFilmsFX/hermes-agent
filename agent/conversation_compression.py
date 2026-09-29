@@ -3400,11 +3400,41 @@ def _publish_rotated_compaction(
     for _handoff_message in compressed:
         if isinstance(_handoff_message, dict):
             _handoff_message[_DB_PERSISTED_MARKER] = True
+    lineage = getattr(agent, "_claude_sdk_hermes_lineage", None)
+    if lineage is None:
+        lineage = []
+        agent._claude_sdk_hermes_lineage = lineage
+    if old_session_id:
+        lineage.append(str(old_session_id))
+        del lineage[:-16]
+
     agent.session_id = new_session_id
     agent._db_flush_scan_prefix = None
     _rebind_session_context(agent.session_id)
     agent._session_db_created = True
     _carry_session_state_to_child(agent, old_session_id, old_title)
+
+    try:
+        from agent.claude_sdk_launch_table import update_lineage
+
+        live_session = getattr(agent, "_claude_sdk_session", None)
+        if live_session is not None:
+            setattr(live_session, "_hermes_session_id", str(new_session_id))
+            setattr(live_session, "_hermes_lineage", list(agent._claude_sdk_hermes_lineage))
+            planned_id_fn = getattr(live_session, "planned_cli_session_id", None)
+            planned_id = (
+                planned_id_fn()
+                if callable(planned_id_fn)
+                else getattr(live_session, "_planned_session_id", None)
+            )
+            if planned_id:
+                update_lineage(
+                    str(planned_id),
+                    hermes_session_id=str(new_session_id),
+                    lineage=agent._claude_sdk_hermes_lineage,
+                )
+    except Exception:
+        logger.debug("launch table update on compression rotation failed", exc_info=True)
 
 
 def _warn_summary_or_aux_fallback(agent: Any) -> None:
