@@ -34,6 +34,7 @@ from tui_gateway.conductor_roster import (
     attribute_build,
     collect_live_cli_map,
     derive_row_status,
+    jobs_for_marker,
     group_rows,
     read_build_status,
     read_marker_index,
@@ -507,9 +508,7 @@ def _build_conductors_payload() -> dict[str, Any]:
         except Exception:
             jobs = []
 
-        target_rid = marker_dict.get("build_run_id") or marker_dict.get("run_id")
-        target_rid_str = str(target_rid) if target_rid else ""
-        matched_jobs = [j for j in jobs if isinstance(j, dict) and str(j.get("build_run_id") or "") == target_rid_str]
+        matched_jobs = jobs_for_marker(marker_dict, jobs)
         build_matched_jobs_map[marker_path] = matched_jobs
 
         derived = derive_row_status(marker_dict, status_read, jobs, now_ts)

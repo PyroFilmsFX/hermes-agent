@@ -828,7 +828,7 @@ def test_derive_row_status_no_status_file_derives_all_fields_with_derived_proven
             "worker": "codex",
             "served_seat": "codex",
             "fallback_from": None,
-            "build_run_id": "run-b4-test",
+            "marker_run_id": "run-b4-test",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
             "heartbeat_at": "2026-09-29T07:10:00Z",
@@ -838,7 +838,7 @@ def test_derive_row_status_no_status_file_derives_all_fields_with_derived_proven
             "worker": "gemini",  # gemini counts as agy
             "served_seat": "gemini",
             "fallback_from": None,
-            "build_run_id": "run-b4-test",
+            "marker_run_id": "run-b4-test",
             "status": "succeeded",
             "spawned_at": "2026-09-29T06:50:00Z",
             "heartbeat_at": "2026-09-29T07:08:00Z",
@@ -929,7 +929,7 @@ def test_derive_row_status_fresh_status_wins_per_field():
         {
             "job_id": "w_marker_lane",
             "worker": "muse",
-            "build_run_id": valid_data["build"]["run_id"],
+            "marker_run_id": valid_data["build"]["run_id"],
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         }
@@ -1027,21 +1027,21 @@ def test_derive_row_status_stale_status_kept_and_flagged():
     assert res.provenance["estimate"] == "status"
 
 
-def test_derive_row_status_jobs_with_different_build_run_id_excluded():
+def test_derive_row_status_jobs_with_different_marker_run_id_excluded():
     ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
     marker = {"run_id": "run-target", "waves_total": 2, "waves_done": 0}
     jobs = [
         {
             "job_id": "w_matched",
             "worker": "codex",
-            "build_run_id": "run-target",
+            "marker_run_id": "run-target",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
         {
             "job_id": "w_other",
             "worker": "codex",
-            "build_run_id": "run-other",
+            "marker_run_id": "run-other",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
@@ -1054,14 +1054,14 @@ def test_derive_row_status_jobs_with_different_build_run_id_excluded():
     assert res.seats["codex"]["spawned"] == 1
 
 
-def test_derive_row_status_jobs_without_build_run_id_excluded():
+def test_derive_row_status_jobs_without_marker_run_id_excluded():
     ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
     marker = {"run_id": "run-target", "waves_total": 2, "waves_done": 0}
     jobs = [
         {
             "job_id": "w_matched",
             "worker": "codex",
-            "build_run_id": "run-target",
+            "marker_run_id": "run-target",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
@@ -1074,14 +1074,14 @@ def test_derive_row_status_jobs_without_build_run_id_excluded():
         {
             "job_id": "w_none_brid",
             "worker": "codex",
-            "build_run_id": None,
+            "marker_run_id": None,
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
         {
             "job_id": "w_empty_brid",
             "worker": "codex",
-            "build_run_id": "",
+            "marker_run_id": "",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
@@ -1106,14 +1106,14 @@ def test_derive_row_status_marker_build_run_id_precedence_for_jobs():
         {
             "job_id": "w_brid_matched",
             "worker": "muse",
-            "build_run_id": "brid-primary",
+            "marker_run_id": "brid-primary",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
         {
             "job_id": "w_legacy_excluded",
             "worker": "muse",
-            "build_run_id": "legacy-run-id",
+            "marker_run_id": "legacy-run-id",
             "status": "running",
             "spawned_at": "2026-09-29T07:00:00Z",
         },
@@ -1226,7 +1226,7 @@ def test_derive_row_status_last_activity_max_calculation():
     jobs = [
         {
             "job_id": "w_act",
-            "build_run_id": "r-act",
+            "marker_run_id": "r-act",
             "worker": "codex",
             "heartbeat_epoch": t_job,
             "status": "running",
@@ -1293,6 +1293,7 @@ def test_relay_jobs_served_seat_and_fallback_from_never_in_public_dict(tmp_path)
         "served_seat": "codex",
         "fallback_from": "sonnet",
         "build_run_id": "run-test-keys",
+        "marker_run_id": "marker-run-keys",
     }
     (jobs_dir / "w_test_keys.json").write_text(json.dumps(job_data), encoding="utf-8")
 
@@ -1305,6 +1306,7 @@ def test_relay_jobs_served_seat_and_fallback_from_never_in_public_dict(tmp_path)
     assert "served_seat" not in public_dict
     assert "fallback_from" not in public_dict
     assert "build_run_id" not in public_dict
+    assert "marker_run_id" not in public_dict
 
     # 2. Internal listing
     internal_jobs = _list_relay_jobs(str(ws), internal=True)
@@ -1313,6 +1315,7 @@ def test_relay_jobs_served_seat_and_fallback_from_never_in_public_dict(tmp_path)
     assert internal_dict["served_seat"] == "codex"
     assert internal_dict["fallback_from"] == "sonnet"
     assert internal_dict["build_run_id"] == "run-test-keys"
+    assert internal_dict["marker_run_id"] == "marker-run-keys"
 
 
 # ---------------------------------------------------------------------------
@@ -1692,3 +1695,26 @@ def test_group_rows_unattributed_grouped_by_marker_session_id():
     assert len(row_b.extra_builds) == 0
 
 
+
+
+def test_caller_run_label_on_a_job_never_joins_the_build():
+    # msg 1073: job.build_run_id is the caller's run label ("mcp55"), even when it happens to
+    # equal the marker's id; only marker_run_id (stamped by conductor 3.61.15) joins.
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    marker = {"run_id": "run-target", "waves_total": 1, "waves_done": 0}
+    jobs = [
+        {"job_id": "w_label_only", "worker": "codex", "build_run_id": "run-target",
+         "status": "running", "spawned_at": "2026-09-29T07:00:00Z"},
+        {"job_id": "w_stamped", "worker": "codex", "build_run_id": "mcp55", "marker_run_id": "run-target",
+         "status": "running", "spawned_at": "2026-09-29T07:00:00Z"},
+    ]
+    res = derive_row_status(marker, None, jobs, now=ref_time)
+    assert res.lanes["job_ids"] == ["w_stamped"]
+
+
+def test_marker_without_an_id_matches_no_jobs():
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    jobs = [{"job_id": "w_unstamped", "worker": "codex", "status": "running",
+             "spawned_at": "2026-09-29T07:00:00Z"}]
+    res = derive_row_status({"waves_total": 1, "waves_done": 0}, None, jobs, now=ref_time)
+    assert res.lanes["job_ids"] == []

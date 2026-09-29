@@ -172,6 +172,11 @@ def _list_relay_jobs(
                 job_row["build_run_id"] = (
                     str(record["build_run_id"]) if record.get("build_run_id") is not None else None
                 )
+                # The governing marker's id, stamped by conductor at spawn (3.61.15). build_run_id
+                # is the caller's run label, not the marker's, so the lane join uses this field.
+                job_row["marker_run_id"] = (
+                    str(record["marker_run_id"]) if record.get("marker_run_id") else None
+                )
                 try:
                     hb_epoch = float(record.get("heartbeat_epoch"))
                 except (TypeError, ValueError):
@@ -189,7 +194,7 @@ def _list_relay_jobs(
 
 
 def _list_relay_jobs_internal(session_cwd: str, *, now: datetime | None = None) -> list[dict]:
-    """Read recent relay worker jobs exposing internal fields (served_seat, fallback_from, build_run_id)."""
+    """Read recent relay worker jobs exposing internal fields (served_seat, fallback_from, build_run_id, marker_run_id)."""
     return _list_relay_jobs(session_cwd, now=now, internal=True)
 
 

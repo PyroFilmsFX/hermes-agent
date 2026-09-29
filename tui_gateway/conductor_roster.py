@@ -965,6 +965,24 @@ class DerivedStatus:
         }
 
 
+def jobs_for_marker(marker: dict[str, Any], jobs: list[Any]) -> list[dict[str, Any]]:
+    """Relay jobs that belong to this marker's build (§15 K3, corrected in msg 1073).
+
+    Conductor stamps ``marker_run_id`` (the governing marker's ``build_run_id`` or ``run_id``) on
+    each relay job at spawn. ``job.build_run_id`` is the caller's run label and never joins.
+    Records written before conductor 3.61.15 carry no ``marker_run_id`` and stay unmatched.
+    """
+    target = marker.get("build_run_id") or marker.get("run_id")
+    target_str = str(target) if target else ""
+    if not target_str:
+        return []
+    return [
+        job
+        for job in jobs
+        if isinstance(job, dict) and job.get("marker_run_id") and str(job["marker_run_id"]) == target_str
+    ]
+
+
 def derive_row_status(
     marker: dict[str, Any],
     status: StatusRead | None,
@@ -994,17 +1012,7 @@ def derive_row_status(
             is_stale = False
             has_status = True
 
-    # Filter jobs by build_run_id match (K3: job.build_run_id == marker.build_run_id or marker.run_id)
-    target_run_id = marker.get("build_run_id") or marker.get("run_id")
-    target_run_id_str = str(target_run_id) if target_run_id is not None and str(target_run_id) else None
-
-    matched_jobs: list[dict[str, Any]] = []
-    if target_run_id_str is not None:
-        for job in jobs:
-            if isinstance(job, dict):
-                job_brid = job.get("build_run_id")
-                if job_brid is not None and str(job_brid) == target_run_id_str:
-                    matched_jobs.append(job)
+    matched_jobs = jobs_for_marker(marker, jobs)
 
     # 1. Gates fallback from marker waits[]
     fallback_gates: list[dict[str, Any]] = []
