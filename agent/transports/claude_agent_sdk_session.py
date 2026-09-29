@@ -305,6 +305,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # stale id fails the session start (the caller retires + retries
         # fresh).
         self._resume_session_id = resume_session_id
+        self._planned_session_id = resume_session_id or str(uuid.uuid4())
         # Display-only partial-text consumer (W4 streaming). Deltas never
         # enter the projected transcript; the gateway's stream consumer
         # handles rate limiting and the already_sent final-send dedup.
@@ -443,6 +444,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 return None
             sid = self._session_id
         return sid if isinstance(sid, str) and sid and sid != "pending" else None
+
+    def planned_cli_session_id(self) -> str:
+        """Pre-assigned Claude session id (--session-id UUID, or the resumed id)."""
+        return self._planned_session_id
 
     def _admission_retired(self) -> bool:
         """Return whether this session must reject a new SDK turn."""
@@ -1656,6 +1661,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             fields["hooks"] = _compaction_hooks
         if self._resume_session_id:
             fields["resume"] = self._resume_session_id
+        else:
+            fields["session_id"] = self._planned_session_id
         # Auto-mode classifier rules via the CLI's flag-settings layer
         # (--settings), which the CLI keeps enabled even with
         # setting_sources=[] — so ONLY {"autoMode": ...} crosses and the
