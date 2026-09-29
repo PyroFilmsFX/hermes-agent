@@ -1,0 +1,368 @@
+{
+  "schema": "hermes-owner-grant-subject-vectors/v1",
+  "normalization": {
+    "applies_to": "conductor:answer:stage-variant question_sha256 (the :::stage-question directive)",
+    "body": "Every line between the opening ':::stage-question{...}' line and the closing ':::' line, exclusive of both fence lines: the question text followed by the numbered options, joined by LF.",
+    "steps": [
+      "Replace every CRLF (U+000D U+000A) with LF (U+000A). A lone CR is left as is.",
+      "Trim only U+0020 SPACE, U+0009 TAB and U+000A LF from both ends. No other character is trimmed (not U+000D, not U+00A0, not other Unicode spaces).",
+      "Apply no Unicode normalisation (no NFC/NFD/NFKC/NFKD).",
+      "question_sha256 = lowercase hex SHA-256 of the UTF-8 bytes of the result."
+    ],
+    "vectors": [
+      {
+        "name": "canonical body",
+        "raw": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "normalized": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "sha256": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa"
+      },
+      {
+        "name": "CRLF line endings and space/tab/LF padding normalise to the canonical body",
+        "raw": "\r\n \tWhich layout should stage 3 ship?\r\n1. Keep the current layout\r\n2. Ship the compact layout\r\n3. Defer the choice to the next wave\n\t \r\n",
+        "normalized": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "sha256": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa"
+      },
+      {
+        "name": "a leading U+00A0 NO-BREAK SPACE is not trimmed",
+        "raw": " Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "normalized": " Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "sha256": "7e7b61dd639d4c4eef6e65bdca3d84709f48f49321d1848f1949e188540915a2"
+      },
+      {
+        "name": "precomposed U+00E9 (NFC) is hashed as is",
+        "raw": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact café layout\n3. Defer the choice to the next wave",
+        "normalized": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact café layout\n3. Defer the choice to the next wave",
+        "sha256": "1b922e4f969537aa07e6f7c7489c218b199bbd8c0500ce64878c27eedeb3339f"
+      },
+      {
+        "name": "decomposed e + U+0301 (NFD) is hashed as is and differs from NFC",
+        "raw": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact café layout\n3. Defer the choice to the next wave",
+        "normalized": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact café layout\n3. Defer the choice to the next wave",
+        "sha256": "3da2f71c9e633439b89c8407bc441004bd82cbe7d802477d9b0c64074161306e"
+      }
+    ]
+  },
+  "grammar_note": "Each scope's 'grammar' is a pattern that must match the WHOLE subject string: Python re.fullmatch(pattern, subject); JavaScript new RegExp('^(?:' + pattern + ')$').test(subject) (no flags). A signed subject outside its scope's grammar makes the grant 'malformed'. The request subject is matched against the signed subject by exact string equality.",
+  "scopes": {
+    "conductor:answer:stage-variant": {
+      "class": "answer",
+      "label": "Answer a conductor stage question",
+      "subject_format": "<question_sha256>:<option_index>",
+      "grammar": "[0-9a-f]{64}:[1-9][0-9]*",
+      "question": {
+        "text": "Which layout should stage 3 ship?",
+        "options": [
+          "Keep the current layout",
+          "Ship the compact layout",
+          "Defer the choice to the next wave"
+        ],
+        "body": "Which layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave",
+        "question_sha256": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa",
+        "directive": ":::stage-question{question_sha256=\"06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa\" scope=\"conductor:answer:stage-variant\"}\nWhich layout should stage 3 ship?\n1. Keep the current layout\n2. Ship the compact layout\n3. Defer the choice to the next wave\n:::",
+        "option_2_subject": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2"
+      },
+      "example": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2",
+      "valid": [
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:1",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:10"
+      ],
+      "invalid": [
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:0",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:02",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:-1",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa",
+        "06101283618D4DBC962ECA91FD29273749B86463DB0DBCFFE9127597861CE6FA:2",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6f:2",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2:3",
+        "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2\n",
+        " 06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2"
+      ],
+      "match": [
+        {
+          "signed": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2",
+          "request": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "option_index",
+          "signed": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2",
+          "request": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:3"
+        },
+        {
+          "part": "question_sha256",
+          "signed": "06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2",
+          "request": "7e7b61dd639d4c4eef6e65bdca3d84709f48f49321d1848f1949e188540915a2:2"
+        }
+      ]
+    },
+    "conductor:continuity:session-relaunch": {
+      "class": "continuity",
+      "label": "Rebind a session's marker after a relaunch",
+      "subject_format": "<old_claude_sid>:<new_claude_sid>",
+      "grammar": "([A-Za-z0-9][A-Za-z0-9._-]{0,127}):(?!\\1$)[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+      "example": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+      "valid": [
+        "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+        "old-sid:new-sid",
+        "a:ab"
+      ],
+      "invalid": [
+        "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+        "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11",
+        "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:",
+        ":9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+        "a:b:c",
+        "old sid:new-sid",
+        "-old:new"
+      ],
+      "match": [
+        {
+          "signed": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+          "request": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "old_claude_sid",
+          "signed": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+          "request": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b12:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f"
+        },
+        {
+          "part": "new_claude_sid",
+          "signed": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e5f",
+          "request": "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11:9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e60"
+        }
+      ]
+    },
+    "conductor:defer:wave-or-unit": {
+      "class": "defer",
+      "label": "Defer a planned wave or unit",
+      "subject_format": "<build_id>:<wave_or_unit_id>",
+      "grammar": "[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+      "example": "b9:w3.u2",
+      "valid": [
+        "b9:w3.u2",
+        "b9:w3",
+        "build-2026-09-28_a:U-17"
+      ],
+      "invalid": [
+        "b9",
+        "b9:",
+        ":w3",
+        "b9:w3:u2",
+        "b9:w 3",
+        "b9:-w3",
+        "b9:w3\n"
+      ],
+      "match": [
+        {
+          "signed": "b9:w3.u2",
+          "request": "b9:w3.u2"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "build_id",
+          "signed": "b9:w3.u2",
+          "request": "b8:w3.u2"
+        },
+        {
+          "part": "wave_or_unit_id",
+          "signed": "b9:w3.u2",
+          "request": "b9:w3.u3"
+        }
+      ]
+    },
+    "conductor:gc:prune-lanes": {
+      "class": "gc",
+      "label": "Prune reviewed lanes",
+      "subject_format": "<dry_run_manifest_sha256>",
+      "grammar": "[0-9a-f]{64}",
+      "example": "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464",
+      "valid": [
+        "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464"
+      ],
+      "invalid": [
+        "C74694CE7EF7E4A3BF45819A11749EA2209C9ED02355255002E5171948300464",
+        "c74694ce7ef7e4a3bf45819a11749ea2209c9ed0235525500",
+        "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e51719483004640",
+        "sha256:c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464",
+        "g74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464"
+      ],
+      "match": [
+        {
+          "signed": "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464",
+          "request": "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "dry_run_manifest_sha256",
+          "signed": "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300464",
+          "request": "c74694ce7ef7e4a3bf45819a11749ea2209c9ed02355255002e5171948300465"
+        }
+      ]
+    },
+    "conductor:override:review-budget": {
+      "class": "override",
+      "label": "Override the review budget",
+      "subject_format": "<build_id>:<wave>:<fan|recheck>",
+      "grammar": "[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:(?:fan|recheck)",
+      "example": "b9:w3:fan",
+      "valid": [
+        "b9:w3:fan",
+        "b9:w3:recheck",
+        "b9:3:fan"
+      ],
+      "invalid": [
+        "b9:w3",
+        "b9:w3:",
+        "b9:w3:both",
+        "b9:w3:Fan",
+        "b9:w3:fan:extra",
+        ":w3:fan",
+        "b9::fan"
+      ],
+      "match": [
+        {
+          "signed": "b9:w3:fan",
+          "request": "b9:w3:fan"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "build_id",
+          "signed": "b9:w3:fan",
+          "request": "b8:w3:fan"
+        },
+        {
+          "part": "wave",
+          "signed": "b9:w3:fan",
+          "request": "b9:w4:fan"
+        },
+        {
+          "part": "fan_or_recheck",
+          "signed": "b9:w3:fan",
+          "request": "b9:w3:recheck"
+        }
+      ]
+    },
+    "conductor:policy:standing-approval": {
+      "class": "policy",
+      "label": "Enable a standing-approval rule",
+      "subject_format": "<rule_id>:<rule_sha256>",
+      "grammar": "[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[0-9a-f]{64}",
+      "example": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+      "valid": [
+        "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+        "r1:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b"
+      ],
+      "invalid": [
+        "docs-only-prs",
+        "docs-only-prs:",
+        ":656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+        "docs-only-prs:656634C68652628CA76BF574BAEF692019101371C5CFD983531AF9A6D9FA165B",
+        "docs-only-prs:656634c68652628ca76bf574baef69201910137",
+        "docs only:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b"
+      ],
+      "match": [
+        {
+          "signed": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+          "request": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "rule_id",
+          "signed": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+          "request": "all-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b"
+        },
+        {
+          "part": "rule_sha256",
+          "signed": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165b",
+          "request": "docs-only-prs:656634c68652628ca76bf574baef692019101371c5cfd983531af9a6d9fa165c"
+        }
+      ]
+    },
+    "conductor:policy:unsandboxed-write": {
+      "class": "policy",
+      "label": "Allow unsandboxed writes for a CLI",
+      "subject_format": "<cli>",
+      "grammar": "[a-z0-9][a-z0-9._-]{0,63}",
+      "example": "codex",
+      "valid": [
+        "codex",
+        "agy",
+        "gemini-cli"
+      ],
+      "invalid": [
+        "Codex",
+        "codex:agy",
+        "codex ",
+        "-codex",
+        "code x"
+      ],
+      "match": [
+        {
+          "signed": "codex",
+          "request": "codex"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "cli",
+          "signed": "codex",
+          "request": "agy"
+        }
+      ]
+    },
+    "conductor:spend:fly": {
+      "class": "spend",
+      "label": "Start paid Fly lanes",
+      "subject_format": "<fly_app>:<usd_cap>",
+      "grammar": "[a-z0-9][a-z0-9-]{0,62}:(?![0.]+$)(?:0|[1-9][0-9]{0,8})(?:\\.[0-9]{1,2})?",
+      "example": "hermes-lanes-ord:25",
+      "valid": [
+        "hermes-lanes-ord:25",
+        "hermes-lanes-ord:25.50",
+        "hermes-lanes-ord:0.5",
+        "hermes-lanes-ord:0.01"
+      ],
+      "invalid": [
+        "hermes-lanes-ord:0",
+        "hermes-lanes-ord:0.00",
+        "hermes-lanes-ord:-5",
+        "hermes-lanes-ord:025",
+        "hermes-lanes-ord:25.",
+        "hermes-lanes-ord:.5",
+        "hermes-lanes-ord:25.505",
+        "hermes-lanes-ord:1e3",
+        "hermes-lanes-ord:$25",
+        "hermes-lanes-ord",
+        "Hermes-Lanes:25",
+        "hermes_lanes:25"
+      ],
+      "match": [
+        {
+          "signed": "hermes-lanes-ord:25",
+          "request": "hermes-lanes-ord:25"
+        }
+      ],
+      "mismatch": [
+        {
+          "part": "fly_app",
+          "signed": "hermes-lanes-ord:25",
+          "request": "hermes-lanes-iad:25"
+        },
+        {
+          "part": "usd_cap",
+          "signed": "hermes-lanes-ord:25",
+          "request": "hermes-lanes-ord:25.00"
+        }
+      ]
+    }
+  }
+}

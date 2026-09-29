@@ -24,6 +24,8 @@ import {
   parseScope,
   SCOPE_CLASS_POLICY,
   SCOPE_LABELS,
+  SUBJECT_GRAMMAR,
+  subjectMatchesGrammar,
   type SignedOutcome,
   type SignPorts,
   type SignRequest,
@@ -378,5 +380,108 @@ describe('T-6: a conductor scope binds every target to a live Claude CLI session
 
     expect(out.cancelled).toBe(false)
     expect(payloadOf((out as SignedOutcome).grants[0].envelope).targets).toEqual([{ session_id: 'w-2', claude_session_id: null }])
+  })
+})
+
+describe('b9: new scope classes and the per-scope subject grammar (tests/fixtures/owner_grant_subject_vectors.json)', () => {
+  const vectors = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../../../tests/fixtures/owner_grant_subject_vectors.json'), 'utf8')
+  )
+
+  const scopes = Object.entries(vectors.scopes) as Array<[string, any]>
+
+  test('every class of the brief table: single use, subject required, TTLs and Touch ID', () => {
+    const table: Record<string, [string, number, number]> = {
+      answer: ['never', 3_600_000, 14_400_000],
+      defer: ['never', 3_600_000, 14_400_000],
+      override: ['never', 3_600_000, 14_400_000],
+      gc: ['never', 3_600_000, 3_600_000],
+      policy: ['when_available', 900_000, 3_600_000],
+      spend: ['when_available', 900_000, 3_600_000],
+      continuity: ['never', 900_000, 900_000]
+    }
+
+    for (const [cls, [touch, def, max]] of Object.entries(table)) {
+      expect(SCOPE_CLASS_POLICY[cls as keyof typeof SCOPE_CLASS_POLICY], cls).toEqual({
+        default_ttl_ms: def,
+        max_ttl_ms: max,
+        single_use: true,
+        subject_required: true,
+        touch_id: touch
+      })
+    }
+  })
+
+  test('the grammar table is pattern-for-pattern the shared vectors, labels included', () => {
+    expect(Object.keys(SUBJECT_GRAMMAR).sort()).toEqual(scopes.map(([scope]) => scope).sort())
+
+    for (const [scope, v] of scopes) {
+      expect(SUBJECT_GRAMMAR[scope], scope).toBe(v.grammar)
+      expect(SCOPE_LABELS[scope], scope).toBe(v.label)
+      expect(parseScope(scope)).toMatchObject({ scopeClass: v.class, catalogued: true, singleUse: true, subjectRequired: true })
+    }
+  })
+
+  test('valid subjects pass and invalid ones fail, in the vectors', () => {
+    for (const [scope, v] of scopes) {
+      for (const good of [v.example, ...v.valid]) {
+        expect(subjectMatchesGrammar(scope, good), `${scope} ${good}`).toBe(true)
+      }
+
+      for (const bad of v.invalid) {
+        expect(subjectMatchesGrammar(scope, bad), `${scope} ${JSON.stringify(bad)}`).toBe(false)
+      }
+    }
+
+    // A scope with no grammar (prod) keeps accepting any non-empty subject.
+    expect(subjectMatchesGrammar('conductor:prod:target', 'deploy:42')).toBe(true)
+  })
+
+  test('plan(): an out-of-grammar subject is bad_subject before any dialog; an in-grammar one signs it exactly', async () => {
+    const requestable = scopes.filter(([, v]) => v.class !== 'continuity')
+
+    for (const [scope, v] of requestable) {
+      const s = readyStore()
+      const bad = ports(s)
+      await expect(
+        confirmAndSignGrants(request({ scope: [scope], subject: { [scope]: v.invalid[0] } }), bad),
+        scope
+      ).rejects.toMatchObject({ code: 'bad_subject' })
+      expect(bad.confirm).not.toHaveBeenCalled()
+
+      await expect(confirmAndSignGrants(request({ scope: [scope] }), ports(s)), scope).rejects.toMatchObject({
+        code: 'subject_required'
+      })
+
+      const good = (await confirmAndSignGrants(request({ scope: [scope], subject: { [scope]: v.example } }), ports(s))) as SignedOutcome
+      expect(good.cancelled).toBe(false)
+      const p = payloadOf(good.grants[0].envelope)
+      expect(p.subject).toEqual({ [scope]: v.example })
+      expect(p.single_use).toEqual([scope])
+      expect(p.expires_at - p.issued_at).toBe(SCOPE_CLASS_POLICY[v.class as keyof typeof SCOPE_CLASS_POLICY].default_ttl_ms)
+    }
+  })
+
+  test('TTL clamps to the class max; policy and spend need Touch ID when it can prompt', async () => {
+    const s = readyStore()
+    const gc = (await confirmAndSignGrants(
+      request({ scope: ['conductor:gc:prune-lanes'], subject: { 'conductor:gc:prune-lanes': 'c'.repeat(64) }, ttlMs: 86_400_000 }),
+      ports(s)
+    )) as SignedOutcome
+    const gp = payloadOf(gc.grants[0].envelope)
+    expect(gp.expires_at - gp.issued_at).toBe(3_600_000)
+
+    for (const [scope, subject, reason] of [
+      ['conductor:spend:fly', 'hermes-lanes-ord:25', 'approve paid spending as you'],
+      ['conductor:policy:unsandboxed-write', 'codex', 'change a conductor policy as you']
+    ]) {
+      const prompt = vi.fn(async () => {})
+      const out = (await confirmAndSignGrants(
+        request({ scope: [scope], subject: { [scope]: subject } }),
+        ports(s, { touchId: { canPrompt: () => true, prompt } })
+      )) as SignedOutcome
+      expect(prompt).toHaveBeenCalledWith(reason)
+      expect(payloadOf(out.grants[0].envelope).confirm).toBe('touch_id')
+    }
   })
 })

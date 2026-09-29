@@ -36,8 +36,9 @@ export interface SendToOrigin {
   messageKey: string
 }
 
-const SendToOriginContext = createContext<null | SendToOrigin>(null)
-const SendToSourceContext = createContext<string>('')
+// Shared with the b9 `:::stage-question` block (stage-question-block.tsx): same origin, same raw text.
+export const SendToOriginContext = createContext<null | SendToOrigin>(null)
+export const SendToSourceContext = createContext<string>('')
 
 export const SendToOriginProvider = SendToOriginContext.Provider
 
@@ -193,7 +194,6 @@ function SendToAction({
             disabled={reason !== null}
             onClick={onClick}
             size="sm"
-            title={reason ?? undefined}
             type="button"
             variant="outline"
           >

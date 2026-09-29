@@ -58,6 +58,14 @@ def test_scope_class_ttl_caps_and_defaults_match_decision_d8():
         "gate": 72 * 60 * 60 * 1000,
         "marker": 4 * 60 * 60 * 1000,
         "prod": 60 * 60 * 1000,
+        # b9 owner-grant scopes
+        "answer": 4 * 60 * 60 * 1000,
+        "defer": 4 * 60 * 60 * 1000,
+        "override": 4 * 60 * 60 * 1000,
+        "gc": 60 * 60 * 1000,
+        "policy": 60 * 60 * 1000,
+        "spend": 60 * 60 * 1000,
+        "continuity": 15 * 60 * 1000,
     }
     assert scopes.DEFAULT_TTL_MS_BY_CLASS == {
         "quote-only": 7 * 24 * 60 * 60 * 1000,
@@ -65,6 +73,13 @@ def test_scope_class_ttl_caps_and_defaults_match_decision_d8():
         "gate": 12 * 60 * 60 * 1000,
         "marker": 60 * 60 * 1000,
         "prod": 15 * 60 * 1000,
+        "answer": 60 * 60 * 1000,
+        "defer": 60 * 60 * 1000,
+        "override": 60 * 60 * 1000,
+        "gc": 60 * 60 * 1000,
+        "policy": 15 * 60 * 1000,
+        "spend": 15 * 60 * 1000,
+        "continuity": 15 * 60 * 1000,
     }
     assert scopes.max_ttl_ms_for_scopes([]) == scopes.MAX_TTL_MS_BY_CLASS["quote-only"]
     assert (
@@ -102,6 +117,13 @@ def test_catalog_is_schema_valid_sorted_and_uses_the_shared_grammar():
         "gate",
         "marker",
         "prod",
+        "answer",
+        "defer",
+        "override",
+        "gc",
+        "policy",
+        "spend",
+        "continuity",
     }
     for scope_class, policy in catalog["classes"].items():
         assert set(policy) == {
@@ -120,6 +142,8 @@ def test_catalog_is_schema_valid_sorted_and_uses_the_shared_grammar():
         if scope_class == "prod":
             assert policy["single_use"] and policy["subject_required"]
             assert policy["touch_id"] == "when_available"
+        elif scope_class in scopes.SUBJECT_BOUND_CLASSES:
+            assert policy["single_use"] and policy["subject_required"]
         else:
             assert not policy["subject_required"]
 
@@ -129,7 +153,8 @@ def test_catalog_is_schema_valid_sorted_and_uses_the_shared_grammar():
     for entry in entries:
         assert set(entry) == {"scope", "label"}
         assert re.fullmatch(
-            r"conductor:(allowlist|gate|marker|prod):[a-z0-9][a-z0-9-]{0,62}",
+            r"conductor:(allowlist|gate|marker|prod|answer|defer|override|gc|policy|spend"
+            r"|continuity):[a-z0-9][a-z0-9-]{0,62}",
             entry["scope"],
         )
         parsed = scopes.parse_scope(entry["scope"])

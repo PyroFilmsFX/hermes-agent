@@ -17,6 +17,7 @@ import { TranscriptVideo } from '@/components/chat/transcript-video'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
 import { SendToBlock, SendToSourceProvider } from '@/components/owner-forward/send-to-block'
+import { StageQuestionBlock } from '@/components/owner-forward/stage-question-block'
 import { useMediaImage } from '@/hooks/use-media-image'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { renderMediaTags } from '@/lib/chat-messages/parts'
@@ -38,6 +39,11 @@ import {
 } from '@/lib/media'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
 import { sendToFences, sendToIndexFromLanguage, sendToPlaceholders } from '@/lib/owner-forward/send-to-directive'
+import {
+  stageQuestionFences,
+  stageQuestionIndexFromLanguage,
+  stageQuestionPlaceholders
+} from '@/lib/owner-forward/stage-question-directive'
 import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { sessionRefFromMarkdownHref } from '@/lib/session-refs'
 import { isDirectiveInProgress } from '@/lib/transcript-directives'
@@ -108,9 +114,14 @@ function useCodePlugin(): CodePlugin | null {
 // `:::send-to` blocks (D33) are lifted out before the prose rewrites can touch
 // them and come back as fenced placeholders the SyntaxHighlighter override
 // claims; the block itself reads the raw text (SendToSourceProvider).
+// `:::stage-question` blocks (b9 §5) take the same route, lifted AFTER the send-to
+// pass. Both fence languages carry a per-load nonce, so only these passes can
+// produce a fence the override claims.
 function preprocessWithTailRepair(text: string): string {
   try {
-    return tailBoundedRemend(sendToFences(preprocessMarkdown(sendToPlaceholders(text))))
+    return tailBoundedRemend(
+      stageQuestionFences(sendToFences(preprocessMarkdown(stageQuestionPlaceholders(sendToPlaceholders(text)))))
+    )
   } catch {
     return text
   }
@@ -726,6 +737,19 @@ function MarkdownTextSurface({
             return (
               <SendToBlock
                 index={sendToIndex}
+                inert={scratchpad}
+                previewOnly={previewOnly}
+                streaming={isStreaming}
+              />
+            )
+          }
+
+          const stageQuestionIndex = stageQuestionIndexFromLanguage(props.language)
+
+          if (stageQuestionIndex !== null) {
+            return (
+              <StageQuestionBlock
+                index={stageQuestionIndex}
                 inert={scratchpad}
                 previewOnly={previewOnly}
                 streaming={isStreaming}

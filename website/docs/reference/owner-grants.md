@@ -34,7 +34,7 @@ directory pinned in the trusted anchor, not under `HERMES_HOME`.
 ## Scope grammar and policy
 
 Scopes have the exact form `conductor:<class>:<name>`. Class is one of `allowlist`, `gate`,
-`marker`, or `prod`; name starts with a lowercase letter or digit and continues with up to
+`marker`, `prod`, `answer`, `defer`, `override`, `gc`, `policy`, `spend`, or `continuity`; name starts with a lowercase letter or digit and continues with up to
 62 lowercase letters, digits, or hyphens. Matching is exact. There are no wildcards. A
 grammar-valid scope may be used before it has a catalog label; new dialog labels belong in
 `hermes_owner_grant/scopes.json`.
@@ -46,10 +46,84 @@ grammar-valid scope may be used before it has a catalog label; new dialog labels
 | gate | 12 hours | 72 hours | Reusable; no subject required |
 | marker | 1 hour | 4 hours | Single-use |
 | prod | 15 minutes | 1 hour | Single-use, subject required, Touch ID when available |
+| answer | 1 hour | 4 hours | Single-use, subject required |
+| defer | 1 hour | 4 hours | Single-use, subject required |
+| override | 1 hour | 4 hours | Single-use, subject required |
+| gc | 1 hour | 1 hour | Single-use, subject required |
+| policy | 15 minutes | 1 hour | Single-use, subject required, Touch ID when available |
+| spend | 15 minutes | 1 hour | Single-use, subject required, Touch ID when available |
+| continuity | 15 minutes | 15 minutes | Single-use, subject required |
 
 TTL values are maxima, not promises that a grant will remain valid. A verifier request may
 ask for several scopes; the strictest class limit applies. Prod hooks should bind the subject
-to the action digest. Marker and prod checks use `--consume`.
+to the action digest. Marker and prod checks use `--consume`, and so do checks for every scope
+in the `answer`, `defer`, `override`, `gc`, `policy`, `spend` and `continuity` classes. The
+scope loader refuses a catalog in which any of those seven classes is reusable or
+subject-free.
+
+### Subject grammar
+
+The hook passes the subject with `--subject`, and the verifier compares it with the signed
+`payload.subject[scope]` by exact string equality. Missing is `subject_required`; any
+difference is `subject_mismatch`. Each catalogued scope below also fixes the grammar of its
+signed subject: a grant whose signed subject falls outside that grammar is `malformed` and
+authorizes nothing, even for a request that repeats the same string.
+
+In the table, `<id>` is an ASCII letter or digit followed by up to 127 letters, digits, `.`,
+`_` or `-` (never a colon), and `<sha256>` is 64 lowercase hex characters.
+
+| Scope | Label | Subject |
+| --- | --- | --- |
+| `conductor:answer:stage-variant` | Answer a conductor stage question | `<question_sha256>:<option_index>`: a `<sha256>` and a 1-based option number with no leading zeros |
+| `conductor:defer:wave-or-unit` | Defer a planned wave or unit | `<build_id>:<wave_or_unit_id>`, two `<id>`s |
+| `conductor:policy:standing-approval` | Enable a standing-approval rule | `<rule_id>:<rule_sha256>`, an `<id>` and a `<sha256>` |
+| `conductor:policy:unsandboxed-write` | Allow unsandboxed writes for a CLI | `<cli>`: a lowercase letter or digit, then up to 63 lowercase letters, digits, `.`, `_` or `-` |
+| `conductor:override:review-budget` | Override the review budget | `<build_id>:<wave>:<fan\|recheck>`, two `<id>`s and the literal `fan` or `recheck` |
+| `conductor:gc:prune-lanes` | Prune reviewed lanes | `<dry_run_manifest_sha256>`, a `<sha256>` |
+| `conductor:spend:fly` | Start paid Fly lanes | `<fly_app>:<usd_cap>`: a Fly app name (lowercase letter or digit, then up to 62 lowercase letters, digits or `-`) and a positive decimal with no leading zeros and at most two decimals, such as `25` or `0.5` |
+| `conductor:continuity:session-relaunch` | Rebind a session's marker after a relaunch | `<old_claude_sid>:<new_claude_sid>`, two different `<id>`s |
+
+The exact patterns live in `SUBJECT_GRAMMAR` in `hermes_owner_grant/scopes.py`. The shared
+vectors in `tests/fixtures/owner_grant_subject_vectors.json` pin the Python verifier and the
+desktop signer to the same patterns. Scopes of the existing classes (`prod` included) keep
+their earlier rule: any non-empty subject, matched exactly.
+
+Only the desktop main process issues `conductor:continuity:session-relaunch`, and only when it
+relaunches a session's backend and the persisted Claude SDK session id for that Hermes session
+is the old id. No IPC channel, gateway method or tool can request one.
+
+### Stage-question answers
+
+A conductor stage question is written as a directive in a session reply:
+
+```text
+:::stage-question{question_sha256="06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa" scope="conductor:answer:stage-variant"}
+Which layout should stage 3 ship?
+1. Keep the current layout
+2. Ship the compact layout
+3. Defer the choice to the next wave
+:::
+```
+
+The body is every line between the opening line and the closing `:::` line: the question text
+and then the numbered options. `question_sha256` is the SHA-256 of that body, computed as:
+
+- replace every CRLF with LF (a lone CR stays);
+- trim only U+0020 space, U+0009 tab and U+000A line feed from both ends;
+- apply no Unicode normalisation;
+- hash the UTF-8 bytes and write the digest as lowercase hex.
+
+The desktop app shows the question with one button per option. It recomputes the hash and
+disables the buttons when it differs from `question_sha256`. A click signs through the same
+confirm-and-sign path as other owner forwards, and the owner still confirms in the system
+dialog. The resulting grant carries `conductor:answer:stage-variant` with the subject
+`<question_sha256>:<option_index>`, where the index is 1-based. For the example above, choosing
+option 2 signs `06101283618d4dbc962eca91fd29273749b86463db0dbcffe9127597861ce6fa:2`.
+
+The renderer marks each directive it parses with a nonce that is new on every load of the
+app. Authors never write the nonce. A fence that imitates the renderer's internal form without
+the current nonce shows as plain text and makes no button. The same rule applies to
+`:::send-to` blocks. Surfaces without the desktop renderer show the directive as raw text.
 
 ## Verifier CLI
 
@@ -147,6 +221,17 @@ Conductor's consumer changes are:
 8. Add new scope names and labels to `hermes_owner_grant/scopes.json`.
 9. Consider root-owning conductor gate hooks through Claude Code managed settings; this hardening
    remains optional and unverified.
+
+## Reinstall after an upgrade
+
+The installed verifier is a root-owned copy of `hermes_owner_grant`, including the scope
+catalog, so new scopes and subject grammar reach hooks only after it is reinstalled. After
+upgrading to a build that changes the verifier package, open Settings → Gateways → **Let
+conductor verify owner decisions** (the owner-grant row) and click **Rotate key**. macOS asks for
+an admin password once; the app re-pushes the verifier package whenever the installed package
+hash differs from the bundled one, not only when the launcher changed. Until then the old
+verifier refuses the new scopes: it does not know their classes, so a request naming one is a
+usage error (exit 2).
 
 ## Trust limits
 
