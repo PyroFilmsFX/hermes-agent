@@ -160,6 +160,8 @@ def test_lane_auto_archive_hourly_min_interval(tmp_path, monkeypatch):
 
     now = 1000000.0
     monkeypatch.setattr(time, "time", lambda: now)
+    # An eligible lane session: the throttle stamp is recorded only by a sweep that archived something.
+    _ended(db, "lane-to-archive", cwd="/tmp/lane-throttle")
 
     # First run executes
     res1 = db.maybe_auto_archive(
@@ -230,3 +232,16 @@ def test_sweep_rechecks_eligibility_when_claiming_each_row(tmp_path, monkeypatch
     assert db.archive_lane_sessions(6) == 0
     assert not _archived(db, "pinned-meanwhile")
     assert not _archived(db, "resumed-meanwhile")
+
+
+def test_empty_lane_sweep_is_read_only(tmp_path):
+    """Nothing to archive → no throttle write, so GET-only session-list polls that trigger the sweep stay
+    read-only (the WAL-preserving poll contract in test_web_server)."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("not-a-lane", "cli", cwd="/Users/me/code/hermes")
+    result = db.maybe_auto_archive(auto_archive=False, auto_archive_lanes=True, lane_archive_hours=6)
+    assert result["lane_archived"] == 0
+    assert db.get_meta("last_auto_archive_lanes") in (None, "")
+    _ended(db, "real-lane", cwd="/tmp/lane-x")
+    assert db.maybe_auto_archive(auto_archive=False, auto_archive_lanes=True, lane_archive_hours=6)["lane_archived"] == 1
+    assert db.get_meta("last_auto_archive_lanes")
