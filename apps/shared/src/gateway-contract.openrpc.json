@@ -1699,6 +1699,42 @@
       }
     },
     {
+      "name": "mcp.prompts.get",
+      "summary": "Fetch and render an MCP prompt template with filled arguments.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpPromptsGetParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpPromptsGetResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.prompts.list",
+      "summary": "List prompt templates advertised by connected MCP servers.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpPromptsListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpPromptsListResult"
+        }
+      }
+    },
+    {
       "name": "mcp.servers.add",
       "summary": "Add a server to the profile's config from a catalog preset and/or an explicit config.",
       "params": [
@@ -17811,6 +17847,236 @@
           "description"
         ],
         "title": "McpProbeTool",
+        "type": "object"
+      },
+      "McpPromptArgument": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "McpPromptArgument",
+        "type": "object"
+      },
+      "McpPromptMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "McpPromptMessage",
+        "type": "object"
+      },
+      "McpPromptRow": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptArgument"
+            },
+            "title": "Arguments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "server",
+          "name",
+          "command"
+        ],
+        "title": "McpPromptRow",
+        "type": "object"
+      },
+      "McpPromptsGetParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Arguments"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "server",
+          "name"
+        ],
+        "title": "McpPromptsGetParams",
+        "type": "object"
+      },
+      "McpPromptsGetResult": {
+        "additionalProperties": false,
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          }
+        },
+        "title": "McpPromptsGetResult",
+        "type": "object"
+      },
+      "McpPromptsListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Server"
+          }
+        },
+        "title": "McpPromptsListParams",
+        "type": "object"
+      },
+      "McpPromptsListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "prompts": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptRow"
+            },
+            "title": "Prompts",
+            "type": "array"
+          }
+        },
+        "title": "McpPromptsListResult",
         "type": "object"
       },
       "McpRuntimeStatus": {

@@ -4201,6 +4201,42 @@ export interface McpServersRemoveResult {
   ok: boolean
   removed: boolean
 }
+export interface McpPromptsListParams {
+  profile?: string | null
+  session_id?: string | null
+  server?: string | null
+}
+export interface McpPromptsListResult {
+  prompts?: McpPromptRow[]
+}
+export interface McpPromptRow {
+  server: string
+  name: string
+  command: string
+  description?: string
+  arguments?: McpPromptArgument[]
+}
+export interface McpPromptArgument {
+  name: string
+  description?: string | null
+  required?: boolean
+}
+export interface McpPromptsGetParams {
+  profile?: string | null
+  server: string
+  name: string
+  arguments?: Record<string, unknown> | null
+  session_id?: string | null
+}
+export interface McpPromptsGetResult {
+  messages?: McpPromptMessage[]
+  text?: string
+  description?: string | null
+}
+export interface McpPromptMessage {
+  role: string
+  content: string
+}
 /** With ``client_redirect_uri`` the CLIENT hosts the loopback and relays the code via ``mcp.servers.oauth.callback``. */
 export interface McpOauthStartParams {
   profile?: string | null
@@ -5142,6 +5178,10 @@ export interface RpcMethods {
   'llm.oneshot': { params: LlmOneshotParams; result: LlmOneshotResult }
   /** Curated MCP presets with per-profile installed/enabled state and the env keys each needs. */
   'mcp.catalog': { params: ProfileParams; result: McpCatalogResult }
+  /** Fetch and render an MCP prompt template with filled arguments. */
+  'mcp.prompts.get': { params: McpPromptsGetParams; result: McpPromptsGetResult }
+  /** List prompt templates advertised by connected MCP servers. */
+  'mcp.prompts.list': { params: McpPromptsListParams; result: McpPromptsListResult }
   /** Add a server to the profile's config from a catalog preset and/or an explicit config. */
   'mcp.servers.add': { params: McpServersAddParams; result: McpServersAddResult }
   /** Configured MCP servers for the (scoped) profile, secrets redacted to env-key names. */
@@ -5553,6 +5593,8 @@ export const RPC_METHODS = [
   'learning.frames',
   'llm.oneshot',
   'mcp.catalog',
+  'mcp.prompts.get',
+  'mcp.prompts.list',
   'mcp.servers.add',
   'mcp.servers.list',
   'mcp.servers.oauth.callback',

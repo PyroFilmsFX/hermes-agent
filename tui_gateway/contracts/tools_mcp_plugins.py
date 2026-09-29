@@ -487,6 +487,58 @@ method("mcp.servers.remove", params=McpServerNameParams, result=McpServersRemove
        doc="Drop a server from the profile's config.yaml.")
 
 
+# ── MCP prompts ───────────────────────────────────────────────────────────────────────────────
+
+
+class McpPromptArgument(Result):
+    name: str
+    description: str | None = None
+    required: bool = False
+
+
+class McpPromptRow(Result):
+    server: str
+    name: str
+    command: str
+    description: str = ""
+    arguments: list[McpPromptArgument] = Field(default_factory=list)
+
+
+class McpPromptsListParams(ProfileParams):
+    session_id: str | None = None
+    server: str | None = None
+
+
+class McpPromptsListResult(Result):
+    prompts: list[McpPromptRow] = Field(default_factory=list)
+
+
+method("mcp.prompts.list", params=McpPromptsListParams, result=McpPromptsListResult,
+       doc="List prompt templates advertised by connected MCP servers.")
+
+
+class McpPromptsGetParams(ProfileParams):
+    server: str
+    name: str
+    arguments: dict[str, JsonValue] | None = None
+    session_id: str | None = None
+
+
+class McpPromptMessage(Result):
+    role: str
+    content: str
+
+
+class McpPromptsGetResult(Result):
+    messages: list[McpPromptMessage] = Field(default_factory=list)
+    text: str = ""
+    description: str | None = None
+
+
+method("mcp.prompts.get", params=McpPromptsGetParams, result=McpPromptsGetResult,
+       doc="Fetch and render an MCP prompt template with filled arguments.")
+
+
 class McpOauthStartParams(McpServerNameParams):
     """With ``client_redirect_uri`` the CLIENT hosts the loopback and relays the code via
     ``mcp.servers.oauth.callback``."""

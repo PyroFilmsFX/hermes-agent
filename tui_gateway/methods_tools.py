@@ -473,6 +473,28 @@ def _catalog_plugin_commands(cat: _Catalog) -> None:
         cat.commands[key] = {"argument_mode": mode, "desktop": None}
 
 
+def _catalog_mcp_prompts(cat: _Catalog) -> None:
+    try:
+        from tools.mcp_tool_handlers import list_mcp_prompts
+        prompts = list_mcp_prompts()
+    except Exception:
+        return
+    if not prompts:
+        return
+    cat.cat_map.setdefault("Prompts", [])
+    for p in prompts:
+        server = p["server"]
+        pname = p["name"]
+        key = f"/{server}:{pname}"
+        desc = p.get("description") or f"MCP prompt from {server}"
+        args = p.get("arguments") or []
+        if args:
+            arg_names = " ".join(f"{a['name']}=" for a in args)
+            desc = f"{desc} [{arg_names}]"
+        cat.add(key, desc, "Prompts")
+        cat.commands[key] = {"argument_mode": "mixed", "desktop": None}
+
+
 def _catalog_skills(cat: _Catalog, skills: dict[str, dict]) -> str:
     """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (every consumer ranks by them).
     Returns the one-line notice for skills whose name is a built-in command (no ``/<name>`` entry;
@@ -512,6 +534,10 @@ def _(rid, params: dict) -> dict:
         _catalog_plugin_commands(cat)
     except Exception as e:
         warning = warning or f"plugin command discovery unavailable: {e}"
+    try:
+        _catalog_mcp_prompts(cat)
+    except Exception as e:
+        warning = warning or f"mcp prompts discovery unavailable: {e}"
     skills: dict[str, dict] = {}
     try:
         with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params)):
@@ -962,18 +988,43 @@ _SLASH_BUILTINS = {
     "loop": _cmd_loop, "undo": _cmd_undo, "snapshot": _cmd_snapshot, "snap": _cmd_snapshot,
     "compress": _cmd_compress, "compact": _cmd_compress}
 
+
+def _dispatch_mcp_prompt(rid, params, session, name, arg):
+    if ":" not in name:
+        return None
+    server_name, prompt_name = name.split(":", 1)
+    try:
+        from tools.mcp_tool_handlers import get_mcp_prompt, parse_prompt_args, list_mcp_prompts
+        prompts = list_mcp_prompts(server_name)
+        target = next((p for p in prompts if p["name"].lower() == prompt_name.lower()), None)
+        if target is None:
+            return None
+        declared_args = target.get("arguments", [])
+        parsed_args = parse_prompt_args(arg, declared_args)
+        rendered = get_mcp_prompt(server_name, target["name"], parsed_args)
+        text = rendered.get("text", "")
+        if not text and rendered.get("messages"):
+            text = "\n\n".join(m.get("content", "") for m in rendered["messages"] if m.get("content"))
+        return _ok(rid, {"type": "prefill", "message": text, "notice": f"Prompt /{server_name}:{target['name']} loaded"})
+    except ValueError as e:
+        return _err(rid, 4018, str(e))
+    except Exception as e:
+        logger.error("MCP prompt dispatch failed: %s", e, exc_info=True)
+        return _err(rid, 4018, f"Failed to get MCP prompt: {e}")
+
+
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
     session = _sessions.get(params.get("session_id", ""))
 
-    # Stage order is load-bearing: quick > plugin > bundle > skill > built-in > SDK-lane plugin skill
+    # Stage order is load-bearing: quick > plugin > bundle > mcp_prompt > skill > built-in > SDK-lane plugin skill
     # (last: a Claude Code plugin skill only fills a name Hermes itself does not own). One home binding
     # around the whole loop: the routing guard (``_is_profile_skill_command``) and the stages
     # must resolve against the SAME profile or a secondary-only skill is routed here and then
     # not found (#110695).
-    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_skill, _SLASH_BUILTINS.get(name),
-              _dispatch_sdk_slash)
+    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_mcp_prompt, _dispatch_skill,
+              _SLASH_BUILTINS.get(name), _dispatch_sdk_slash)
     with _session_home_scope(session):
         for stage in filter(None, stages):
             res = stage(rid, params, session, name, arg)
@@ -1003,6 +1054,9 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"output": live_output or "(no output)"})
     if base in _WORKER_BLOCKED_COMMANDS and _is_snapshot_restore(arg):
         return _err(rid, 4018, "snapshot restore mutates live config/state; use command.dispatch for /snapshot restore")
+    # MCP prompt commands (/<server>:<prompt>) route straight to command.dispatch
+    if ":" in base:
+        return _methods["command.dispatch"](rid, {"name": base, "arg": arg, "session_id": sid})
     # Pending-input built-ins route straight to command.dispatch (some clients fail the
     # error-then-retry fallback); bundles go the same way under their resolved key.
     with _session_home_scope(session):  # a secondary-only bundle must route too (#110695)
@@ -1374,6 +1428,57 @@ def _(rid, params: dict) -> dict:
             "enabled": bool(mcp_catalog.is_enabled(entry.name)), "requires": requires,
             "transport": str(getattr(transport, "kind", "") or transport or "stdio")})
     return _ok(rid, {"servers": out})
+
+
+@_scoped_rpc("mcp.prompts.list")
+def _(rid, params: dict) -> dict:
+    """List prompt templates advertised by connected MCP servers."""
+    try:
+        from tools.mcp_tool_handlers import list_mcp_prompts
+        prompts = list_mcp_prompts(params.get("server"))
+        rows = [
+            {
+                "server": p["server"],
+                "name": p["name"],
+                "command": p.get("command") or f"/{p['server']}:{p['name']}",
+                "description": p.get("description", ""),
+                "arguments": [
+                    {
+                        "name": a["name"],
+                        "description": a.get("description"),
+                        "required": bool(a.get("required", False)),
+                    }
+                    for a in p.get("arguments", [])
+                ],
+            }
+            for p in prompts
+        ]
+        return _ok(rid, {"prompts": rows})
+    except Exception as exc:
+        return _err(rid, 5024, f"mcp.prompts.list failed: {exc}")
+
+
+@_scoped_rpc("mcp.prompts.get", required=(("server", _stripped), ("name", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Fetch and render an MCP prompt template with filled arguments."""
+    server = params.get("server", "").strip()
+    name = params.get("name", "").strip()
+    args = params.get("arguments") or {}
+    try:
+        from tools.mcp_tool_handlers import get_mcp_prompt
+        res = get_mcp_prompt(server, name, args)
+        return _ok(rid, {
+            "messages": [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in res.get("messages", [])
+            ],
+            "text": res.get("text", ""),
+            "description": res.get("description"),
+        })
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, f"mcp.prompts.get failed: {exc}")
 
 
 @_mcp_rpc("list", required=())

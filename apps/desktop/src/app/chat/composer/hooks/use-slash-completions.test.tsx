@@ -174,4 +174,49 @@ describe('useSlashCompletions', () => {
     expect(groupOf('/compress')).toBe('Commands')
     expect(groupOf('/docx')).toBe('Skills')
   })
+
+  it('lists MCP prompts in Prompts group with their declared args in completions', async () => {
+    const request = vi.fn().mockImplementation((method: string) =>
+      Promise.resolve(
+        method === 'commands.catalog'
+          ? CATALOG
+          : {
+              items: [
+                {
+                  text: '/mcp2026:greeting',
+                  display: '/mcp2026:greeting',
+                  kind: 'prompt',
+                  meta: 'A greeting prompt with a name argument. (usage: name=<name>)'
+                }
+              ]
+            }
+      )
+    )
+
+    const api = harness({ request } as unknown as HermesGateway)
+    const items = await completions(api, 'mcp')
+
+    expect(commandsOf(items)).toEqual(['/mcp2026:greeting'])
+    const promptItem = items[0]
+    expect((promptItem.metadata as any)?.group).toBe('Prompts')
+    expect((promptItem.metadata as any)?.meta).toContain('A greeting prompt with a name argument')
+  })
+
+  it('provides declared argument completions for MCP prompt in Options group', async () => {
+    const request = vi.fn().mockImplementation((method: string, params: any) =>
+      Promise.resolve({
+        items: [
+          { text: 'name=', display: 'name=', meta: 'User name (required)' }
+        ],
+        replace_from: '/mcp2026:greeting '.length
+      })
+    )
+
+    const api = harness({ request } as unknown as HermesGateway)
+    const items = await completions(api, 'mcp2026:greeting ')
+
+    expect(items).toHaveLength(1)
+    expect((items[0].metadata as any)?.command).toBe('/mcp2026:greeting name=')
+    expect((items[0].metadata as any)?.group).toBe('Options')
+  })
 })

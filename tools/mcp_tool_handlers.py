@@ -773,6 +773,236 @@ def _render_get_prompt(result, server_name: str) -> dict:
     return {"messages": messages, **_pick(result, ("description", "description", True))}
 
 
+def parse_prompt_args(arg_str: Optional[str], declared_args: Optional[List[dict]] = None) -> Dict[str, Any]:
+    """Parse prompt arguments from a command string.
+
+    Supports:
+    - key=value or key="quoted value"
+    - --key value or --key=value
+    - positional arguments mapped to declared arguments in order
+    """
+    if not arg_str or not arg_str.strip():
+        return {}
+    import shlex
+    try:
+        tokens = shlex.split(arg_str)
+    except Exception:
+        tokens = arg_str.split()
+
+    result: Dict[str, Any] = {}
+    positional: List[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            clean = tok[2:]
+            if "=" in clean:
+                k, v = clean.split("=", 1)
+                result[k] = v
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                result[clean] = tokens[i + 1]
+                i += 1
+            else:
+                result[clean] = True
+        elif "=" in tok and not tok.startswith("="):
+            k, v = tok.split("=", 1)
+            result[k] = v
+        else:
+            positional.append(tok)
+        i += 1
+
+    if declared_args and positional:
+        assigned = set(result.keys())
+        pos_idx = 0
+        for decl in declared_args:
+            name = decl.get("name")
+            if name and name not in assigned:
+                result[name] = positional[pos_idx]
+                pos_idx += 1
+                if pos_idx >= len(positional):
+                    break
+
+    return result
+
+
+def _run_mcp_coroutine(coro_fn):
+    """Run an async coroutine on the MCP loop, or current/new loop if MCP loop is down."""
+    loop = _loop._running_loop()
+    if loop is not None:
+        return _loop._run_on_mcp_loop(coro_fn, timeout=60)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if current_loop is not None and current_loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro_fn())).result(timeout=60)
+    return asyncio.run(coro_fn())
+
+
+async def async_list_mcp_prompts(server_target: Any = None) -> List[dict]:
+    """List prompt templates from connected MCP servers.
+
+    ``server_target`` may be:
+    - None: query all connected MCP servers that declare the prompts capability
+    - str (server_name): query that specific registered server
+    - an MCP ClientSession, client object, or ServerParameters directly (useful in stdio/fixture tests)
+    """
+    from tools import mcp_tool_discovery as _discovery
+
+    results: List[dict] = []
+
+    # Direct server parameters passed (e.g. StdioServerParameters in test fixture)
+    if server_target is not None and not isinstance(server_target, str):
+        if hasattr(server_target, "command") and hasattr(server_target, "args"):
+            from mcp import Client
+            try:
+                async with Client(server_target) as client:
+                    return await async_list_mcp_prompts(client.session)
+            except BaseException as exc:
+                cur = exc
+                while getattr(cur, "exceptions", None):
+                    cur = cur.exceptions[0]
+                raise cur
+
+        session = getattr(server_target, "session", server_target)
+        lock = getattr(server_target, "_rpc_lock", None)
+        server_name = getattr(server_target, "name", "mcp")
+        if lock:
+            async with lock:
+                res = await session.list_prompts()
+        else:
+            res = await session.list_prompts()
+        prompts = getattr(res, "prompts", [])
+        rendered = _render_prompt_list(prompts, server_name)
+        for p in rendered.get("prompts", []):
+            results.append({
+                "server": server_name,
+                "name": p["name"],
+                "command": f"/{server_name}:{p['name']}",
+                "description": p.get("description", ""),
+                "arguments": p.get("arguments", []),
+            })
+        return results
+
+    if isinstance(server_target, str):
+        server = _discovery._get_connected_server_for_call(server_target)
+        if not server or not server.session:
+            raise ValueError(f"MCP server '{server_target}' is not connected")
+        servers_to_query = [(server_target, server)]
+    else:
+        with _core._lock:
+            servers_to_query = [
+                (key, s) for key, s in _core._servers.items()
+                if s is not None and s.session is not None
+            ]
+
+    for s_name, server in servers_to_query:
+        init_res = getattr(server, "initialize_result", None)
+        if init_res:
+            caps = getattr(init_res, "capabilities", None)
+            if caps and getattr(caps, "prompts", None) is None:
+                continue
+
+        try:
+            async with server._rpc_lock:
+                res = await _core._paginate_full_list(server.session.list_prompts, "prompts", s_name)
+            prompts = res if isinstance(res, list) else getattr(res, "prompts", [])
+            rendered = _render_prompt_list(prompts, s_name)
+            for p in rendered.get("prompts", []):
+                results.append({
+                    "server": s_name,
+                    "name": p["name"],
+                    "command": f"/{s_name}:{p['name']}",
+                    "description": p.get("description", ""),
+                    "arguments": p.get("arguments", []),
+                })
+        except Exception as exc:
+            logger.debug("Failed to list prompts for MCP server '%s': %s", s_name, exc)
+
+    return results
+
+
+def list_mcp_prompts(server_target: Any = None) -> List[dict]:
+    """Sync wrapper for async_list_mcp_prompts."""
+    return _run_mcp_coroutine(lambda: async_list_mcp_prompts(server_target))
+
+
+async def async_get_mcp_prompt(
+    server_target: Any,
+    name: str,
+    arguments: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Fetch and render an MCP prompt by name from an MCP server or session.
+
+    ``server_target`` may be:
+    - str (server_name): query that specific registered server
+    - an MCP ClientSession, client object, or ServerParameters directly
+    """
+    from tools import mcp_tool_discovery as _discovery
+    import mcp.shared.exceptions
+
+    arguments = dict(arguments or {})
+
+    # Direct server parameters passed (e.g. in test fixture)
+    if server_target is not None and not isinstance(server_target, str):
+        if hasattr(server_target, "command") and hasattr(server_target, "args"):
+            from mcp import Client
+            try:
+                async with Client(server_target) as client:
+                    return await async_get_mcp_prompt(client.session, name, arguments)
+            except BaseException as exc:
+                cur = exc
+                while getattr(cur, "exceptions", None):
+                    cur = cur.exceptions[0]
+                raise cur
+
+    if isinstance(server_target, str):
+        server = _discovery._get_connected_server_for_call(server_target)
+        if not server or not server.session:
+            raise ValueError(f"MCP server '{server_target}' is not connected")
+        session = server.session
+        lock = server._rpc_lock
+        server_name = server_target
+    else:
+        session = getattr(server_target, "session", server_target)
+        lock = getattr(server_target, "_rpc_lock", None)
+        server_name = getattr(server_target, "name", "mcp")
+
+    # Validate required arguments against declared prompt arguments
+    prompts_list = await async_list_mcp_prompts(session)
+    target_prompt = next((p for p in prompts_list if p["name"] == name), None)
+    if target_prompt and target_prompt.get("arguments"):
+        for arg_def in target_prompt["arguments"]:
+            arg_name = arg_def.get("name")
+            if arg_def.get("required") and (arg_name not in arguments or arguments[arg_name] is None or arguments[arg_name] == ""):
+                raise ValueError(f"Missing required argument: '{arg_name}'")
+
+    try:
+        if lock:
+            async with lock:
+                res = await session.get_prompt(name, arguments=arguments)
+        else:
+            res = await session.get_prompt(name, arguments=arguments)
+    except mcp.shared.exceptions.MCPError as exc:
+        raise ValueError(str(exc)) from exc
+
+    rendered = _render_get_prompt(res, server_name)
+    messages = rendered.get("messages", [])
+    text = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
+    return {
+        "messages": messages,
+        "text": text,
+        "description": rendered.get("description"),
+    }
+
+
+def get_mcp_prompt(server_target: Any, name: str, arguments: Optional[Dict[str, Any]] = None) -> dict:
+    """Sync wrapper for async_get_mcp_prompt."""
+    return _run_mcp_coroutine(lambda: async_get_mcp_prompt(server_target, name, arguments))
+
+
 _make_list_resources_handler = _make_utility_handler(
     "resources/list", "list_resources",
     lambda session, args, sn: _core._paginate_full_list(session.list_resources, "resources", sn), _render_resource_list)

@@ -1365,6 +1365,47 @@ describe('usePromptActions slash.exec dispatch payloads', () => {
     expect(renderedText).not.toContain('/goal: no output')
   })
 
+  it('inserts rendered MCP prompt messages into the composer draft as prefill without auto-sending', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'slash.exec') {
+        return {
+          type: 'prefill',
+          notice: '⊙ Prompt /mcp2026:greeting loaded',
+          message: 'Hello, World!'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    setComposerDraft('')
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/mcp2026:greeting name=World')
+
+    expect(calls.map(c => c.method)).toEqual(['slash.exec'])
+    expect(calls[0]?.params).toEqual({
+      command: 'mcp2026:greeting name=World',
+      session_id: RUNTIME_SESSION_ID
+    })
+    // Verified: prompt was rendered and inserted into composer draft
+    expect($composerDraft.get()).toBe('Hello, World!')
+    // Verified: prompt was NOT auto-sent (prompt.submit was never called)
+    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+  })
+
   it('clears the goal card when /goal clear returns a typed exec dispatch (#80348)', async () => {
     // The gateway can answer `/goal clear` with a TYPED `{ type: "exec" }`
     // dispatch instead of the plain `{ output }` shape. The typed branch used

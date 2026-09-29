@@ -531,13 +531,21 @@ export function isDesktopSlashExtensionCommand(command: string): boolean {
  * dumped into Skills just because this table has no row yet. Older backends
  * omit `kind` — then the table is the fallback.
  */
-export function slashCompletionGroup(command: string, kind?: string | null): 'Commands' | 'Skills' {
+export function slashCompletionGroup(command: string, kind?: string | null): 'Commands' | 'Skills' | 'Prompts' {
+  if (kind === 'prompt') {
+    return 'Prompts'
+  }
+
   if (kind === 'skill') {
     return 'Skills'
   }
 
   if (kind === 'command') {
     return 'Commands'
+  }
+
+  if (command.includes(':')) {
+    return 'Prompts'
   }
 
   return isDesktopSlashExtensionCommand(command) ? 'Skills' : 'Commands'
