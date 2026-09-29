@@ -181,6 +181,8 @@ def test_only_whitelisted_fields_leave(auth_client):
         "launch_seq",
         "hermes_lineage",
         "recorded_at",
+        "sid_origin",
+        "resumed_unverified",
     }
     assert set(item.keys()) == whitelisted
     assert "lineage" not in item
@@ -190,3 +192,22 @@ def test_only_whitelisted_fields_leave(auth_client):
     assert item["launch_seq"] == 1
     assert item["hermes_lineage"] == ["root-h"]
     assert isinstance(item["recorded_at"], (int, float))
+
+
+def test_feed_carries_resume_provenance_and_fails_closed(auth_client):
+    """b10 review (codex #1): main must not attest a resumed id Hermes could not authenticate."""
+    record_launch(hermes_session_id="h-f", claude_session_id="c-fresh", sid_origin="fresh")
+    record_launch(hermes_session_id="h-r", claude_session_id="c-resumed", sid_origin="resumed")
+    record_launch(
+        hermes_session_id="h-a", claude_session_id="c-authed", sid_origin="resumed",
+        resume_authenticated=True,
+    )
+    record_launch(hermes_session_id="h-u", claude_session_id="c-unknown")
+
+    resp = auth_client.get("/api/session-launches", params={"since": 0})
+    assert resp.status_code == 200
+    by_id = {x["claude_session_id"]: x for x in resp.json()["launches"]}
+    assert (by_id["c-fresh"]["sid_origin"], by_id["c-fresh"]["resumed_unverified"]) == ("fresh", False)
+    assert (by_id["c-resumed"]["sid_origin"], by_id["c-resumed"]["resumed_unverified"]) == ("resumed", True)
+    assert (by_id["c-authed"]["sid_origin"], by_id["c-authed"]["resumed_unverified"]) == ("resumed", False)
+    assert (by_id["c-unknown"]["sid_origin"], by_id["c-unknown"]["resumed_unverified"]) == ("unknown", True)

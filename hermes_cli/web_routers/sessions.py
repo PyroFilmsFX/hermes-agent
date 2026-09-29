@@ -550,6 +550,10 @@ async def get_session_launches(
             "launch_seq": int(e.get("launch_seq") or 0),
             "hermes_lineage": list(e.get("hermes_lineage") or []),
             "recorded_at": e.get("recorded_at"),
+            # "fresh" (Hermes-minted uuid) | "resumed" | "unknown". Main must not attest a
+            # launch unless resumed_unverified is exactly false (missing = unverified).
+            "sid_origin": str(e.get("sid_origin") or "unknown"),
+            "resumed_unverified": e.get("resumed_unverified") is not False,
         }
         for e in entries
     ]

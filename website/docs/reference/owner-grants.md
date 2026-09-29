@@ -211,10 +211,21 @@ artifact is a scope class in `scopes.json`, and neither writes to the single-use
      - Maximum TTL is capped at 30 minutes (`ATTEST_MAX_TTL_MS = 1800000` ms in
        `hermes_owner_grant/attest.py:35` and `apps/desktop/electron/session-binding-issuer.ts:31`).
        The verifier rejects any file where `expires_at - issued_at > 30 min` (`ttl_exceeded`).
+     - Attestations verify only under the anchor's **active** `kid`; unknown, retired and revoked
+       kids are refused (unlike grants, there is no pre-retirement grace: main re-signs live
+       attestations at rotation).
      - Electron main's issuer long-polls the backend launch table (`GET /api/session-launches?since=<seq>&wait=2`
        in `hermes_cli/web_routers/sessions.py:539-556`). Before spawning a Claude CLI instance, the
        backend records the planned Claude session ID and waits up to 1.5 seconds for main to write
-       the signed attestation file. Main refreshes live attestations at TTL/2 (every 15 minutes,
+       the signed attestation file (the wait runs on a daemon thread, refuses a planned sid that is
+       not a single safe path component, and never follows a symlinked `session-attest` or sid
+       dir). Each feed entry carries `sid_origin` (`fresh` = Hermes-minted uuid, `resumed`, or
+       `unknown`) and `resumed_unverified`. A resumed sid comes from agent-writable state, so it
+       is `resumed_unverified: false` only when an attestation for that sid, naming this Hermes
+       session or an ancestor in the backend's in-memory lineage, verifies under the active kid
+       (expiry ignored; `hermes_owner_grant.attest.verify_launch_provenance`). Main must not
+       attest an entry unless `resumed_unverified` is exactly `false`.
+       Main refreshes live attestations at TTL/2 (every 15 minutes,
        `ATTEST_REFRESH_INTERVAL_MS = 900000` ms) while the session remains active in the launch feed
        (`session-binding-issuer.ts`).
    - **Payload schema**:
@@ -285,10 +296,11 @@ session's lineage: an ordered list of ancestor session IDs `[root_session_id, ..
     prefix or alter process environment variables.
   - `HERMES_SESSION_ATTEST_DIR`: Exported as `<grants_dir>/session-attest` as a diagnostic hint
     (`claude_agent_sdk_session_config.py:185-190`).
-  - `TB_STATE_ROOT`: Set to `binding.project_root` for bound sessions only after verifying main's
-    signed binding record using `hermes_owner_grant.attest.verify_binding_file`
-    (`claude_agent_sdk_session_config.py:209-266`). Falls back to `~/.hermes/sdk-state/<sha256(cwd)[:16]>`
-    when unbound.
+  - `TB_STATE_ROOT`: Always `~/.hermes/sdk-state/<sha256(realpath(key))[:16]>`, never a path
+    inside the project (state there would be agent-writable and committable). The key is
+    `binding.project_root` for bound sessions, only after verifying main's signed binding record
+    with `hermes_owner_grant.attest.verify_binding_file`, and the launch cwd otherwise. An
+    operator-configured `TB_STATE_ROOT` still wins.
   - Conductor must never trust environment variables to resolve session identity or build ownership.
     Conductor reads `claude_session_id` from trusted hook stdin, looks up the attestation under that
     directory, and extracts `hermes_session_id` from the signed payload. Env `HERMES_SESSION_ID` must

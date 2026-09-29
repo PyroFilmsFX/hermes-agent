@@ -419,3 +419,256 @@ class TestAttestationBarrier:
         finally:
             session.close()
 
+
+# --- b10 review fixes: resume provenance (codex #1) and a barrier that can't hang (grok #4) ---
+
+_UUID_A = "5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11"
+
+
+class _Signer:
+    """A real Ed25519 owner key plus an anchor pinning a tmp grants dir (tests only)."""
+
+    def __init__(self, grants_dir, status="active"):
+        import os as _os
+
+        ed = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
+        from cryptography.hazmat.primitives import serialization
+        from hermes_owner_grant import anchor as anchor_mod, envelope as env_mod
+
+        self.key = ed.Ed25519PrivateKey.generate()
+        pub = self.key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        self.kid = env_mod.kid_for_pub(pub)
+        self.grants_dir = grants_dir
+        self.anchor = anchor_mod.Anchor(
+            owner_uid=_os.getuid(),
+            grants_dir=str(grants_dir),
+            keys=(anchor_mod.AnchorKey(
+                kid=self.kid, alg="Ed25519", pub=pub, status=status, not_before=0,
+                retired_at=(1 if status == "retired" else None),
+            ),),
+            verifier_sha256=None,
+            sha256="0" * 64,
+        )
+
+    def write(self, claude_sid, hermes_sid, *, issued_at=None, lineage=None, bad_sig=False):
+        import os as _os
+        from hermes_owner_grant import attest as attest_mod, envelope as env_mod
+
+        issued = int(time.time() * 1000) - 3 * 3600 * 1000 if issued_at is None else issued_at
+        payload = {
+            "v": 1, "aud": [attest_mod.AUDIENCE], "owner_uid": _os.getuid(),
+            "profile": "default", "backend": "spawn-1",
+            "hermes_session_id": hermes_sid, "claude_session_id": claude_sid,
+            "launch_seq": 1, "project_root": "/abs/project", "repo_common_root": None,
+            "binding_nonce": "nonce-1", "binding_seq": 1, "repo_remote": None,
+            "issued_at": issued, "expires_at": issued + 15 * 60 * 1000,
+            "hermes_lineage": list(lineage or []),
+        }
+        env = attest_mod.seal(env_mod.encode_payload(payload), self.kid, self.key.sign)
+        if bad_sig:
+            env = attest_mod.AttestationEnvelope(kid=env.kid, payload=env.payload, sig=bytes(64))
+        d = self.grants_dir / "session-attest" / claude_sid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ("%d-1.json" % issued)).write_text(env.to_json(), encoding="utf-8")
+
+
+class TestLaunchSidOrigin:
+    def test_record_launch_flags_origin_and_fails_closed_by_default(self):
+        fresh = record_launch(hermes_session_id="h", claude_session_id="c-fresh", sid_origin="fresh")
+        assert fresh["sid_origin"] == "fresh" and fresh["resumed_unverified"] is False
+        resumed = record_launch(hermes_session_id="h", claude_session_id="c-res", sid_origin="resumed")
+        assert resumed["sid_origin"] == "resumed" and resumed["resumed_unverified"] is True
+        authed = record_launch(
+            hermes_session_id="h", claude_session_id="c-auth", sid_origin="resumed",
+            resume_authenticated=True,
+        )
+        assert authed["resumed_unverified"] is False
+        legacy = record_launch(hermes_session_id="h", claude_session_id="c-legacy")
+        assert legacy["sid_origin"] == "unknown" and legacy["resumed_unverified"] is True
+        # /compress lineage updates keep the provenance flags.
+        updated = update_lineage("c-res", hermes_session_id="h2", lineage=["h"])
+        assert updated["resumed_unverified"] is True and updated["sid_origin"] == "resumed"
+
+
+class TestAuthenticatedResume:
+    def test_no_prior_attestation_is_unverified(self, tmp_path):
+        from agent.claude_sdk_launch_table import authenticated_resume
+
+        signer = _Signer(tmp_path / "grants")
+        assert authenticated_resume(_UUID_A, "h-victim", [], anchor=signer.anchor) is False
+
+    def test_signed_prior_attestation_for_same_session_or_ancestor_authenticates(self, tmp_path):
+        from agent.claude_sdk_launch_table import authenticated_resume
+
+        signer = _Signer(tmp_path / "grants")
+        signer.write(_UUID_A, "h-parent")  # issued 3 h ago: long expired, still provenance
+        assert authenticated_resume(_UUID_A, "h-parent", [], anchor=signer.anchor) is True
+        assert authenticated_resume(_UUID_A, "h-child", ["h-parent"], anchor=signer.anchor) is True
+        # The same signed sid does not authenticate for a different Hermes session.
+        assert authenticated_resume(_UUID_A, "h-attacker", ["h-other"], anchor=signer.anchor) is False
+
+    def test_forged_or_retired_attestation_is_unverified(self, tmp_path):
+        from agent.claude_sdk_launch_table import authenticated_resume
+
+        signer = _Signer(tmp_path / "grants")
+        signer.write(_UUID_A, "h-victim", bad_sig=True)
+        assert authenticated_resume(_UUID_A, "h-victim", [], anchor=signer.anchor) is False
+
+        retired = _Signer(tmp_path / "grants2", status="retired")
+        retired.write(_UUID_A, "h-victim")
+        assert authenticated_resume(_UUID_A, "h-victim", [], anchor=retired.anchor) is False
+
+    def test_unsafe_sid_is_unverified(self, tmp_path):
+        from agent.claude_sdk_launch_table import authenticated_resume
+
+        signer = _Signer(tmp_path / "grants")
+        for sid in ("/etc/passwd", "..", "a/b", ""):
+            assert authenticated_resume(sid, "h", [], anchor=signer.anchor) is False
+
+    def test_resumed_session_launch_is_recorded_unverified_without_attestation(self, monkeypatch, tmp_path):
+        import hermes_owner_grant.anchor as anchor_mod
+
+        signer = _Signer(tmp_path / "grants")
+        monkeypatch.setattr(anchor_mod, "load_trusted_anchor", lambda *a, **k: signer.anchor)
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-victim",
+            resume_session_id=_UUID_A,
+        )
+        try:
+            session.ensure_started()
+            _, snap = snapshot(0)
+            entry = next(e for e in snap if e["claude_session_id"] == _UUID_A)
+            assert entry["sid_origin"] == "resumed"
+            assert entry["resumed_unverified"] is True
+        finally:
+            session.close()
+
+    def test_resumed_session_launch_is_authenticated_by_prior_attestation(self, monkeypatch, tmp_path):
+        import hermes_owner_grant.anchor as anchor_mod
+
+        signer = _Signer(tmp_path / "grants")
+        signer.write(_UUID_A, "h-owner")
+        monkeypatch.setattr(anchor_mod, "load_trusted_anchor", lambda *a, **k: signer.anchor)
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-owner",
+            resume_session_id=_UUID_A,
+        )
+        try:
+            session.ensure_started()
+            _, snap = snapshot(0)
+            entry = next(e for e in snap if e["claude_session_id"] == _UUID_A)
+            assert entry["sid_origin"] == "resumed"
+            assert entry["resumed_unverified"] is False
+        finally:
+            session.close()
+
+    def test_fresh_session_launch_is_recorded_fresh(self):
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")], hermes_session_id="h-fresh"
+        )
+        planned = session.planned_cli_session_id()
+        try:
+            session.ensure_started()
+            _, snap = snapshot(0)
+            entry = next(e for e in snap if e["claude_session_id"] == planned)
+            assert entry["sid_origin"] == "fresh"
+            assert entry["resumed_unverified"] is False
+        finally:
+            session.close()
+
+
+class TestAttestationBarrierHardening:
+    _setup_clock = TestAttestationBarrier._setup_clock
+
+    def _anchor(self, monkeypatch, grants_dir):
+        import hermes_owner_grant.anchor as anchor_mod
+
+        monkeypatch.setattr(
+            anchor_mod,
+            "load_trusted_anchor",
+            lambda *a, **k: types.SimpleNamespace(grants_dir=str(grants_dir)),
+        )
+
+    @pytest.mark.parametrize("bad_sid", ["/abs/elsewhere", "..", "a/b", "x\\y", "x\x00y"])
+    def test_barrier_refuses_unsafe_planned_sid_without_probing(self, monkeypatch, tmp_path, bad_sid):
+        from agent import claude_sdk_launch_table as lt
+
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        record_consumer_seen(cur_time[0])
+        grants_dir = tmp_path / "grants"
+        (grants_dir / "session-attest").mkdir(parents=True)
+        self._anchor(monkeypatch, grants_dir)
+        probes = []
+        monkeypatch.setattr(lt, "attestation_files_present", lambda *a: probes.append(a) or True)
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], hermes_session_id="h-bad")
+        session._planned_session_id = bad_sid
+        try:
+            start = cur_time[0]
+            session._wait_for_attestation_barrier()
+            assert cur_time[0] - start < 0.1
+            assert sleep_calls == []
+            assert probes == []
+        finally:
+            session.close()
+
+    @pytest.mark.parametrize("level", ["sid", "parent"])
+    def test_barrier_does_not_follow_a_symlinked_attest_dir(self, monkeypatch, tmp_path, level):
+        import os as _os
+
+        cur_time, sleep_calls = self._setup_clock(monkeypatch)
+        record_consumer_seen(cur_time[0])
+        grants_dir = tmp_path / "grants"
+        grants_dir.mkdir()
+        self._anchor(monkeypatch, grants_dir)
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], hermes_session_id="h-link")
+        planned = session.planned_cli_session_id()
+        outside = tmp_path / "outside"
+        if level == "sid":
+            (outside).mkdir()
+            (outside / "1-x.json").write_text("{}")
+            (grants_dir / "session-attest").mkdir()
+            _os.symlink(str(outside), str(grants_dir / "session-attest" / planned))
+        else:
+            (outside / planned).mkdir(parents=True)
+            (outside / planned / "1-x.json").write_text("{}")
+            _os.symlink(str(outside), str(grants_dir / "session-attest"))
+        try:
+            start = cur_time[0]
+            session._wait_for_attestation_barrier()
+            # Refused as absent: the barrier runs to its deadline instead of proceeding early.
+            assert 1.45 <= cur_time[0] - start <= 1.55
+        finally:
+            session.close()
+
+    def test_barrier_returns_by_the_deadline_when_the_probe_blocks(self, monkeypatch, tmp_path):
+        import os as _os
+
+        record_consumer_seen()
+        grants_dir = tmp_path / "grants"
+        self._anchor(monkeypatch, grants_dir)
+        session, _holder = _make_session(script=[ResultMessage(result="ok")], hermes_session_id="h-hang")
+        (grants_dir / "session-attest" / session.planned_cli_session_id()).mkdir(parents=True)
+        release = threading.Event()
+        entered = threading.Event()
+        real_listdir = _os.listdir
+
+        def blocking_listdir(path="."):
+            if isinstance(path, int):  # the barrier probe lists its O_NOFOLLOW dir fd
+                entered.set()
+                release.wait(30)
+            return real_listdir(path)
+
+        monkeypatch.setattr(_os, "listdir", blocking_listdir)
+        try:
+            start = time.monotonic()
+            session._wait_for_attestation_barrier()
+            elapsed = time.monotonic() - start
+            assert entered.is_set(), "the probe must have reached the blocking listdir"
+            assert 1.4 <= elapsed <= 1.65
+        finally:
+            release.set()
+            session.close()

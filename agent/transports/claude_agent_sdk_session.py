@@ -590,8 +590,20 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
     def generation(self) -> str:
         return getattr(self, "_instance_generation", "")
 
+    # Upper bound on the pre-spawn wait for main's attestation file (#49 / b10 H3).
+    _ATTEST_BARRIER_S = 1.5
+    # Upper bound on the resumed-id provenance check before recording the launch.
+    _RESUME_PROVENANCE_TIMEOUT_S = 1.0
+
     def _wait_for_attestation_barrier(self) -> None:
-        """Poll up to 1.5 s for signed attestation before spawning the CLI (#49 / b10 H3)."""
+        """Wait up to 1.5 s for main's attestation before spawning the CLI (#49 / b10 H3).
+
+        The attestation directory is agent-writable, so the probe (a) refuses a planned sid
+        that is not a single safe path component, (b) opens ``session-attest`` and the sid dir
+        with ``O_NOFOLLOW`` (a symlink never counts as present), and (c) runs on a daemon
+        thread: a probe blocked on FUSE/NFS/a fifo is abandoned at the deadline and the CLI is
+        spawned anyway. The barrier is a sync aid, never a gate.
+        """
         try:
             from agent.claude_sdk_launch_table import has_recent_consumer
 
@@ -611,26 +623,65 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             return
 
         try:
+            from agent.claude_sdk_launch_table import attestation_files_present
+            from hermes_owner_grant.attest import is_safe_session_component
+
             planned_sid = self.planned_cli_session_id()
-            if not planned_sid:
+            if not is_safe_session_component(planned_sid):
+                logger.warning("attestation barrier skipped: planned Claude sid is not a safe id")
                 return
-            attest_dir = os.path.join(str(grants_dir), "session-attest", str(planned_sid))
-            deadline = time.monotonic() + 1.5
-            while True:
-                if self._startup_is_retired():
-                    break
-                try:
-                    if os.path.isdir(attest_dir) and len(os.listdir(attest_dir)) > 0:
+            grants_root = str(grants_dir)
+            found = threading.Event()
+            stop = threading.Event()
+
+            def _probe() -> None:
+                while not stop.is_set():
+                    try:
+                        if attestation_files_present(grants_root, planned_sid):
+                            found.set()
+                            return
+                    except Exception:
+                        pass
+                    stop.wait(0.05)
+
+            threading.Thread(target=_probe, name="sdk-attest-barrier", daemon=True).start()
+            deadline = time.monotonic() + self._ATTEST_BARRIER_S
+            first = True
+            try:
+                while True:
+                    if self._startup_is_retired():
                         break
-                except Exception:
-                    pass
-                now = time.monotonic()
-                if now >= deadline:
-                    break
-                step = min(0.05, max(0.0, deadline - now))
-                time.sleep(step)
+                    # Real-time wait on the probe; the monotonic deadline below bounds the loop.
+                    if found.wait(0.05 if first else 0.02):
+                        break
+                    first = False
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    step = min(0.05, max(0.0, deadline - now))
+                    time.sleep(step)
+            finally:
+                stop.set()
         except Exception:
             pass
+
+    def _resume_is_authenticated(self, profile: str) -> bool:
+        """Bounded provenance check for a resumed Claude sid (b10 review finding 1)."""
+        try:
+            from agent.claude_sdk_launch_table import authenticated_resume, run_bounded
+
+            claude_sid = str(self._resume_session_id or "")
+            hermes_sid = str(self._hermes_session_id or "")
+            lineage = list(self._hermes_lineage or [])
+            finished, value = run_bounded(
+                lambda: authenticated_resume(claude_sid, hermes_sid, lineage, profile=profile),
+                self._RESUME_PROVENANCE_TIMEOUT_S,
+                name="sdk-resume-provenance",
+            )
+            return bool(finished and value is True)
+        except Exception:
+            logger.debug("resume provenance check failed", exc_info=True)
+            return False
 
     def ensure_started(self) -> Optional[str]:
         """Start the loop thread, build the SDK client, connect. Idempotent —
@@ -719,13 +770,24 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             except Exception:
                 pass
             try:
-                from agent.claude_sdk_launch_table import record_launch
+                from agent.claude_sdk_launch_table import (
+                    SID_ORIGIN_FRESH,
+                    SID_ORIGIN_RESUMED,
+                    record_launch,
+                )
 
+                # A resumed id was read from agent-writable session state: main may attest it
+                # only when it already signed that id for this session (or a lineage ancestor).
+                resumed = bool(self._resume_session_id)
                 record_launch(
                     hermes_session_id=str(self._hermes_session_id or ""),
                     claude_session_id=self.planned_cli_session_id(),
                     profile=profile,
                     lineage=self._hermes_lineage,
+                    sid_origin=SID_ORIGIN_RESUMED if resumed else SID_ORIGIN_FRESH,
+                    resume_authenticated=(
+                        self._resume_is_authenticated(profile) if resumed else False
+                    ),
                 )
             except Exception:
                 logger.debug("recording launch table entry failed", exc_info=True)

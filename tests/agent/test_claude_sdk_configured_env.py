@@ -352,7 +352,17 @@ def test_tb_state_root_set_from_verified_bound_binding(env_config, monkeypatch, 
         hermes_session_id=fixture["session"],
         profile=fixture["profile"],
     )
-    assert env["TB_STATE_ROOT"] == fixture["project_root"]
+    # b10 review (grok #2): the verified binding picks WHICH path is hashed; the state root
+    # itself stays under HERMES_HOME, never the (agent-writable, committable) project.
+    import hashlib
+    import os
+    from hermes_constants import get_hermes_home
+
+    expected = get_hermes_home() / "sdk-state" / hashlib.sha256(
+        os.fsencode(Path(fixture["project_root"]).resolve())
+    ).hexdigest()[:16]
+    assert env["TB_STATE_ROOT"] == str(expected)
+    assert env["TB_STATE_ROOT"] != fixture["project_root"]
 
 
 def test_tb_state_root_not_set_on_tamper_unbound_missing(env_config, monkeypatch, tmp_path):
@@ -478,3 +488,67 @@ def test_operator_configured_tb_state_root_wins(env_config, monkeypatch, tmp_pat
         profile=fixture["profile"],
     )
     assert env["TB_STATE_ROOT"] == "/custom/operator/tb_state_root"
+
+
+def test_bound_tb_state_root_is_hashed_under_hermes_home_never_the_project(
+    env_config, monkeypatch, tmp_path
+):
+    """b10 review (grok #2): conductor state must not land inside the bound git worktree."""
+    import hashlib
+    import json
+    import os
+    from hermes_owner_grant import anchor as anchor_mod, envelope as env_mod
+
+    fixture_path = Path(__file__).resolve().parent.parent / "hermes_owner_grant" / "fixtures" / "attest_v1_fixture.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    profile_home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+    grants_dir = tmp_path / "grants"
+    key = fixture["anchor_key"]
+    anchor = anchor_mod.Anchor(
+        owner_uid=fixture["owner_uid"],
+        grants_dir=str(grants_dir),
+        keys=(anchor_mod.AnchorKey(
+            kid=key["kid"], alg=key["alg"], pub=env_mod.b64url_decode(key["pub"]),
+            status=key["status"], not_before=key["not_before"], retired_at=key["retired_at"],
+        ),),
+        verifier_sha256=None,
+        sha256="0" * 64,
+    )
+    monkeypatch.setattr("hermes_owner_grant.anchor.load_trusted_anchor", lambda **kwargs: anchor)
+    binding_dir = grants_dir / "session-bindings" / fixture["profile"]
+    binding_dir.mkdir(parents=True, exist_ok=True)
+    (binding_dir / f"{fixture['session']}.json").write_text(
+        json.dumps(fixture["binding_envelope"]), encoding="utf-8"
+    )
+    env_config()
+
+    roots = []
+    for sub in ("repo-a", "repo-b/nested"):
+        cwd = tmp_path / sub
+        cwd.mkdir(parents=True)
+        env = M._sdk_env_overrides(
+            sdk_cwd=str(cwd), hermes_session_id=fixture["session"], profile=fixture["profile"]
+        )
+        roots.append(env["TB_STATE_ROOT"])
+
+    project_root = fixture["project_root"]
+    state_dir = Path(roots[0])
+    assert roots[0] == roots[1], "a bound session's cwd moves share one state root"
+    assert state_dir.is_relative_to(profile_home / "sdk-state")
+    assert state_dir.name == hashlib.sha256(
+        os.fsencode(Path(project_root).resolve())
+    ).hexdigest()[:16]
+    assert not str(state_dir).startswith(project_root)
+    assert state_dir.is_dir()
+    assert state_dir.stat().st_mode & 0o777 == 0o700
+
+    # Unbound: today's cwd hash, also under HERMES_HOME.
+    unbound = M._sdk_env_overrides(
+        sdk_cwd=str(tmp_path / "repo-a"), hermes_session_id="unbound_other", profile=fixture["profile"]
+    )["TB_STATE_ROOT"]
+    assert unbound != roots[0]
+    assert Path(unbound).name == hashlib.sha256(
+        os.fsencode((tmp_path / "repo-a").resolve())
+    ).hexdigest()[:16]

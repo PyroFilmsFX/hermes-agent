@@ -208,7 +208,9 @@ def seal(payload: bytes, kid: str, sign: Callable[[bytes], bytes]) -> Attestatio
     return AttestationEnvelope(kid=kid, payload=payload, sig=bytes(sig))
 
 
-def read_envelope_file(path: str, *, max_bytes: int = MAX_ATTESTATION_BYTES) -> AttestationEnvelope:
+def read_envelope_file(
+    path: str, *, max_bytes: int = MAX_ATTESTATION_BYTES, dir_fd: Optional[int] = None
+) -> AttestationEnvelope:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_NOFOLLOW", 0)
@@ -216,7 +218,7 @@ def read_envelope_file(path: str, *, max_bytes: int = MAX_ATTESTATION_BYTES) -> 
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        fd = os.open(path, flags)
+        fd = os.open(path, flags) if dir_fd is None else os.open(path, flags, dir_fd=dir_fd)
     except OSError as exc:
         raise _envelope.EnvelopeError("cannot open attestation file: %s" % exc.strerror) from None
     try:
@@ -476,6 +478,30 @@ def _validate_payload(p: Dict[str, Any]) -> None:
             raise _malformed("hermes_lineage exceeds %d entries" % MAX_LINEAGE_ENTRIES, payload=p)
 
 
+def _require_active_key(
+    anchor: _anchor.Anchor, kid: str, *, issued_at: int, now: int
+) -> _anchor.AnchorKey:
+    """The anchor key for ``kid`` when it is ACTIVE and valid for ``issued_at`` and ``now``.
+
+    Unknown, retired and revoked kids are refused whatever the artifact claims about time.
+    """
+    key = anchor.key(kid)
+    if key is None:
+        raise _Deny(_anchor.REASON_UNKNOWN_KID, "kid %s is not in the anchor" % kid)
+    if key.status == _anchor.STATUS_REVOKED:
+        raise _Deny(_anchor.REASON_KEY_REVOKED, "key %s is revoked" % kid)
+    if key.status == _anchor.STATUS_RETIRED:
+        raise _Deny(
+            _anchor.REASON_KEY_RETIRED,
+            "key %s is retired (attestations require the active kid)" % kid,
+        )
+    if key.status != _anchor.STATUS_ACTIVE:
+        raise _Deny(_anchor.REASON_KEY_NOT_YET_VALID, "key %s is not active (%s)" % (kid, key.status))
+    if now < key.not_before or issued_at < key.not_before:
+        raise _Deny(_anchor.REASON_KEY_NOT_YET_VALID, "key %s is not yet valid" % kid)
+    return key
+
+
 def _evaluate_attestation(
     env: AttestationEnvelope,
     payload: Dict[str, Any],
@@ -496,9 +522,11 @@ def _evaluate_attestation(
     if not isinstance(issued_at, int) or isinstance(issued_at, bool) or issued_at < 0:
         raise _malformed("issued_at must be a non-negative int")
 
-    key_reason = _anchor.check_key(anchor, env.kid, issued_at=issued_at, now=now)
-    if key_reason is not None:
-        raise _Deny(key_reason, "key %s: %s" % (env.kid, key_reason))
+    # Attestations need the ACTIVE kid, the same gate as bindings. The grant rule
+    # (``anchor.check_key``) still honours a retired kid for artifacts issued before
+    # retirement; main re-signs every live attestation at rotation, so that grace would only
+    # help a leaked retired key backdate an attestation.
+    key = _require_active_key(anchor, env.kid, issued_at=issued_at, now=now)
 
     # 2. Signature verification
     if budget[0] <= 0:
@@ -765,6 +793,158 @@ def verify_attestation_envelope(
             trusted,
             1 if trusted is not None else 0,
         )
+
+
+def is_safe_session_component(value: Any) -> bool:
+    """True when ``value`` can name one directory under ``session-attest/``.
+
+    Refuses empty values, separators, NUL, ``.``/``..``, a leading dot and anything outside
+    ``[A-Za-z0-9_-]`` (a Claude sid is a UUID). Capped at 128 characters.
+    """
+    if not isinstance(value, str) or not value or len(value) > 128:
+        return False
+    if value in (".", "..") or value.startswith("."):
+        return False
+    for ch in value:
+        if not (ch.isascii() and (ch.isalnum() or ch in "-_")):
+            return False
+    return True
+
+
+def _open_dir_nofollow(name: str, dir_fd: Optional[int] = None) -> int:
+    """Open a directory without following a symlink at the last component."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    fd = os.open(name, flags) if dir_fd is None else os.open(name, flags, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("not a directory")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def verify_launch_provenance(
+    *,
+    claude_session: str,
+    hermes_sessions: Sequence[str],
+    uid: int,
+    now: int,
+    profile: Optional[str] = None,
+    anchor: Optional[_anchor.Anchor] = None,
+    fs: Any = None,
+) -> AttestationResult:
+    """Did main ever sign ``claude_session -> one of hermes_sessions``? (b10 review, resume provenance)
+
+    A resumed Claude sid is read from agent-writable state, so the backend may treat it as this
+    session's own only when an attestation for that sid, naming this Hermes session (or an
+    ancestor in the backend's in-memory lineage), carries main's signature.
+
+    Rules, and how they differ from :func:`verify_attestation`:
+
+    * **Key**: the kid must be ACTIVE in the anchor now. Retired, revoked and unknown kids fail.
+      At rotation main re-signs every live attestation under the new kid, so a sid still worth
+      resuming has an active-kid attestation; accepting a retired kid would let a leaked retired
+      key forge history. A sid whose only attestations predate a rotation resumes unverified.
+    * **Expiry does not matter**: this is history ("main mapped these ids"), not live authority.
+      ``issued_at`` must still be at or after the key's ``not_before`` and the TTL cap holds.
+    * **Unbound attestations count**: a revocation attestation is still main's statement of the
+      mapping.
+    * Directories are opened with ``O_NOFOLLOW``; a symlinked ``session-attest`` or sid dir
+      finds nothing.
+    """
+    if not is_safe_session_component(claude_session):
+        raise AttestUsageError("invalid claude_session format")
+    accepted = frozenset(s for s in (hermes_sessions or ()) if isinstance(s, str) and s)
+    if not accepted:
+        raise AttestUsageError("hermes_sessions must name at least one session")
+
+    trusted = None
+    try:
+        trusted = _check_anchor(anchor, fs, uid)
+        try:
+            parent_fd = _open_dir_nofollow(posixpath.join(trusted.grants_dir, "session-attest"))
+        except OSError:
+            return _denied(now, _Deny(REASON_NOT_FOUND, "no session-attest directory"), trusted)
+        try:
+            try:
+                sid_fd = _open_dir_nofollow(claude_session, dir_fd=parent_fd)
+            except OSError:
+                return _denied(
+                    now,
+                    _Deny(REASON_NOT_FOUND, "no attestations for claude_session %s" % claude_session),
+                    trusted,
+                )
+        finally:
+            os.close(parent_fd)
+        candidates = []
+        try:
+            for name in os.listdir(sid_fd):
+                if not name.endswith(".json") or name.startswith("."):
+                    continue
+                try:
+                    env = read_envelope_file(name, dir_fd=sid_fd)
+                    payload = _envelope.decode_payload(env.payload)
+                except (_envelope.EnvelopeError, OSError):
+                    continue
+                issued = payload.get("issued_at")
+                issued_int = issued if isinstance(issued, int) and not isinstance(issued, bool) else -1
+                candidates.append((issued_int, name, env, payload))
+        finally:
+            os.close(sid_fd)
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not candidates:
+            return _denied(now, _Deny(REASON_NOT_FOUND, "no candidate attestation files"), trusted)
+
+        first_deny = None
+        budget = MAX_SIGNATURE_CHECKS
+        for _, _, env, payload in candidates:
+            try:
+                issued_at = payload.get("issued_at")
+                if not isinstance(issued_at, int) or isinstance(issued_at, bool) or issued_at < 0:
+                    raise _malformed("issued_at must be a non-negative int")
+                key = _require_active_key(trusted, env.kid, issued_at=issued_at, now=now)
+                if budget <= 0:
+                    break
+                budget -= 1
+                if not _signature_ok(key.pub, env.sign_bytes(), env.sig):
+                    raise _Deny(REASON_BAD_SIGNATURE, "signature does not verify under %s" % env.kid)
+                _validate_payload(payload)
+                if AUDIENCE not in payload["aud"] or DISALLOWED_AUDIENCE in payload["aud"]:
+                    raise _Deny(REASON_WRONG_AUDIENCE, "wrong audience", payload=payload)
+                if payload["owner_uid"] != uid:
+                    raise _Deny(REASON_UID_MISMATCH, "owner_uid mismatch", payload=payload)
+                if payload["claude_session_id"] != claude_session:
+                    raise _Deny(REASON_CLAUDE_SESSION_MISMATCH, "claude_session_id mismatch", payload=payload)
+                if payload["hermes_session_id"] not in accepted:
+                    raise _Deny(REASON_SESSION_MISMATCH, "hermes_session_id not in lineage", payload=payload)
+                if profile is not None and payload["profile"] != profile:
+                    raise _Deny(REASON_PROFILE_MISMATCH, "profile mismatch", payload=payload)
+                if payload["expires_at"] - payload["issued_at"] > ATTEST_MAX_TTL_MS:
+                    raise _Deny(REASON_TTL_EXCEEDED, "lifetime exceeds the cap", payload=payload)
+            except _Deny as deny:
+                if first_deny is None:
+                    first_deny = deny
+                continue
+            return _ok(payload, trusted, now, candidates=len(candidates))
+        return _denied(
+            now,
+            first_deny or _Deny(REASON_NOT_FOUND, "no matching attestation"),
+            trusted,
+            candidates=len(candidates),
+        )
+    except _Deny as deny:
+        return _denied(now, deny, trusted)
+    except AttestUsageError:
+        raise
+    except Exception as exc:
+        return _denied(now, _Deny(REASON_INTERNAL, "%s: %s" % (type(exc).__name__, exc)), trusted)
 
 
 @dataclass(frozen=True)

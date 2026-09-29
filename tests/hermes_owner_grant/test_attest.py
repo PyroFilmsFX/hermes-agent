@@ -862,3 +862,136 @@ def test_verify_binding_file_helper(tmp_path: Path) -> None:
     )
     assert not res_missing.ok
     assert res_missing.reason == attest_mod.REASON_NOT_FOUND
+
+
+# --- b10 review (grok #3): attestations need the ACTIVE kid --------------------------------
+
+
+def test_retired_kid_attestation_issued_before_retirement_is_rejected(
+    owner: Owner, grants: Path
+) -> None:
+    """The grant rule honours a retired kid for artifacts issued before retirement; attestations
+    must not (main re-signs live attestations at rotation)."""
+    retired_anchor = make_anchor(
+        grants, [owner.anchor_key(status="retired", retired_at=NOW - MIN)]
+    )
+    payload = make_payload(claude_session_id="c-ret-before", issued_at=NOW - 2 * MIN)
+    env = seal_attestation(owner, payload)
+    write_attestation(grants, "c-ret-before", env)
+    res = attest_mod.verify_attestation(
+        claude_session="c-ret-before", uid=UID, now=NOW, anchor=retired_anchor
+    )
+    assert res.ok is False
+    assert res.reason == "key_retired"
+    direct = attest_mod.verify_attestation_envelope(
+        env, claude_session="c-ret-before", uid=UID, now=NOW, anchor=retired_anchor
+    )
+    assert direct.ok is False
+    assert direct.reason == "key_retired"
+
+
+def test_retired_kid_rejected_even_when_an_active_kid_exists(owner: Owner, grants: Path) -> None:
+    new_owner = Owner()
+    rotated = make_anchor(
+        grants,
+        [
+            owner.anchor_key(status="retired", retired_at=NOW - MIN),
+            new_owner.anchor_key(status="active", not_before=NOW - MIN),
+        ],
+    )
+    old = make_payload(claude_session_id="c-rot", issued_at=NOW - 2 * MIN)
+    write_attestation(grants, "c-rot", seal_attestation(owner, old))
+    res = attest_mod.verify_attestation(claude_session="c-rot", uid=UID, now=NOW, anchor=rotated)
+    assert res.ok is False
+    assert res.reason == "key_retired"
+    # The re-signed copy under the new active kid verifies.
+    fresh = make_payload(claude_session_id="c-rot", issued_at=NOW - 10 * SEC)
+    write_attestation(grants, "c-rot", seal_attestation(new_owner, fresh))
+    ok = attest_mod.verify_attestation(claude_session="c-rot", uid=UID, now=NOW, anchor=rotated)
+    assert ok.ok is True
+
+
+# --- b10 review (codex #1): resume provenance --------------------------------------------
+
+
+def test_launch_provenance_accepts_an_expired_signed_attestation(
+    owner: Owner, grants: Path, anchor: anchor_mod.Anchor
+) -> None:
+    old = make_payload(issued_at=NOW - 5 * HOUR)  # long expired
+    write_attestation(grants, CLAUDE_SID, seal_attestation(owner, old))
+    res = attest_mod.verify_launch_provenance(
+        claude_session=CLAUDE_SID, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=anchor
+    )
+    assert res.ok is True
+    assert res.hermes_session_id == HERMES_SID
+    # An ancestor in the caller's lineage is also accepted.
+    via_lineage = attest_mod.verify_launch_provenance(
+        claude_session=CLAUDE_SID,
+        hermes_sessions=["20260929_120000_child1", HERMES_SID],
+        uid=UID,
+        now=NOW,
+        anchor=anchor,
+    )
+    assert via_lineage.ok is True
+
+
+def test_launch_provenance_refuses_other_session_forgery_retired_kid_and_symlink(
+    owner: Owner, grants: Path, anchor: anchor_mod.Anchor, tmp_path: Path
+) -> None:
+    write_attestation(grants, CLAUDE_SID, seal_attestation(owner, make_payload()))
+    other = attest_mod.verify_launch_provenance(
+        claude_session=CLAUDE_SID, hermes_sessions=[OTHER_HERMES_SID], uid=UID, now=NOW, anchor=anchor
+    )
+    assert other.ok is False
+    assert other.reason == attest_mod.REASON_SESSION_MISMATCH
+
+    wrong_profile = attest_mod.verify_launch_provenance(
+        claude_session=CLAUDE_SID,
+        hermes_sessions=[HERMES_SID],
+        uid=UID,
+        now=NOW,
+        profile="work",
+        anchor=anchor,
+    )
+    assert wrong_profile.ok is False
+
+    # Forged: signed by a key the anchor does not know, and a tampered signature.
+    forger = Owner()
+    forged_sid = "11111111-2222-4333-8444-555555555555"
+    write_attestation(grants, forged_sid, seal_attestation(forger, make_payload(claude_session_id=forged_sid)))
+    unk = attest_mod.verify_launch_provenance(
+        claude_session=forged_sid, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=anchor
+    )
+    assert unk.ok is False and unk.reason == "unknown_kid"
+    bad_sid = "22222222-2222-4333-8444-555555555555"
+    good = seal_attestation(owner, make_payload(claude_session_id=bad_sid))
+    tampered = attest_mod.AttestationEnvelope(kid=good.kid, payload=good.payload, sig=bytes(64))
+    write_attestation(grants, bad_sid, tampered)
+    bad = attest_mod.verify_launch_provenance(
+        claude_session=bad_sid, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=anchor
+    )
+    assert bad.ok is False and bad.reason == attest_mod.REASON_BAD_SIGNATURE
+
+    retired = make_anchor(grants, [owner.anchor_key(status="retired", retired_at=NOW - MIN)])
+    ret = attest_mod.verify_launch_provenance(
+        claude_session=CLAUDE_SID, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=retired
+    )
+    assert ret.ok is False and ret.reason == "key_retired"
+
+    # A symlinked sid directory is never followed.
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link_sid = "33333333-2222-4333-8444-555555555555"
+    env = seal_attestation(owner, make_payload(claude_session_id=link_sid))
+    (real / "1-x.json").write_text(env.to_json(), encoding="utf-8")
+    os.symlink(str(real), str(grants / "session-attest" / link_sid))
+    linked = attest_mod.verify_launch_provenance(
+        claude_session=link_sid, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=anchor
+    )
+    assert linked.ok is False and linked.reason == attest_mod.REASON_NOT_FOUND
+
+    for unsafe in ("/etc", "..", ".", "a/b", "a\\b", "x\x00y", ""):
+        with pytest.raises(attest_mod.AttestUsageError):
+            attest_mod.verify_launch_provenance(
+                claude_session=unsafe, hermes_sessions=[HERMES_SID], uid=UID, now=NOW, anchor=anchor
+            )

@@ -256,14 +256,21 @@ def _sdk_env_overrides(
             except Exception:
                 bound_project_root = None
 
+        # The state root is ALWAYS a hashed dir under HERMES_HOME, never the project itself:
+        # conductor state inside the checkout is agent-writable and committable. A verified
+        # binding only changes which path is hashed (the bound project instead of the launch
+        # cwd), so cwd moves, subfolders and lanes of a bound session share one state root.
+        state_key = project_cwd
         if bound_project_root:
-            overrides["TB_STATE_ROOT"] = str(bound_project_root)
-        else:
-            cwd_hash = hashlib.sha256(os.fsencode(project_cwd)).hexdigest()[:16]
-            state_dir = get_hermes_home() / "sdk-state" / cwd_hash
-            state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            state_dir.chmod(0o700)
-            overrides["TB_STATE_ROOT"] = str(state_dir)
+            try:
+                state_key = Path(str(bound_project_root)).resolve()
+            except (OSError, RuntimeError, ValueError):
+                state_key = project_cwd
+        state_hash = hashlib.sha256(os.fsencode(state_key)).hexdigest()[:16]
+        state_dir = get_hermes_home() / "sdk-state" / state_hash
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_dir.chmod(0o700)
+        overrides["TB_STATE_ROOT"] = str(state_dir)
     return overrides
 
 
