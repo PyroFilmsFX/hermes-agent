@@ -3670,9 +3670,16 @@ export const en: Translations = {
     scopeNone: 'Nothing extra: the worker can quote this decision',
     scopeClass: {
       allowlist: 'Reusable for 12 hours',
+      answer: 'One use, 1 hour',
+      continuity: 'Issued by the app after a relaunch',
+      defer: 'One use, 1 hour',
       gate: 'Reusable for 12 hours',
+      gc: 'One use, 1 hour',
       marker: 'One use, 1 hour',
-      prod: 'Production: one use, 15 minutes'
+      override: 'One use, 1 hour',
+      policy: 'Policy: one use, 15 minutes',
+      prod: 'Production: one use, 15 minutes',
+      spend: 'Spending: one use, 15 minutes'
     },
     otherScope: 'Other scope',
     addScope: 'Add scope',

@@ -50,7 +50,7 @@ import nodeFs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { OWNER_ANCHOR_FORMAT, type OwnerAnchor, type OwnerAnchorKey, type OwnerAnchorRead } from './owner-grant-anchor'
+import { OWNER_ANCHOR_DIR, OWNER_ANCHOR_FORMAT, type OwnerAnchor, type OwnerAnchorKey, type OwnerAnchorRead } from './owner-grant-anchor'
 import { OwnerKeyError, type OwnerKeyLog, type OwnerKeyPublic, type OwnerKeyStore } from './owner-grant-key'
 
 export const OSASCRIPT_PATH = '/usr/bin/osascript'
@@ -325,6 +325,12 @@ export interface OwnerGrantControllerDeps {
   /** The `hermes_owner_grant` package directory the verifier files are read from. Without it
    *  (or with any file missing) every install is refused before a confirm or admin prompt. */
   verifierSourceDir?: string
+  /** Production: `() => readInstalledOwnerVerifierManifest()`, the root-owned `manifest.sha256` the
+   *  root script wrote beside the anchor, or null when it can't be read. With it, enable also
+   *  re-pushes the verifier PACKAGE when an installed file's hash differs from this app's (b9 §6),
+   *  and only reports success once the manifest says the package is current. Without it only the
+   *  launcher sha is compared (the pre-b9 behaviour; tests that never install stay isolated). */
+  readInstalledManifest?: () => Buffer | null
   tmpRoot?: string
   now?: () => number
   log?: OwnerKeyLog
@@ -351,6 +357,59 @@ interface AnchorDoc {
 
 /** Staged relative path -> bytes, for every package file. */
 type VerifierFiles = Map<string, Buffer>
+
+export const OWNER_VERIFY_MANIFEST_PATH = `${OWNER_ANCHOR_DIR}/manifest.sha256`
+
+/** Read the installed verifier manifest (root-owned, 0644). Null when it is missing, a symlink,
+ *  not a regular file or too large. Only ever used to decide whether to offer a re-push, never to
+ *  trust the verifier: a wrong answer costs one extra confirm or leaves the old package in place. */
+export function readInstalledOwnerVerifierManifest(fs: typeof nodeFs = nodeFs): Buffer | null {
+  try {
+    const st = fs.lstatSync(OWNER_VERIFY_MANIFEST_PATH)
+
+    if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_VERIFIER_FILE_BYTES) {
+      return null
+    }
+
+    const bytes = fs.readFileSync(OWNER_VERIFY_MANIFEST_PATH)
+
+    return bytes.length > MAX_VERIFIER_FILE_BYTES ? null : bytes
+  } catch {
+    return null
+  }
+}
+
+/** Whether an installed `manifest.sha256` (`<sha256>  <path>` lines) pins exactly this app's
+ *  launcher and every package file. A missing, extra-malformed or differing line means "not
+ *  current". The root-compiled `pycache/` lines are ignored (they follow from the package). */
+export function installedVerifierIsCurrent(manifest: Buffer | string | null, verifier: VerifierFiles): boolean {
+  if (manifest === null) {
+    return false
+  }
+
+  const listed = new Map<string, string>()
+
+  for (const line of manifest.toString().split('\n')) {
+    const match = /^([0-9a-f]{64}) {2}(\S.*)$/.exec(line)
+
+    if (match) {
+      listed.set(match[2], match[1])
+    }
+  }
+
+  const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+
+  if (listed.get('hermes_owner_verify.py') !== OWNER_VERIFY_LAUNCHER_SHA256) {
+    return false
+  }
+
+  return VERIFIER_PACKAGE_FILES.every(name => {
+    const rel = `${VERIFIER_PACKAGE_REL}/${name}`
+    const bytes = verifier.get(rel)
+
+    return bytes !== undefined && listed.get(rel) === sha(bytes)
+  })
+}
 
 const MESSAGES: Record<Exclude<OwnerGrantState, 'ready'>, string> = {
   off: 'Off. Owner decisions are not signed.',
@@ -512,7 +571,9 @@ class OwnerGrantControllerImpl {
 
   /** "Let conductor verify owner decisions": pin a fresh key unless the anchor already pins ours.
    *  When it does but the installed verifier is not this app's launcher (an older install, or
-   *  one from before U11b), the same keys are re-installed with the current verifier. */
+   *  one from before U11b), or (b9 §6) the installed package's manifest differs from this app's
+   *  package (a scope-catalog or verifier update with the same launcher), the same keys are
+   *  re-installed with the current verifier: one confirm, one admin prompt. */
   enable(): Promise<OwnerGrantActionResult> {
     return this.#exclusive(async () => {
       const read = this.#d.readAnchor()
@@ -521,7 +582,7 @@ class OwnerGrantControllerImpl {
       if (read.ok && this.#d.store.anchorState() === 'match') {
         const kid = this.#d.store.publicInfo()!.kid
 
-        if (read.anchor.verifierSha256 === OWNER_VERIFY_LAUNCHER_SHA256) {
+        if (read.anchor.verifierSha256 === OWNER_VERIFY_LAUNCHER_SHA256 && this.#installedPackageCurrent()) {
           return { ok: true, kid, unchanged: true }
         }
 
@@ -629,13 +690,31 @@ class OwnerGrantControllerImpl {
     const after = this.#d.readAnchor()
     this.#d.store.setAnchor(after.ok ? after.anchor : null)
 
-    if (!after.ok || !sameAnchor(after.anchor, doc)) {
+    // A package-only refresh leaves anchor.json byte-identical, so the anchor alone can't prove the
+    // install happened: the installed manifest must now pin this app's package too.
+    const packageLanded = !this.#d.readInstalledManifest || installedVerifierIsCurrent(this.#d.readInstalledManifest(), verifier)
+
+    if (!after.ok || !sameAnchor(after.anchor, doc) || !packageLanded) {
       return { ok: false, reason: this.#runnerReason(ran) }
     }
 
     this.#log('info', 'owner-grant verifier updated', { kid })
 
     return { ok: true, kid }
+  }
+
+  /** True unless the installed package is known to differ from this app's. Without the manifest
+   *  reader, or when this app's own package can't be read (nothing to push), it can't tell: true. */
+  #installedPackageCurrent(): boolean {
+    const readManifest = this.#d.readInstalledManifest
+
+    if (!readManifest) {
+      return true
+    }
+
+    const verifier = this.#loadVerifier()
+
+    return verifier === null || installedVerifierIsCurrent(readManifest(), verifier)
   }
 
   /** The package files, read before any confirm or key work. Null when any is missing, not a

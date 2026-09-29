@@ -41,7 +41,19 @@ export const GESTURES = ['composer_signed', 'menu', 'proposal', 'selection', 'sl
 export const SOURCE_ROLES = ['assistant', 'peer', 'user'] as const
 
 export type Gesture = (typeof GESTURES)[number]
-export type ScopeClass = 'allowlist' | 'gate' | 'marker' | 'prod' | 'quote-only'
+export type ScopeClass =
+  | 'allowlist'
+  | 'answer'
+  | 'continuity'
+  | 'defer'
+  | 'gate'
+  | 'gc'
+  | 'marker'
+  | 'override'
+  | 'policy'
+  | 'prod'
+  | 'quote-only'
+  | 'spend'
 
 export interface ScopeClassPolicy {
   default_ttl_ms: number
@@ -54,27 +66,78 @@ export interface ScopeClassPolicy {
 /** Mirrors `hermes_owner_grant/scopes.json` `classes` (a parity test pins them equal). */
 export const SCOPE_CLASS_POLICY: Record<ScopeClass, ScopeClassPolicy> = {
   allowlist: { default_ttl_ms: 43_200_000, max_ttl_ms: 259_200_000, single_use: false, subject_required: false, touch_id: 'never' },
+  answer: { default_ttl_ms: 3_600_000, max_ttl_ms: 14_400_000, single_use: true, subject_required: true, touch_id: 'never' },
+  continuity: { default_ttl_ms: 900_000, max_ttl_ms: 900_000, single_use: true, subject_required: true, touch_id: 'never' },
+  defer: { default_ttl_ms: 3_600_000, max_ttl_ms: 14_400_000, single_use: true, subject_required: true, touch_id: 'never' },
   gate: { default_ttl_ms: 43_200_000, max_ttl_ms: 259_200_000, single_use: false, subject_required: false, touch_id: 'never' },
+  gc: { default_ttl_ms: 3_600_000, max_ttl_ms: 3_600_000, single_use: true, subject_required: true, touch_id: 'never' },
   marker: { default_ttl_ms: 3_600_000, max_ttl_ms: 14_400_000, single_use: true, subject_required: false, touch_id: 'never' },
+  override: { default_ttl_ms: 3_600_000, max_ttl_ms: 14_400_000, single_use: true, subject_required: true, touch_id: 'never' },
+  policy: { default_ttl_ms: 900_000, max_ttl_ms: 3_600_000, single_use: true, subject_required: true, touch_id: 'when_available' },
   prod: { default_ttl_ms: 900_000, max_ttl_ms: 3_600_000, single_use: true, subject_required: true, touch_id: 'when_available' },
-  'quote-only': { default_ttl_ms: 604_800_000, max_ttl_ms: 604_800_000, single_use: false, subject_required: false, touch_id: 'never' }
+  'quote-only': { default_ttl_ms: 604_800_000, max_ttl_ms: 604_800_000, single_use: false, subject_required: false, touch_id: 'never' },
+  spend: { default_ttl_ms: 900_000, max_ttl_ms: 3_600_000, single_use: true, subject_required: true, touch_id: 'when_available' }
 }
 
 /** Mirrors `hermes_owner_grant/scopes.json` `scopes` (dialog labels only; parity-tested). */
 export const SCOPE_LABELS: Record<string, string> = {
   'conductor:allowlist:member-profile': 'Allowlisted member profile',
+  'conductor:answer:stage-variant': 'Answer a conductor stage question',
+  'conductor:continuity:session-relaunch': "Rebind a session's marker after a relaunch",
+  'conductor:defer:wave-or-unit': 'Defer a planned wave or unit',
   'conductor:gate:job-store-write-block': 'Block job store writes',
   'conductor:gate:lane-test-budget-enable': 'Enable lane test budget',
   'conductor:gate:pr-discipline-enable': 'Enable PR discipline',
   'conductor:gate:review-budget-enable': 'Enable review budget',
+  'conductor:gc:prune-lanes': 'Prune reviewed lanes',
   'conductor:marker:bypass': 'Bypass marker',
   'conductor:marker:rebind-owner': 'Rebind marker owner',
   'conductor:marker:repoint-ledger': 'Repoint marker ledger',
   'conductor:marker:restore': 'Restore marker',
-  'conductor:prod:target': 'Production target'
+  'conductor:override:review-budget': 'Override the review budget',
+  'conductor:policy:standing-approval': 'Enable a standing-approval rule',
+  'conductor:policy:unsandboxed-write': 'Allow unsandboxed writes for a CLI',
+  'conductor:prod:target': 'Production target',
+  'conductor:spend:fly': 'Start paid Fly lanes'
 }
 
-const SCOPE_RE = /^conductor:(allowlist|gate|marker|prod):([a-z0-9][a-z0-9-]{0,62})$/
+/** Mirrors `hermes_owner_grant/scopes.py` `_SCOPE_RE`. */
+export const SCOPE_RE =
+  /^conductor:(allowlist|gate|marker|prod|answer|defer|override|gc|policy|spend|continuity):([a-z0-9][a-z0-9-]{0,62})$/
+
+// Per-scope signed-subject grammar, pattern-for-pattern the same as `hermes_owner_grant/scopes.py`
+// SUBJECT_GRAMMAR (tests/fixtures/owner_grant_subject_vectors.json pins both). Each pattern must
+// match the WHOLE subject: `^(?:pattern)$`, no flags. A scope without an entry takes any non-empty
+// subject; the verifier still matches the request subject by exact string equality.
+const SUBJECT_ID = '[A-Za-z0-9][A-Za-z0-9._-]{0,127}'
+const SUBJECT_HEX64 = '[0-9a-f]{64}'
+
+export const SUBJECT_GRAMMAR: Readonly<Record<string, string>> = Object.freeze({
+  'conductor:answer:stage-variant': `${SUBJECT_HEX64}:[1-9][0-9]*`,
+  'conductor:continuity:session-relaunch': `(${SUBJECT_ID}):(?!\\1$)${SUBJECT_ID}`,
+  'conductor:defer:wave-or-unit': `${SUBJECT_ID}:${SUBJECT_ID}`,
+  'conductor:gc:prune-lanes': SUBJECT_HEX64,
+  'conductor:override:review-budget': `${SUBJECT_ID}:${SUBJECT_ID}:(?:fan|recheck)`,
+  'conductor:policy:standing-approval': `${SUBJECT_ID}:${SUBJECT_HEX64}`,
+  'conductor:policy:unsandboxed-write': '[a-z0-9][a-z0-9._-]{0,63}',
+  'conductor:spend:fly': '[a-z0-9][a-z0-9-]{0,62}:(?![0.]+$)(?:0|[1-9][0-9]{0,8})(?:\\.[0-9]{1,2})?'
+})
+
+const SUBJECT_RES: ReadonlyMap<string, RegExp> = new Map(
+  Object.entries(SUBJECT_GRAMMAR).map(([scope, pattern]) => [scope, new RegExp(`^(?:${pattern})$`)])
+)
+
+/** Whether `subject` fits `scope`'s signed-subject grammar (true for a scope with no grammar). */
+export function subjectMatchesGrammar(scope: string, subject: string): boolean {
+  const re = SUBJECT_RES.get(scope)
+
+  return re ? typeof subject === 'string' && re.test(subject) : true
+}
+
+/** Scope classes only Electron main mints, never through a request (brief b9 §3). `plan()` refuses
+ *  them, so no IPC channel, gateway method or tool that reaches `confirmAndSignGrants` can sign one;
+ *  the continuity issuer (owner-grant-continuity.ts) signs them itself. */
+export const MAIN_ISSUED_SCOPE_CLASSES: ReadonlySet<ScopeClass> = new Set<ScopeClass>(['continuity'])
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 export type OwnerGrantSignErrorCode =
@@ -459,6 +522,18 @@ function plan(req: SignRequest): Plan {
   }
 
   for (const s of scopes) {
+    if (MAIN_ISSUED_SCOPE_CLASSES.has(s.scopeClass)) {
+      fail('bad_scope', `${s.value} is issued by the app itself and can't be requested`)
+    }
+  }
+
+  for (const [scope, value] of Object.entries(subject)) {
+    if (!subjectMatchesGrammar(scope, value)) {
+      fail('bad_subject', `subject for ${scope} is outside its grammar`)
+    }
+  }
+
+  for (const s of scopes) {
     if (s.subjectRequired && !(s.value in subject)) {
       fail('subject_required', `${s.value} needs a subject (the exact action digest)`)
     }
@@ -529,6 +604,21 @@ function confirmModel(p: Plan, now: number, requiresTouchId: boolean): ConfirmMo
   }
 }
 
+/** The Touch ID sheet names what is being signed: production first, then spend, then policy. */
+function touchIdReason(scopes: ParsedScope[]): string {
+  const classes = new Set(scopes.filter(s => s.touchId === 'when_available').map(s => s.scopeClass))
+
+  if (classes.has('prod')) {
+    return 'sign a production decision as you'
+  }
+
+  if (classes.has('spend')) {
+    return 'approve paid spending as you'
+  }
+
+  return 'change a conductor policy as you'
+}
+
 function lowerBase32Id(prefix: string, bytes: Buffer): string {
   return prefix + base32(bytes).toLowerCase()
 }
@@ -562,7 +652,7 @@ export async function confirmAndSignGrants(req: SignRequest, ports: SignPorts): 
 
   if (requiresTouchId) {
     try {
-      await ports.touchId!.prompt('sign a production decision as you')
+      await ports.touchId!.prompt(touchIdReason(p.scopes))
     } catch {
       return { cancelled: true, reason: 'touch_id' }
     }

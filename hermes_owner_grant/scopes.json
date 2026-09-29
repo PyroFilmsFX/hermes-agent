@@ -7,11 +7,39 @@
       "subject_required": false,
       "touch_id": "never"
     },
+    "answer": {
+      "default_ttl_ms": 3600000,
+      "max_ttl_ms": 14400000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "never"
+    },
+    "continuity": {
+      "default_ttl_ms": 900000,
+      "max_ttl_ms": 900000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "never"
+    },
+    "defer": {
+      "default_ttl_ms": 3600000,
+      "max_ttl_ms": 14400000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "never"
+    },
     "gate": {
       "default_ttl_ms": 43200000,
       "max_ttl_ms": 259200000,
       "single_use": false,
       "subject_required": false,
+      "touch_id": "never"
+    },
+    "gc": {
+      "default_ttl_ms": 3600000,
+      "max_ttl_ms": 3600000,
+      "single_use": true,
+      "subject_required": true,
       "touch_id": "never"
     },
     "marker": {
@@ -20,6 +48,20 @@
       "single_use": true,
       "subject_required": false,
       "touch_id": "never"
+    },
+    "override": {
+      "default_ttl_ms": 3600000,
+      "max_ttl_ms": 14400000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "never"
+    },
+    "policy": {
+      "default_ttl_ms": 900000,
+      "max_ttl_ms": 3600000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "when_available"
     },
     "prod": {
       "default_ttl_ms": 900000,
@@ -34,6 +76,13 @@
       "single_use": false,
       "subject_required": false,
       "touch_id": "never"
+    },
+    "spend": {
+      "default_ttl_ms": 900000,
+      "max_ttl_ms": 3600000,
+      "single_use": true,
+      "subject_required": true,
+      "touch_id": "when_available"
     }
   },
   "format": "hermes-owner-grant-scopes/v1",
@@ -41,6 +90,18 @@
     {
       "label": "Allowlisted member profile",
       "scope": "conductor:allowlist:member-profile"
+    },
+    {
+      "label": "Answer a conductor stage question",
+      "scope": "conductor:answer:stage-variant"
+    },
+    {
+      "label": "Rebind a session's marker after a relaunch",
+      "scope": "conductor:continuity:session-relaunch"
+    },
+    {
+      "label": "Defer a planned wave or unit",
+      "scope": "conductor:defer:wave-or-unit"
     },
     {
       "label": "Block job store writes",
@@ -59,6 +120,10 @@
       "scope": "conductor:gate:review-budget-enable"
     },
     {
+      "label": "Prune reviewed lanes",
+      "scope": "conductor:gc:prune-lanes"
+    },
+    {
       "label": "Bypass marker",
       "scope": "conductor:marker:bypass"
     },
@@ -75,8 +140,24 @@
       "scope": "conductor:marker:restore"
     },
     {
+      "label": "Override the review budget",
+      "scope": "conductor:override:review-budget"
+    },
+    {
+      "label": "Enable a standing-approval rule",
+      "scope": "conductor:policy:standing-approval"
+    },
+    {
+      "label": "Allow unsandboxed writes for a CLI",
+      "scope": "conductor:policy:unsandboxed-write"
+    },
+    {
       "label": "Production target",
       "scope": "conductor:prod:target"
+    },
+    {
+      "label": "Start paid Fly lanes",
+      "scope": "conductor:spend:fly"
     }
   ]
 }

@@ -29,8 +29,10 @@ import {
   type ConfirmModel,
   type Gesture,
   GESTURES,
+  MAIN_ISSUED_SCOPE_CLASSES,
   OwnerGrantSignError,
   parseScope,
+  type ScopeClass,
   type SignedOutcome,
   type SignPorts,
   type SignRequest
@@ -238,6 +240,13 @@ function bindingLine(claudeId: string | null, state: ClaudeSessionState | undefi
   return 'not bound: its Claude CLI session id is not known'
 }
 
+/** The Touch ID classes (scopes.json `touch_id: when_available`) and their dialog warning. */
+const TOUCH_ID_CLASS_WARNINGS: ReadonlyArray<readonly [ScopeClass, string, string]> = [
+  ['prod', 'Production scope', 'this signs a production action.'],
+  ['policy', 'Policy scope', 'this signs a conductor policy change.'],
+  ['spend', 'Spend scope', 'this signs paid spending.']
+]
+
 export function isLongText(text: string): boolean {
   return text.length > DIALOG_TEXT_FULL_MAX
 }
@@ -287,13 +296,12 @@ export function buildConfirmDialog(
     }
   }
 
-  if (model.scopes.some(s => s.scopeClass === 'prod')) {
-    lines.push('')
-    lines.push(
-      model.requiresTouchId
-        ? 'Production scope: Touch ID is required after Send.'
-        : 'Production scope: this signs a production action.'
-    )
+  // Every Touch ID class (prod, policy, spend) gets its own warning line, as prod always had.
+  for (const [scopeClass, name, action] of TOUCH_ID_CLASS_WARNINGS) {
+    if (model.scopes.some(s => s.scopeClass === scopeClass)) {
+      lines.push('')
+      lines.push(model.requiresTouchId ? `${name}: Touch ID is required after Send.` : `${name}: ${action}`)
+    }
   }
 
   lines.push('')
@@ -334,7 +342,7 @@ export function buildConfirmDialog(
     lines.push(`Source: ${where} · ${role ? ROLE_LABEL[role] : 'author not known'}`)
   }
 
-  const prod = model.scopes.some(s => s.scopeClass === 'prod')
+  const prod = model.scopes.some(s => TOUCH_ID_CLASS_WARNINGS.some(([scopeClass]) => s.scopeClass === scopeClass))
   // A long text offers no Send until the owner viewed it in THIS confirm (per request).
   const buttons = long ? (extras.fullTextViewed ? [SEND_BUTTON, VIEW_BUTTON, CANCEL_BUTTON] : [VIEW_BUTTON, CANCEL_BUTTON]) : [SEND_BUTTON, CANCEL_BUTTON]
 
@@ -624,6 +632,22 @@ export function createOwnerForwardConfirmHandler(deps: OwnerForwardConfirmDeps) 
 
     if (typeof req === 'string') {
       return refused('bad_request', req)
+    }
+
+    // b9 §3: a main-issued scope (the relaunch continuity grant) is never requestable. Refused here,
+    // before the rate gate, any session lookup or any other side effect.
+    for (const value of req.scope) {
+      let mainIssued = false
+
+      try {
+        mainIssued = MAIN_ISSUED_SCOPE_CLASSES.has(parseScope(value).scopeClass)
+      } catch {
+        // an out-of-grammar scope is refused by the signing core below
+      }
+
+      if (mainIssued) {
+        return refused('bad_scope', `${value} is issued by the app itself and can't be requested`)
+      }
     }
 
     const slot = gate.tryOpen()

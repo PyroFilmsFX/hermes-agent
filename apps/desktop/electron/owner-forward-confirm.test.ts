@@ -711,3 +711,87 @@ describe('hermes:owner-grant:action: same main-frame check and a rate gate', () 
     expect(await h.handler(h.event(), 'enable')).toMatchObject({ ok: false, reason: 'rate' })
   })
 })
+
+describe('b9: Touch ID warning for policy and spend; the continuity scope is not requestable over IPC', () => {
+  const policyReq = () =>
+    req({
+      scope: ['conductor:policy:standing-approval'],
+      subject: `docs-only-prs:${'a'.repeat(64)}`
+    })
+
+  test('policy + Touch ID available: the dialog warns, promptTouchID runs, the grant says touch_id', async () => {
+    const h = harness()
+    h.touchId.canPrompt.mockReturnValue(true)
+
+    const result: any = await h.handler(h.event(), policyReq())
+
+    expect(result.ok).toBe(true)
+    expect(h.touchId.prompt).toHaveBeenCalledTimes(1)
+    const options = h.showMessageBox.mock.calls[0][0]
+    expect(options.type).toBe('warning')
+    expect(options.detail).toContain('Policy scope: Touch ID is required after Send.')
+    const payload = JSON.parse(Buffer.from(result.envelope.payload, 'base64url').toString('utf8'))
+    expect(payload.confirm).toBe('touch_id')
+    expect(payload.single_use).toEqual(['conductor:policy:standing-approval'])
+  })
+
+  test('spend without Touch ID still shows its warning line', async () => {
+    const h = harness()
+
+    const result: any = await h.handler(h.event(), req({ scope: ['conductor:spend:fly'], subject: 'hermes-lanes-ord:25' }))
+
+    expect(result.ok).toBe(true)
+    const options = h.showMessageBox.mock.calls[0][0]
+    expect(options.type).toBe('warning')
+    expect(options.detail).toContain('Spend scope: this signs paid spending.')
+  })
+
+  test('a subject outside its scope grammar is refused before any dialog', async () => {
+    const h = harness()
+
+    const result = await h.handler(h.event(), req({ scope: ['conductor:spend:fly'], subject: 'hermes-lanes-ord:0' }))
+
+    expect(result).toMatchObject({ ok: false, code: 'bad_subject' })
+    expect(h.showMessageBox).not.toHaveBeenCalled()
+    expect(grantFiles(h.grantsDir)).toEqual([])
+  })
+
+  test('hermes:owner-forward:confirm can never mint conductor:continuity:session-relaunch', async () => {
+    const h = harness()
+
+    for (const gesture of ['menu', 'proposal', 'selection', 'slash_to', 'composer_signed']) {
+      const self = gesture === 'composer_signed'
+      const result = await h.handler(
+        h.event(),
+        req({
+          gesture,
+          scope: ['conductor:continuity:session-relaunch'],
+          subject: 'old-sid:new-sid',
+          ...(self ? { targets: [{ profile: 'default', session_id: 'mgr' }] } : {})
+        })
+      )
+
+      expect(result, gesture).toMatchObject({ ok: false, code: 'bad_scope' })
+    }
+
+    expect(h.showMessageBox).not.toHaveBeenCalled()
+    expect(h.touchId.prompt).not.toHaveBeenCalled()
+    expect(grantFiles(h.grantsDir)).toEqual([])
+  })
+
+  test('P1-2: a continuity request is refused before ANY session lookup (nothing can be armed or tracked)', async () => {
+    const h = harness()
+
+    const result = await h.handler(
+      h.event(),
+      req({ scope: ['conductor:gate:review-budget-enable', 'conductor:continuity:session-relaunch'], subject: 'old-sid:new-sid' })
+    )
+
+    expect(result).toMatchObject({ ok: false, code: 'bad_scope' })
+    expect(h.resolveSession).not.toHaveBeenCalled()
+    expect(h.showMessageBox).not.toHaveBeenCalled()
+    expect(grantFiles(h.grantsDir)).toEqual([])
+    // Not even the rate gate was spent: an ordinary request right after goes through.
+    expect(await h.handler(h.event(), req())).toMatchObject({ ok: true })
+  })
+})

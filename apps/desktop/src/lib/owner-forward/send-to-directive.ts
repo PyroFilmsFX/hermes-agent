@@ -13,9 +13,10 @@
  * Rendering path: `sendToPlaceholders` runs on the raw message text BEFORE `preprocessMarkdown` (so
  * the prose rewrites never touch a directive), swapping each block for an inert token line; after
  * preprocessing, `sendToFences` turns each token into a fenced block whose language names the
- * directive's index. The card re-parses the RAW text and takes the directive at that index, so the
+ * directive's index (behind the per-load nonce, directive-nonce.ts). The card re-parses the RAW text and takes the directive at that index, so the
  * body it shows and sends is exactly what the model wrote (trimmed), never rendered markdown.
  */
+import { DIRECTIVE_NONCE } from './directive-nonce'
 import type { ForwardCandidate } from './parse-to'
 import { matchesFor } from './parse-to'
 
@@ -58,7 +59,7 @@ function sessionAttr(attrs: string): null | string {
 }
 
 /** Tracks ``` / ~~~ fences so a directive shown inside a code block stays code. */
-function fenceStep(line: string, open: null | string): null | string {
+export function fenceStep(line: string, open: null | string): null | string {
   const match = CODE_FENCE_RE.exec(line)
 
   if (!match) {
@@ -136,15 +137,11 @@ export function parseSendToDirectives(text: string): SendToDirective[] {
   return scan(text).map(({ index, session, body, closed }) => ({ index, session, body, closed }))
 }
 
-// Per-load nonce: a model can't write a token line that the fence pass would pick up.
-const NONCE =
-  Math.random()
-    .toString(36)
-    .slice(2, 10)
-    .replace(/[^a-z0-9]/g, '') || 'n'
-const TOKEN_PREFIX = `hermessendto${NONCE}i`
+// Per-load nonce (b9 §5): a model can't write a token line the fence pass would pick up, nor a
+// fence whose language the code override would claim. Only nonce-bearing fences are accepted.
+const TOKEN_PREFIX = `hermessendto${DIRECTIVE_NONCE}i`
 const TOKEN_LINE_RE = new RegExp(`^[ \\t]*${TOKEN_PREFIX}(\\d{1,4})x[ \\t]*$`, 'gm')
-const LANGUAGE_PREFIX = 'hermes-send-to-'
+const LANGUAGE_PREFIX = `hermes-send-to-${DIRECTIVE_NONCE}-`
 
 /** Phase 1 (raw text, before `preprocessMarkdown`): each block becomes one inert token paragraph. */
 export function sendToPlaceholders(text: string): string {
@@ -181,7 +178,8 @@ export function sendToFences(text: string): string {
   )
 }
 
-/** The directive index a fenced block's language names, or null for any other code block. */
+/** The directive index a fenced block's language names, or null for any other code block. Only a
+ *  language carrying this load's nonce counts, so a model-written ```hermes-send-to-0 fence stays code. */
 export function sendToIndexFromLanguage(language: string | undefined): null | number {
   if (!language?.startsWith(LANGUAGE_PREFIX)) {
     return null

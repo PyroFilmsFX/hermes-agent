@@ -425,6 +425,11 @@ def _validate_payload(p: Dict[str, Any]) -> None:
     for value, parsed_scope in parsed.items():
         if parsed_scope.subject_required and value not in subject:
             raise _malformed("%s requires a signed subject" % value)
+    # A signed subject outside its scope's grammar grants nothing: step 9 compares exact
+    # strings only, so each scope's grammar is enforced once, here, on the signed side.
+    for value in sorted(subject):
+        if not _scopes.subject_matches_grammar(value, subject[value]):
+            raise _malformed("subject for %s is outside its grammar" % value)
 
     text = p["text"]
     if not isinstance(text, str):

@@ -361,8 +361,10 @@ import { readTrustedOwnerAnchor } from './owner-grant-anchor'
 import {
   createOsascriptAdminRunner,
   createOwnerGrantController,
-  type OwnerGrantConfirmRequest
+  type OwnerGrantConfirmRequest,
+  readInstalledOwnerVerifierManifest
 } from './owner-grant-anchor-install'
+import { CONTINUITY_OBSERVE_MS, createOwnerGrantContinuityIssuer } from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import {
   createOwnerForwardConfirmHandler,
@@ -8053,6 +8055,8 @@ const ownerGrantController = createOwnerGrantController({
   store: ownerGrantKeyStore,
   readAnchor: () => readTrustedOwnerAnchor(),
   adminRunner: createOsascriptAdminRunner(),
+  // b9 §6: enable re-pushes the verifier package when the installed manifest differs from ours.
+  readInstalledManifest: () => readInstalledOwnerVerifierManifest(),
   confirm: confirmOwnerGrantStep,
   ownerUid: process.getuid?.() ?? -1,
   grantsDir: defaultOwnerGrantsDir(),
@@ -8072,9 +8076,72 @@ const ownerGrantController = createOwnerGrantController({
 // a dead backend fails the gateway's backend check (fail closed).
 const ownerGrantBackendIds = new Map<string, string>()
 
+// b9 §3: the relaunch continuity issuer. Main-only. `old` is never read from state.db (agent-
+// writable): a main-owned timer records, per app-spawned backend, the LIVE Claude CLI id each active
+// session's backend announces (GET /api/sessions/{id} `claude_session_id`, the CLI's own
+// announcement). On a relaunch (the spawn hook below) the previous backend's observations are
+// frozen and a grant is signed only when the relaunched backend's live id differs from them.
+// No IPC channel, gateway method, tool, signing or forward request reaches it
+// (owner-grant-continuity.test.ts pins that).
+const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
+  store: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir(),
+  ownerUid: process.getuid?.() ?? -1,
+  now: () => Date.now(),
+  listLiveSessions: async backendProfile => {
+    const listed: any = await fetchJsonForRunningProfile(
+      backendProfile,
+      `/api/sessions?profile=${encodeURIComponent(backendProfile)}&limit=20&order=recent`
+    )
+    const rows: any[] = Array.isArray(listed?.sessions) ? listed.sessions : Array.isArray(listed) ? listed : []
+    const active = rows.filter(row => row && typeof row.id === 'string' && row.id && !row.ended_at).slice(0, 10)
+    const out: Array<{ profile: string; sessionId: string; live: string | null }> = []
+
+    for (const row of active) {
+      out.push({ profile: backendProfile, sessionId: row.id, live: await ownerGrantLiveClaudeId(backendProfile, backendProfile, row.id) })
+    }
+
+    return out
+  },
+  readLive: (backendProfile, profile, sessionId) => ownerGrantLiveClaudeId(backendProfile, profile, sessionId),
+  log: message => rememberLog(message)
+})
+
+/** The session's live Claude CLI id as its backend announces it (never the state.db column). */
+async function ownerGrantLiveClaudeId(backendProfile: string, profile: string, sessionId: string): Promise<string | null> {
+  const row: any = await fetchJsonForRunningProfile(
+    backendProfile,
+    `/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}`
+  )
+
+  if (!row || typeof row !== 'object' || row.id !== sessionId || row.claude_session_state !== 'live') {
+    return null
+  }
+
+  return typeof row.claude_session_id === 'string' && row.claude_session_id ? row.claude_session_id : null
+}
+
+// The observation timer: only app-spawned backends, only while this app can sign, never spawning.
+setInterval(() => {
+  if (ownerGrantKeyStore.anchorState() !== 'match') {
+    return
+  }
+
+  for (const [profile, backendId] of ownerGrantBackendIds) {
+    void ownerGrantContinuity.observe(profile, backendId).catch(() => {})
+  }
+}, CONTINUITY_OBSERVE_MS).unref?.()
+
 function ownerGrantBackendSpawnEnv(profile: string) {
   const backendId = `spawn_${crypto.randomBytes(16).toString('hex')}`
+  const relaunched = ownerGrantBackendIds.has(profile)
   ownerGrantBackendIds.set(profile, backendId)
+
+  if (relaunched) {
+    void ownerGrantContinuity.onBackendRelaunch(profile, backendId).catch(error => {
+      rememberLog(`[owner-grant] continuity watch failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
 
   return {
     // These are public verification inputs. The backend's spawned agent shells may inherit them.
@@ -10243,9 +10310,20 @@ async function fetchJsonForProfile(profile, path) {
   return requestJsonForProfile(profile, path, 'GET')
 }
 
+// GET without spawning a pooled backend (passive): background observers only.
+async function fetchJsonForRunningProfile(profile: string, path: string) {
+  return requestJsonForProfile(profile, path, 'GET', undefined, { passive: true })
+}
+
 // Issue an arbitrary method against a profile's resolved backend, parsed JSON.
-async function requestJsonForProfile(profile: string, path: string, method: string, body?: string) {
-  const conn = await ensureBackend(profile)
+async function requestJsonForProfile(
+  profile: string,
+  path: string,
+  method: string,
+  body?: string,
+  ensureOpts: { passive?: boolean } = {}
+) {
+  const conn = await ensureBackend(profile, ensureOpts)
   const url = `${conn.baseUrl}${path}`
   const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
 

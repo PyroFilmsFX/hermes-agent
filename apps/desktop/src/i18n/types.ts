@@ -3106,7 +3106,19 @@ export interface Translations {
     charCount: (count: number, max: number) => string
     scopes: string
     scopeNone: string
-    scopeClass: { allowlist: string; gate: string; marker: string; prod: string }
+    scopeClass: {
+      allowlist: string
+      answer: string
+      continuity: string
+      defer: string
+      gate: string
+      gc: string
+      marker: string
+      override: string
+      policy: string
+      prod: string
+      spend: string
+    }
     otherScope: string
     addScope: string
     badScope: string

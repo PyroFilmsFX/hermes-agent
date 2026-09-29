@@ -15,8 +15,50 @@ from typing import Dict, Mapping, Sequence, Tuple
 
 CATALOG_FORMAT = "hermes-owner-grant-scopes/v1"
 _SCOPE_RE = re.compile(
-    r"\Aconductor:(allowlist|gate|marker|prod):([a-z0-9][a-z0-9-]{0,62})\Z"
+    r"\Aconductor:"
+    r"(allowlist|gate|marker|prod|answer|defer|override|gc|policy|spend|continuity)"
+    r":([a-z0-9][a-z0-9-]{0,62})\Z"
 )
+_ORIGINAL_CLASSES = frozenset(("quote-only", "allowlist", "gate", "marker", "prod"))
+# b9 owner-grant scopes: each of these classes authorizes one exact, owner-confirmed act, so the
+# loader refuses a catalog that makes any of them reusable or subject-free.
+SUBJECT_BOUND_CLASSES = frozenset((
+    "answer",
+    "defer",
+    "override",
+    "gc",
+    "policy",
+    "spend",
+    "continuity",
+))
+_CLASS_NAMES = _ORIGINAL_CLASSES | SUBJECT_BOUND_CLASSES
+
+# Per-scope signed-subject grammar. Each pattern must match the whole subject (re.fullmatch;
+# the desktop mirrors use ``^(?:pattern)$`` with no flags, so every pattern here is written in
+# the Python/JavaScript common subset). The shared vectors live in
+# tests/fixtures/owner_grant_subject_vectors.json and a test pins them to this table.
+_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+_HEX64 = r"[0-9a-f]{64}"
+SUBJECT_GRAMMAR: Mapping[str, str] = {
+    # <question_sha256>:<option_index>, 1-based, no leading zeros.
+    "conductor:answer:stage-variant": _HEX64 + r":[1-9][0-9]*",
+    # <old_claude_sid>:<new_claude_sid>; a rebind to the same id is not a rebind.
+    "conductor:continuity:session-relaunch": "(" + _ID + r"):(?!\1$)" + _ID,
+    # <build_id>:<wave_or_unit_id>
+    "conductor:defer:wave-or-unit": _ID + ":" + _ID,
+    # <dry_run_manifest_sha256>
+    "conductor:gc:prune-lanes": _HEX64,
+    # <build_id>:<wave>:<fan|recheck>
+    "conductor:override:review-budget": _ID + ":" + _ID + ":(?:fan|recheck)",
+    # <rule_id>:<rule_sha256>
+    "conductor:policy:standing-approval": _ID + ":" + _HEX64,
+    # <cli>
+    "conductor:policy:unsandboxed-write": r"[a-z0-9][a-z0-9._-]{0,63}",
+    # <fly_app>:<usd_cap>, a positive decimal: no leading zeros, at most 2 decimals, not 0.
+    "conductor:spend:fly": (
+        r"[a-z0-9][a-z0-9-]{0,62}:(?![0.]+$)(?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,2})?"
+    ),
+}
 _CATALOG_KEYS = frozenset(("format", "classes", "scopes"))
 _CLASS_POLICY_KEYS = frozenset((
     "default_ttl_ms",
@@ -62,13 +104,7 @@ def _load_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     if catalog["format"] != CATALOG_FORMAT:
         raise ScopeError("scope catalog format is unsupported")
     classes = catalog["classes"]
-    if not isinstance(classes, dict) or set(classes) != {
-        "quote-only",
-        "allowlist",
-        "gate",
-        "marker",
-        "prod",
-    }:
+    if not isinstance(classes, dict) or set(classes) != _CLASS_NAMES:
         raise ScopeError("scope catalog classes are invalid")
     for scope_class, policy in classes.items():
         if not isinstance(policy, dict) or set(policy) != _CLASS_POLICY_KEYS:
@@ -93,6 +129,14 @@ def _load_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
         or classes["prod"]["subject_required"] is not True
     ):
         raise ScopeError("prod scopes must be single-use and require a subject")
+    for scope_class in sorted(SUBJECT_BOUND_CLASSES):
+        if (
+            classes[scope_class]["single_use"] is not True
+            or classes[scope_class]["subject_required"] is not True
+        ):
+            raise ScopeError(
+                "%s scopes must be single-use and require a subject" % scope_class
+            )
 
     entries = catalog["scopes"]
     if not isinstance(entries, list):
@@ -115,6 +159,9 @@ def _load_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
             raise ScopeError("catalog scope has no class policy")
         previous = value
         by_scope[value] = entry
+    for value in SUBJECT_GRAMMAR:
+        if value not in by_scope:
+            raise ScopeError("subject grammar names an uncatalogued scope %r" % value)
     return classes, by_scope
 
 
@@ -165,3 +212,16 @@ def max_ttl_ms_for_scopes(values: Sequence[str]) -> int:
     if not values:
         return MAX_TTL_MS_BY_CLASS["quote-only"]
     return min(MAX_TTL_MS_BY_CLASS[class_for_scope(value)] for value in values)
+
+
+def subject_matches_grammar(scope: str, subject: str) -> bool:
+    """Whether ``subject`` fits ``scope``'s signed-subject grammar.
+
+    Scopes without a registered grammar accept any subject here; the verifier's non-empty
+    string check and exact-match rule still apply to them.
+    """
+    # Compiled on first use (re caches it), keeping the launcher's import cost flat.
+    pattern = SUBJECT_GRAMMAR.get(scope)
+    if pattern is None:
+        return True
+    return isinstance(subject, str) and re.fullmatch(pattern, subject) is not None

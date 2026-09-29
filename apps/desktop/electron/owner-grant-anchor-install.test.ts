@@ -28,6 +28,7 @@ import {
   buildAdminArgv,
   createOsascriptAdminRunner,
   createOwnerGrantController,
+  installedVerifierIsCurrent,
   OSASCRIPT_PATH,
   OWNER_VERIFY_LAUNCHER,
   type OwnerGrantConfirmRequest,
@@ -283,6 +284,8 @@ function harness(
     before?: (src: string) => void
     verifierSourceDir?: string
     warm?: boolean
+    /** b9 §6: read the installed manifest.sha256 out of the fake /Library. */
+    manifestReader?: boolean
   } = {}
 ): Harness {
   const rfs = opts.rfs ?? new RedirectFs(mkTmp('ogai-root-'))
@@ -309,6 +312,17 @@ function harness(
     grantsDir: '/Users/owner/.hermes/owner-grants',
     tmpRoot,
     verifierSourceDir: opts.verifierSourceDir ?? VERIFIER_SOURCE_DIR,
+    ...(opts.manifestReader
+      ? {
+          readInstalledManifest: () => {
+            try {
+              return fs.readFileSync(rfs.real(`${OWNER_ANCHOR_DIR}/manifest.sha256`))
+            } catch {
+              return null
+            }
+          }
+        }
+      : {}),
     now: opts.now ?? (() => NOW),
     platform: 'darwin'
   })
@@ -1248,5 +1262,87 @@ describe('U11b cross-language: the Python doctor check reads what the root scrip
 
   test.skipIf(HAVE_PYTHON)('U11b-X1 SKIPPED: no Python for the cross-language check', () => {
     console.warn(`U11b-X1 SKIPPED: no Python at ${PYTHON} or no hermes_owner_grant at ${REPO}`)
+  })
+})
+
+describe('b9 §6: enable re-pushes the verifier PACKAGE when the installed manifest differs', () => {
+  function packageCopy(): string {
+    const dir = mkTmp('ogai-pkg-')
+
+    for (const name of VERIFIER_PACKAGE_FILES) {
+      fs.copyFileSync(path.join(VERIFIER_SOURCE_DIR, name), path.join(dir, name))
+    }
+
+    return dir
+  }
+
+  const installed = (h: Harness, name: string) => fs.readFileSync(h.rfs.real(`${OWNER_ANCHOR_DIR}/${PKG_REL}/${name}`))
+
+  test('same launcher, same package: a no-op (no prompt)', async () => {
+    const h = harness({ manifestReader: true, verifierSourceDir: packageCopy() })
+    expect((await h.controller.enable()).ok).toBe(true)
+    const kid = h.store.publicInfo()!.kid
+    expect(await h.controller.enable()).toMatchObject({ ok: true, kid, unchanged: true })
+    expect(h.seen).toHaveLength(1)
+    expect(h.confirms).toHaveLength(1)
+  })
+
+  test('same launcher, changed scopes.json: one confirm, one admin prompt, same key, new package installed', async () => {
+    const src = packageCopy()
+    const h = harness({ manifestReader: true, verifierSourceDir: src })
+    expect((await h.controller.enable()).ok).toBe(true)
+    const kid = h.store.publicInfo()!.kid
+    const anchorBefore = fs.readFileSync(h.rfs.real(OWNER_ANCHOR_PATH))
+
+    fs.appendFileSync(path.join(src, 'scopes.json'), '\n')
+    const updated = fs.readFileSync(path.join(src, 'scopes.json'))
+    expect(installed(h, 'scopes.json')).not.toEqual(updated)
+
+    const res = await h.controller.enable()
+    expect(res).toMatchObject({ ok: true, kid })
+    expect(res.unchanged).toBeUndefined()
+    expect(h.seen).toHaveLength(2)
+    expect(h.confirms).toHaveLength(2)
+    expect(h.confirms[1].title).toBe('Update the owner-grant verifier')
+    expect(installed(h, 'scopes.json')).toEqual(updated)
+    // Same keys, same launcher: anchor.json is unchanged and signing stays on.
+    expect(fs.readFileSync(h.rfs.real(OWNER_ANCHOR_PATH))).toEqual(anchorBefore)
+    expect(h.controller.status().canSign).toBe(true)
+    // Settled: a third enable is a no-op again.
+    expect(await h.controller.enable()).toMatchObject({ ok: true, unchanged: true })
+    expect(h.seen).toHaveLength(2)
+  })
+
+  test('a package refresh the admin step did not land is reported as a failure', async () => {
+    const src = packageCopy()
+    let calls = 0
+    const h = harness({
+      manifestReader: true,
+      verifierSourceDir: src,
+      runner: rfs => {
+        const inner = fakeAdminRunner(rfs).runner
+
+        return { run: async argv => (++calls === 1 ? inner.run(argv) : { code: 1 }) }
+      }
+    })
+    expect((await h.controller.enable()).ok).toBe(true)
+    fs.appendFileSync(path.join(src, 'verify.py'), '\n')
+
+    expect(await h.controller.enable()).toMatchObject({ ok: false, reason: 'admin_failed' })
+    expect(calls).toBe(2)
+  })
+
+  test('installedVerifierIsCurrent: launcher and every package file must be listed with this app\'s hash', () => {
+    const files = new Map(VERIFIER_PACKAGE_FILES.map(n => [`${PKG_REL}/${n}`, fs.readFileSync(path.join(VERIFIER_SOURCE_DIR, n))]))
+    const lines = [
+      `${sha256Hex(OWNER_VERIFY_LAUNCHER)}  hermes_owner_verify.py`,
+      ...[...files].map(([rel, bytes]) => `${sha256Hex(bytes)}  ${rel}`),
+      `${'0'.repeat(64)}  pycache/x.pyc`
+    ]
+    expect(installedVerifierIsCurrent(lines.join('\n') + '\n', files)).toBe(true)
+    expect(installedVerifierIsCurrent(null, files)).toBe(false)
+    expect(installedVerifierIsCurrent(lines.slice(1).join('\n'), files)).toBe(false)
+    expect(installedVerifierIsCurrent(lines.filter(l => !l.endsWith('/scopes.json')).join('\n'), files)).toBe(false)
+    expect(installedVerifierIsCurrent(lines.map(l => (l.endsWith('/verify.py') ? `${'f'.repeat(64)}${l.slice(64)}` : l)).join('\n'), files)).toBe(false)
   })
 })
