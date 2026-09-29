@@ -30,6 +30,26 @@ _MISSING = object()
 
 declaration.on_change = invalidate_check_fn_cache
 
+
+def _persist_mcp_task(result, *, server_name: str, session_id: str, tool_call_id: str) -> Optional[str]:
+    structured = mcp_field(result, "structured_content", "structuredContent", {}) or {}
+    task = getattr(result, "task", None) or mcp_field(structured, "task", "task") or {}
+    task_id = (getattr(result, "task_id", None) or mcp_field(structured, "task_id", "taskId")
+               or getattr(task, "task_id", None) or mcp_field(task, "task_id", "taskId"))
+    result_type = getattr(result, "result_type", None) or mcp_field(structured, "result_type", "resultType")
+    if result_type != "task" or not task_id or not session_id or not tool_call_id:
+        return None
+    from hermes_state import SessionDB
+    db = SessionDB()
+    try:
+        db._execute_write(lambda conn: conn.execute(
+            "INSERT OR IGNORE INTO mcp_pending_tasks "
+            "(server, task_id, session_id, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (server_name, str(task_id), session_id, tool_call_id, time.time())))
+    finally:
+        db.close()
+    return str(task_id)
+
 _NEEDS_REAUTH_MSG = (
     "MCP server '{s}' requires re-authentication. Run `hermes mcp login {s}` (or delete the tokens file under "
     "~/.hermes/mcp-tokens/ and restart). Do NOT retry this tool — ask the user to re-authenticate.")
@@ -481,7 +501,9 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
             logger.debug("MCP %s/%s progress callback failed", server_name, tool_name, exc_info=True)
 
     _call_coro = server.session.call_tool(
-        tool_name, arguments=args, progress_callback=_on_progress, meta={"traceparent": _traceparent(traceparent)})
+        tool_name, arguments=args, progress_callback=_on_progress,
+        meta={"traceparent": _traceparent(traceparent), "io.modelcontextprotocol/tasks": {}},
+        allow_claimed=True)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
@@ -679,6 +701,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 server._mark_session_proven()
             if schema_error is not None:
                 return schema_error
+            task_id = _persist_mcp_task(result, server_name=server_name,
+                                        session_id=kwargs.get("session_id") or "",
+                                        tool_call_id=kwargs.get("tool_call_id") or "")
+            if task_id:
+                return json.dumps({"status": "waiting_on_task", "server": server_name,
+                                   "task_id": task_id, "tool_call_id": kwargs.get("tool_call_id")})
             return _render_validated_call_tool_result(result, server_name, tool_name)
 
         def _on_failure(exc):

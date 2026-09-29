@@ -509,6 +509,7 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
         return unfit
     target = _tip(db, str(row["target_session_id"]))
     live = _find_live(target, profile_home)
+    task_wake = dict(row).get("from_label") == "MCP task"
     if live is not None:
         if _mailbox_auto_blocked(live[1]):
             return STATUS_QUEUED, "owner input pending or Stop hold active"
@@ -517,7 +518,8 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
             return native
         if not db.peer_mailbox_claim(row["id"], _OWNER):
             return STATUS_QUEUED, "another delivery of this message is in progress"
-        return _submit_claimed(db, row, live[0], via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
+        return _submit_claimed(db, row, live[0], via="task" if task_wake else "live",
+                               ok_status=STATUS_DELIVERED_LIVE, pol=pol)
     with contextlib.suppress(Exception):
         if not db.get_session(target):
             db.peer_mailbox_fail(row["id"], "target session no longer exists")
@@ -544,7 +546,8 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
             if (session := server._sessions.get(sid)) is not None and not session.get("pinned_resident"):
                 session["_peer_mailbox_woken"] = True
         _emit_mailbox_woken_lifecycle(sid, row, profile_home)
-        return _submit_claimed(db, row, sid, via="resume", ok_status=STATUS_RESUMED, pol=pol)
+        return _submit_claimed(db, row, sid, via="task" if task_wake else "resume",
+                               ok_status=STATUS_RESUMED, pol=pol)
     finally:
         _gate.release(target)
 

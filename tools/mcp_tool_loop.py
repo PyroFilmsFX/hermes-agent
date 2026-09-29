@@ -18,6 +18,8 @@ from tools.mcp_tool_common import _core
 from tools import mcp_tool_lifecycle as _lifecycle
 
 logger = logging.getLogger("tools.mcp_tool")
+MCP_TASK_POLL_INTERVAL_S = 5.0
+_mcp_task_backoff: dict[tuple[str, str], tuple[float, float]] = {}
 
 
 class _LockCookie:
@@ -256,6 +258,99 @@ def _ensure_mcp_loop():
         loop.set_exception_handler(_mcp_loop_exception_handler)
         _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
         _origin._mcp_thread.start()
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(_poll_mcp_tasks()))
+
+
+def _task_poll_interval() -> float:
+    try:
+        from hermes_cli.config import load_config_readonly
+        value = float((load_config_readonly().get("mcp") or {}).get("task_poll_interval_s", MCP_TASK_POLL_INTERVAL_S))
+        return max(0.1, value)
+    except (TypeError, ValueError, AttributeError):
+        return MCP_TASK_POLL_INTERVAL_S
+
+
+def _task_db():
+    from hermes_state import SessionDB
+    db = SessionDB()
+    db.ensure_peer_mailbox()
+    return db
+
+
+def _enqueue_task_wake(db, row: dict, result: Any) -> None:
+    import json
+    from agent.secret_hygiene import mask_ingress_text
+    from tui_gateway.session_mailbox import schedule_drain
+
+    serialized = json.dumps(result.model_dump(mode="json", by_alias=True) if hasattr(result, "model_dump") else result,
+                            ensure_ascii=False, default=str)
+    body, _ = mask_ingress_text(f'MCP task result (untrusted data):\n"""\n{serialized}\n"""')
+    now = time.time()
+    dedupe = f"mcp-task:{row['server']}:{row['task_id']}"
+
+    def write(conn):
+        conn.execute("UPDATE mcp_pending_tasks SET completed_at = COALESCE(completed_at, ?) "
+                     "WHERE server = ? AND task_id = ?", (now, row["server"], row["task_id"]))
+        conn.execute(
+            "INSERT OR IGNORE INTO peer_mailbox "
+            "(target_session_id, from_label, body, dedupe_key, status, created_at) "
+            "VALUES (?, 'MCP task', ?, ?, 'queued', ?)",
+            (row["session_id"], body, dedupe, now))
+        conn.execute("UPDATE mcp_pending_tasks SET delivered_at = COALESCE(delivered_at, ?) "
+                     "WHERE server = ? AND task_id = ?", (now, row["server"], row["task_id"]))
+    db._execute_write(write)
+    schedule_drain(str(row["session_id"]), None)
+
+
+async def _poll_mcp_tasks_once() -> None:
+    import mcp.types as types
+    from pydantic import TypeAdapter
+    from tools import mcp_tool as core
+
+    db = _task_db()
+    try:
+        rows = [dict(row) for row in db._read_all(
+            "SELECT * FROM mcp_pending_tasks WHERE delivered_at IS NULL ORDER BY created_at")]
+        with core._lock:
+            servers = {str(server.name): server for server in core._servers.values() if server.session is not None}
+        for row in rows:
+            key = (row["server"], row["task_id"])
+            retry_at, delay = _mcp_task_backoff.get(key, (0.0, MCP_TASK_POLL_INTERVAL_S))
+            if time.monotonic() < retry_at:
+                continue
+            server = servers.get(row["server"])
+            if server is None:
+                continue
+            try:
+                async with server._rpc_lock:
+                    status = await server.session.send_request(
+                        types.GetTaskRequest(params=types.GetTaskRequestParams(taskId=row["task_id"])),
+                        types.GetTaskResult)
+                    if status.status != "completed":
+                        _mcp_task_backoff.pop(key, None)
+                        continue
+                    result = await server.session.send_request(
+                        types.GetTaskPayloadRequest(params=types.GetTaskPayloadRequestParams(taskId=row["task_id"])),
+                        TypeAdapter(dict[str, Any]))
+                _enqueue_task_wake(db, row, result)
+                _mcp_task_backoff.pop(key, None)
+            except Exception:
+                delay = min(max(delay * 2, MCP_TASK_POLL_INTERVAL_S), 300.0)
+                _mcp_task_backoff[key] = (time.monotonic() + delay, delay)
+                logger.debug("MCP task poll failed for %s/%s", *key, exc_info=True)
+    finally:
+        db.close()
+
+
+async def _poll_mcp_tasks() -> None:
+    while True:
+        try:
+            await _poll_mcp_tasks_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("MCP task poller failed", exc_info=True)
+        await asyncio.sleep(_task_poll_interval())
 
 
 def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
