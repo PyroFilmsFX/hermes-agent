@@ -98,14 +98,121 @@ def _read_json_file(directory: Path, name: str, max_bytes: int = _MARKER_MAX_BYT
         os.close(directory_fd)
 
 
-def _marker_view(record: dict | None, mtime: float | None) -> dict | None:
-    """A finished build shows nothing; an unfinished one past 12 h stays visible, muted (D32). A private
-    key, so a marker field can never collide with it."""
+def owner_liveness(session: dict | None, gateway_server: Any = None) -> str:
+    """Probe session liveness: 'busy', 'attached', 'cli', or 'none'.
+
+    Matches the Conductors router owner-liveness probe (§4):
+    - gateway session running -> busy
+    - open non-detached transport -> attached
+    - live_claude_cli_session(agent) == 'live' -> cli
+    - otherwise -> none
+    """
+    if not isinstance(session, dict) or session.get("_finalized"):
+        return "none"
+    if session.get("running"):
+        return "busy"
+    transport = session.get("transport")
+    if transport and not getattr(transport, "_closed", False):
+        detached = getattr(gateway_server, "_detached_ws_transport", None) if gateway_server else None
+        if detached is None and "_detached_ws_transport" in globals():
+            detached = globals().get("_detached_ws_transport")
+        if detached is None:
+            try:
+                from tui_gateway import server as _default_server
+                detached = getattr(_default_server, "_detached_ws_transport", None)
+            except Exception:
+                detached = None
+        if transport is not detached:
+            return "attached"
+    agent = session.get("agent")
+    if agent:
+        try:
+            from agent.claude_sdk_runtime_continuity import live_claude_cli_session
+            c_state, _ = live_claude_cli_session(agent)
+            if c_state == "live":
+                return "cli"
+        except Exception:
+            pass
+    return "none"
+
+
+def _has_fresh_running_lane(jobs: list[dict] | None, now: float) -> bool:
+    """Return True if any build lane is running with a heartbeat of 5 min or less."""
+    if not jobs:
+        return False
+    from datetime import datetime, timezone
+    for job in jobs:
+        if isinstance(job, dict) and job.get("status") == "running":
+            hb = job.get("heartbeat_epoch")
+            if isinstance(hb, (int, float)):
+                if (now - hb) <= 300:
+                    return True
+            time_str = job.get("heartbeat_at") or job.get("spawned_at")
+            if isinstance(time_str, str) and time_str:
+                try:
+                    dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if (now - dt.timestamp()) <= 300:
+                        return True
+                except (ValueError, OSError):
+                    pass
+    return False
+
+
+def _is_lease_expired_or_absent(lease_expires_at: Any, now: float) -> bool:
+    """Return True if the lease is in the past (expired) or absent."""
+    if lease_expires_at is None or lease_expires_at == "":
+        return True
+    if isinstance(lease_expires_at, (int, float)) and not isinstance(lease_expires_at, bool):
+        return float(lease_expires_at) <= now
+    if isinstance(lease_expires_at, str):
+        from datetime import datetime, timezone
+        try:
+            lease_time = datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
+            if lease_time.tzinfo is None:
+                lease_time = lease_time.replace(tzinfo=timezone.utc)
+            return lease_time.timestamp() <= now
+        except (ValueError, OSError):
+            return True
+    return True
+
+
+def _is_marker_stale(
+    record: dict | None,
+    mtime: float | None,
+    session: dict | None,
+    jobs: list[dict] | None,
+    now: float,
+) -> bool:
+    if record is None or mtime is None:
+        return False
+    if (now - mtime) <= _MARKER_MAX_AGE_SECONDS:
+        return False
+    if owner_liveness(session) in ("busy", "attached"):
+        return False
+    if _has_fresh_running_lane(jobs, now):
+        return False
+    if not _is_lease_expired_or_absent(record.get("lease_expires_at"), now):
+        return False
+    return True
+
+
+def _marker_view(
+    record: dict | None,
+    mtime: float | None,
+    *,
+    session: dict | None = None,
+    jobs: list[dict] | None = None,
+) -> dict | None:
+    """A finished build shows nothing; an unfinished one past 12 h stays visible, muted (D32)
+    when the owner session is idle. A private key, so a marker field can never collide with it."""
     from datetime import datetime, timezone
 
     if record is None or record.get("done") is True:
         return None
-    if mtime is not None and datetime.now(timezone.utc).timestamp() - mtime > _MARKER_MAX_AGE_SECONDS:
+    now = datetime.now(timezone.utc).timestamp()
+    if _is_marker_stale(record, mtime, session, jobs, now):
         record = dict(record)
         record[_STALE_KEY] = True
     return record
@@ -114,7 +221,13 @@ def _marker_view(record: dict | None, mtime: float | None) -> dict | None:
 _BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
-def _indexed_marker(state: Path, claude_sid: str | None) -> tuple[dict | None, bool, bool]:
+def _indexed_marker(
+    state: Path,
+    claude_sid: str | None,
+    *,
+    session: dict | None = None,
+    jobs: list[dict] | None = None,
+) -> tuple[dict | None, bool, bool]:
     """Conductor 3.62's ``tb-builds-index.json`` (schema ``tb-builds-index/v1``): ``(record, unreadable,
     decided)``. ``decided`` is False when there's no index or it names no build for this session, so the
     caller falls back to the flat marker. A row is trusted only for a namespaced marker inside this state
@@ -147,19 +260,27 @@ def _indexed_marker(state: Path, claude_sid: str | None) -> tuple[dict | None, b
         if bad:
             return None, True, True
         if record is not None and (not claude_sid or not mine or record.get("session_id") == claude_sid):
-            return _marker_view(record, mtime), False, True
+            return _marker_view(record, mtime, session=session, jobs=jobs), False, True
     return None, False, False
 
 
-def _read_marker(workspace: Path, claude_sid: str | None = None) -> tuple[dict | None, bool]:
+def _read_marker(
+    workspace: Path,
+    claude_sid: str | None = None,
+    *,
+    session: dict | None = None,
+    jobs: list[dict] | None = None,
+) -> tuple[dict | None, bool]:
     """The build to show for this workspace: the 3.62 builds index (this session's own row), else the
     flat ``tb-build-active.json`` (pre-3.62 installs, and 3.62's dual-written first build)."""
+    if jobs is None:
+        jobs = _relay_job_reader(str(workspace))
     state = workspace / ".claude" / "state"
-    record, unreadable, decided = _indexed_marker(state, claude_sid)
+    record, unreadable, decided = _indexed_marker(state, claude_sid, session=session, jobs=jobs)
     if decided:
         return record, unreadable
     flat, mtime, flat_unreadable = _read_json_file(state, "tb-build-active.json")
-    return _marker_view(flat, mtime), flat_unreadable or (unreadable and flat is None)
+    return _marker_view(flat, mtime, session=session, jobs=jobs), flat_unreadable or (unreadable and flat is None)
 
 
 def _session_claude_sid(session: dict) -> str | None:
@@ -193,7 +314,12 @@ def _clean_waiting_on(value) -> str:
     return "".join(char for char in value if unicodedata.category(char) != "Cc")[:80]
 
 
-def _build_snapshot(session_cwd: str, claude_sid: str | None = None) -> tuple[dict | None, bool]:
+def _build_snapshot(
+    session_cwd: str,
+    claude_sid: str | None = None,
+    *,
+    session: dict | None = None,
+) -> tuple[dict | None, bool]:
     from datetime import datetime, timezone
     from pathlib import Path
 
@@ -202,7 +328,8 @@ def _build_snapshot(session_cwd: str, claude_sid: str | None = None) -> tuple[di
     resolved_cwd = Path(session_cwd).expanduser().resolve()
     top = git_probe.repo_root(str(resolved_cwd))
     workspace = Path(top).resolve() if top else resolved_cwd
-    marker, unreadable = _read_marker(workspace, claude_sid)
+    jobs = _relay_job_reader(str(workspace))
+    marker, unreadable = _read_marker(workspace, claude_sid, session=session, jobs=jobs)
     if marker is None:
         return None, unreadable
 
@@ -241,7 +368,6 @@ def _build_snapshot(session_cwd: str, claude_sid: str | None = None) -> tuple[di
         )
     )
 
-    jobs = _relay_job_reader(str(workspace))
     lanes_running = sum(job.get("status") == "running" for job in jobs)
     lanes_stale = sum(job.get("status") == "stale" for job in jobs)
     run_id = marker.get("run_id") if isinstance(marker.get("run_id"), str) else ""
@@ -288,7 +414,7 @@ def _conductor_build_get(rid, params):
     session_cwd = session.get("cwd")
     if not isinstance(session_cwd, str) or not session_cwd:
         return _ok(rid, {"build": None, "unreadable": False})
-    build, unreadable = _build_snapshot(session_cwd, _session_claude_sid(session))
+    build, unreadable = _build_snapshot(session_cwd, _session_claude_sid(session), session=session)
     return _ok(rid, {"build": build, "unreadable": unreadable})
 
 

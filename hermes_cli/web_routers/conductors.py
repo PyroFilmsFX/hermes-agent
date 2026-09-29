@@ -39,7 +39,11 @@ from tui_gateway.conductor_roster import (
     read_build_status,
     read_marker_index,
 )
-from tui_gateway.methods_conductor_build import _read_json_file
+from tui_gateway.methods_conductor_build import (
+    _has_fresh_running_lane,
+    _read_json_file,
+    owner_liveness,
+)
 from tui_gateway.methods_relay_jobs import _list_relay_jobs
 
 _log = logging.getLogger("hermes_cli.web_server")
@@ -307,22 +311,7 @@ def compute_liveness(
     lease_unexpired = (lease_ts is not None and lease_ts > now)
 
     # 1. active: owner live (busy or attached) OR any build lane running with heartbeat <= 5 min
-    has_running_lane = False
-    for job in matched_jobs:
-        if isinstance(job, dict) and job.get("status") == "running":
-            hb = job.get("heartbeat_epoch")
-            if isinstance(hb, (int, float)):
-                if (now - hb) <= 300:
-                    has_running_lane = True
-                    break
-            elif isinstance(job.get("heartbeat_at"), str):
-                try:
-                    hb_ts = datetime.fromisoformat(job["heartbeat_at"].replace("Z", "+00:00")).timestamp()
-                    if (now - hb_ts) <= 300:
-                        has_running_lane = True
-                        break
-                except (ValueError, OSError):
-                    pass
+    has_running_lane = _has_fresh_running_lane(matched_jobs, now)
     if not has_running_lane and lanes and isinstance(lanes, dict):
         if (lanes.get("running") or 0) > 0 and last_activity_at is not None and (now - last_activity_at) <= 300:
             has_running_lane = True
@@ -565,22 +554,7 @@ def _build_conductors_payload() -> dict[str, Any]:
                         live_sess = s_val
                         break
             if live_sess is not None:
-                if live_sess.get("running"):
-                    owner_live = "busy"
-                elif live_sess.get("transport") and not getattr(live_sess.get("transport"), "_closed", False):
-                    detached = getattr(gateway_server, "_detached_ws_transport", None) if gateway_server else None
-                    if live_sess.get("transport") is not detached:
-                        owner_live = "attached"
-                if owner_live == "none":
-                    agent = live_sess.get("agent")
-                    if agent:
-                        try:
-                            from agent.claude_sdk_runtime_continuity import live_claude_cli_session
-                            c_state, _ = live_claude_cli_session(agent)
-                            if c_state == "live":
-                                owner_live = "cli"
-                        except Exception:
-                            pass
+                owner_live = owner_liveness(live_sess, gateway_server)
 
             prof_name = attr.profile or "default"
             stored_s = sessions_by_profile_sid.get((prof_name, hsid))

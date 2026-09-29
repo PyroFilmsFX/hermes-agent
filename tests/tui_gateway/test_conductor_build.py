@@ -203,15 +203,122 @@ def test_old_marker_done_false_gives_stale_done_true_gives_none(workspace):
     root, marker = workspace
     old_time = time.time() - 13 * 3600
 
-    marker.write_text(json.dumps(_marker(done=False)), encoding="utf-8")
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=None)), encoding="utf-8")
     os.utime(marker, (old_time, old_time))
     build = _result(workspace)["result"]["build"]
     assert build is not None
     assert build["state"] == "stale"
 
-    marker.write_text(json.dumps(_marker(done=True)), encoding="utf-8")
-    os.utime(marker, (old_time, old_time))
+    marker.write_text(json.dumps(_marker(done=True, lease_expires_at=None)), encoding="utf-8")
+    os.utime(marker, (old_time + 1, old_time + 1))
     assert _result(workspace)["result"]["build"] is None
+
+
+def test_old_marker_busy_session_is_not_stale(workspace, monkeypatch):
+    root, marker = workspace
+    now = time.time()
+    old_time = now - 13 * 3600
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=old_time)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (object(), {"cwd": str(root), "running": True}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] != "stale"
+
+
+def test_old_marker_attached_is_not_stale(workspace, monkeypatch):
+    root, marker = workspace
+    now = time.time()
+    old_time = now - 13 * 3600
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=old_time)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    transport = object()
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (transport, {"cwd": str(root), "transport": transport}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] != "stale"
+
+
+def test_old_marker_running_lane_with_fresh_heartbeat_is_not_stale(workspace, monkeypatch):
+    root, marker = workspace
+    now = time.time()
+    old_time = now - 13 * 3600
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=old_time)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    jobs_dir = root / ".claude" / "state" / "worker-spawn" / "jobs"
+    now_dt = datetime.now(timezone.utc)
+    job_record = {
+        "job_id": "w_active",
+        "worker": "codex",
+        "status": "running",
+        "spawned_at": now_dt.isoformat(),
+        "heartbeat_at": now_dt.isoformat(),
+        "lease_expires_epoch": now + 600,
+        "heartbeat_epoch": now - 30,
+    }
+    (jobs_dir / "w_active.json").write_text(json.dumps(job_record), encoding="utf-8")
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (object(), {"cwd": str(root)}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] != "stale"
+
+
+@pytest.mark.parametrize("lease", [time.time() - 3600, "2026-01-01T00:00:00Z", None])
+def test_old_marker_idle_expired_lease_is_stale(workspace, monkeypatch, lease):
+    root, marker = workspace
+    old_time = time.time() - 13 * 3600
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=lease)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (object(), {"cwd": str(root)}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] == "stale"
+
+
+def test_young_marker_idle_is_not_stale(workspace, monkeypatch):
+    root, marker = workspace
+    now = time.time()
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=now - 60)), encoding="utf-8")
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (object(), {"cwd": str(root)}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] != "stale"
+
+
+@pytest.mark.parametrize("lease", [time.time() + 3600, "2099-01-01T00:00:00Z"])
+def test_old_marker_idle_lease_still_in_future_is_not_stale(workspace, monkeypatch, lease):
+    root, marker = workspace
+    old_time = time.time() - 13 * 3600
+    marker.write_text(json.dumps(_marker(done=False, lease_expires_at=lease)), encoding="utf-8")
+    os.utime(marker, (old_time, old_time))
+    monkeypatch.setattr(
+        server,
+        "_current_session_steer_authority",
+        lambda _sid: (object(), {"cwd": str(root)}),
+    )
+    build = _result(workspace)["result"]["build"]
+    assert build is not None
+    assert build["state"] != "stale"
 
 
 def test_cwd_in_subdirectory_resolves_toplevel_marker(tmp_path, monkeypatch):
