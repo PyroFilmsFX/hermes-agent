@@ -1,3 +1,7 @@
+// Must stay the first import: installs the CI launch-smoke crash handlers before
+// any other module body runs (see smoke-launch-guard.ts).
+import './smoke-launch-guard'
+
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -497,6 +501,7 @@ import {
   SESSION_WINDOW_MIN_WIDTH
 } from './session-windows'
 import { ensureLoginShellPath } from './shell-path'
+import { watchSmokeMainWindow } from './smoke-launch-guard'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
 import { createBootstrapCoordinator, sshConfigFingerprint } from './ssh-bootstrap-coordinator'
 import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
@@ -14685,6 +14690,7 @@ function createWindow() {
   })
 
   const createdMainWindow = mainWindow
+  watchSmokeMainWindow(createdMainWindow)
   minimizeToTray.registerWindow(createdMainWindow, { closeToTray: true })
   const defaultRoute = desktopProfilePreferences.getDefault()
 
