@@ -807,7 +807,8 @@ export const frOverrides = {
       appUpdates: 'Version et mises à jour',
       uninstall: 'Désinstaller',
       billingOverview: "Vue d'ensemble",
-      billingPlans: 'Forfaits'
+      billingPlans: 'Forfaits',
+      debugProcesses: 'Processus'
     },
     closeSettings: 'Fermer les paramètres',
     exportConfig: 'Exporter la configuration',
@@ -833,7 +834,8 @@ export const frOverrides = {
       about: 'À propos',
       billing: 'Facturation',
       notifications: 'Notifications',
-      vault: 'Mots de passe et identifiants'
+      vault: 'Mots de passe et identifiants',
+      debug: 'Débogage'
     },
     plugins: {
       title: 'Plugins du desktop',
@@ -2588,6 +2590,20 @@ export const frOverrides = {
       deleteFailed: 'Échec de la suppression',
       updateDirFailed: 'Impossible de mettre à jour le répertoire par défaut',
       clearDirFailed: 'Impossible de vider le répertoire par défaut'
+    },
+    processes: {
+      title: 'Processus',
+      description: 'Arborescence récursive complète des processus de l’application et du backend Python.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'Commande',
+      tableAge: 'Âge',
+      tableCpu: 'CPU (10s)',
+      tableSession: 'Session / Lane',
+      spawnsPerMinute: 'Lancements / min',
+      noSpawns: 'Aucun nouveau processus lancé au cours des 60 dernières secondes',
+      noProcesses: 'Aucun processus enfant actif',
+      loading: 'Inspection de l’arborescence des processus…'
     },
     toolsets: {
       loadingConfig: 'Chargement de la configuration',

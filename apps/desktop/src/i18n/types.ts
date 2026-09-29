@@ -699,6 +699,7 @@ export interface Translations {
       billing: string
       notifications: string
       vault: string
+      debug: string
     }
     plugins: {
       title: string
@@ -1862,6 +1863,20 @@ export interface Translations {
       deleteFailed: string
       updateDirFailed: string
       clearDirFailed: string
+    }
+    processes: {
+      title: string
+      description: string
+      tablePid: string
+      tablePpid: string
+      tableCommand: string
+      tableAge: string
+      tableCpu: string
+      tableSession: string
+      spawnsPerMinute: string
+      noSpawns: string
+      noProcesses: string
+      loading: string
     }
     toolsets: {
       loadingConfig: string

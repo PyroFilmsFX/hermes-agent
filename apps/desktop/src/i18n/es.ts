@@ -808,7 +808,8 @@ export const esOverrides = {
       appUpdates: 'Versión y actualizaciones',
       uninstall: 'Desinstalar',
       billingOverview: 'Resumen',
-      billingPlans: 'Planes'
+      billingPlans: 'Planes',
+      debugProcesses: 'Procesos'
     },
     closeSettings: 'Cerrar configuración',
     exportConfig: 'Exportar configuración',
@@ -834,7 +835,8 @@ export const esOverrides = {
       about: 'Acerca de',
       billing: 'Facturación',
       notifications: 'Notificaciones',
-      vault: 'Contraseñas e inicios de sesión'
+      vault: 'Contraseñas e inicios de sesión',
+      debug: 'Depuración'
     },
     plugins: {
       title: 'Plugins de escritorio',
@@ -2570,6 +2572,20 @@ export const esOverrides = {
       deleteFailed: 'No se pudo eliminar',
       updateDirFailed: 'No se pudo actualizar el directorio predeterminado',
       clearDirFailed: 'No se pudo limpiar el directorio predeterminado'
+    },
+    processes: {
+      title: 'Procesos',
+      description: 'Árbol recursivo de procesos secundarios de la aplicación de escritorio y el backend de Python.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'Comando',
+      tableAge: 'Edad',
+      tableCpu: 'CPU (10s)',
+      tableSession: 'Sesión / Lane',
+      spawnsPerMinute: 'Generaciones / min',
+      noSpawns: 'No se generaron procesos en los últimos 60 s',
+      noProcesses: 'No hay procesos secundarios activos',
+      loading: 'Inspeccionando el árbol de procesos…'
     },
     toolsets: {
       loadingConfig: 'Cargando configuración',

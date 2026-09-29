@@ -396,7 +396,8 @@ export const ja = defineLocale({
       appUpdates: 'バージョンと更新',
       uninstall: 'アンインストール',
       billingOverview: '概要',
-      billingPlans: 'プラン'
+      billingPlans: 'プラン',
+      debugProcesses: 'プロセス'
     },
     plugins: {
       openFolder: 'デスクトッププラグインフォルダーを開く',
@@ -436,7 +437,8 @@ export const ja = defineLocale({
       about: '情報',
       billing: '請求',
       notifications: '通知',
-      vault: 'パスワードとログイン'
+      vault: 'パスワードとログイン',
+      debug: 'デバッグ'
     },
     vault: {
       title: 'パスワードとログイン',
@@ -1475,6 +1477,20 @@ export const ja = defineLocale({
       deleteFailed: '削除に失敗しました',
       updateDirFailed: 'デフォルトディレクトリを更新できませんでした',
       clearDirFailed: 'デフォルトディレクトリをクリアできませんでした'
+    },
+    processes: {
+      title: 'プロセス',
+      description: 'デスクトップアプリとバックエンドの実行中プロセスの再帰ツリー。',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'コマンド',
+      tableAge: '経過時間',
+      tableCpu: 'CPU (10秒)',
+      tableSession: 'セッション / Lane',
+      spawnsPerMinute: '起動数 / 分',
+      noSpawns: '過去60秒間にプロセスの起動はありません',
+      noProcesses: 'アクティブな子プロセスはありません',
+      loading: 'プロセスツリーを確認中…'
     },
     toolsets: {
       loadingConfig: '設定を読み込み中',

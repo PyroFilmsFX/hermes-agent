@@ -427,7 +427,8 @@ export const ar = defineLocale({
       appUpdates: 'الإصدار والتحديثات',
       uninstall: 'إلغاء التثبيت',
       billingOverview: 'نظرة عامة',
-      billingPlans: 'الخطط'
+      billingPlans: 'الخطط',
+      debugProcesses: 'العمليات'
     },
     closeSettings: 'إغلاق الإعدادات',
     exportConfig: 'تصدير الإعدادات',
@@ -450,7 +451,8 @@ export const ar = defineLocale({
       about: 'حول',
       notifications: 'الإشعارات',
       keybinds: 'اختصارات لوحة المفاتيح',
-      vault: 'كلمات المرور وتسجيلات الدخول'
+      vault: 'كلمات المرور وتسجيلات الدخول',
+      debug: 'تصحيح الأخطاء'
     },
     vault: {
       title: 'كلمات المرور وتسجيلات الدخول',
@@ -1208,6 +1210,20 @@ export const ar = defineLocale({
       deleteFailed: 'فشل الحذف',
       updateDirFailed: 'تعذر تحديث المجلد الافتراضي',
       clearDirFailed: 'تعذر مسح المجلد الافتراضي'
+    },
+    processes: {
+      title: 'العمليات',
+      description: 'شجرة متداخلة ومباشرة لعمليات تطبيق سطح المكتب والخلفية البرمجية.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'الأمر',
+      tableAge: 'المدة',
+      tableCpu: 'المعالج (10 ث)',
+      tableSession: 'الجلسة / المسار',
+      spawnsPerMinute: 'بدء عمليات / دقيقة',
+      noSpawns: 'لم يتم بدء أي عمليات جديدة خلال آخر 60 ثانية',
+      noProcesses: 'لا توجد عمليات تابعة نشطة',
+      loading: 'جارٍ فحص شجرة العمليات…'
     },
     toolsets: {
       loadingConfig: 'جار تحميل الإعدادات',

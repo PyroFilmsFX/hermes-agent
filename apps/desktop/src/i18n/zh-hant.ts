@@ -355,7 +355,8 @@ export const zhHant = defineLocale({
       appUpdates: '版本與更新',
       uninstall: '解除安裝',
       billingOverview: '概覽',
-      billingPlans: '方案'
+      billingPlans: '方案',
+      debugProcesses: '程序'
     },
     plugins: {
       openFolder: '開啟桌面外掛資料夾',
@@ -393,7 +394,8 @@ export const zhHant = defineLocale({
       about: '關於',
       billing: '帳單',
       notifications: '通知',
-      vault: '密碼與登入'
+      vault: '密碼與登入',
+      debug: '除錯'
     },
     vault: {
       title: '密碼與登入',
@@ -1728,6 +1730,20 @@ export const zhHant = defineLocale({
       deleteFailed: '刪除失敗',
       updateDirFailed: '無法更新預設目錄',
       clearDirFailed: '無法清除預設目錄'
+    },
+    processes: {
+      title: '程序',
+      description: '桌面應用程式與後端執行中程序的遞迴樹。',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: '指令',
+      tableAge: '執行時間',
+      tableCpu: 'CPU (10秒)',
+      tableSession: '工作階段 / Lane',
+      spawnsPerMinute: '產生數 / 分鐘',
+      noSpawns: '過去 60 秒內無新程序產生',
+      noProcesses: '沒有活動的子程序',
+      loading: '正在檢查程序樹…'
     },
     toolsets: {
       loadingConfig: '正在載入設定',

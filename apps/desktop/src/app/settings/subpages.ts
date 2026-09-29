@@ -85,7 +85,8 @@ const SUBPAGE_ICONS: Record<string, IconComponent> = {
   vaultCredentials: KeyRound,
   vaultSources: Lock,
   appUpdates: Download,
-  uninstall: Trash2
+  uninstall: Trash2,
+  debugProcesses: Cpu
 }
 
 export function settingsSubpageIcon(page: SettingsSubpage, fallback: IconComponent): IconComponent {

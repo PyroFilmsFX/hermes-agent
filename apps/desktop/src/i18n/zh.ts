@@ -511,7 +511,8 @@ export const zh = defineLocale({
       appUpdates: '版本与更新',
       uninstall: '卸载',
       billingOverview: '概览',
-      billingPlans: '套餐'
+      billingPlans: '套餐',
+      debugProcesses: '进程'
     },
     closeSettings: '关闭设置',
     exportConfig: '导出配置',
@@ -537,7 +538,8 @@ export const zh = defineLocale({
       about: '关于',
       billing: '账单',
       notifications: '通知',
-      vault: '密码与登录'
+      vault: '密码与登录',
+      debug: '调试'
     },
     vault: {
       title: '密码与登录',
@@ -2093,6 +2095,20 @@ export const zh = defineLocale({
       deleteFailed: '删除失败',
       updateDirFailed: '无法更新默认目录',
       clearDirFailed: '无法清除默认目录'
+    },
+    processes: {
+      title: '进程',
+      description: '桌面应用与后端运行中进程的递归树。',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: '命令',
+      tableAge: '运行时间',
+      tableCpu: 'CPU (10秒)',
+      tableSession: '会话 / Lane',
+      spawnsPerMinute: '生成数 / 分钟',
+      noSpawns: '过去 60 秒内无新进程生成',
+      noProcesses: '没有活动的子进程',
+      loading: '正在检查进程树…'
     },
     toolsets: {
       loadingConfig: '正在加载配置',

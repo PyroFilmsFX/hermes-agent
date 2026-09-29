@@ -461,7 +461,8 @@ export const ru = defineLocale({
       appUpdates: 'Версия и обновления',
       uninstall: 'Удаление',
       billingOverview: 'Обзор',
-      billingPlans: 'Тарифы'
+      billingPlans: 'Тарифы',
+      debugProcesses: 'Процессы'
     },
     closeSettings: 'Закрыть настройки',
     exportConfig: 'Экспорт конфигурации',
@@ -485,7 +486,8 @@ export const ru = defineLocale({
       sessions: 'Сеансы',
       about: 'О программе',
       billing: 'Оплата',
-      notifications: 'Уведомления'
+      notifications: 'Уведомления',
+      debug: 'Отладка'
     },
     plugins: {
       title: 'Плагины приложения',
@@ -1527,6 +1529,20 @@ export const ru = defineLocale({
       deleteFailed: 'Не удалось удалить',
       updateDirFailed: 'Не удалось обновить папку по умолчанию',
       clearDirFailed: 'Не удалось очистить папку по умолчанию'
+    },
+    processes: {
+      title: 'Процессы',
+      description: 'Рекурсивное дерево процессов настольного приложения и бэкенда.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'Команда',
+      tableAge: 'Время работы',
+      tableCpu: 'CPU (10 с)',
+      tableSession: 'Сессия / Lane',
+      spawnsPerMinute: 'Запусков / мин',
+      noSpawns: 'Нет новых процессов за последние 60 с',
+      noProcesses: 'Нет активных дочерних процессов',
+      loading: 'Проверка дерева процессов…'
     },
     toolsets: {
       loadingConfig: 'Загрузка конфигурации',

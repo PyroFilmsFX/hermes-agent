@@ -412,6 +412,19 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       return () => ipcRenderer.removeListener('hermes:minimize-to-tray:changed', listener)
     }
   },
+  processTree: {
+    get: () => ipcRenderer.invoke('hermes:process-tree:get'),
+    subscribe: callback => {
+      ipcRenderer.send('hermes:process-tree:subscribe')
+      const listener = (_event, data) => callback(data)
+      ipcRenderer.on('hermes:process-tree:update', listener)
+
+      return () => {
+        ipcRenderer.removeListener('hermes:process-tree:update', listener)
+        ipcRenderer.send('hermes:process-tree:unsubscribe')
+      }
+    }
+  },
   setDisableF12: blocked => ipcRenderer.send('hermes:devtools:disable-f12', blocked),
   setF12ShortcutActive: active => ipcRenderer.send('hermes:f12ShortcutActive', Boolean(active)),
   onF12Shortcut: callback => {

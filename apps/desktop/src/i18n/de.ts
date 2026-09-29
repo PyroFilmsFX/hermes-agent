@@ -808,7 +808,8 @@ export const deOverrides = {
       appUpdates: 'Version & Updates',
       uninstall: 'Deinstallieren',
       billingOverview: 'Übersicht',
-      billingPlans: 'Tarife'
+      billingPlans: 'Tarife',
+      debugProcesses: 'Prozesse'
     },
     closeSettings: 'Einstellungen schließen',
     exportConfig: 'Konfiguration exportieren',
@@ -834,7 +835,8 @@ export const deOverrides = {
       about: 'Über',
       billing: 'Abrechnung',
       notifications: 'Benachrichtigungen',
-      vault: 'Passwörter & Logins'
+      vault: 'Passwörter & Logins',
+      debug: 'Debug'
     },
     plugins: {
       title: 'Desktop-Plugins',
@@ -2583,6 +2585,20 @@ export const deOverrides = {
       deleteFailed: 'Löschen fehlgeschlagen',
       updateDirFailed: 'Standardordner konnte nicht aktualisiert werden',
       clearDirFailed: 'Standardordner konnte nicht geleert werden'
+    },
+    processes: {
+      title: 'Prozesse',
+      description: 'Vollständiger rekursiver Prozessbaum der Desktop-App und des Python-Backends.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'Befehl',
+      tableAge: 'Alter',
+      tableCpu: 'CPU (10s)',
+      tableSession: 'Session / Lane',
+      spawnsPerMinute: 'Starts / Min.',
+      noSpawns: 'Keine neuen Prozesse in den letzten 60 Sekunden gestartet',
+      noProcesses: 'Keine aktiven Kindprozesse',
+      loading: 'Prozessbaum wird untersucht…'
     },
     toolsets: {
       loadingConfig: 'Konfiguration wird geladen',

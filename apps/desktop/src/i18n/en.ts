@@ -804,7 +804,8 @@ export const en: Translations = {
       appUpdates: 'Version & updates',
       uninstall: 'Uninstall',
       billingOverview: 'Overview',
-      billingPlans: 'Plans'
+      billingPlans: 'Plans',
+      debugProcesses: 'Processes'
     },
     closeSettings: 'Close settings',
     exportConfig: 'Export config',
@@ -830,7 +831,8 @@ export const en: Translations = {
       about: 'About',
       billing: 'Billing',
       notifications: 'Notifications',
-      vault: 'Passwords & Logins'
+      vault: 'Passwords & Logins',
+      debug: 'Debug'
     },
     plugins: {
       title: 'Desktop plugins',
@@ -2218,6 +2220,20 @@ export const en: Translations = {
       deleteFailed: 'Delete failed',
       updateDirFailed: 'Could not update default directory',
       clearDirFailed: 'Could not clear default directory'
+    },
+    processes: {
+      title: 'Processes',
+      description: 'Live recursive process tree of the desktop app and backend.',
+      tablePid: 'PID',
+      tablePpid: 'PPID',
+      tableCommand: 'Command',
+      tableAge: 'Age',
+      tableCpu: 'CPU (10s)',
+      tableSession: 'Session / Lane',
+      spawnsPerMinute: 'Spawns / min',
+      noSpawns: 'No spawns in the last 60s',
+      noProcesses: 'No active child processes',
+      loading: 'Inspecting process tree…'
     },
     toolsets: {
       loadingConfig: 'Loading configuration',

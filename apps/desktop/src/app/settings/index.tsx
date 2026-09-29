@@ -54,6 +54,7 @@ import { KEYS_VIEWS, KeysSettings, type KeysView } from './keys-settings'
 import { movedSettingsTabRedirect } from './moved-tabs'
 import { NotificationsSettings } from './notifications-settings'
 import { SettingsBreadcrumbContext } from './primitives'
+import { ProcessesPanel } from './processes-panel'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
 import { SessionsSettings } from './sessions-settings'
 import { SettingsSubpageHeader } from './subpage-navigation'
@@ -74,7 +75,8 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'notifications',
   'billing',
   'sessions',
-  'about'
+  'about',
+  'debug'
 ]
 
 export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: SettingsPageProps) {
@@ -391,6 +393,13 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
             id: 'about',
             label: t.settings.nav.about,
             onSelect: () => setActiveView('about')
+          },
+          {
+            active: activeView === 'debug',
+            icon: Cpu,
+            id: 'debug',
+            label: t.settings.nav.debug,
+            onSelect: () => setActiveView('debug')
           }
         ] as OverlayNavGroup[]
       ).map(group => {
@@ -548,6 +557,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
       <BillingSettings />
     ) : activeView === 'vault' ? (
       <VaultSettings key={vaultOwnerKey(activeConnectionId, scopeProfile)} subpage={subpage} />
+    ) : activeView === 'debug' ? (
+      <ProcessesPanel />
     ) : (
       <SessionsSettings subpage={subpage} />
     )

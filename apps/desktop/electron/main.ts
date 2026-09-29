@@ -439,6 +439,7 @@ import {
   spliceRegistrySessionRows,
   tagRegistrySessionResponse
 } from './profile-session-routing'
+import { registerProcessTreeIpc } from './process-tree'
 import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySettings } from './quick-entry'
 import { createQuitFinalization } from './quit-finalization'
 import { type ActiveWork, backendOwnedByApp, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
@@ -17769,6 +17770,23 @@ registerGitIpc({ resolveGitBinary, resolveGhBinary })
 // Client-side loopback callback for MCP OAuth against remote backends — see
 // mcp-oauth-callback-ipc.ts.
 registerMcpOauthCallbackIpc()
+
+// Full recursive process tree debug panel — see process-tree.ts.
+registerProcessTreeIpc({
+  getRootPids: () => {
+    const pids: number[] = [process.pid]
+    const hermesProcess = backendConnectionState.getProcess()
+    if (hermesProcess && Number.isInteger(hermesProcess.pid)) {
+      pids.push(hermesProcess.pid)
+    }
+    for (const entry of backendPool.values()) {
+      if (entry.process && Number.isInteger(entry.process.pid)) {
+        pids.push(entry.process.pid)
+      }
+    }
+    return pids
+  }
+})
 
 // Embedded terminal PTY host (hermes:terminal:*) — see terminal-ipc.ts.
 const terminalIpc = registerTerminalIpc({

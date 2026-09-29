@@ -27,5 +27,8 @@ export const OTHER_SUBPAGES: Record<string, { id: string; labelKey: string }[]> 
   about: [
     { id: 'updates', labelKey: 'appUpdates' },
     { id: 'uninstall', labelKey: 'uninstall' }
+  ],
+  debug: [
+    { id: 'processes', labelKey: 'debugProcesses' }
   ]
 }

@@ -22,6 +22,29 @@ export {}
 
 export type DesktopMachineProfile = MachineProfile
 
+export interface DesktopProcessInfo {
+  pid: number
+  ppid: number
+  command: string
+  comm: string
+  age: string
+  ageSeconds: number
+  cpuTime10s: number
+  laneOrSession: string
+  depth: number
+}
+
+export interface DesktopSpawnRateEntry {
+  basename: string
+  count: number
+}
+
+export interface DesktopProcessTreeSnapshot {
+  processes: DesktopProcessInfo[]
+  spawnsPerMinute: DesktopSpawnRateEntry[]
+  timestamp: number
+}
+
 declare global {
   interface Window {
     hermesDesktop: {
@@ -382,6 +405,10 @@ declare global {
         get: () => Promise<{ enabled: boolean; available: boolean }>
         set: (on: boolean) => Promise<{ enabled: boolean; available: boolean }>
         onChanged: (callback: (status: { enabled: boolean; available: boolean }) => void) => () => void
+      }
+      processTree?: {
+        get: () => Promise<DesktopProcessTreeSnapshot>
+        subscribe: (callback: (snapshot: DesktopProcessTreeSnapshot) => void) => () => void
       }
       setDisableF12?: (blocked: boolean) => void
       setF12ShortcutActive?: (active: boolean) => void
