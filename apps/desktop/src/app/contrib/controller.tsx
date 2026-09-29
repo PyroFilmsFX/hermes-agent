@@ -105,6 +105,8 @@ import {
   watchSessionTiles,
   WorkspaceTabMenu
 } from '../chat/session-tile'
+import { ConductorsPane } from '../conductors/conductors-pane'
+import { $conductorsPaneOpen, CONDUCTORS_PANE_ID, openConductorsPane } from '../conductors/pane-state'
 import { AppContextMenu } from '../context-menu/app-context-menu'
 import { HudShell } from '../hud/hud-shell'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
@@ -695,6 +697,45 @@ registerPaneOpener('conductor', () => $conductorPaneOpen.set(true))
 syncConductorPane($conductorPaneOpen.get())
 $conductorPaneOpen.listen(syncConductorPane)
 
+// The all-builds Conductors page (#49) is summoned the same way: it enters the
+// registry only while open. Keep-alive like any tab; the pane itself releases
+// its poller whenever it is hidden (usePaneVisible), so a backgrounded tab
+// costs no timers and no requests.
+let unregisterConductorsPane: (() => void) | null = null
+
+const syncConductorsPane = (open: boolean) => {
+  if (open) {
+    unregisterConductorsPane ??= registry.register({
+      id: CONDUCTORS_PANE_ID,
+      area: 'panes',
+      title: translateNow('conductors.title'),
+      data: {
+        placement: 'bottom',
+        dock: { pane: 'terminal', pos: 'right' },
+        height: '32vh',
+        maxHeight: '80vh',
+        tabTitle: () => <LocalizedTabTitle select={t => t.conductors.title} />,
+        tabTitleText: () => translateNow('conductors.title')
+      },
+      render: () => idle(<ConductorsPane />)
+    })
+    revealTreePane(CONDUCTORS_PANE_ID)
+  } else {
+    unregisterConductorsPane?.()
+    unregisterConductorsPane = null
+    const tree = $layoutTree.get()
+    if (tree && allPaneIds(tree).includes(CONDUCTORS_PANE_ID)) {
+      removeTreePane(CONDUCTORS_PANE_ID)
+    }
+  }
+}
+
+markCollapsePane(CONDUCTORS_PANE_ID)
+registerPaneCloser(CONDUCTORS_PANE_ID, () => $conductorsPaneOpen.set(false))
+registerPaneOpener(CONDUCTORS_PANE_ID, () => $conductorsPaneOpen.set(true))
+syncConductorsPane($conductorsPaneOpen.get())
+$conductorsPaneOpen.listen(syncConductorsPane)
+
 let unregisterArtifactViewerPane: (() => void) | null = null
 
 const syncArtifactViewerPane = (open: boolean) => {
@@ -734,6 +775,17 @@ registry.register(
     keywords: ['conductor', 'tb-build', 'runs', 'lanes'],
     get: () => isPaneVisible('conductor'),
     set: () => (isPaneVisible('conductor') ? $conductorPaneOpen.set(false) : openConductorPane())
+  })
+)
+
+registry.register(
+  paletteToggle({
+    id: 'conductors.toggle',
+    label: translateNow('conductors.paletteLabel'),
+    icon: FileText,
+    keywords: ['conductors', 'tb-build', 'builds', 'status'],
+    get: () => isPaneVisible(CONDUCTORS_PANE_ID),
+    set: () => (isPaneVisible(CONDUCTORS_PANE_ID) ? $conductorsPaneOpen.set(false) : openConductorsPane())
   })
 )
 

@@ -2853,6 +2853,59 @@ export interface Translations {
     copyPath: string
   }
 
+  conductors: {
+    title: string
+    paletteLabel: string
+    viewAll: string
+    gridLabel: string
+    needsYou: (count: number) => string
+    updated: (ago: string) => string
+    refresh: string
+    filters: Record<'active' | 'all' | 'idleStale' | 'needsMe', string>
+    columns: Record<
+      'activity' | 'blockers' | 'ci' | 'estimate' | 'lanes' | 'now' | 'project' | 'remaining' | 'seats' | 'session',
+      string
+    >
+    liveness: Record<'abandoned' | 'active' | 'idle' | 'quiet' | 'stale', string>
+    livenessHint: Record<'abandoned' | 'active' | 'idle' | 'quiet' | 'stale', string>
+    idleSince: (clock: string) => string
+    derived: string
+    derivedRelayOnly: string
+    derivedWorkspace: string
+    loading: string
+    emptyTitle: string
+    emptyBody: string
+    emptyNoIndex: string
+    emptyFilter: string
+    errorTitle: string
+    errorBody: string
+    retry: string
+    staleBanner: (asOf: string) => string
+    showAbandoned: (count: number) => string
+    hideAbandoned: (count: number) => string
+    waves: (count: number) => string
+    units: (count: number) => string
+    unitsUnknown: string
+    more: (count: number) => string
+    estimateMissing: string
+    estimateStale: (asOf: string) => string
+    gates: (count: number) => string
+    gateSince: (clock: string) => string
+    gateDue: (day: string) => string
+    seatUnknown: string
+    refusedAtLeast: (count: number) => string
+    staleLanes: (count: number) => string
+    blocked: string
+    notHermesSession: string
+    otherProfile: (profile: string) => string
+    none: string
+    ageNow: string
+    ageSeconds: (seconds: number) => string
+    ageMinutes: (minutes: number) => string
+    ageHours: (hours: number) => string
+    ageDays: (days: number) => string
+  }
+
   artifactCard: {
     kind: Record<'code' | 'html' | 'svg', string>
     generating: (lines: number) => string
