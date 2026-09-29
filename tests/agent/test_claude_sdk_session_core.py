@@ -641,7 +641,9 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         # The interpreter-path scrub is a separate default (test_claude_sdk_configured_env);
         # isolate it so this test stays about metered vectors alone.
-        for key in ("PYTHONPATH", "PYTHONHOME"):
+        # ... and the sibling-session id scrub (it blanks an inherited HERMES_SESSION_ID,
+        # which an earlier test in the same process can leave behind).
+        for key in ("PYTHONPATH", "PYTHONHOME", "HERMES_SESSION_ID"):
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
@@ -666,7 +668,8 @@ class TestSession:
             raising=False,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake")
-        for key in ("PYTHONPATH", "PYTHONHOME"):  # interpreter-path scrub is independent of this opt-in
+        # The interpreter-path and sibling-session-id scrubs are independent of this opt-in.
+        for key in ("PYTHONPATH", "PYTHONHOME", "HERMES_SESSION_ID"):
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
