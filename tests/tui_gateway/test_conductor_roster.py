@@ -6,13 +6,17 @@ import json
 import os
 import pwd
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from tui_gateway.conductor_roster import (
     IndexScan,
+    StatusRead,
     _clear_cache,
+    _clear_status_cache,
+    read_build_status,
     read_marker_index,
 )
 
@@ -342,3 +346,419 @@ def test_default_path_uses_passwd_home(env):
     scan = read_marker_index()
     assert len(scan.entries) == 1
     assert scan.entries[0]["marker_path"] == m
+
+
+_FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "conductor"
+
+
+def _read_fixture(name: str) -> dict:
+    return json.loads((_FIXTURES_DIR / name).read_text(encoding="utf-8"))
+
+
+def test_read_build_status_valid_parse(tmp_path):
+    _clear_status_cache()
+    status_content = (_FIXTURES_DIR / "status_v1_valid.json").read_text(encoding="utf-8")
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(status_content, encoding="utf-8")
+
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {
+        "run_id": "cc546d7b99dc45d6a829da8e2c77a673",
+        "session_id": "6d739ad6-1234-5678-9abc-def012345678",
+    }
+
+    ref_time = datetime.fromisoformat("2026-09-29T07:15:00+00:00").timestamp()
+    os.utime(status_file, (ref_time - 120, ref_time - 120))
+
+    res = read_build_status(marker, marker_file, now=ref_time)
+    assert isinstance(res, StatusRead)
+    assert res.present is True
+    assert res.valid is True
+    assert res.reason == "ok"
+    assert res.seq == 42
+    assert res.fresh is True
+    assert res.stale is False
+    assert res.status_at is not None
+    assert res.record is not None
+    assert res.data is res.record
+
+    assert res.record["build"]["run_id"] == "cc546d7b99dc45d6a829da8e2c77a673"
+    assert res.record["build"]["session_id"] == "6d739ad6-1234-5678-9abc-def012345678"
+    assert res.record["build"]["plan_title"] == "Hermes worker plan b9/b10"
+    assert res.record["build"]["branch"] == "cntrl-hermes-worker"
+    assert res.record["phase"] == "build"
+    assert res.record["progress"]["waves"]["done"] == 1
+    assert res.record["progress"]["waves"]["total"] == 4
+    assert res.record["estimate"]["p50"] == 6.5
+    assert res.record["estimate"]["p90"] == 10.0
+    assert len(res.record["gates"]) == 1
+    assert res.record["gates"][0]["label"] == "CI run 36533732367 on sync/land-b9"
+    assert res.record["seats"]["agy"]["refused"] == 3
+    assert res.record["seats"]["agy"]["refused_min"] == 3
+    assert res.record["other_names"] == ["grok"]
+    assert res.record["refusals"][0]["seat"] == "agy"
+    assert res.record["lanes"]["running"] == 3
+    assert res.record["ci"][0]["kind"] == "run"
+    assert res.record["owner_blockers"][0]["id"] == "ob-1"
+    assert res.record["last_activity"]["verb"] == "wave-done"
+
+
+def test_read_build_status_mismatched_ignored(tmp_path):
+    _clear_status_cache()
+    status_content = (_FIXTURES_DIR / "status_v1_mismatched.json").read_text(encoding="utf-8")
+    (tmp_path / "tb-build-status.json").write_text(status_content, encoding="utf-8")
+    marker_file = tmp_path / "tb-build-active.json"
+
+    # Mismatched run_id and session_id
+    marker = {"run_id": "expected-run-id", "session_id": "expected-session-id"}
+    res = read_build_status(marker, marker_file)
+    assert res.present is True
+    assert res.valid is False
+    assert res.reason == "mismatched"
+
+    # Matching run_id but mismatched session_id
+    marker_mismatched_sid = {"run_id": "mismatched-run-id-999", "session_id": "other-sid"}
+    res_sid = read_build_status(marker_mismatched_sid, marker_file)
+    assert res_sid.present is True
+    assert res_sid.valid is False
+    assert res_sid.reason == "mismatched"
+
+    # Matching session_id but mismatched run_id
+    marker_mismatched_rid = {"run_id": "other-rid", "session_id": "mismatched-session-id-999"}
+    res_rid = read_build_status(marker_mismatched_rid, marker_file)
+    assert res_rid.present is True
+    assert res_rid.valid is False
+    assert res_rid.reason == "mismatched"
+
+
+def test_read_build_status_build_run_id_fallback_join(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    data["build"]["run_id"] = "brid-join-target"
+    (tmp_path / "tb-build-status.json").write_text(json.dumps(data), encoding="utf-8")
+    marker_file = tmp_path / "tb-build-active.json"
+
+    # Marker has only build_run_id, no run_id
+    marker_only_brid = {
+        "build_run_id": "brid-join-target",
+        "session_id": data["build"]["session_id"],
+    }
+    res1 = read_build_status(marker_only_brid, marker_file)
+    assert res1.valid is True
+    assert res1.reason == "ok"
+    assert res1.record["build"]["run_id"] == "brid-join-target"
+
+    # Marker has both build_run_id and run_id; build_run_id takes precedence
+    marker_both = {
+        "build_run_id": "brid-join-target",
+        "run_id": "old-stale-run-id",
+        "session_id": data["build"]["session_id"],
+    }
+    res2 = read_build_status(marker_both, marker_file)
+    assert res2.valid is True
+    assert res2.reason == "ok"
+
+
+def test_read_build_status_lower_seq_ignored(tmp_path):
+    _clear_status_cache()
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": "run-seq-test", "session_id": "sess-seq-test"}
+
+    data = _read_fixture("status_v1_valid.json")
+    data["build"]["run_id"] = "run-seq-test"
+    data["build"]["session_id"] = "sess-seq-test"
+    data["seq"] = 5
+    data["build"]["plan_title"] = "Seq 5 plan"
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    res1 = read_build_status(marker, marker_file)
+    assert res1.valid is True
+    assert res1.seq == 5
+    assert res1.record["build"]["plan_title"] == "Seq 5 plan"
+
+    # Write a lower seq (seq = 3); must be ignored and last good read kept
+    data["seq"] = 3
+    data["build"]["plan_title"] = "Rolled back plan"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    res2 = read_build_status(marker, marker_file)
+    assert res2.valid is True
+    assert res2.seq == 5
+    assert res2.record["build"]["plan_title"] == "Seq 5 plan"
+
+    # Write a higher seq (seq = 8); accepted
+    data["seq"] = 8
+    data["build"]["plan_title"] = "Seq 8 plan"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    res3 = read_build_status(marker, marker_file)
+    assert res3.valid is True
+    assert res3.seq == 8
+    assert res3.record["build"]["plan_title"] == "Seq 8 plan"
+
+    # New run_id resets seq high-water mark
+    marker_new = {"run_id": "run-new-lifecycle", "session_id": "sess-seq-test"}
+    data["build"]["run_id"] = "run-new-lifecycle"
+    data["seq"] = 0
+    data["build"]["plan_title"] = "New run plan"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    res4 = read_build_status(marker_new, marker_file)
+    assert res4.valid is True
+    assert res4.seq == 0
+    assert res4.record["build"]["plan_title"] == "New run plan"
+
+
+def test_read_build_status_stale_flagged_not_hidden(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    written_dt = datetime.fromisoformat("2026-09-29T06:00:00+00:00")
+    data["written_at"] = "2026-09-29T06:00:00Z"
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    # Mtime 50 minutes ago
+    mtime = written_dt.timestamp() + 100
+    os.utime(status_file, (mtime, mtime))
+
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    # now is 50 minutes after status_at (over the 30 min threshold)
+    now = mtime + (50 * 60)
+    res = read_build_status(marker, marker_file, now=now)
+
+    assert res.present is True
+    assert res.valid is True
+    assert res.reason == "ok"
+    assert res.fresh is False
+    assert res.stale is True
+    assert res.record is not None  # Never hidden
+    assert res.record["build"]["plan_title"] == "Hermes worker plan b9/b10"
+
+
+def test_read_build_status_future_written_at_clamped(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    now_dt = datetime.fromisoformat("2026-09-29T08:00:00+00:00")
+    now_ts = now_dt.timestamp()
+
+    # written_at is 2 hours into the future
+    data["written_at"] = "2026-09-29T10:00:00Z"
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+
+    # Mtime also set in the future
+    future_mtime = now_ts + 7200
+    os.utime(status_file, (future_mtime, future_mtime))
+
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file, now=now_ts)
+    assert res.valid is True
+    assert res.status_at == now_ts  # Clamped to now
+
+    # Future written_at with old mtime (e.g. 2 hours old) cannot make record look fresh
+    old_mtime = now_ts - 7200
+    os.utime(status_file, (old_mtime, old_mtime))
+    res_old_mtime = read_build_status(marker, marker_file, now=now_ts)
+    # status_at = min(written_at, mtime + 5 min) -> old_mtime + 300
+    assert res_old_mtime.status_at == old_mtime + 300.0
+    assert res_old_mtime.fresh is False
+    assert res_old_mtime.stale is True
+
+
+def test_read_build_status_wrong_typed_field_blanks_only_itself(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    data["phase"] = 12345
+    data["progress"]["waves"]["done"] = "wrong_type"
+    data["estimate"] = {"unit": "work_hours", "p50": 20.0, "p90": 5.0}  # p50 > p90
+    data["gates"] = "not_a_list"
+    data["seats"]["agy"]["spawned"] = "bad"
+    data["lanes"] = 999
+    data["ci"] = "bad_ci"
+    data["build"]["plan_title"] = 888
+
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file)
+    assert res.valid is True
+    assert res.reason == "ok"
+    assert res.record["phase"] is None
+    assert res.record["progress"]["waves"]["done"] is None
+    assert res.record["progress"]["waves"]["total"] == 4
+    assert res.record["estimate"] is None
+    assert res.record["gates"] == []
+    assert res.record["seats"]["agy"]["spawned"] is None
+    assert res.record["seats"]["agy"]["refused"] == 3
+    assert res.record["lanes"] is None
+    assert res.record["ci"] == []
+    assert res.record["build"]["plan_title"] is None
+    assert res.record["build"]["run_id"] == data["build"]["run_id"]
+
+
+def test_read_build_status_each_cap_enforced(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    data["build"]["plan_title"] = "P" * 200
+    data["progress"]["current_wave"]["title"] = "W" * 150
+    data["progress"]["current_units"] = [
+        {"id": f"u{i}", "title": "T" * 150, "seat": "agy"} for i in range(15)
+    ]
+    data["progress"]["remaining_waves"] = [
+        {"index": i, "id": f"w{i}", "title": "R" * 150, "units": 1} for i in range(20)
+    ]
+    data["gates"] = [
+        {"id": f"g{i}", "kind": "ci", "label": "G" * 200, "state": "waiting"} for i in range(25)
+    ]
+    data["refusals"] = [
+        {"seat": "agy", "code": f"c{i}", "count": 1, "note": "N" * 200} for i in range(15)
+    ]
+    data["lanes"]["job_ids"] = [f"job_{i}" for i in range(20)]
+    data["ci"] = [
+        {"kind": "run", "ref": f"ref_{i}", "url": "https://github.com/a/b", "state": "pending"}
+        for i in range(10)
+    ]
+    data["owner_blockers"] = [
+        {"id": f"ob{i}", "action": "approve", "label": "B" * 200} for i in range(12)
+    ]
+    data["other_names"] = [f"name_{i}" for i in range(15)]
+    data["last_activity"]["what"] = "A" * 150
+
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_text(json.dumps(data), encoding="utf-8")
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file)
+    assert res.valid is True
+    rec = res.record
+
+    # List caps
+    assert len(rec["progress"]["current_units"]) == 8
+    assert len(rec["progress"]["remaining_waves"]) == 12
+    assert len(rec["gates"]) == 16
+    assert len(rec["refusals"]) == 10
+    assert len(rec["lanes"]["job_ids"]) == 12
+    assert len(rec["ci"]) == 6
+    assert len(rec["owner_blockers"]) == 8
+    assert len(rec["other_names"]) == 8
+
+    # String caps
+    assert len(rec["build"]["plan_title"]) == 120
+    assert len(rec["progress"]["current_wave"]["title"]) == 80
+    assert len(rec["progress"]["current_units"][0]["title"]) == 80
+    assert len(rec["progress"]["remaining_waves"][0]["title"]) == 80
+    assert len(rec["gates"][0]["label"]) == 120
+    assert len(rec["refusals"][0]["note"]) == 120
+    assert len(rec["owner_blockers"][0]["label"]) == 120
+    assert len(rec["last_activity"]["what"]) == 80
+
+
+def test_read_build_status_hostile_strings_masked_stripped_capped(tmp_path):
+    _clear_status_cache()
+    status_content = (_FIXTURES_DIR / "status_v1_hostile.json").read_text(encoding="utf-8")
+    (tmp_path / "tb-build-status.json").write_text(status_content, encoding="utf-8")
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {
+        "run_id": "cc546d7b99dc45d6a829da8e2c77a673",
+        "session_id": "6d739ad6-1234-5678-9abc-def012345678",
+    }
+
+    res = read_build_status(marker, marker_file)
+    assert res.valid is True
+    rec = res.record
+
+    # Absolute paths dropped in free-text fields
+    assert rec["build"]["plan_title"] is None
+    assert rec["build"]["branch"] is None
+    assert rec["refusals"][0]["note"] is None
+
+    # Embedded absolute paths stripped from labels
+    assert "/private/tmp/secret.txt" not in rec["gates"][0]["label"]
+    assert "/Users/justin/confidential.txt" not in rec["owner_blockers"][0]["label"]
+
+    # Secret masking: fake Anthropic key and Bearer token masked
+    assert "sk-ant-api03-" not in rec["progress"]["current_units"][0]["title"]
+    assert "[REDACTED:anthropic-key:" in rec["progress"]["current_units"][0]["title"]
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in rec["owner_blockers"][0]["label"]
+
+    # ANSI escapes and control characters stripped
+    assert "\x1b" not in rec["progress"]["current_units"][0]["title"]
+    assert "\x00" not in rec["progress"]["current_units"][0]["title"]
+    assert "\x07" not in rec["progress"]["current_units"][0]["title"]
+    assert "\x1b" not in rec["last_activity"]["what"]
+    assert "\x08" not in rec["last_activity"]["what"]
+
+    # 10k-char label capped
+    assert len(rec["progress"]["current_wave"]["title"]) <= 80
+    assert len(rec["gates"][1]["label"]) <= 120
+
+
+def test_read_build_status_symlinked_status_file_refused(tmp_path):
+    _clear_status_cache()
+    data = _read_fixture("status_v1_valid.json")
+    target_file = tmp_path / "real_status.json"
+    target_file.write_text(json.dumps(data), encoding="utf-8")
+
+    symlink_file = tmp_path / "tb-build-status.json"
+    symlink_file.symlink_to(target_file)
+
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file)
+    assert res.present is True
+    assert res.valid is False
+    assert res.reason == "unreadable"
+
+
+def test_read_build_status_oversize_refused(tmp_path):
+    _clear_status_cache()
+    oversize_file = _FIXTURES_DIR / "status_v1_oversize.json"
+    assert oversize_file.stat().st_size > 64 * 1024
+
+    status_file = tmp_path / "tb-build-status.json"
+    status_file.write_bytes(oversize_file.read_bytes())
+
+    data = _read_fixture("status_v1_valid.json")
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file)
+    assert res.present is True
+    assert res.valid is False
+    assert res.reason == "unreadable"
+
+
+def test_read_build_status_v2_only_unknown_schema(tmp_path):
+    _clear_status_cache()
+    status_content = (_FIXTURES_DIR / "status_v1_v2_only.json").read_text(encoding="utf-8")
+    (tmp_path / "tb-build-status.json").write_text(status_content, encoding="utf-8")
+
+    data = _read_fixture("status_v1_valid.json")
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": data["build"]["run_id"], "session_id": data["build"]["session_id"]}
+
+    res = read_build_status(marker, marker_file)
+    assert res.present is True
+    assert res.valid is False
+    assert res.reason == "unknown_schema"
+
+
+def test_read_build_status_missing(tmp_path):
+    _clear_status_cache()
+    marker_file = tmp_path / "tb-build-active.json"
+    marker = {"run_id": "r1", "session_id": "s1"}
+
+    res = read_build_status(marker, marker_file)
+    assert res.present is False
+    assert res.valid is False
+    assert res.reason == "missing"
+

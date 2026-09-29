@@ -1,0 +1,160 @@
+{
+  "schema": "tb-build-status/v2",
+  "seq": 42,
+  "written_at": "2026-09-29T07:12:03Z",
+  "conductor_version": "3.62.0",
+  "build": {
+    "run_id": "cc546d7b99dc45d6a829da8e2c77a673",
+    "session_id": "6d739ad6-1234-5678-9abc-def012345678",
+    "build_id": "b_123",
+    "hermes_session_id": null,
+    "binding_nonce": null,
+    "plan_title": "Hermes worker plan b9/b10",
+    "branch": "cntrl-hermes-worker",
+    "armed_at": "2026-09-29T06:39:40Z"
+  },
+  "phase": "build",
+  "progress": {
+    "waves": {
+      "done": 1,
+      "total": 4
+    },
+    "units": {
+      "done": 7,
+      "running": 3,
+      "failed": 0,
+      "remaining": 12,
+      "total": 22
+    },
+    "current_wave": {
+      "index": 2,
+      "id": "W2",
+      "title": "b10 binding"
+    },
+    "current_units": [
+      {
+        "id": "H5",
+        "title": "attest.py verifier",
+        "seat": "agy",
+        "since": "2026-09-29T07:00:00Z"
+      }
+    ],
+    "remaining_waves": [
+      {
+        "index": 3,
+        "id": "W3",
+        "title": "#49 Conductors page",
+        "units": 19
+      }
+    ]
+  },
+  "estimate": {
+    "unit": "work_hours",
+    "p50": 6.5,
+    "p90": 10.0,
+    "basis": "reforecast",
+    "as_of": "2026-09-29T07:10:00Z",
+    "prediction_id": "pred-42"
+  },
+  "gates": [
+    {
+      "id": "g-7209",
+      "kind": "ci",
+      "label": "CI run 36533732367 on sync/land-b9",
+      "since": "2026-09-29T07:05:00Z",
+      "due": null,
+      "ref": "36533732367",
+      "state": "waiting",
+      "waiter": true
+    }
+  ],
+  "seats": {
+    "agy": {
+      "spawned": 12,
+      "running": 2,
+      "succeeded": 8,
+      "failed": 1,
+      "refused": 3
+    },
+    "muse": {
+      "spawned": 0,
+      "running": 0,
+      "succeeded": 0,
+      "failed": 0,
+      "refused": 0
+    },
+    "codex": {
+      "spawned": 4,
+      "running": 1,
+      "succeeded": 3,
+      "failed": 0,
+      "refused": 0
+    },
+    "sonnet": {
+      "spawned": 6,
+      "running": 0,
+      "succeeded": 6,
+      "failed": 0,
+      "refused": 1
+    },
+    "opus": {
+      "spawned": 2,
+      "running": 0,
+      "succeeded": 2,
+      "failed": 0,
+      "refused": 0
+    },
+    "other": {
+      "spawned": 1,
+      "running": 0,
+      "succeeded": 1,
+      "failed": 0,
+      "refused": 0
+    }
+  },
+  "other_names": [
+    "grok"
+  ],
+  "refusals": [
+    {
+      "seat": "agy",
+      "code": "stale_daemon",
+      "count": 3,
+      "last_at": "2026-09-29T07:11:00Z",
+      "note": "tb-workers daemon predates 3.61.10"
+    }
+  ],
+  "lanes": {
+    "running": 3,
+    "stale": 0,
+    "cap": 6,
+    "job_ids": [
+      "w_20260929T065856Z_06fd"
+    ]
+  },
+  "ci": [
+    {
+      "kind": "run",
+      "ref": "36533732367",
+      "branch": "sync/land-b9",
+      "pr": null,
+      "state": "pending",
+      "url": "https://github.com/example/repo/actions/runs/36533732367",
+      "checked_at": "2026-09-29T07:11:30Z"
+    }
+  ],
+  "owner_blockers": [
+    {
+      "id": "ob-1",
+      "action": "approve",
+      "label": "Reinstall owner verifier (admin prompt)",
+      "since": "2026-09-29T07:00:00Z",
+      "ref": null
+    }
+  ],
+  "last_activity": {
+    "at": "2026-09-29T07:12:00Z",
+    "what": "wave-done W1",
+    "verb": "wave-done"
+  }
+}
