@@ -230,3 +230,30 @@ describe('conductors store and poller', () => {
     expect(mockedFetchConductors).toHaveBeenLastCalledWith({})
   })
 })
+
+
+describe('shared relative-time ticker', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers()
+    const mod = await import('./conductors')
+    mod._resetConductorsPollerForTest()
+  })
+  afterEach(async () => {
+    const mod = await import('./conductors')
+    mod._resetConductorsPollerForTest()
+    vi.useRealTimers()
+  })
+
+  it('ticks every 30 s only while acquired and visible, and stops on release', async () => {
+    const { $conductorsNow, acquireConductorsPoller, RELATIVE_TIME_TICK_MS } = await import('./conductors')
+    vi.setSystemTime(1_000_000)
+    const release = acquireConductorsPoller()
+    expect($conductorsNow.get()).toBe(1_000_000)
+    vi.advanceTimersByTime(RELATIVE_TIME_TICK_MS)
+    expect($conductorsNow.get()).toBe(1_000_000 + RELATIVE_TIME_TICK_MS)
+    release()
+    const frozen = $conductorsNow.get()
+    vi.advanceTimersByTime(RELATIVE_TIME_TICK_MS * 3)
+    expect($conductorsNow.get()).toBe(frozen)
+  })
+})

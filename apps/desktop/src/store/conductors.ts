@@ -9,6 +9,7 @@ import {
 export const FOCUSED_POLL_INTERVAL_MS = 15_000
 export const BLURRED_POLL_INTERVAL_MS = 60_000
 export const MAX_CONSECUTIVE_FAILURES = 3
+export const RELATIVE_TIME_TICK_MS = 30_000
 
 export type ConductorsStatus = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -26,6 +27,10 @@ export const $conductors = atom<ConductorsState>({
   failures: 0
 })
 
+// One shared clock for "3 min ago" labels: rows read it instead of running their own timers.
+export const $conductorsNow = atom<number>(Date.now())
+
+let tickTimer: ReturnType<typeof setInterval> | null = null
 let pollerUsers = 0
 let pollerTimer: ReturnType<typeof setInterval> | null = null
 let pollerInterval: number | null = null
@@ -51,6 +56,25 @@ function isWindowFocused(): boolean {
 
 function shouldPoll(): boolean {
   return pollerUsers > 0 && isDocumentVisible() && $conductors.get().failures < MAX_CONSECUTIVE_FAILURES
+}
+
+function ensureTicker(): void {
+  if (pollerUsers === 0 || !isDocumentVisible()) {
+    clearTicker()
+    return
+  }
+  if (tickTimer !== null) {
+    return
+  }
+  $conductorsNow.set(Date.now())
+  tickTimer = setInterval(() => $conductorsNow.set(Date.now()), RELATIVE_TIME_TICK_MS)
+}
+
+function clearTicker(): void {
+  if (tickTimer !== null) {
+    clearInterval(tickTimer)
+    tickTimer = null
+  }
 }
 
 function clearPollerTimer(): void {
@@ -85,6 +109,7 @@ function ensurePollerTimer(): void {
 }
 
 const onVisibilityChange = (): void => {
+  ensureTicker()
   if (!isDocumentVisible()) {
     clearPollerTimer()
     return
@@ -149,6 +174,7 @@ export function acquireConductorsPoller(): () => void {
 
   if (pollerUsers === 1) {
     startListening()
+    ensureTicker()
     if (isDocumentVisible()) {
       void refreshConductors()
       ensurePollerTimer()
@@ -165,6 +191,7 @@ export function acquireConductorsPoller(): () => void {
 
     if (pollerUsers === 0) {
       clearPollerTimer()
+      clearTicker()
       stopListening()
     }
   }
@@ -214,6 +241,7 @@ export async function refreshConductors(options: FetchConductorsOptions = {}): P
 
 export function _resetConductorsPollerForTest(): void {
   clearPollerTimer()
+  clearTicker()
   stopListening()
   pollerUsers = 0
   inFlight = null
