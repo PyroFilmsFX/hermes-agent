@@ -767,29 +767,31 @@ function repoWithLane(prefix) {
   return { dir, repo }
 }
 
-test('listWorktrees: overlapping calls for one repo share a single scan', async () => {
+test('listWorktrees: overlapping calls for one repo share at most one follow-up scan', async () => {
   const { dir, repo } = repoWithLane('hermes-worktrees-singleflight-')
   const git = countingGit(dir)
 
   try {
     const results = await Promise.all(Array.from({ length: 10 }, () => listWorktrees(repo, git.bin)))
 
-    assert.equal(git.calls('worktree list'), 1)
-    assert.equal(git.calls(' status '), 1)
+    // The first call scans; the nine that arrive while it runs share ONE
+    // follow-up scan that starts after it, so none gets a stale listing.
+    assert.equal(git.calls('worktree list'), 2)
+    assert.equal(git.calls(' status '), 2)
 
     for (const result of results) {
       assert.deepEqual(result, results[0])
     }
 
-    // A call inside the reuse window is answered without spawning git again.
+    // A later call is a fresh scan, never a replay of an old one.
     await listWorktrees(repo, git.bin)
-    assert.equal(git.calls('worktree list'), 1)
+    assert.equal(git.calls('worktree list'), 3)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('listWorktrees: a lane added through addWorktree shows at once, not after the reuse window', async () => {
+test('listWorktrees: a lane added through addWorktree shows at once', async () => {
   const { dir, repo } = repoWithLane('hermes-worktrees-forget-')
 
   try {
@@ -800,6 +802,21 @@ test('listWorktrees: a lane added through addWorktree shows at once, not after t
 
     const after = await listWorktrees(repo, 'git')
     assert.equal(after.some(tree => tree.branch === 'feature/next'), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listWorktrees: a lane added by raw git while a scan runs shows in the next answer', async () => {
+  const { dir, repo } = repoWithLane('hermes-worktrees-raced-')
+
+  try {
+    const first = listWorktrees(repo, 'git')
+    execFileSync('git', ['worktree', 'add', path.join(dir, 'next-wt'), 'feature/next'], { cwd: repo, stdio: 'pipe' })
+    const second = await listWorktrees(repo, 'git')
+
+    await first
+    assert.equal(second.some(tree => tree.branch === 'feature/next'), true)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

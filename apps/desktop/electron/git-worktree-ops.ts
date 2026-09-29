@@ -212,14 +212,27 @@ function rememberMergeProof(key, value) {
   mergeProofCache.set(key, value)
 }
 
-// One listing per repo at a time. The sidebar asks again on every re-probe
-// (turn settle, focus, project change); without this, overlapping calls each
-// start a full per-lane scan and a many-lane repo spawns hundreds of `git`
-// processes at once. A caller that arrives while a scan runs shares it, and a
-// finished result is reused for a short window.
-const LISTING_REUSE_MS = 5000
-const listingInflight = new Map()
-const listingRecent = new Map()
+// At most one scan per repo runs at a time. The sidebar asks again on every
+// re-probe (turn settle, focus, project change); without this, overlapping
+// calls each start a full per-lane scan and a many-lane repo spawns hundreds
+// of `git` processes at once. A caller that arrives while a scan runs gets the
+// NEXT scan, which starts after the current one ends: it never receives a
+// listing that began before it asked (a lane added during a turn must show),
+// and every caller in that window shares that one follow-up scan.
+const listingRunning = new Map()
+const listingQueued = new Map()
+
+function startListing(resolved, gitBin) {
+  const scan = scanWorktrees(resolved, gitBin).finally(() => {
+    if (listingRunning.get(resolved) === scan) {
+      listingRunning.delete(resolved)
+    }
+  })
+
+  listingRunning.set(resolved, scan)
+
+  return scan
+}
 
 async function listWorktrees(repoPath, gitBin) {
   let resolved
@@ -230,33 +243,27 @@ async function listWorktrees(repoPath, gitBin) {
     return []
   }
 
-  const recent = listingRecent.get(resolved)
+  const running = listingRunning.get(resolved)
 
-  if (recent && Date.now() - recent.at < LISTING_REUSE_MS) {
-    return recent.value
+  if (!running) {
+    return startListing(resolved, gitBin)
   }
 
-  const running = listingInflight.get(resolved)
+  const queued = listingQueued.get(resolved)
 
-  if (running) {
-    return running
+  if (queued) {
+    return queued
   }
 
-  // Only the scan still registered may publish or unregister: one that was
-  // forgotten mid-flight (a lane was added or removed) must not overwrite the
-  // fresher state with what it saw before the change.
-  const scan = scanWorktrees(resolved, gitBin).then(value => {
-    if (listingInflight.get(resolved) === scan) {
-      listingInflight.delete(resolved)
-      listingRecent.set(resolved, { at: Date.now(), value })
-    }
+  const next = running.then(() => {
+    listingQueued.delete(resolved)
 
-    return value
+    return startListing(resolved, gitBin)
   })
 
-  listingInflight.set(resolved, scan)
+  listingQueued.set(resolved, next)
 
-  return scan
+  return next
 }
 
 async function scanWorktrees(resolved, gitBin) {
@@ -285,15 +292,24 @@ async function scanWorktrees(resolved, gitBin) {
           mergedVia = mergeProofCache.get(proofKey)
         } else {
           // Only lanes git did not already prove merged pay for `git cherry`.
+          // A probe that errored (null) is not a verdict: nothing is cached,
+          // so the next scan retries it instead of pinning "not merged".
+          let answered = true
+
           for (const { sha } of trunkRefs) {
-            if (await cherryMerged(gitBin, resolved, tree.branch, tree.head, sha)) {
+            const verdict = await cherryMerged(gitBin, resolved, tree.branch, tree.head, sha)
+
+            if (verdict === null) {
+              answered = false
+            } else if (verdict) {
               mergedVia = 'merged-squash'
+              answered = true
 
               break
             }
           }
 
-          if (tree.head) {
+          if (tree.head && answered) {
             rememberMergeProof(proofKey, mergedVia)
           }
         }
@@ -769,12 +785,12 @@ async function listBaseBranches(repoPath, gitBin) {
   }
 }
 
-// Adding or removing a lane changes the listing, so a reused or in-flight
-// scan from before the change must not answer the next ask. Cleared after the
-// change lands, so a scan that raced it is not reused either.
+// Adding or removing a lane changes the listing, so a scan that started
+// before the change must not answer the next ask. Cleared after the change
+// lands, so the next call starts a fresh scan.
 function forgetWorktreeListings() {
-  listingRecent.clear()
-  listingInflight.clear()
+  listingRunning.clear()
+  listingQueued.clear()
 }
 
 async function addWorktreeAndForget(repoPath, options, gitBin) {
