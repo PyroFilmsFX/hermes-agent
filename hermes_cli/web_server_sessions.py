@@ -256,6 +256,17 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
         # of its own and a bare lock-file probe would report stopped.
         if _check_gateway_running(profile_home):
             return
+        if not auto_archive:
+            # Lane sweep only: this runs on GET session-list polls, and opening the store writable writes
+            # (and checkpoints the WAL) even when nothing is archived. Look first through a read-only
+            # handle; open writable only when a lane is actually due.
+            probe = _open_session_db_for_profile(profile, read_only=True)
+            try:
+                due = probe.count_lane_archive_candidates(float(cfg.get("lane_archive_hours", 6)))
+            finally:
+                probe.close()
+            if not due:
+                return
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
             db.maybe_auto_archive(

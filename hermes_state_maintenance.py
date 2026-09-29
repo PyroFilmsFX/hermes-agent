@@ -312,6 +312,27 @@ class SessionMaintenanceMixin:
             self.set_session_archived(row[0], True)
         return len(rows)
 
+    def count_lane_archive_candidates(self, lane_archive_hours: float = 6.0, *, exclude_pinned: bool = True) -> int:
+        """Read-only: how many ended lane sessions ``archive_lane_sessions`` would claim now. Lets a caller
+        on a read path (GET session-list polls) skip opening the store writable when there is nothing to do."""
+        if lane_archive_hours is None or lane_archive_hours < 0:
+            return 0
+        cutoff = time.time() - float(lane_archive_hours) * 3600.0
+        pin_clause = "AND s.pinned = 0" if exclude_pinned else ""
+        rows = self._read_all(
+            f"""
+            SELECT s.cwd FROM sessions s
+            WHERE s.archived = 0
+              AND s.ended_at IS NOT NULL
+              AND s.ended_at < ?
+              AND COALESCE(s.end_reason, '') <> 'compression'
+              AND COALESCE(s.end_reason, '') NOT IN ({_RECOVERABLE_END_REASONS_SQL})
+              {pin_clause}
+            """,
+            (cutoff,),
+        )
+        return sum(1 for row in rows if is_conductor_lane(cwd=row[0]))
+
     def archive_lane_sessions(
         self, lane_archive_hours: float = 6.0, *, exclude_pinned: bool = True
     ) -> int:
