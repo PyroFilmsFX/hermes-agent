@@ -154,6 +154,8 @@ class ConductorRow(BaseModel):
     record: RecordModel
     field_sources: Dict[str, str] = {}
     other_builds: List[OtherBuildModel] = []
+    # §4: rows past 7 days go behind "Show abandoned (n)"; they are never silently dropped.
+    abandoned: bool = False
 
 
 class ConductorsResponse(BaseModel):
@@ -604,7 +606,6 @@ def _build_conductors_payload() -> dict[str, Any]:
 
         if is_abandoned:
             abandoned_count += 1
-            continue
 
         # Project Orchestrator
         claude_sid = m.get("session_id")
@@ -786,6 +787,7 @@ def _build_conductors_payload() -> dict[str, Any]:
             record=record_m,
             field_sources=dict(d.field_sources) if d else {},
             other_builds=extra_builds_list,
+            abandoned=is_abandoned,
         ))
 
     response_payload = ConductorsResponse(

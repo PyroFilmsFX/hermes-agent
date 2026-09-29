@@ -235,9 +235,10 @@ def test_abandoned_over_7_days(client, env, monkeypatch):
     data = resp.json()
 
     assert data["abandoned"] == 1
-    run_ids = [r["build"]["run_id"] for r in data["rows"]]
-    assert "run-recent" in run_ids
-    assert "run-aban" not in run_ids
+    # §4: abandoned rows stay in the payload, flagged, behind the renderer's "Show abandoned" toggle.
+    by_run = {r["build"]["run_id"]: r for r in data["rows"]}
+    assert by_run["run-recent"]["abandoned"] is False
+    assert by_run["run-aban"]["abandoned"] is True
 
 
 def test_fresh_reuse_within_5s(client, env, monkeypatch):
