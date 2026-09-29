@@ -725,6 +725,8 @@ export interface DesktopSessionBindingSetInput {
   profile: string
   hermes_session_id: string
   path: string
+  /** Step two of a bind: the exact root main returned in `confirm_required` and the owner confirmed. */
+  confirmed_project_root?: string
 }
 
 export interface DesktopSessionBindingSessionInput {
@@ -757,7 +759,22 @@ export interface DesktopSessionBindingRefusalResult {
   error?: unknown
 }
 
-export type DesktopSessionBindingOutcome = DesktopSessionBindingRecord | DesktopSessionBindingRefusalResult
+/** Step one of a bind (b10 review): main resolved the root it would sign and signed nothing. */
+export interface DesktopSessionBindingConfirmRequired {
+  ok: false
+  reason: 'confirm_required'
+  profile: string
+  hermes_session_id: string
+  project_root: string
+  repo_common_root: string | null
+  repo_remote: string | null
+  current_project_root: string | null
+}
+
+export type DesktopSessionBindingOutcome =
+  | DesktopSessionBindingRecord
+  | DesktopSessionBindingConfirmRequired
+  | DesktopSessionBindingRefusalResult
 
 export type DesktopSessionBindingStatusResult = DesktopSessionBindingRecord | DesktopSessionBindingRefusalResult
 

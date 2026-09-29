@@ -8105,12 +8105,13 @@ const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
   log: message => rememberLog(message)
 })
 
-// b10 H7a/H7b: session-binding store and launch-attestation issuer.
+// b10 H7a/H7b: session-binding store and launch-attestation issuer. Both stay idle at module init:
+// the store verifies records against the owner key + anchor, which only loadOwnerGrantKeyAtLaunch()
+// loads, so loadAll() and the issuer start run from startSessionBindingsAfterOwnerKey() there.
 const sessionBindingStore = createSessionBindingStore({
   store: ownerGrantKeyStore,
   grantsDir: defaultOwnerGrantsDir()
 })
-sessionBindingStore.loadAll()
 
 const sessionBindingIssuer = createSessionAttestationIssuer({
   bindingStore: sessionBindingStore,
@@ -8123,7 +8124,22 @@ const sessionBindingIssuer = createSessionAttestationIssuer({
   now: () => Date.now(),
   log: message => rememberLog(message)
 })
-sessionBindingIssuer.start()
+
+/** b10 review: bindings load (and verify) only once the owner key and anchor are loaded; a load
+ *  before that would surface every verified binding as needs_reconfirm for the whole run. */
+function startSessionBindingsAfterOwnerKey(): void {
+  try {
+    const loaded = sessionBindingStore.loadAll()
+
+    if (loaded.refused.length > 0) {
+      rememberLog(`[session-binding] refused ${loaded.refused.length} binding file(s) at load`)
+    }
+  } catch (error) {
+    rememberLog(`[session-binding] load failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  sessionBindingIssuer.start()
+}
 
 /** The session's live Claude CLI id as its backend announces it (never the state.db column). */
 async function ownerGrantLiveClaudeId(backendProfile: string, profile: string, sessionId: string): Promise<string | null> {
@@ -8177,6 +8193,9 @@ function loadOwnerGrantKeyAtLaunch(): void {
   if (status.state !== 'off' && status.state !== 'ready' && status.state !== 'unsupported') {
     rememberLog(`[owner-grant] signing off at launch: ${status.state}${status.refusal ? ` (${status.refusal})` : ''}`)
   }
+
+  // After the key and anchor: load bindings against them, then start the attestation issuer.
+  startSessionBindingsAfterOwnerKey()
 }
 
 /**
@@ -15561,14 +15580,21 @@ const sessionBindingHandlers = createSessionBindingIpcHandlers({
   log: message => rememberLog(message)
 })
 
-ipcMain.handle('hermes:session-binding:set', async (event: any, params: any) => sessionBindingHandlers.set(event, params))
+ipcMain.handle('hermes:session-binding:set', async (event: any, params: any) => {
+  const result = await sessionBindingHandlers.set(event, params)
+  // A committed bind / re-bind re-issues the session's live launches now, not at the next refresh.
+  if (result.ok && 'binding_nonce' in result && typeof result.profile === 'string') {
+    await sessionBindingIssuer.onBindingChanged(result.profile, result.hermes_session_id)
+  }
+  return result
+})
 ipcMain.handle('hermes:session-binding:clear', async (event: any, params: any) => {
   const result = await sessionBindingHandlers.clear(event, params)
   if (result.ok && params && typeof params === 'object') {
     const profile = (params as any).profile
     const hermes_session_id = (params as any).hermes_session_id
     if (typeof profile === 'string' && typeof hermes_session_id === 'string') {
-      sessionBindingIssuer.revoke(profile, hermes_session_id)
+      await sessionBindingIssuer.revoke(profile, hermes_session_id)
     }
   }
   return result

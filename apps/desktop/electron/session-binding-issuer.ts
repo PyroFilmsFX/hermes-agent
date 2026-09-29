@@ -8,7 +8,11 @@
  * - Bound verified record -> bound payload; unbound/needs_reconfirm -> null binding fields.
  * - Atomic write: temp wx 0600 + fsync + rename under <grants_dir>/session-attest/<claude_sid>/.
  * - Refresh attestation at TTL/2 (15 min) while in feed; stop when disappeared.
+ * - Every issue re-reads the verified store at sign time (never a cached record); a /compress child
+ *   with no record of its own carries its nearest recorded lineage ancestor's bound binding.
  * - revoke(profile, hermes_session_id): re-issues with nulls for live launches of that session.
+ * - onBindingChanged(profile, hermes_session_id): re-issues matching live launches at once.
+ * - Each live launch has a generation; a refresh that awaited past a newer issue is discarded.
  * - isAttestationLive(profile, hermes_session_id): true if live non-expired bound attestation exists.
  * - Anchor gate failure (anchor_missing/anchor_mismatch) -> idles ("signing off"), never throws.
  */
@@ -96,6 +100,12 @@ export interface LiveLaunchRecord {
   filePath?: string
   refreshTimer?: any
   isBound: boolean
+  /** The hermes session whose binding this attestation carries: the launch's own id, or a lineage
+   *  ancestor after /compress; null when unbound. */
+  binding_source: string | null
+  /** Bumped on every (re-)issue attempt: revoke, onBindingChanged, a compression / newer launch
+   *  update, a refresh. A refresh that awaited past a bump is stale and drops its work. */
+  generation: number
 }
 
 export interface SessionAttestationIssuer {
@@ -104,6 +114,8 @@ export interface SessionAttestationIssuer {
   dispose(): void
   pollOnce(): Promise<void>
   revoke(profile: string, hermes_session_id: string): Promise<void>
+  /** Re-issue matching live launches right after an owner bind / re-bind / unbind of that session. */
+  onBindingChanged(profile: string, hermes_session_id: string): Promise<void>
   isAttestationLive(profile: string, hermes_session_id: string): boolean
   getLiveLaunches(): ReadonlyMap<string, LiveLaunchRecord>
 }
@@ -355,16 +367,97 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
     return 'spawn-1'
   }
 
-  async function issueAttestation(
-    entry: LaunchFeedEntry,
-    binding: SessionBindingRecord | null,
-    issuedAt: number
-  ): Promise<boolean> {
-    if (!canSign()) {
+  function isBoundVerified(binding: SessionBindingRecord | null | undefined): binding is SessionBindingRecord {
+    return Boolean(binding && binding.state === 'bound' && binding.verified)
+  }
+
+  /**
+   * The binding a launch carries, read from the verified store NOW (never from a cached live
+   * record, so an unbind, a re-bind or a first bind is picked up by the next issue):
+   * - an explicit record for the launch's own hermes_session_id (bound or unbound) always wins;
+   * - with no own record (the child of a `/compress`), the launch's `hermes_lineage` is walked
+   *   newest -> oldest and the NEAREST ancestor that has a record decides: a bound + verified one
+   *   is carried forward with its own binding_nonce / binding_seq; an unbound or needs_reconfirm
+   *   one stops the walk, so an owner's unbind of the parent is never bypassed by an older bound
+   *   root further up the chain.
+   *
+   * Trust: `hermes_lineage` comes from the backend's launch feed (the backend's in-memory runtime
+   * lineage, read with main's dashboard token, which agents never hold), never from state.db.
+   * That is the same trust §4 gives the Claude sid: a compromised backend could already report any
+   * hermes_session_id for a Claude sid, so naming an ancestor in the lineage gives it no new power.
+   */
+  function resolveBinding(entry: LaunchFeedEntry): SessionBindingRecord | null {
+    if (!store) {
+      return null
+    }
+
+    const own = store.get(entry.profile, entry.hermes_session_id)
+
+    if (own) {
+      return isBoundVerified(own) ? own : null
+    }
+
+    const lineage = entry.hermes_lineage ?? []
+
+    for (let i = lineage.length - 1; i >= 0; i--) {
+      const ancestorId = lineage[i]
+
+      if (ancestorId === entry.hermes_session_id) {
+        continue
+      }
+
+      const ancestor = store.get(entry.profile, ancestorId)
+
+      if (!ancestor) {
+        continue
+      }
+
+      return isBoundVerified(ancestor) ? ancestor : null
+    }
+
+    return null
+  }
+
+  function armRefresh(record: LiveLaunchRecord): void {
+    if (record.refreshTimer) {
+      clearTimeoutFn(record.refreshTimer)
+    }
+
+    record.refreshTimer = setTimeoutFn(() => {
+      void refreshLaunch(record.claude_session_id)
+    }, refreshIntervalMs)
+  }
+
+  /**
+   * Sign and write one attestation for `entry`. Synchronous from the store read to the live-record
+   * swap, so nothing can interleave between "which binding" and "what is signed". Every attempt
+   * bumps the launch's generation, so a refresh that captured the record before an await sees it
+   * is stale and drops its work. `forceNull` signs the explicit revocation (null binding fields).
+   */
+  function issueAttestation(entry: LaunchFeedEntry, issuedAt: number, options: { forceNull?: boolean } = {}): boolean {
+    const existing = liveLaunches.get(entry.claude_session_id)
+    const generation = (existing?.generation ?? 0) + 1
+
+    if (existing) {
+      existing.generation = generation
+    }
+
+    const failed = (): boolean => {
+      // The previous file is still the newest on disk; keep retrying on the refresh cadence.
+      if (existing && !disposed) {
+        armRefresh(existing)
+      }
+
       return false
     }
 
-    const isBound = Boolean(binding && binding.state === 'bound' && binding.verified)
+    if (!canSign()) {
+      return failed()
+    }
+
+    // Re-read the verified store at sign time; anything but bound + verified signs nulls.
+    const binding = options.forceNull ? null : resolveBinding(entry)
+    const isBound = isBoundVerified(binding)
     const backend = resolveBackendId(entry)
 
     const payload: LaunchAttestationPayload = {
@@ -396,21 +489,21 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
         (err.code === 'anchor_missing' || err.code === 'anchor_mismatch' || err.code === 'no_key')
       ) {
         deps.log?.(`[session-binding-issuer] signing off during signDomain: ${err.message}`)
-        return false
+        return failed()
       }
       deps.log?.(`[session-binding-issuer] signDomain error: ${err}`)
-      return false
+      return failed()
     }
 
     const written = writeAttestationFile(grantsDir, entry.claude_session_id, entry.launch_seq, issuedAt, envelope, fs, random)
     if ('reason' in written) {
       deps.log?.(`[session-binding-issuer] writeAttestationFile failed: ${written.reason}`)
-      return false
+      return failed()
     }
 
-    const existing = liveLaunches.get(entry.claude_session_id)
     if (existing?.refreshTimer) {
       clearTimeoutFn(existing.refreshTimer)
+      existing.refreshTimer = undefined
     }
 
     const record: LiveLaunchRecord = {
@@ -421,34 +514,65 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
       backend,
       launch_seq: entry.launch_seq,
       binding_nonce: payload.binding_nonce,
+      binding_source: isBound ? binding!.hermes_session_id : null,
       issued_at: issuedAt,
       expires_at: payload.expires_at,
       filePath: written.path,
-      isBound
+      isBound,
+      generation
     }
 
-    record.refreshTimer = setTimeoutFn(() => {
-      void refreshLaunch(entry.claude_session_id)
-    }, refreshIntervalMs)
-
     liveLaunches.set(entry.claude_session_id, record)
+
+    if (!disposed) {
+      armRefresh(record)
+    }
+
     return true
+  }
+
+  function newestFeedEntryFor(launches: unknown[], claudeSessionId: string): LaunchFeedEntry | null {
+    let newest: LaunchFeedEntry | null = null
+
+    for (const raw of launches) {
+      const entry = validateFeedEntry(raw)
+
+      if (entry && entry.claude_session_id === claudeSessionId && (!newest || entry.launch_seq >= newest.launch_seq)) {
+        newest = entry
+      }
+    }
+
+    return newest
   }
 
   async function refreshLaunch(claudeSessionId: string): Promise<void> {
     if (disposed) return
     const record = liveLaunches.get(claudeSessionId)
     if (!record) return
+    const generation = record.generation
 
-    // Verify still in feed
+    let snapshot: { seq: number; launches: unknown[] } | null = null
     try {
-      const snapshot = await fetchLaunches(0, 0)
-      const activeCids = new Set(
-        snapshot.launches
-          .map(l => (typeof l?.claude_session_id === 'string' ? l.claude_session_id : null))
-          .filter((cid): cid is string => cid !== null)
-      )
-      if (!activeCids.has(claudeSessionId)) {
+      snapshot = await fetchLaunches(0, 0)
+    } catch {
+      // On snapshot fetch error, do not drop blindly
+      snapshot = null
+    }
+
+    // Anything that happened during the await (an unbind, a re-bind, a compression update, a
+    // newer launch) re-issued this launch and bumped its generation: this refresh is stale.
+    const current = liveLaunches.get(claudeSessionId)
+    if (disposed || current !== record || current.generation !== generation) {
+      deps.log?.(`[session-binding-issuer] stale refresh discarded: ${claudeSessionId}`)
+      return
+    }
+
+    let launch = record.launch
+
+    if (snapshot) {
+      const active = newestFeedEntryFor(snapshot.launches, claudeSessionId)
+
+      if (!active) {
         if (record.refreshTimer) {
           clearTimeoutFn(record.refreshTimer)
           record.refreshTimer = undefined
@@ -457,13 +581,14 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
         deps.log?.(`[session-binding-issuer] stopped refresh, launch disappeared from feed: ${claudeSessionId}`)
         return
       }
-    } catch {
-      // On snapshot fetch error, do not drop blindly
+
+      // The feed's own view wins over the cached launch (e.g. /compress moved it to a child id).
+      if (active.launch_seq >= record.launch.launch_seq) {
+        launch = active
+      }
     }
 
-    const binding = record.isBound && store ? store.get(record.profile, record.hermes_session_id) : null
-    const now = nowFn()
-    await issueAttestation(record.launch, binding, now)
+    issueAttestation(launch, nowFn())
   }
 
   async function reconcileActiveLaunches(): Promise<void> {
@@ -497,9 +622,7 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
       return
     }
 
-    const binding = store ? store.get(entry.profile, entry.hermes_session_id) : null
-    const now = nowFn()
-    await issueAttestation(entry, binding, now)
+    issueAttestation(entry, nowFn())
   }
 
   async function pollOnce(): Promise<void> {
@@ -552,79 +675,54 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
     }
   }
 
-  async function revoke(profile: string, hermes_session_id: string): Promise<void> {
-    if (!isValidPathComponent(profile) || !isValidPathComponent(hermes_session_id)) {
-      return
-    }
-
-    const matching = Array.from(liveLaunches.values()).filter(
-      l => l.profile === profile && l.hermes_session_id === hermes_session_id
+  /** Live launches whose attestation depends on (profile, hermes_session_id): its own launches,
+   *  launches carrying its binding, and /compress descendants that name it in their lineage. */
+  function affectedLaunches(profile: string, hermes_session_id: string): LiveLaunchRecord[] {
+    return Array.from(liveLaunches.values()).filter(
+      l =>
+        l.profile === profile &&
+        (l.hermes_session_id === hermes_session_id ||
+          l.binding_source === hermes_session_id ||
+          (l.launch.hermes_lineage ?? []).includes(hermes_session_id))
     )
+  }
 
-    if (matching.length === 0) {
+  /**
+   * The owner changed (profile, hermes_session_id)'s binding (bind, re-bind, or unbind): re-issue
+   * every matching live launch now, from the store as it is now, instead of waiting for the refresh.
+   */
+  async function onBindingChanged(profile: string, hermes_session_id: string): Promise<void> {
+    if (disposed || !isValidPathComponent(profile) || !isValidPathComponent(hermes_session_id)) {
       return
     }
 
-    for (const record of matching) {
-      record.isBound = false
-      record.binding_nonce = null
-
-      if (!canSign()) {
+    for (const record of affectedLaunches(profile, hermes_session_id)) {
+      if (liveLaunches.get(record.claude_session_id) !== record) {
         continue
       }
 
-      const issued_at = nowFn()
-      const expires_at = issued_at + ttlMs
+      if (issueAttestation(record.launch, nowFn())) {
+        deps.log?.(`[session-binding-issuer] re-issued launch attestation after a binding change: ${record.claude_session_id}`)
+      }
+    }
+  }
 
-      const payload: LaunchAttestationPayload = {
-        v: 1,
-        aud: [...ATTESTATION_AUDIENCE],
-        owner_uid: ownerUid,
-        profile: record.profile,
-        backend: record.backend,
-        hermes_session_id: record.hermes_session_id,
-        claude_session_id: record.claude_session_id,
-        launch_seq: record.launch_seq,
-        project_root: null,
-        repo_common_root: null,
-        binding_nonce: null,
-        binding_seq: null,
-        repo_remote: null,
-        hermes_lineage: record.launch.hermes_lineage ?? [],
-        issued_at,
-        expires_at
+  async function revoke(profile: string, hermes_session_id: string): Promise<void> {
+    if (disposed || !isValidPathComponent(profile) || !isValidPathComponent(hermes_session_id)) {
+      return
+    }
+
+    for (const record of affectedLaunches(profile, hermes_session_id)) {
+      if (liveLaunches.get(record.claude_session_id) !== record) {
+        continue
       }
 
-      try {
-        const payloadBytes = encodePayload(payload as unknown as Record<string, unknown>)
-        const envelope = keyStore.signDomain(ATTESTATION_FORMAT, payloadBytes)
-        const written = writeAttestationFile(
-          grantsDir,
-          record.claude_session_id,
-          record.launch_seq,
-          issued_at,
-          envelope,
-          fs,
-          random
-        )
+      // The revoked session's own launches and anything carrying its binding sign explicit nulls;
+      // other descendants re-resolve (the store's unbound record stops their lineage walk).
+      const forceNull = record.hermes_session_id === hermes_session_id || record.binding_source === hermes_session_id
 
-        if ('path' in written) {
-          record.issued_at = issued_at
-          record.expires_at = expires_at
-          record.binding_nonce = null
-          record.filePath = written.path
-
-          if (record.refreshTimer) {
-            clearTimeoutFn(record.refreshTimer)
-          }
-          record.refreshTimer = setTimeoutFn(() => {
-            void refreshLaunch(record.claude_session_id)
-          }, refreshIntervalMs)
-
-          deps.log?.(`[session-binding-issuer] revoked launch attestation for ${record.claude_session_id}`)
-        }
-      } catch (err) {
-        deps.log?.(`[session-binding-issuer] error re-issuing revoked attestation: ${err}`)
+      if (issueAttestation(record.launch, nowFn(), { forceNull })) {
+        deps.log?.(`[session-binding-issuer] revoked launch attestation for ${record.claude_session_id}`)
       }
     }
   }
@@ -636,7 +734,10 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
 
     const now = nowFn()
     for (const record of liveLaunches.values()) {
-      if (record.profile === profile && record.hermes_session_id === hermes_session_id) {
+      if (
+        record.profile === profile &&
+        (record.hermes_session_id === hermes_session_id || record.binding_source === hermes_session_id)
+      ) {
         if (record.binding_nonce !== null && record.binding_nonce !== undefined) {
           if (now <= record.expires_at) {
             return true
@@ -684,6 +785,7 @@ export function createSessionAttestationIssuer(deps: SessionAttestationIssuerDep
     dispose,
     pollOnce,
     revoke,
+    onBindingChanged,
     isAttestationLive,
     getLiveLaunches: () => liveLaunches
   }

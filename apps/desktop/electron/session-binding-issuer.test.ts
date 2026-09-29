@@ -534,3 +534,360 @@ describe('session-binding-issuer: launch-attestation issuer (b10 H7b)', () => {
     issuer.dispose()
   })
 })
+
+describe('session-binding-issuer: b10 review — binding changes, compression and stale refreshes', () => {
+  /** Reads every attestation for a Claude sid, oldest first (file names are `<issued_at>-<seq>`). */
+  function payloadsFor(grantsDir: string, cid: string): LaunchAttestationPayload[] {
+    const dir = path.join(grantsDir, 'session-attest', cid)
+    if (!fs.existsSync(dir)) return []
+    return fs
+      .readdirSync(dir)
+      .filter(f => f.endsWith('.json'))
+      .sort((a, b) => Number(a.split('-')[0]) - Number(b.split('-')[0]))
+      .map(f => {
+        const env = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as OwnerDomainEnvelope
+        return JSON.parse(b64urlDecode(env.payload)!.toString('utf8')) as LaunchAttestationPayload
+      })
+  }
+
+  const newest = (grantsDir: string, cid: string) => payloadsFor(grantsDir, cid).at(-1)!
+
+  /** Manual timers: refresh callbacks are fired by the test, never by the clock. */
+  function manualTimers() {
+    const pending = new Map<number, () => void>()
+    let id = 0
+    return {
+      setTimeout: ((fn: () => void) => {
+        id += 1
+        pending.set(id, fn)
+        return id
+      }) as unknown as typeof setTimeout,
+      clearTimeout: ((handle: number) => {
+        pending.delete(handle)
+      }) as unknown as typeof clearTimeout,
+      /** Fire every armed timer once (the refresh). */
+      fireAll: () => {
+        const fns = Array.from(pending.values())
+        pending.clear()
+        for (const fn of fns) fn()
+      }
+    }
+  }
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>(r => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  test('3a. binding an already-running unbound session re-issues its attestation at once (onBindingChanged)', async () => {
+    const h = harness()
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_late', claude_session_id: 'cs_late', profile: 'default', launch_seq: 1 }
+    const timers = manualTimers()
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches: [launch] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_late').project_root).toBeNull()
+    expect(issuer.isAttestationLive('default', 'hs_late')).toBe(false)
+
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_late', project_root: '/abs/late', repo_common_root: '/abs/late' })
+    h.advanceTime(1000)
+    await issuer.onBindingChanged('default', 'hs_late')
+
+    const after = newest(h.grantsDir, 'cs_late')
+    expect(after.project_root).toBe('/abs/late')
+    expect(after.binding_nonce).toBe(h.bindingStore.get('default', 'hs_late')!.binding_nonce)
+    expect(issuer.isAttestationLive('default', 'hs_late')).toBe(true)
+    issuer.dispose()
+  })
+
+  test('3b. a refresh derives the binding from the current store, even for a launch cached as unbound', async () => {
+    const h = harness()
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_rf', claude_session_id: 'cs_rf', profile: 'default', launch_seq: 1 }
+    const timers = manualTimers()
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches: [launch] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_rf').project_root).toBeNull()
+
+    // Bound behind the issuer's back (no onBindingChanged): the next refresh still picks it up.
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_rf', project_root: '/abs/rf', repo_common_root: '/abs/rf' })
+    h.advanceTime(15 * 60 * 1000)
+    timers.fireAll()
+    await vi.waitFor(() => expect(payloadsFor(h.grantsDir, 'cs_rf')).toHaveLength(2))
+    expect(newest(h.grantsDir, 'cs_rf').project_root).toBe('/abs/rf')
+    issuer.dispose()
+  })
+
+  test('3c. a re-bind moves the live attestation to the new project immediately', async () => {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_mv', project_root: '/abs/old', repo_common_root: '/abs/old' })
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_mv', claude_session_id: 'cs_mv', profile: 'default', launch_seq: 1 }
+    const timers = manualTimers()
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches: [launch] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_mv').project_root).toBe('/abs/old')
+
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_mv', project_root: '/abs/new', repo_common_root: '/abs/new' })
+    h.advanceTime(1000)
+    await issuer.onBindingChanged('default', 'hs_mv')
+
+    const after = newest(h.grantsDir, 'cs_mv')
+    expect(after.project_root).toBe('/abs/new')
+    expect(after.binding_seq).toBe(2)
+    issuer.dispose()
+  })
+
+  test('4a. after /compress the child launch carries the verified parent binding forward via lineage', async () => {
+    const h = harness()
+    const parent = h.bindingStore.bind({
+      profile: 'default',
+      hermes_session_id: 'hs_parent',
+      project_root: '/abs/compress',
+      repo_common_root: '/abs/compress'
+    })
+    const child: LaunchFeedEntry = {
+      hermes_session_id: 'hs_child',
+      claude_session_id: 'cs_compress',
+      profile: 'default',
+      launch_seq: 2,
+      hermes_lineage: ['hs_root', 'hs_parent']
+    }
+    const timers = manualTimers()
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches: [child] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    const p = newest(h.grantsDir, 'cs_compress')
+    expect(p.hermes_session_id).toBe('hs_child')
+    expect(p.hermes_lineage).toEqual(['hs_root', 'hs_parent'])
+    expect(p.project_root).toBe('/abs/compress')
+    expect('binding_nonce' in parent && p.binding_nonce).toBe('binding_nonce' in parent && parent.binding_nonce)
+    expect(p.binding_seq).toBe(1)
+    expect(issuer.isAttestationLive('default', 'hs_child')).toBe(true)
+    // The parent's binding powers a live build, so a re-bind of the parent gets the native confirm.
+    expect(issuer.isAttestationLive('default', 'hs_parent')).toBe(true)
+
+    // Unbinding the parent revokes the carried binding on the child's live launch.
+    h.bindingStore.unbind('default', 'hs_parent')
+    h.advanceTime(1000)
+    await issuer.revoke('default', 'hs_parent')
+    expect(newest(h.grantsDir, 'cs_compress').project_root).toBeNull()
+    expect(issuer.isAttestationLive('default', 'hs_parent')).toBe(false)
+    issuer.dispose()
+  })
+
+  test('4b. an explicit child record (unbound) wins over the parent; a nearer unbound ancestor stops the walk', async () => {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_p', project_root: '/abs/p', repo_common_root: '/abs/p' })
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_c', project_root: '/abs/c', repo_common_root: '/abs/c' })
+    h.bindingStore.unbind('default', 'hs_c')
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_root2', project_root: '/abs/root2', repo_common_root: '/abs/root2' })
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_mid2', project_root: '/abs/mid2', repo_common_root: '/abs/mid2' })
+    h.bindingStore.unbind('default', 'hs_mid2')
+
+    const explicit: LaunchFeedEntry = {
+      hermes_session_id: 'hs_c',
+      claude_session_id: 'cs_explicit',
+      profile: 'default',
+      launch_seq: 1,
+      hermes_lineage: ['hs_p']
+    }
+    const walk: LaunchFeedEntry = {
+      hermes_session_id: 'hs_leaf2',
+      claude_session_id: 'cs_walk',
+      profile: 'default',
+      launch_seq: 1,
+      hermes_lineage: ['hs_root2', 'hs_mid2']
+    }
+    const otherProfile: LaunchFeedEntry = {
+      hermes_session_id: 'hs_leaf3',
+      claude_session_id: 'cs_other_profile',
+      profile: 'work',
+      launch_seq: 1,
+      hermes_lineage: ['hs_p']
+    }
+    const timers = manualTimers()
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => ({ seq: 1, launches: [explicit, walk, otherProfile] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_explicit').project_root).toBeNull()
+    expect(newest(h.grantsDir, 'cs_walk').project_root).toBeNull()
+    // Lineage never crosses profiles.
+    expect(newest(h.grantsDir, 'cs_other_profile').project_root).toBeNull()
+    issuer.dispose()
+  })
+
+  test('5a. a refresh in flight across an unbind + revoke cannot re-sign the old binding', async () => {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_race', project_root: '/abs/race', repo_common_root: '/abs/race' })
+    const launch: LaunchFeedEntry = { hermes_session_id: 'hs_race', claude_session_id: 'cs_race', profile: 'default', launch_seq: 1 }
+    const timers = manualTimers()
+    let gate: ReturnType<typeof deferred<{ seq: number; launches: unknown[] }>> | null = null
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => (gate ? gate.promise : { seq: 1, launches: [launch] })),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_race').project_root).toBe('/abs/race')
+
+    // The refresh starts and blocks on its feed snapshot...
+    gate = deferred()
+    h.advanceTime(15 * 60 * 1000)
+    timers.fireAll()
+
+    // ...the owner unbinds meanwhile...
+    h.bindingStore.unbind('default', 'hs_race')
+    h.advanceTime(1000)
+    await issuer.revoke('default', 'hs_race')
+    const revokedCount = payloadsFor(h.grantsDir, 'cs_race').length
+    expect(newest(h.grantsDir, 'cs_race').project_root).toBeNull()
+
+    // ...then the stale refresh resumes: it must write nothing.
+    h.advanceTime(1000)
+    gate.resolve({ seq: 1, launches: [launch] })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(payloadsFor(h.grantsDir, 'cs_race')).toHaveLength(revokedCount)
+    expect(newest(h.grantsDir, 'cs_race').project_root).toBeNull()
+    expect(issuer.isAttestationLive('default', 'hs_race')).toBe(false)
+    issuer.dispose()
+  })
+
+  test('5b. a refresh in flight across a compression update cannot overwrite the child with the parent identity', async () => {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_old', project_root: '/abs/cmp', repo_common_root: '/abs/cmp' })
+    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_old', claude_session_id: 'cs_cmp', profile: 'default', launch_seq: 1 }
+    const childLaunch: LaunchFeedEntry = {
+      hermes_session_id: 'hs_new',
+      claude_session_id: 'cs_cmp',
+      profile: 'default',
+      launch_seq: 2,
+      hermes_lineage: ['hs_old']
+    }
+    const timers = manualTimers()
+    let feed: { seq: number; launches: unknown[] } = { seq: 1, launches: [parentLaunch] }
+    let gate: ReturnType<typeof deferred<{ seq: number; launches: unknown[] }>> | null = null
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async (url: string) => (gate && url.includes('since=0&wait=0') ? gate.promise : feed)),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    expect(newest(h.grantsDir, 'cs_cmp').hermes_session_id).toBe('hs_old')
+
+    // Refresh blocks; meanwhile the feed delivers the /compress child for the same Claude sid.
+    gate = deferred()
+    h.advanceTime(15 * 60 * 1000)
+    timers.fireAll()
+    feed = { seq: 2, launches: [childLaunch] }
+    h.advanceTime(1000)
+    await issuer.pollOnce()
+    const afterChild = payloadsFor(h.grantsDir, 'cs_cmp').length
+    expect(newest(h.grantsDir, 'cs_cmp').hermes_session_id).toBe('hs_new')
+    expect(newest(h.grantsDir, 'cs_cmp').project_root).toBe('/abs/cmp')
+
+    // The stale refresh resumes with the old snapshot: discarded, the child stays newest.
+    h.advanceTime(1000)
+    gate.resolve({ seq: 1, launches: [parentLaunch] })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(payloadsFor(h.grantsDir, 'cs_cmp')).toHaveLength(afterChild)
+    expect(newest(h.grantsDir, 'cs_cmp').hermes_session_id).toBe('hs_new')
+    expect(issuer.getLiveLaunches().get('cs_cmp')?.hermes_session_id).toBe('hs_new')
+    issuer.dispose()
+  })
+
+  test('5c. a refresh re-signs from the feed view: a compression seen only in the snapshot moves to the child', async () => {
+    const h = harness()
+    h.bindingStore.bind({ profile: 'default', hermes_session_id: 'hs_snap_old', project_root: '/abs/snap', repo_common_root: '/abs/snap' })
+    const parentLaunch: LaunchFeedEntry = { hermes_session_id: 'hs_snap_old', claude_session_id: 'cs_snap', profile: 'default', launch_seq: 1 }
+    const childLaunch: LaunchFeedEntry = {
+      hermes_session_id: 'hs_snap_new',
+      claude_session_id: 'cs_snap',
+      profile: 'default',
+      launch_seq: 2,
+      hermes_lineage: ['hs_snap_old']
+    }
+    const timers = manualTimers()
+    let feed: { seq: number; launches: unknown[] } = { seq: 1, launches: [parentLaunch] }
+    const issuer = createSessionAttestationIssuer({
+      bindingStore: h.bindingStore,
+      keyStore: h.keyStore,
+      grantsDir: h.grantsDir,
+      backend: 'spawn-test-1',
+      fetchJson: vi.fn(async () => feed),
+      now: h.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    })
+
+    await issuer.pollOnce()
+    feed = { seq: 2, launches: [childLaunch] }
+    h.advanceTime(15 * 60 * 1000)
+    timers.fireAll()
+    await vi.waitFor(() => expect(payloadsFor(h.grantsDir, 'cs_snap')).toHaveLength(2))
+    const p = newest(h.grantsDir, 'cs_snap')
+    expect(p.hermes_session_id).toBe('hs_snap_new')
+    expect(p.project_root).toBe('/abs/snap')
+    issuer.dispose()
+  })
+})

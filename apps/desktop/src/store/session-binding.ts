@@ -10,12 +10,14 @@
  * No polling: main's IPC shares one rate gate across status, set and clear (at most 10 calls a
  * minute, one at a time), so status reads are cache-first and every IPC call is serialized here.
  *
- * The renderer never sends a project root, seq or nonce: set carries exactly
- * `{profile, hermes_session_id, path}`; main resolves the rest itself.
+ * The renderer never chooses a project root, seq or nonce: set carries
+ * `{profile, hermes_session_id, path}`; main resolves the rest itself. The only root it ever sends
+ * back is the one main just resolved (`confirmed_project_root`, after the owner saw it).
  */
 import { atom } from 'nanostores'
 
 import type {
+  DesktopSessionBindingConfirmRequired,
   DesktopSessionBindingOutcome,
   DesktopSessionBindingRecord,
   DesktopSessionBindingSessionInput,
@@ -155,8 +157,33 @@ export function ensureSessionBinding(profile: null | string | undefined, session
   void refreshSessionBinding(profile, sessionId)
 }
 
-/** Owner-clicked bind. Sends only `{profile, hermes_session_id, path}`, then re-reads status. */
-export async function setSessionBinding(input: DesktopSessionBindingSetInput): Promise<DesktopSessionBindingOutcome> {
+/** The root main resolved for a bind (step one), shown in the owner's confirm before it is signed. */
+export type SessionBindingResolvedRoot = Pick<
+  DesktopSessionBindingConfirmRequired,
+  'current_project_root' | 'project_root' | 'repo_common_root' | 'repo_remote'
+>
+
+export interface SetSessionBindingOptions {
+  /** The owner's confirm, shown the exact root main will sign. Resolve false to sign nothing. */
+  confirmRoot?: (resolved: SessionBindingResolvedRoot) => Promise<boolean>
+}
+
+function isConfirmRequired(outcome: unknown): outcome is DesktopSessionBindingConfirmRequired {
+  const o = outcome as null | Partial<DesktopSessionBindingConfirmRequired> | undefined
+
+  return Boolean(o && o.ok === false && o.reason === 'confirm_required' && typeof o.project_root === 'string')
+}
+
+/**
+ * Owner-clicked bind, two-step (b10 review): send `{profile, hermes_session_id, path}` and main
+ * resolves the root it would sign without signing; `confirmRoot` shows that exact root; the commit
+ * sends it back as `confirmed_project_root`, and main refuses if a fresh probe resolves elsewhere.
+ * Then re-reads status.
+ */
+export async function setSessionBinding(
+  input: DesktopSessionBindingSetInput,
+  options: SetSessionBindingOptions = {}
+): Promise<DesktopSessionBindingOutcome> {
   const set = bridge()?.set
 
   if (!set) {
@@ -169,7 +196,26 @@ export async function setSessionBinding(input: DesktopSessionBindingSetInput): P
     path: input.path
   }
 
-  const outcome = await serialized(() => set(params))
+  const probe = await serialized(() => set(params))
+
+  if (!isConfirmRequired(probe)) {
+    await refreshAfterWrite(params.profile, params.hermes_session_id)
+
+    return probe
+  }
+
+  const resolved: SessionBindingResolvedRoot = {
+    current_project_root: probe.current_project_root ?? null,
+    project_root: probe.project_root,
+    repo_common_root: probe.repo_common_root ?? null,
+    repo_remote: probe.repo_remote ?? null
+  }
+
+  if (options.confirmRoot && !(await options.confirmRoot(resolved))) {
+    return { ok: false, reason: 'cancelled' }
+  }
+
+  const outcome = await serialized(() => set({ ...params, confirmed_project_root: resolved.project_root }))
 
   await refreshAfterWrite(params.profile, params.hermes_session_id)
 

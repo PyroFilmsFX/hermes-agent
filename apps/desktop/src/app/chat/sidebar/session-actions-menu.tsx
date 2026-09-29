@@ -68,6 +68,7 @@ import {
   refreshSessionBinding,
   sessionBindingAvailable,
   sessionBindingKey,
+  type SessionBindingResolvedRoot,
   setSessionBinding
 } from '@/store/session-binding'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
@@ -346,19 +347,17 @@ function BindToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
 
   const bindTo = async (path: string, name: string) => {
     triggerHaptic('selection')
-    if (firstBind) {
-      const ok = await confirm({
-        title: copy.confirmTitle(name),
-        description: copy.confirmDescription(path),
-        confirmLabel: copy.confirmLabel
-      })
+    // A first bind's in-app confirm names the exact root main resolved and will sign (b10 review).
+    const confirmRoot = firstBind
+      ? (resolved: SessionBindingResolvedRoot) =>
+          confirm({
+            title: copy.confirmTitle(name),
+            description: copy.confirmDescription(resolved.project_root),
+            confirmLabel: copy.confirmLabel
+          })
+      : undefined
 
-      if (!ok) {
-        return
-      }
-    }
-
-    const outcome = await setSessionBinding({ profile: profileKey, hermes_session_id: sessionId, path })
+    const outcome = await setSessionBinding({ profile: profileKey, hermes_session_id: sessionId, path }, { confirmRoot })
 
     if (!outcome.ok && outcome.reason !== 'cancelled') {
       notify({ kind: 'error', title: copy.failedTitle, message: copy.failed(outcome.reason) })

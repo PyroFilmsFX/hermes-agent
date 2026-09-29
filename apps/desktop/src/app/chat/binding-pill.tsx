@@ -47,6 +47,7 @@ import {
   refreshSessionBinding,
   sessionBindingAvailable,
   sessionBindingKey,
+  type SessionBindingResolvedRoot,
   type SessionBindingSuggestion,
   setSessionBinding,
   type SuggestionSource
@@ -332,19 +333,18 @@ export function SessionBindingPill({ className, session }: SessionBindingPillPro
   const firstBind = !record || record.state === 'unbound'
 
   const bindTo = async (path: string, name: string) => {
-    if (firstBind) {
-      const ok = await confirm({
-        title: copy.confirmTitle(name),
-        description: copy.confirmDescription(path),
-        confirmLabel: copy.confirmLabel
-      })
+    // A first bind's in-app confirm names the exact root main resolved and will sign (b10 review);
+    // a re-bind of a live build gets main's native confirm, which names it too.
+    const confirmRoot = firstBind
+      ? (resolved: SessionBindingResolvedRoot) =>
+          confirm({
+            title: copy.confirmTitle(name),
+            description: copy.confirmDescription(resolved.project_root),
+            confirmLabel: copy.confirmLabel
+          })
+      : undefined
 
-      if (!ok) {
-        return
-      }
-    }
-
-    const outcome = await setSessionBinding({ profile, hermes_session_id: sessionId, path })
+    const outcome = await setSessionBinding({ profile, hermes_session_id: sessionId, path }, { confirmRoot })
     const reason = outcomeReason(outcome)
 
     if (reason && reason !== 'cancelled') {

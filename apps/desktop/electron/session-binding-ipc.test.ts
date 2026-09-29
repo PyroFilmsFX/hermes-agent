@@ -23,6 +23,7 @@ import { CANCEL_COOLDOWN_MS, MAX_CONFIRMS_PER_MINUTE } from './owner-forward-con
 import { createOwnerKeyStore, type SafeStorageLike } from './owner-grant-key'
 import {
   createSessionBindingIpcHandlers,
+  isSameOrAncestor,
   probeWorkspace,
   type RebindConfirmDetails,
   type SessionBindingIpcDeps
@@ -99,6 +100,15 @@ function harness(options: {
   }
 
   const handlers = createSessionBindingIpcHandlers(deps)
+  // b10 review: a bind is two-step. `set` without confirmed_project_root only resolves the root
+  // (confirm_required); the commit sends back exactly that root. This drives both steps.
+  const set = async (evt: unknown, input: Record<string, unknown>): Promise<any> => {
+    const probe = await handlers.set(evt, input)
+    if (!('reason' in probe) || probe.reason !== 'confirm_required' || !('project_root' in probe)) {
+      return probe
+    }
+    return handlers.set(evt, { ...input, confirmed_project_root: probe.project_root })
+  }
   const event = (isTrusted = true) => ({ trusted: isTrusted })
 
   return {
@@ -107,6 +117,7 @@ function harness(options: {
     grantsDir,
     store,
     handlers,
+    set,
     event,
     confirmRebind,
     isAttestationLive,
@@ -125,7 +136,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const h = harness({ trusted: false })
     const repoDir = initGitRepo(path.join(h.base, 'repo'))
 
-    const setRes = await h.handlers.set(h.event(false), {
+    const setRes = await h.set(h.event(false), {
       profile: 'default',
       hermes_session_id: 's_untrusted',
       path: repoDir
@@ -168,7 +179,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const repoB = initGitRepo(path.join(h.base, 'repoB'))
 
     // 1. Initial bind (first bind -> no native confirmRebind called)
-    const firstBind = await h.handlers.set(h.event(), {
+    const firstBind = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_rate',
       path: repoA
@@ -177,7 +188,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     expect(h.confirmRebind).not.toHaveBeenCalled()
 
     // 2. Start a re-bind that hangs on confirmRebind (dialog open)
-    const secondBindPromise = h.handlers.set(h.event(), {
+    const secondBindPromise = h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_rate',
       path: repoB
@@ -185,7 +196,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     await confirmReachedPromise
 
     // Concurrent call while dialog is open must fail with dialog_open
-    const concurrentCall = await h.handlers.set(h.event(), {
+    const concurrentCall = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_rate',
       path: repoB
@@ -199,7 +210,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
 
     // 3. Cooldown: calls within CANCEL_COOLDOWN_MS must fail with cooldown
     h.advanceTime(1000)
-    const duringCooldown = await h.handlers.set(h.event(), {
+    const duringCooldown = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_rate',
       path: repoB
@@ -216,7 +227,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     // We had 2 starts in the current window (firstBind + secondBind).
     // Loop until we reach the cap.
     for (let i = 2; i < MAX_CONFIRMS_PER_MINUTE; i++) {
-      const res = await h.handlers.set(h.event(), {
+      const res = await h.set(h.event(), {
         profile: 'default',
         hermes_session_id: `s_rate_${i}`,
         path: repoA
@@ -225,7 +236,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     }
 
     // Next call must be refused with 'rate'
-    const overLimit = await h.handlers.set(h.event(), {
+    const overLimit = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_rate_overflow',
       path: repoA
@@ -240,7 +251,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     // Non-directory (regular file)
     const filePath = path.join(h.base, 'regular-file.txt')
     fs.writeFileSync(filePath, 'hello')
-    const nonDirRes = await h.handlers.set(h.event(), {
+    const nonDirRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_test',
       path: filePath
@@ -250,7 +261,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     // Symlink-escaping / broken symlink
     const brokenLink = path.join(h.base, 'broken-link')
     fs.symlinkSync(path.join(h.base, 'non-existent-target'), brokenLink)
-    const brokenLinkRes = await h.handlers.set(h.event(), {
+    const brokenLinkRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_test',
       path: brokenLink
@@ -260,7 +271,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     // Non-git directory
     const plainDir = path.join(h.base, 'plain-folder')
     fs.mkdirSync(plainDir)
-    const nonGitRes = await h.handlers.set(h.event(), {
+    const nonGitRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_test',
       path: plainDir
@@ -268,7 +279,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     expect(nonGitRes).toEqual({ ok: false, reason: 'not_git' })
 
     // Bad path input (empty or NUL)
-    const badInputRes = await h.handlers.set(h.event(), {
+    const badInputRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_test',
       path: 'invalid\0path'
@@ -278,7 +289,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     // Valid symlink pointing to a git repo should succeed and resolve to realpath
     const symlinkToRepo = path.join(h.base, 'symlink-to-repo')
     fs.symlinkSync(validRepo, symlinkToRepo, 'dir')
-    const symlinkRes = await h.handlers.set(h.event(), {
+    const symlinkRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_symlink',
       path: symlinkToRepo
@@ -296,7 +307,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const wtPath = addGitWorktree(mainRepo, worktreeDir, 'feat-worktree')
 
     // Bind to the worktree
-    const res = await h.handlers.set(h.event(), {
+    const res = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_wt',
       path: wtPath
@@ -322,7 +333,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const h = harness()
     const repo = initGitRepo(path.join(h.base, 'real-repo'))
 
-    const res = await h.handlers.set(h.event(), {
+    const res = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_spoof',
       path: repo,
@@ -351,7 +362,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
       expect(res.ok).toBe(true)
     }
 
-    const bound = await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_after', path: repo })
+    const bound = await h.set(h.event(), { profile: 'default', hermes_session_id: 's_after', path: repo })
     expect('state' in bound && bound.state).toBe('bound')
   })
 
@@ -367,7 +378,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const h = harness({ isAttestationLive: () => isLive, confirmRebind })
     const repo = initGitRepo(path.join(h.base, 'repoUnbind'))
 
-    await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_u', path: repo })
+    await h.set(h.event(), { profile: 'default', hermes_session_id: 's_u', path: repo })
     isLive = true
 
     const refused = await h.handlers.clear(h.event(), { profile: 'default', hermes_session_id: 's_u' })
@@ -386,7 +397,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const confirmRebind = vi.fn(async () => false)
     const h = harness({ confirmRebind })
     const repo = initGitRepo(path.join(h.base, 'repoUnbind2'))
-    await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_v', path: repo })
+    await h.set(h.event(), { profile: 'default', hermes_session_id: 's_v', path: repo })
 
     const cleared = await h.handlers.clear(h.event(), { profile: 'default', hermes_session_id: 's_v' })
     expect(cleared.ok).toBe(true)
@@ -406,7 +417,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const repoB = initGitRepo(path.join(h.base, 'repoB'))
 
     // First bind: no confirmRebind
-    const firstRes = await h.handlers.set(h.event(), {
+    const firstRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_live',
       path: repoA
@@ -418,7 +429,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     isLive = true
 
     // Re-bind with confirmRebind returning false -> aborts
-    const rebindAborted = await h.handlers.set(h.event(), {
+    const rebindAborted = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_live',
       path: repoB
@@ -443,7 +454,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
 
     // Now re-bind with confirmRebind returning true -> succeeds
     confirmRebind.mockResolvedValueOnce(true)
-    const rebindSuccess = await h.handlers.set(h.event(), {
+    const rebindSuccess = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_live',
       path: repoB
@@ -463,7 +474,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const repo = initGitRepo(path.join(h.base, 'repo'))
 
     // Initial bind at seq 1
-    const bindRes = await h.handlers.set(h.event(), {
+    const bindRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_clear',
       path: repo
@@ -510,7 +521,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     })
 
     // Status for bound session
-    await h.handlers.set(h.event(), {
+    await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_bound',
       path: repo
@@ -583,7 +594,7 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     const repo = initGitRepo(path.join(h.base, 'repo'))
 
     // set should surface error state, not throw
-    const setRes = await h.handlers.set(h.event(), {
+    const setRes = await h.set(h.event(), {
       profile: 'default',
       hermes_session_id: 's_signoff',
       path: repo
@@ -605,5 +616,125 @@ describe('session-binding-ipc: H8 main-side IPC handlers', () => {
     expect('project_root' in probed && probed.project_root).toBe(repo)
     expect('repo_common_root' in probed && probed.repo_common_root).toBe(repo)
     expect('repo_remote' in probed && probed.repo_remote).toBe('https://github.com/org/standalone.git')
+  })
+})
+
+describe('session-binding-ipc: b10 review — the confirmed root is the signed root', () => {
+  test('a repo whose core.worktree points outside the requested folder is refused (foreign_toplevel)', async () => {
+    const h = harness()
+    const repo = initGitRepo(path.join(h.base, 'redirected-repo'))
+    const elsewhere = path.join(h.base, 'never-seen-by-owner')
+    fs.mkdirSync(elsewhere)
+    execFileSync('git', ['config', 'core.worktree', elsewhere], { cwd: repo, stdio: 'ignore' })
+
+    // git itself follows the redirect...
+    const gitSays = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo }).toString().trim()
+    expect(fs.realpathSync(gitSays)).toBe(fs.realpathSync(elsewhere))
+
+    // ...main refuses it, in both the probe and the commit step, and signs nothing.
+    const probed = await probeWorkspace(repo)
+    expect(probed).toMatchObject({ ok: false, reason: 'foreign_toplevel' })
+
+    const res = await h.set(h.event(), { profile: 'default', hermes_session_id: 's_redirect', path: repo })
+    expect(res).toMatchObject({ ok: false, reason: 'foreign_toplevel' })
+    const commit = await h.handlers.set(h.event(), {
+      profile: 'default',
+      hermes_session_id: 's_redirect',
+      path: repo,
+      confirmed_project_root: fs.realpathSync(elsewhere)
+    })
+    expect(commit).toMatchObject({ ok: false, reason: 'foreign_toplevel' })
+    expect(h.store.get('default', 's_redirect')).toBeNull()
+  })
+
+  test('a toplevel that does not realpath is refused, never normalized', async () => {
+    const h = harness()
+    const repo = initGitRepo(path.join(h.base, 'gone-worktree-repo'))
+    const gone = path.join(h.base, 'does-not-exist')
+    execFileSync('git', ['config', 'core.worktree', gone], { cwd: repo, stdio: 'ignore' })
+
+    const probed = await probeWorkspace(repo)
+    expect(probed.ok).toBe(false)
+    expect(h.store.get('default', 's_gone')).toBeNull()
+  })
+
+  test('isSameOrAncestor accepts the folder or its ancestors only', () => {
+    expect(isSameOrAncestor('/a/b', '/a/b')).toBe(true)
+    expect(isSameOrAncestor('/a/b', '/a/b/c/d')).toBe(true)
+    expect(isSameOrAncestor('/a/b', '/a/bc')).toBe(false)
+    expect(isSameOrAncestor('/a/b/c', '/a/b')).toBe(false)
+    expect(isSameOrAncestor('/x', '/a/b')).toBe(false)
+  })
+
+  test('set without confirmed_project_root signs nothing and returns the main-resolved root', async () => {
+    const h = harness()
+    const repo = initGitRepo(path.join(h.base, 'probe-repo'), 'git@github.com:example/probe.git')
+    const sub = path.join(repo, 'packages', 'app')
+    fs.mkdirSync(sub, { recursive: true })
+
+    const probe = await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_probe', path: sub })
+    expect(probe).toEqual({
+      ok: false,
+      reason: 'confirm_required',
+      profile: 'default',
+      hermes_session_id: 's_probe',
+      project_root: repo,
+      repo_common_root: repo,
+      repo_remote: 'git@github.com:example/probe.git',
+      current_project_root: null
+    })
+    expect(h.store.get('default', 's_probe')).toBeNull()
+    expect(fs.existsSync(path.join(h.grantsDir, 'session-bindings', 'default', 's_probe.json'))).toBe(false)
+
+    // The commit signs exactly the root the owner saw.
+    const committed = await h.handlers.set(h.event(), {
+      profile: 'default',
+      hermes_session_id: 's_probe',
+      path: sub,
+      confirmed_project_root: repo
+    })
+    expect('state' in committed && committed.state).toBe('bound')
+    expect(h.store.get('default', 's_probe')?.project_root).toBe(repo)
+  })
+
+  test('a commit whose fresh probe resolves elsewhere than the confirmed root is refused (root_changed)', async () => {
+    const h = harness()
+    const repoA = initGitRepo(path.join(h.base, 'confirmed-repo'))
+    const repoB = initGitRepo(path.join(h.base, 'other-repo'))
+
+    const res = await h.handlers.set(h.event(), {
+      profile: 'default',
+      hermes_session_id: 's_changed',
+      path: repoB,
+      confirmed_project_root: repoA
+    })
+    expect(res).toEqual({ ok: false, reason: 'root_changed', project_root: repoB })
+    expect(h.store.get('default', 's_changed')).toBeNull()
+
+    const bad = await h.handlers.set(h.event(), {
+      profile: 'default',
+      hermes_session_id: 's_changed',
+      path: repoB,
+      confirmed_project_root: 42
+    } as any)
+    expect(bad).toEqual({ ok: false, reason: 'bad_input' })
+  })
+
+  test('the native re-bind confirm names the main-resolved root, not the requested subfolder', async () => {
+    const confirmRebind = vi.fn(async () => true)
+    const h = harness({ isAttestationLive: () => true, confirmRebind })
+    const repoA = initGitRepo(path.join(h.base, 'rebind-a'))
+    const repoB = initGitRepo(path.join(h.base, 'rebind-b'))
+    const subB = path.join(repoB, 'src')
+    fs.mkdirSync(subB)
+
+    await h.set(h.event(), { profile: 'default', hermes_session_id: 's_rb', path: repoA })
+    const probe = await h.handlers.set(h.event(), { profile: 'default', hermes_session_id: 's_rb', path: subB })
+    expect(probe).toMatchObject({ reason: 'confirm_required', project_root: repoB, current_project_root: repoA })
+
+    const res = await h.set(h.event(), { profile: 'default', hermes_session_id: 's_rb', path: subB })
+    expect('state' in res && res.state).toBe('bound')
+    expect(confirmRebind).toHaveBeenCalledWith(expect.objectContaining({ currentProjectRoot: repoA, newProjectRoot: repoB }))
+    expect(h.store.get('default', 's_rb')?.project_root).toBe(repoB)
   })
 })

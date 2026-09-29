@@ -8,6 +8,9 @@
  * - path `<grants_dir>/session-bindings/<profile>/<hermes_session_id>.json` (dir 0700, file 0600);
  * - verify-on-load accepts ONLY active-kid records (retired or unknown kid -> `needs_reconfirm`);
  * - in-memory high-water mark per (profile, hermes_session_id) to prevent replay/rollback;
+ * - `loadAll()` is re-runnable: a reload re-verifies the records this run already holds (same seq
+ *   and nonce) and never accepts one below the in-run high-water. Main calls it only after the
+ *   owner key and anchor are loaded, so a verified record never loads as `needs_reconfirm`;
  * - `resignAll()` re-signs in-memory verified records with the current active key upon key rotation.
  */
 
@@ -854,8 +857,14 @@ export function createSessionBindingStore(ports: SessionBindingStorePorts): Sess
 
         const key = `${profile}\0${hermesSessionId}`
         const currentHw = highWaterMarks.get(key) ?? 0
+        const held = records.get(key)
 
-        if (verdict.payload.seq <= currentHw) {
+        // Re-runnable: a reload may re-read the exact record this run already holds (same seq and
+        // nonce), e.g. to re-verify it once the owner key and anchor are loaded. Anything older than
+        // the in-run high-water, or a different record at the same seq, is a rollback (§4).
+        const sameAsHeld = verdict.payload.seq === currentHw && held !== undefined && held.binding_nonce === verdict.payload.binding_nonce
+
+        if (verdict.payload.seq < currentHw || (verdict.payload.seq === currentHw && !sameAsHeld)) {
           refusedList.push({ path: filePath, reason: 'seq_low' })
           continue
         }

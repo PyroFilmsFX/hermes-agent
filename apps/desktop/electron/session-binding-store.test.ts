@@ -207,10 +207,27 @@ describe('session-binding-store: owner-signed durable session binding records', 
       expect(resZero.reason).toBe('seq_low')
     }
 
-    // load-time high-water refusal:
-    // If a store already has highWater 1, loading a file with seq 1 again or an older file is refused
+    // load-time high-water (b10 review: loadAll is re-runnable, so this assertion changed): a reload
+    // re-reads the SAME record the store holds without tripping its own high-water...
+    const reloaded = store.loadAll()
+    expect(reloaded.refused.some(r => r.reason === 'seq_low')).toBe(false)
+    expect(store.get('default', 's_seq_1')?.seq).toBe(1)
+
+    // ...while a restored older file (rollback below the in-run high-water) is still refused.
+    const recordPath = path.join(s.grantsDir, 'session-bindings', 'default', 's_seq_1.json')
+    const seqOneFile = fs.readFileSync(recordPath, 'utf8')
+    const bumped = store.bind({
+      profile: 'default',
+      hermes_session_id: 's_seq_1',
+      project_root: '/abs/path/to/other',
+      repo_common_root: '/abs/path/to/other'
+    })
+    expect('seq' in bumped && bumped.seq).toBe(2)
+    fs.writeFileSync(recordPath, seqOneFile)
     const loaded = store.loadAll()
     expect(loaded.refused.some(r => r.reason === 'seq_low')).toBe(true)
+    expect(store.get('default', 's_seq_1')?.seq).toBe(2)
+    expect(store.get('default', 's_seq_1')?.project_root).toBe('/abs/path/to/other')
   })
 
   test('5. unbind increments seq and rotates the nonce', () => {
@@ -419,5 +436,62 @@ describe('session-binding-store: owner-signed durable session binding records', 
     const store2 = createSessionBindingStore({ store: s.store, grantsDir: s.grantsDir })
     const loaded = store2.loadAll()
     expect(loaded).toHaveLength(2)
+  })
+})
+
+describe('session-binding-store: b10 review — bindings load after the key', () => {
+  test('a load before the key/anchor surfaces needs_reconfirm; a re-run after them verifies the same records', () => {
+    const s = readyStore()
+    const writer = createSessionBindingStore({ store: s.store, grantsDir: s.grantsDir })
+    const bound = writer.bind({
+      profile: 'default',
+      hermes_session_id: 's_restart',
+      project_root: '/abs/path/restart',
+      repo_common_root: '/abs/path/restart'
+    })
+    expect('state' in bound && bound.state).toBe('bound')
+
+    // A fresh process before loadOwnerGrantKeyAtLaunch(): no anchor yet.
+    const anchor = { keys: [{ kid: s.info.kid, pub: s.info.pub, status: 'active' }] }
+    s.store.setAnchor(null)
+    const restarted = createSessionBindingStore({ store: s.store, grantsDir: s.grantsDir })
+    const early = restarted.loadAll()
+    expect(early).toHaveLength(1)
+    expect(restarted.get('default', 's_restart')?.state).toBe('needs_reconfirm')
+
+    // After the key + anchor load, a re-run of loadAll must not trip its own high-water.
+    s.store.setAnchor(anchor)
+    const late = restarted.loadAll()
+    expect(late.refused).toEqual([])
+    const got = restarted.get('default', 's_restart')
+    expect(got?.state).toBe('bound')
+    expect(got?.verified).toBe(true)
+    expect(got?.seq).toBe(1)
+
+    // And the in-run high-water still holds: the next write is seq 2.
+    const next = restarted.unbind('default', 's_restart')
+    expect('seq' in next && next.seq).toBe(2)
+  })
+
+  test('main.ts loads bindings and starts the issuer only after the owner key (source pin)', () => {
+    const src = fs.readFileSync(path.join(__dirname, 'main.ts'), 'utf8')
+    const loadCalls = src.match(/sessionBindingStore\.loadAll\(\)/g) ?? []
+    const startCalls = src.match(/sessionBindingIssuer\.start\(\)/g) ?? []
+    expect(loadCalls).toHaveLength(1)
+    expect(startCalls).toHaveLength(1)
+
+    const helperAt = src.indexOf('function startSessionBindingsAfterOwnerKey(')
+    expect(helperAt).toBeGreaterThan(-1)
+    const helperBody = src.slice(helperAt, src.indexOf('\n}\n', helperAt))
+    expect(helperBody).toContain('sessionBindingStore.loadAll()')
+    expect(helperBody).toContain('sessionBindingIssuer.start()')
+    expect(helperBody.indexOf('loadAll()')).toBeLessThan(helperBody.indexOf('start()'))
+
+    const launchAt = src.indexOf('function loadOwnerGrantKeyAtLaunch(')
+    const launchBody = src.slice(launchAt, src.indexOf('\n}\n', launchAt))
+    expect(launchBody.indexOf('ownerGrantController.launch()')).toBeGreaterThan(-1)
+    expect(launchBody.indexOf('startSessionBindingsAfterOwnerKey()')).toBeGreaterThan(
+      launchBody.indexOf('ownerGrantController.launch()')
+    )
   })
 })

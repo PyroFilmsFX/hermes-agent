@@ -163,3 +163,66 @@ describe('suggestion', () => {
     expect($sessionBindingSuggestions.get()[sessionBindingKey('default', 's1')]?.path).toBe('/r/app')
   })
 })
+
+describe('session-binding store: two-step bind (b10 review)', () => {
+  const resolves = (params: any, root: string) => ({
+    ok: false,
+    reason: 'confirm_required',
+    profile: params.profile,
+    hermes_session_id: params.hermes_session_id,
+    project_root: root,
+    repo_common_root: '/r/common',
+    repo_remote: null,
+    current_project_root: null
+  })
+
+  it('shows confirmRoot the root main resolved, then commits exactly that root', async () => {
+    set.mockImplementation(async (params: any) =>
+      params.confirmed_project_root === undefined
+        ? resolves(params, '/r/app')
+        : record({ state: 'bound', project_root: params.confirmed_project_root, seq: 1 })
+    )
+    const confirmRoot = vi.fn(async () => true)
+
+    const outcome = await setSessionBinding({ profile: 'default', hermes_session_id: 's1', path: '/r/app/src' }, { confirmRoot })
+
+    expect(confirmRoot).toHaveBeenCalledWith({
+      current_project_root: null,
+      project_root: '/r/app',
+      repo_common_root: '/r/common',
+      repo_remote: null
+    })
+    expect(set).toHaveBeenCalledTimes(2)
+    expect(set.mock.calls[0][0]).toEqual({ profile: 'default', hermes_session_id: 's1', path: '/r/app/src' })
+    expect(set.mock.calls[1][0]).toEqual({
+      profile: 'default',
+      hermes_session_id: 's1',
+      path: '/r/app/src',
+      confirmed_project_root: '/r/app'
+    })
+    expect(outcome.ok).toBe(true)
+  })
+
+  it('a declined confirm never commits', async () => {
+    set.mockImplementation(async (params: any) => resolves(params, '/r/app'))
+
+    const outcome = await setSessionBinding(
+      { profile: 'default', hermes_session_id: 's1', path: '/r/app' },
+      { confirmRoot: async () => false }
+    )
+
+    expect(outcome).toEqual({ ok: false, reason: 'cancelled' })
+    expect(set).toHaveBeenCalledTimes(1)
+  })
+
+  it("a refused resolve step (e.g. main's foreign_toplevel) is returned as-is with no commit", async () => {
+    set.mockResolvedValueOnce({ ok: false, reason: 'foreign_toplevel' } as any)
+    const confirmRoot = vi.fn(async () => true)
+
+    const outcome = await setSessionBinding({ profile: 'default', hermes_session_id: 's1', path: '/r/x' }, { confirmRoot })
+
+    expect(outcome).toEqual({ ok: false, reason: 'foreign_toplevel' })
+    expect(confirmRoot).not.toHaveBeenCalled()
+    expect(set).toHaveBeenCalledTimes(1)
+  })
+})

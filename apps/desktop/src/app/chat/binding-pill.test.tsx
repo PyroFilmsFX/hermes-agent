@@ -98,6 +98,20 @@ let status: ReturnType<typeof vi.fn>
 let set: ReturnType<typeof vi.fn>
 let clear: ReturnType<typeof vi.fn>
 
+/** Step one of main's set: the root main resolved (the requested path unless a test overrides it). */
+function mainResolves(params: any, root: string = params.path) {
+  return {
+    ok: false as const,
+    reason: 'confirm_required' as const,
+    profile: params.profile,
+    hermes_session_id: params.hermes_session_id,
+    project_root: root,
+    repo_common_root: null,
+    repo_remote: null,
+    current_project_root: null
+  }
+}
+
 beforeEach(() => {
   resetSessionBindingsForTests()
   resetOwnerGrantStatusForTests()
@@ -106,7 +120,12 @@ beforeEach(() => {
   confirmMock.mockClear()
   notifyMock.mockClear()
   status = vi.fn(async () => record())
-  set = vi.fn(async () => record({ state: 'bound', project_root: '/r/proj/.worktrees/a', seq: 1 }))
+  // b10 review: main's set is two-step (resolve without signing, then commit the confirmed root).
+  set = vi.fn(async (params: any) =>
+    params.confirmed_project_root === undefined
+      ? mainResolves(params)
+      : record({ state: 'bound', project_root: params.confirmed_project_root, seq: 1 })
+  )
   clear = vi.fn(async () => record({ seq: 2 }))
   ;(window as any).hermesDesktop = { sessionBinding: { set, clear, status } }
 })
@@ -228,9 +247,16 @@ describe('SessionBindingPill picker', () => {
     )
     fireEvent.click(screen.getByRole('menuitem', { name: /lane\/a/ }))
 
-    await waitFor(() => expect(set).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2))
     expect(confirmMock).toHaveBeenCalledTimes(1)
     expect(set.mock.calls[0][0]).toEqual({ profile: 'default', hermes_session_id: 's1', path: '/r/proj/.worktrees/a' })
+    // The commit sends back exactly the root main resolved and the owner confirmed.
+    expect(set.mock.calls[1][0]).toEqual({
+      profile: 'default',
+      hermes_session_id: 's1',
+      path: '/r/proj/.worktrees/a',
+      confirmed_project_root: '/r/proj/.worktrees/a'
+    })
     await waitFor(() => expect(pill().dataset.state).toBe('bound'))
   })
 
@@ -244,7 +270,8 @@ describe('SessionBindingPill picker', () => {
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
     await act(async () => undefined)
-    expect(set).not.toHaveBeenCalled()
+    // Only main's read-only resolve step ran; no commit (nothing signed). b10 review: was not.toHaveBeenCalled().
+    expect(set.mock.calls.every(([p]) => p.confirmed_project_root === undefined)).toBe(true)
   })
 
   it('a re-bind skips the in-app confirm (main owns the native confirm for a live build)', async () => {
@@ -255,7 +282,7 @@ describe('SessionBindingPill picker', () => {
 
     fireEvent.click(screen.getByRole('menuitem', { name: /lane\/a/ }))
 
-    await waitFor(() => expect(set).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2))
     expect(confirmMock).not.toHaveBeenCalled()
   })
 
@@ -271,6 +298,26 @@ describe('SessionBindingPill picker', () => {
     await waitFor(() => expect(clear).toHaveBeenCalledWith({ profile: 'default', hermes_session_id: 's1' }))
     expect(set).not.toHaveBeenCalled()
     await waitFor(() => expect(pill().dataset.state).toBe('suggested'))
+  })
+
+  it('the first-bind confirm names the root main resolved, not the folder clicked (b10 review)', async () => {
+    set.mockImplementation(async (params: any) =>
+      params.confirmed_project_root === undefined
+        ? mainResolves(params, '/r/proj')
+        : record({ state: 'bound', project_root: params.confirmed_project_root, seq: 1 })
+    )
+    render(<SessionBindingPill session={GIT_SESSION} />)
+    await waitFor(() => expect(pill().dataset.state).toBe('suggested'))
+    await openPicker()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /lane\/a/ }))
+
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2))
+    expect(confirmMock).toHaveBeenCalledTimes(1)
+    const shown = (confirmMock.mock.calls[0] as unknown as [{ description: string }])[0].description
+    expect(shown).toContain('/r/proj')
+    expect(shown).not.toContain('.worktrees/a')
+    expect(set.mock.calls[1][0]).toMatchObject({ path: '/r/proj/.worktrees/a', confirmed_project_root: '/r/proj' })
   })
 
   it('a refused bind surfaces an error toast', async () => {
