@@ -769,10 +769,12 @@ def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
             stamp = session.get("_compute_host_activity_ns")
             return (session.get("running", False) and isinstance(stamp, int)
                     and 0 <= (time.perf_counter_ns() - stamp) / 1_000_000_000 < _WS_ORPHAN_ACTIVITY_STALE_S)
-    if not callable(summary_fn := getattr(session.get("agent"), "get_activity_summary", None)):
+    agent = session.get("agent")
+    if agent is None:
         return False
+    from agent.turn_liveness import effective_idle_seconds
     try:
-        elapsed = summary_fn().get("seconds_since_activity")
+        elapsed = effective_idle_seconds(agent)
         return elapsed is not None and float(elapsed) < _WS_ORPHAN_ACTIVITY_STALE_S
     except Exception:
         return False

@@ -3552,7 +3552,9 @@ class GatewayTurnMixin:
         _timed_out_agent = turn_ctx.agent_holder[0]
         _activity = self._agent_activity_summary(_timed_out_agent)
         _last_desc = _activity.get("last_activity_desc", "unknown")
-        _secs_ago = _activity.get("seconds_since_activity", 0)
+        from agent.turn_liveness import effective_idle_seconds
+        _eff = effective_idle_seconds(_timed_out_agent) if _timed_out_agent else None
+        _secs_ago = _eff if _eff is not None else _activity.get("seconds_since_activity", 0)
         _cur_tool = _activity.get("current_tool")
         _iter_n = _activity.get("api_call_count", 0)
         _iter_max = _activity.get("max_iterations", 0)
@@ -3613,7 +3615,11 @@ class GatewayTurnMixin:
             if worker.agent_timeout is not None:
                 if worker.timeout_fired.is_set():
                     break
-                _idle_secs = self._agent_activity_summary(agent_holder[0]).get("seconds_since_activity", 0.0)
+                from agent.turn_liveness import effective_idle_seconds
+                _eff_idle = effective_idle_seconds(agent_holder[0]) if agent_holder else None
+                _idle_secs = _eff_idle if _eff_idle is not None else (
+                    self._agent_activity_summary(agent_holder[0]).get("seconds_since_activity", 0.0) or 0.0
+                )
                 if not _warning_fired and worker.agent_warning is not None and _idle_secs >= worker.agent_warning:
                     _warning_fired = True
                     await self._run_agent_inactivity_warning(worker, turn_ctx.source, turn_ctx._status_thread_metadata)

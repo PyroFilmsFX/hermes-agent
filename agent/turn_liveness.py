@@ -65,6 +65,45 @@ def _transport_liveness(agent: Any) -> Optional[Tuple[float, float]]:
     return max(0.0, idle), max(0.0, limit)
 
 
+def effective_idle_seconds(agent: Any) -> Optional[float]:
+    """Effective idle duration for an agent turn: min(agent clock idle, SDK watch idle).
+
+    On the Claude Agent SDK lane the transport's own turn watchdog sees liveness the
+    agent activity clock never does (stream deltas, tool executions, background tasks).
+    A torn read on the SDK watch skips this sample by reporting 0.0 idle (retries next
+    poll). Off the SDK lane, returns the agent activity clock idle, or None when no
+    activity has been recorded or agent is unreadable. Duck-typed and never raises.
+    """
+    if agent is None:
+        return None
+    agent_idle: Optional[float] = None
+    if callable(summary_fn := getattr(agent, "get_activity_summary", None)):
+        try:
+            summary = summary_fn()
+            if isinstance(summary, dict):
+                raw_idle = summary.get("seconds_since_activity")
+                if raw_idle is not None:
+                    agent_idle = max(0.0, float(raw_idle))
+        except Exception:
+            pass
+    if agent_idle is None:
+        last_ts = getattr(agent, "_last_activity_ts", None)
+        if last_ts is not None:
+            try:
+                agent_idle = max(0.0, time.time() - float(last_ts))
+            except Exception:
+                pass
+
+    transport = _transport_liveness(agent)
+    if transport is not None:
+        transport_idle, _ = transport
+        if agent_idle is not None:
+            return min(agent_idle, transport_idle)
+        return transport_idle
+
+    return agent_idle
+
+
 def _warn_invalid_value(key: str, raw: Any, default: float) -> None:
     logger.warning("Invalid %s in config.yaml: %r — falling back to default %.1f.", key, raw, default)
 

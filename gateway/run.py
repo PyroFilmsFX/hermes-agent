@@ -2715,9 +2715,12 @@ def _watch_gateway_turn_inactivity(
         now = time.monotonic()
         idle_seconds = now - activity_origin
         agent = agent_holder[0] if agent_holder else None
-        if agent is not None and hasattr(agent, "get_activity_summary"):
+        if agent is not None:
             try:
-                reported_idle = agent.get_activity_summary().get("seconds_since_activity")
+                from agent.turn_liveness import effective_idle_seconds
+                reported_idle = effective_idle_seconds(agent)
+                if reported_idle is None and hasattr(agent, "get_activity_summary"):
+                    reported_idle = agent.get_activity_summary().get("seconds_since_activity")
                 if reported_idle is not None:
                     idle_seconds = max(0.0, float(reported_idle))
                     # Preserve the most recent usable activity clock as the fallback if
