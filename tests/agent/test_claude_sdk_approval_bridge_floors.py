@@ -633,7 +633,9 @@ class TestGatewayApprovalBridgeFloors(ApprovalBridgeCase):
         assert selected_callback is None
         assert fields["permission_mode"] == "default"
         assert callable(fields["can_use_tool"])
-        assert fields["disallowed_tools"] == ["AskUserQuestion", "Read"]
+        # M5: AskUserQuestion routes through Hermes elicitation (declined where no owner
+        # surface can answer) instead of being banned; native Read stays banned.
+        assert fields["disallowed_tools"] == ["Read"]
         assert all(type(result).__name__ == "PermissionResultDeny" for result in outcomes[:3])
         assert type(outcomes[3]).__name__ == "PermissionResultAllow"
         assert outcomes[3].updated_input == benign
@@ -837,7 +839,9 @@ class TestGatewayApprovalBridgeFloors(ApprovalBridgeCase):
         fields, outcomes, benign = exercised[0]
         assert fields["permission_mode"] == "default"
         assert callable(fields["can_use_tool"])
-        assert fields["disallowed_tools"] == ["AskUserQuestion", "Read"]
+        # M5: AskUserQuestion routes through Hermes elicitation (declined where no owner
+        # surface can answer) instead of being banned; native Read stays banned.
+        assert fields["disallowed_tools"] == ["Read"]
         assert all(type(result).__name__ == "PermissionResultDeny" for result in outcomes[:3])
         assert type(outcomes[3]).__name__ == "PermissionResultAllow"
         assert outcomes[3].updated_input == benign
