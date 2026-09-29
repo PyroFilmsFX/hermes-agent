@@ -1,4 +1,4 @@
-# cntrl fork only: full per-file suite on free GitHub-hosted runners, sliced 4 ways.
+# cntrl fork only: path-classified suite on free GitHub-hosted runners, sliced 10 ways with duration cache.
 # Upstream's tests.yml is workflow_call-only on a 96-core org runner a personal fork doesn't
 # have. Push triggers work from any branch that carries this file; enabling Actions on the fork
 # and switching its default branch are owner decisions (manager relay, 2026-09-25).
@@ -6,7 +6,10 @@ name: cntrl fork tests
 
 on:
   push:
-    branches: [cntrl-hermes-worker, "sync/land-**"]
+    branches:
+      - cntrl-hermes-worker
+      - "sync/land-**"
+      - "lane/**"
   workflow_dispatch:
 
 permissions:
@@ -17,21 +20,92 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  classify:
     if: github.repository == 'PyroFilmsFX/hermes-agent'
-    name: Tests (slice ${{ matrix.slice }}/4)
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+      files_count: ${{ steps.classify.outputs.files_count }}
+      files_args: ${{ steps.classify.outputs.files_args }}
+      matrix: ${{ steps.classify.outputs.matrix }}
+      desktop: ${{ steps.classify.outputs.desktop }}
+      desktop_files: ${{ steps.classify.outputs.desktop_files }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Classify changes and select tests
+        id: classify
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Pushes to sync/land-** and workflow_dispatch always run the FULL suite.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [[ "$REF_NAME" =~ ^sync/land- ]]; then
+            echo "Full suite triggered by $EVENT_NAME / $REF_NAME"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "files_count=0" >> "$GITHUB_OUTPUT"
+            echo "files_args=" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"slice":[1,2,3,4,5,6,7,8,9,10]}' >> "$GITHUB_OUTPUT"
+            echo "desktop=true" >> "$GITHUB_OUTPUT"
+            echo "desktop_files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Ensure origin/cntrl-hermes-worker is fetched for merge-base if needed
+          git fetch origin cntrl-hermes-worker || true
+
+          OUTPUT_JSON=$(python3 scripts/ci/select_tests.py --before "$EVENT_BEFORE" --sha "$EVENT_SHA")
+          echo "$OUTPUT_JSON"
+
+          python3 -c '
+          import json, os, sys
+
+          raw = sys.argv[1]
+          data = json.loads(raw)
+          mode = data.get("mode", "full")
+          files = data.get("files", [])
+          desktop = data.get("desktop", False)
+          desktop_files = data.get("desktop_files", [])
+
+          count = len(files)
+          files_args = " ".join(files)
+          desktop_files_str = " ".join(desktop_files)
+
+          if mode == "selected" and count <= 60:
+              matrix = {"slice": [1]}
+          else:
+              matrix = {"slice": list(range(1, 11))}
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"mode={mode}\n")
+              f.write(f"files_count={count}\n")
+              f.write(f"files_args={files_args}\n")
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"desktop={str(desktop).lower()}\n")
+              f.write(f"desktop_files={desktop_files_str}\n")
+          ' "$OUTPUT_JSON"
+
+  test:
+    if: github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.outputs.mode != 'none'
+    needs: classify
+    name: ${{ needs.classify.outputs.mode == 'selected' && fromJson(needs.classify.outputs.files_count) <= 60 && 'Tests (selected)' || format('Tests (slice {0}/10)', matrix.slice) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        slice: [1, 2, 3, 4]
+      matrix: ${{ fromJson(needs.classify.outputs.matrix) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Mirrors upstream tests.yml's test job: a pinned prebuilt ripgrep and the locked PM
-      # toolchain with a hermetic test environment (scripts/run_tests.sh runs the suite in
-      # that env, not .venv), plus the fork's Claude Agent SDK extra.
+      # Mirrors upstream tests.yml: a pinned prebuilt ripgrep and locked PM toolchain.
       - name: Install ripgrep (prebuilt binary)
         run: |
           set -euo pipefail
@@ -53,9 +127,108 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
+      - name: Restore per-file duration cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: cntrl-test-durations-never-exact
+          restore-keys: |
+            cntrl-test-durations-
+
       - name: Run tests
+        # Selected files arrive through env, never interpolated into the script.
         run: |
-          scripts/run_tests.sh
+          if [ "$MODE" = "selected" ]; then
+            if [ "$FILES_COUNT" -le 60 ]; then
+              unset HERMES_TEST_SLICE
+            fi
+            read -r -a files <<< "$FILES_ARGS"
+            scripts/run_tests.sh "${files[@]}"
+          else
+            scripts/run_tests.sh
+          fi
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}/4
+          MODE: ${{ needs.classify.outputs.mode }}
+          FILES_COUNT: ${{ needs.classify.outputs.files_count }}
+          FILES_ARGS: ${{ needs.classify.outputs.files_args }}
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/10
           HERMES_TEST_WORKERS: "4"
+
+      - name: Upload slice duration cache
+        if: always() && hashFiles('test_durations.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-durations-slice-${{ matrix.slice }}
+          path: test_durations.json
+
+  durations:
+    if: always() && github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.result == 'success' && needs.classify.outputs.mode == 'full'
+    needs: [classify, test]
+    name: Save merged test durations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download all slice duration artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: slice-durations
+
+      - name: Merge test durations
+        run: |
+          python3 scripts/ci/merge_test_durations.py slice-durations -o test_durations.json
+
+      - name: Save per-file duration cache
+        if: hashFiles('test_durations.json') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: cntrl-test-durations-${{ github.run_id }}
+
+  desktop:
+    # Targeted only: runs the changed/sibling desktop tests when apps/desktop changes. The full
+    # desktop suite is not gated here (upstream js-tests.yml owns it on a 32-core runner).
+    if: github.repository == 'PyroFilmsFX/hermes-agent' && needs.classify.outputs.desktop == 'true' && needs.classify.outputs.desktop_files != ''
+    needs: classify
+    name: Desktop tests (changed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Mirrors upstream js-tests.yml: the electron contracts drive real hermes_cli/pm code
+      # through HERMES_PYTHON, so the Python toolchain is installed too.
+      - name: Set up the locked JS build toolchain
+        id: node
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Restore node_modules
+        id: node-modules-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            ui-tui/node_modules
+            ui-tui/packages/*/node_modules
+            tests-js/node_modules
+            web/node_modules
+          key: cntrl-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-npm${{ steps.node.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
+
+      - uses: ./.github/actions/retry
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        with:
+          command: npm ci
+
+      - name: Run vitest on changed desktop tests
+        working-directory: apps/desktop
+        env:
+          DESKTOP_FILES: ${{ needs.classify.outputs.desktop_files }}
+        run: |
+          read -r -a files <<< "$DESKTOP_FILES"
+          npx vitest run "${files[@]}" --maxWorkers=4
