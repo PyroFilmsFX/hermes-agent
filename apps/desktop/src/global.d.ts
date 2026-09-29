@@ -238,6 +238,12 @@ declare global {
         // #60 U16: main re-verifies a delivered owner_forward row's stored envelope (display only).
         verify?: (check: { envelope: unknown; text: string; sessionId: string }) => Promise<DesktopOwnerGrantVerdict>
       }
+      // b10 H8: session-binding IPC (set/clear/status) over H7a store.
+      sessionBinding?: {
+        set: (params: DesktopSessionBindingSetInput) => Promise<DesktopSessionBindingOutcome>
+        clear: (params: DesktopSessionBindingSessionInput) => Promise<DesktopSessionBindingOutcome>
+        status: (params: DesktopSessionBindingSessionInput) => Promise<DesktopSessionBindingStatusResult>
+      }
       // #60 owner-forward: native confirm + sign in main (mirrors electron/owner-forward-confirm.ts).
       ownerForward?: {
         confirm: (request: DesktopOwnerForwardConfirmRequest) => Promise<DesktopOwnerForwardConfirmResult>
@@ -713,6 +719,47 @@ export interface DesktopOwnerGrantActionResult {
   unchanged?: boolean
   status: DesktopOwnerGrantStatus
 }
+
+/** b10 H8: session-binding IPC types. */
+export interface DesktopSessionBindingSetInput {
+  profile: string
+  hermes_session_id: string
+  path: string
+}
+
+export interface DesktopSessionBindingSessionInput {
+  profile: string
+  hermes_session_id: string
+}
+
+export type DesktopSessionBindingState = 'bound' | 'unbound' | 'needs_reconfirm'
+
+export interface DesktopSessionBindingRecord {
+  ok: true
+  state: DesktopSessionBindingState
+  profile: string
+  hermes_session_id: string
+  seq: number
+  binding_nonce: string | null
+  bound_at: number | null
+  project_root: string | null
+  repo_common_root: string | null
+  repo_remote: string | null
+  project_id?: string | null
+  carried_from?: string | null
+  verified?: boolean
+  record?: unknown
+}
+
+export interface DesktopSessionBindingRefusalResult {
+  ok: false
+  reason: string
+  error?: unknown
+}
+
+export type DesktopSessionBindingOutcome = DesktopSessionBindingRecord | DesktopSessionBindingRefusalResult
+
+export type DesktopSessionBindingStatusResult = DesktopSessionBindingRecord | DesktopSessionBindingRefusalResult
 
 export interface DesktopMarketplaceSearchItem {
   extensionId: string

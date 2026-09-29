@@ -377,6 +377,8 @@ import {
 } from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
+import { createSessionBindingIpcHandlers } from './session-binding-ipc'
+import { createSessionBindingStore } from './session-binding-store'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -15489,6 +15491,59 @@ const handleOwnerGrantAction = createOwnerGrantActionHandler({
 })
 
 ipcMain.handle('hermes:owner-grant:action', async (event: any, action: any) => handleOwnerGrantAction(event, action))
+
+// b10 H8: session-binding store and IPC handlers (set/clear/status).
+const sessionBindingStore = createSessionBindingStore({
+  store: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir()
+})
+sessionBindingStore.loadAll()
+
+async function confirmSessionRebind(details: {
+  profile: string
+  hermes_session_id: string
+  currentProjectRoot: string | null
+  newProjectRoot: string
+  event?: unknown
+}): Promise<boolean> {
+  const options = {
+    type: 'warning' as const,
+    title: 'Re-bind session project',
+    message: 'This session has an active build with another project binding. Re-bind to new project?',
+    detail: `Current project: ${details.currentProjectRoot ?? '(none)'}\nNew project: ${details.newProjectRoot}`,
+    buttons: ['Re-bind', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  }
+
+  const sender = (details.event as { sender?: unknown } | null | undefined)?.sender
+  const asking = sender ? BrowserWindow.fromWebContents(sender as Electron.WebContents) : null
+
+  const parent =
+    asking && !asking.isDestroyed() && asking.isVisible()
+      ? asking
+      : mainWindow && !mainWindow.isDestroyed()
+        ? mainWindow
+        : null
+
+  const { response } = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options)
+
+  return response === 0
+}
+
+const sessionBindingHandlers = createSessionBindingIpcHandlers({
+  isTrustedSender: isOwnerAppChromeSender,
+  store: sessionBindingStore,
+  confirmRebind: confirmSessionRebind,
+  isAttestationLive: () => false,
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+
+ipcMain.handle('hermes:session-binding:set', async (event: any, params: any) => sessionBindingHandlers.set(event, params))
+ipcMain.handle('hermes:session-binding:clear', async (event: any, params: any) => sessionBindingHandlers.clear(event, params))
+ipcMain.handle('hermes:session-binding:status', async (event: any, params: any) => sessionBindingHandlers.status(event, params))
 
 const OWNER_SOURCE_ROLES = new Set(['assistant', 'peer', 'user'])
 const CLAUDE_SESSION_STATES = new Set(['live', 'not_running', 'starting'])
