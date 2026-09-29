@@ -712,3 +712,153 @@ def test_cli_verify_attestation_op(
     body5 = json.loads(out5.getvalue())
     assert body5["ok"] is False
     assert body5["reason"] == "not_found"
+
+
+def make_binding_payload(**overrides: Any) -> Dict[str, Any]:
+    payload = {
+        "v": 1,
+        "aud": [attest_mod.BINDING_AUDIENCE],
+        "owner_uid": UID,
+        "profile": "default",
+        "hermes_session_id": HERMES_SID,
+        "state": "bound",
+        "seq": 1,
+        "binding_nonce": NONCE,
+        "bound_at": NOW - MIN,
+        "project_root": PROJECT_ROOT,
+        "repo_common_root": REPO_COMMON_ROOT,
+        "repo_remote": "git@github.com:example/repo.git",
+        "project_id": "p_123",
+        "carried_from": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_binding_envelope_and_seal(tmp_path: Path) -> None:
+    owner = Owner()
+    payload = make_binding_payload()
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    env = attest_mod.seal_binding(payload_bytes, owner.kid, owner.sign)
+    assert env.format == attest_mod.BINDING_FORMAT
+    assert env.kid == owner.kid
+
+    parsed = attest_mod.parse_binding_envelope(env.to_dict())
+    assert parsed.kid == owner.kid
+    assert parsed.payload == payload_bytes
+
+    parsed_json = attest_mod.parse_binding_envelope(env.to_json())
+    assert parsed_json.kid == owner.kid
+
+    file_path = tmp_path / "binding.json"
+    file_path.write_text(env.to_json(), encoding="utf-8")
+    from_file = attest_mod.read_binding_file(str(file_path))
+    assert from_file.kid == owner.kid
+
+
+def test_verify_binding_envelope_unit(tmp_path: Path) -> None:
+    owner = Owner()
+    anchor = anchor_mod.Anchor(
+        owner_uid=UID,
+        grants_dir=str(tmp_path),
+        keys=(
+            anchor_mod.AnchorKey(
+                kid=owner.kid,
+                alg="Ed25519",
+                pub=owner.pub,
+                status="active",
+                not_before=0,
+                retired_at=None,
+            ),
+        ),
+        verifier_sha256=None,
+        sha256="0" * 64,
+    )
+    payload = make_binding_payload()
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    env = attest_mod.seal_binding(payload_bytes, owner.kid, owner.sign)
+
+    # Success
+    res = attest_mod.verify_binding_envelope(
+        env,
+        profile="default",
+        session=HERMES_SID,
+        uid=UID,
+        anchor=anchor,
+    )
+    assert res.ok
+    assert res.project_root == PROJECT_ROOT
+    assert res.hermes_session_id == HERMES_SID
+
+    # Bad signature
+    tampered_env = attest_mod.BindingEnvelope(kid=owner.kid, payload=payload_bytes, sig=b"\x00" * 64)
+    res_bad_sig = attest_mod.verify_binding_envelope(
+        tampered_env, profile="default", session=HERMES_SID, uid=UID, anchor=anchor,
+    )
+    assert not res_bad_sig.ok
+    assert res_bad_sig.reason == attest_mod.REASON_BAD_SIGNATURE
+
+    # Wrong audience
+    wrong_aud_payload = make_binding_payload(aud=["wrong-aud"])
+    env_wrong_aud = attest_mod.seal_binding(
+        json.dumps(wrong_aud_payload).encode("utf-8"), owner.kid, owner.sign
+    )
+    res_aud = attest_mod.verify_binding_envelope(
+        env_wrong_aud, profile="default", session=HERMES_SID, uid=UID, anchor=anchor
+    )
+    assert not res_aud.ok
+    assert res_aud.reason == attest_mod.REASON_WRONG_AUDIENCE
+
+    # UID mismatch
+    res_uid = attest_mod.verify_binding_envelope(
+        env, profile="default", session=HERMES_SID, uid=999, anchor=anchor
+    )
+    assert not res_uid.ok
+    assert res_uid.reason in (anchor_mod.REASON_ANCHOR_UNTRUSTED, attest_mod.REASON_UID_MISMATCH)
+
+
+def test_verify_binding_file_helper(tmp_path: Path) -> None:
+    owner = Owner()
+    anchor = anchor_mod.Anchor(
+        owner_uid=UID,
+        grants_dir=str(tmp_path),
+        keys=(
+            anchor_mod.AnchorKey(
+                kid=owner.kid,
+                alg="Ed25519",
+                pub=owner.pub,
+                status="active",
+                not_before=0,
+                retired_at=None,
+            ),
+        ),
+        verifier_sha256=None,
+        sha256="0" * 64,
+    )
+    payload = make_binding_payload()
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    env = attest_mod.seal_binding(payload_bytes, owner.kid, owner.sign)
+
+    binding_path = tmp_path / "binding.json"
+    binding_path.write_text(env.to_json(), encoding="utf-8")
+
+    res = attest_mod.verify_binding_file(
+        str(binding_path),
+        profile="default",
+        session=HERMES_SID,
+        uid=UID,
+        anchor=anchor,
+    )
+    assert res.ok
+    assert res.project_root == PROJECT_ROOT
+
+    # Missing file
+    res_missing = attest_mod.verify_binding_file(
+        str(tmp_path / "missing.json"),
+        profile="default",
+        session=HERMES_SID,
+        uid=UID,
+        anchor=anchor,
+    )
+    assert not res_missing.ok
+    assert res_missing.reason == attest_mod.REASON_NOT_FOUND

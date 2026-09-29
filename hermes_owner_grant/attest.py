@@ -38,6 +38,11 @@ MAX_LINEAGE_ENTRIES = 16
 MAX_ATTESTATION_BYTES = 64 * 1024  # 64 KB
 MAX_SIGNATURE_CHECKS = 32
 
+BINDING_FORMAT = "hermes-session-binding/v1"
+BINDING_DOMAIN_PREFIX = BINDING_FORMAT.encode("ascii") + b"\x00"
+BINDING_AUDIENCE = "hermes-main"
+MAX_BINDING_BYTES = 64 * 1024  # 64 KB
+
 SCHEMA = "hermes-owner-verify/v1"
 VERSION = "1.0.0"
 IMPL = "pure"
@@ -53,6 +58,7 @@ REASON_BAD_SIGNATURE = "bad_signature"
 REASON_WRONG_AUDIENCE = "wrong_audience"
 REASON_UID_MISMATCH = "uid_mismatch"
 REASON_SESSION_MISMATCH = "session_mismatch"
+REASON_PROFILE_MISMATCH = "profile_mismatch"
 REASON_CLAUDE_SESSION_MISMATCH = "claude_session_mismatch"
 REASON_EXPIRED = "expired"
 REASON_TTL_EXCEEDED = "ttl_exceeded"
@@ -82,6 +88,18 @@ _REQUIRED_PAYLOAD_FIELDS = (
     "binding_nonce",
     "issued_at",
     "expires_at",
+)
+_REQUIRED_BINDING_PAYLOAD_FIELDS = (
+    "v",
+    "aud",
+    "owner_uid",
+    "profile",
+    "hermes_session_id",
+    "state",
+    "seq",
+    "binding_nonce",
+    "bound_at",
+    "project_root",
 )
 
 
@@ -221,6 +239,102 @@ def read_envelope_file(path: str, *, max_bytes: int = MAX_ATTESTATION_BYTES) -> 
     if len(data) > max_bytes:
         raise _envelope.EnvelopeError("attestation file exceeds %d bytes" % max_bytes)
     return parse_envelope(data)
+
+
+def sign_binding_bytes(payload: bytes) -> bytes:
+    """The exact message an Ed25519 signature covers for session bindings."""
+    return BINDING_DOMAIN_PREFIX + bytes(payload)
+
+
+@dataclass(frozen=True)
+class BindingEnvelope:
+    kid: str
+    payload: bytes
+    sig: bytes
+
+    @property
+    def format(self) -> str:
+        return BINDING_FORMAT
+
+    def sign_bytes(self) -> bytes:
+        return sign_binding_bytes(self.payload)
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "format": BINDING_FORMAT,
+            "kid": self.kid,
+            "payload": _envelope.b64url_encode(self.payload),
+            "sig": _envelope.b64url_encode(self.sig),
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+
+def parse_binding_envelope(source: Union[Mapping[str, Any], bytes, bytearray, str, Any]) -> BindingEnvelope:
+    """Validate the binding envelope shape. This does NOT verify the signature."""
+    if hasattr(source, "to_dict"):
+        source = source.to_dict()
+    if isinstance(source, (bytes, bytearray, str)):
+        if len(source) > MAX_BINDING_BYTES:
+            raise _envelope.EnvelopeError("envelope exceeds %d bytes" % MAX_BINDING_BYTES)
+        obj = _envelope.strict_json_object(source, "envelope")
+    elif isinstance(source, Mapping):
+        obj = dict(source)
+    else:
+        raise _envelope.EnvelopeError("envelope must be a JSON object")
+    if set(obj) != frozenset(("format", "kid", "payload", "sig")):
+        raise _envelope.EnvelopeError("envelope keys must be exactly ('format', 'kid', 'payload', 'sig')")
+    if obj["format"] != BINDING_FORMAT:
+        raise _envelope.EnvelopeError("format is not %s" % BINDING_FORMAT)
+    if not isinstance(obj["payload"], str) or not isinstance(obj["sig"], str):
+        raise _envelope.EnvelopeError("payload and sig must be base64url strings")
+    payload = _envelope.b64url_decode(obj["payload"])
+    sig = _envelope.b64url_decode(obj["sig"])
+    _check_parts(obj["kid"], payload, sig)
+    return BindingEnvelope(kid=obj["kid"], payload=payload, sig=sig)
+
+
+def seal_binding(payload: bytes, kid: str, sign: Callable[[bytes], bytes]) -> BindingEnvelope:
+    """Build a binding envelope by signing ``sign_binding_bytes(payload)`` with ``sign``."""
+    payload = bytes(payload)
+    _check_parts(kid, payload, b"\x00" * _envelope.SIG_LEN)
+    sig = sign(sign_binding_bytes(payload))
+    _check_parts(kid, payload, sig)
+    return BindingEnvelope(kid=kid, payload=payload, sig=bytes(sig))
+
+
+def read_binding_file(path: str, *, max_bytes: int = MAX_BINDING_BYTES) -> BindingEnvelope:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _envelope.EnvelopeError("cannot open binding file: %s" % exc.strerror) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _envelope.EnvelopeError("binding file is not a regular file")
+        if st.st_size > max_bytes:
+            raise _envelope.EnvelopeError("binding file exceeds %d bytes" % max_bytes)
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > max_bytes:
+        raise _envelope.EnvelopeError("binding file exceeds %d bytes" % max_bytes)
+    return parse_binding_envelope(data)
 
 
 @dataclass(frozen=True)
@@ -651,3 +765,343 @@ def verify_attestation_envelope(
             trusted,
             1 if trusted is not None else 0,
         )
+
+
+@dataclass(frozen=True)
+class BindingResult:
+    ok: bool
+    reason: Optional[str] = None
+    detail: Optional[str] = None
+    profile: Optional[str] = None
+    hermes_session_id: Optional[str] = None
+    project_root: Optional[str] = None
+    repo_common_root: Optional[str] = None
+    repo_remote: Optional[str] = None
+    binding_nonce: Optional[str] = None
+    seq: Optional[int] = None
+    state: Optional[str] = None
+    bound_at: Optional[int] = None
+    carried_from: Optional[str] = None
+    project_id: Optional[str] = None
+    binding: Optional[Dict[str, Any]] = None
+    anchor_sha256: Optional[str] = None
+
+    @property
+    def exit_code(self) -> int:
+        if self.ok:
+            return EXIT_OK
+        if self.reason in _ANCHOR_REASONS:
+            return EXIT_ANCHOR
+        if self.reason == REASON_NOT_FOUND:
+            return EXIT_NOT_FOUND
+        if self.reason == REASON_INTERNAL:
+            return EXIT_INTERNAL
+        return EXIT_DENY
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema": SCHEMA,
+            "ok": self.ok,
+            "reason": self.reason,
+            "detail": self.detail,
+            "profile": self.profile,
+            "hermes_session_id": self.hermes_session_id,
+            "project_root": self.project_root,
+            "repo_common_root": self.repo_common_root,
+            "repo_remote": self.repo_remote,
+            "binding_nonce": self.binding_nonce,
+            "seq": self.seq,
+            "state": self.state,
+            "bound_at": self.bound_at,
+            "carried_from": self.carried_from,
+            "project_id": self.project_id,
+            "verifier": {
+                "version": VERSION,
+                "impl": IMPL,
+                "anchor_sha256": self.anchor_sha256,
+            },
+            "binding": self.binding,
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
+
+
+def _check_anchor_binding(
+    anchor: Optional[_anchor.Anchor], fs: Any, uid: Optional[int]
+) -> _anchor.Anchor:
+    if anchor is None:
+        try:
+            anchor = _anchor.load_trusted_anchor(fs=fs)
+        except _anchor.AnchorError as exc:
+            raise _Deny(exc.reason, exc.detail) from None
+    elif not isinstance(anchor, _anchor.Anchor):
+        raise AttestUsageError("anchor must be a hermes_owner_grant.anchor.Anchor")
+    if uid is not None and anchor.owner_uid != uid:
+        raise _Deny(
+            REASON_ANCHOR_UNTRUSTED,
+            "anchor pins owner_uid %d, verifying uid is %d" % (anchor.owner_uid, uid),
+        )
+    return anchor
+
+
+def _validate_binding_payload(p: Dict[str, Any]) -> None:
+    for f in _REQUIRED_BINDING_PAYLOAD_FIELDS:
+        if f not in p:
+            raise _malformed("binding payload lacks %s" % f, payload=p)
+    if not isinstance(p["v"], int) or isinstance(p["v"], bool) or p["v"] != PAYLOAD_VERSION:
+        raise _malformed("binding payload v must be %d" % PAYLOAD_VERSION, payload=p)
+    if not isinstance(p["aud"], list) or not all(isinstance(a, str) for a in p["aud"]):
+        raise _malformed("binding aud must be a list of strings", payload=p)
+    for name in ("owner_uid", "seq", "bound_at"):
+        val = p[name]
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise _malformed("%s must be a non-negative int" % name, payload=p)
+    for name in ("profile", "hermes_session_id", "binding_nonce"):
+        val = p[name]
+        if not isinstance(val, str) or not val:
+            raise _malformed("%s must be a non-empty string" % name, payload=p)
+    if p["state"] not in ("bound", "unbound"):
+        raise _malformed("state must be 'bound' or 'unbound'", payload=p)
+
+    proj = p["project_root"]
+    if proj is not None:
+        if not isinstance(proj, str) or not proj:
+            raise _malformed("project_root must be null or a non-empty string", payload=p)
+        if (
+            not posixpath.isabs(proj)
+            or posixpath.normpath(proj) != proj
+            or (proj != "/" and proj.endswith("/"))
+        ):
+            raise _malformed("project_root must be an absolute and normalized path", payload=p)
+
+    repo_common = p.get("repo_common_root")
+    if repo_common is not None:
+        if not isinstance(repo_common, str) or not repo_common:
+            raise _malformed("repo_common_root must be null or a non-empty string", payload=p)
+        if (
+            not posixpath.isabs(repo_common)
+            or posixpath.normpath(repo_common) != repo_common
+            or (repo_common != "/" and repo_common.endswith("/"))
+        ):
+            raise _malformed("repo_common_root must be an absolute and normalized path", payload=p)
+
+    for opt_field in ("repo_remote", "project_id", "carried_from"):
+        val = p.get(opt_field)
+        if val is not None and not isinstance(val, str):
+            raise _malformed("%s must be null or a string" % opt_field, payload=p)
+
+
+def _evaluate_binding(
+    env: BindingEnvelope,
+    payload: Dict[str, Any],
+    anchor: _anchor.Anchor,
+    *,
+    uid: int,
+    now: Optional[int] = None,
+    expected_profile: Optional[str] = None,
+    expected_session: Optional[str] = None,
+) -> None:
+    # 1. Anchor kid lookup and active kid check
+    key = anchor.key(env.kid)
+    if key is None:
+        raise _Deny(_anchor.REASON_UNKNOWN_KID, "kid %s is not in the anchor" % env.kid)
+
+    if key.status != _anchor.STATUS_ACTIVE:
+        if key.status == _anchor.STATUS_RETIRED:
+            raise _Deny(_anchor.REASON_KEY_RETIRED, "key %s is retired (bindings require active kid)" % env.kid)
+        if key.status == _anchor.STATUS_REVOKED:
+            raise _Deny(_anchor.REASON_KEY_REVOKED, "key %s is revoked" % env.kid)
+        raise _Deny(_anchor.REASON_KEY_NOT_YET_VALID, "key %s is not active (%s)" % (env.kid, key.status))
+
+    # 2. Shape validation
+    _validate_binding_payload(payload)
+
+    bound_at = payload["bound_at"]
+    if bound_at < key.not_before:
+        raise _Deny(_anchor.REASON_KEY_NOT_YET_VALID, "binding bound_at predates key not_before")
+    if now is not None and now < key.not_before:
+        raise _Deny(_anchor.REASON_KEY_NOT_YET_VALID, "verifying time predates key not_before")
+
+    # 3. Signature verification
+    if not _signature_ok(key.pub, env.sign_bytes(), env.sig):
+        raise _Deny(REASON_BAD_SIGNATURE, "signature does not verify under %s" % env.kid)
+
+    # 4. Audience and UID
+    if BINDING_AUDIENCE not in payload["aud"]:
+        raise _Deny(REASON_WRONG_AUDIENCE, "aud does not include %s" % BINDING_AUDIENCE, payload=payload)
+    if DISALLOWED_AUDIENCE in payload["aud"]:
+        raise _Deny(REASON_WRONG_AUDIENCE, "aud must not include %s" % DISALLOWED_AUDIENCE, payload=payload)
+    if payload["owner_uid"] != uid:
+        raise _Deny(
+            REASON_UID_MISMATCH,
+            "binding owner_uid %d, verifying uid %d" % (payload["owner_uid"], uid),
+            payload=payload,
+        )
+
+    # 5. Profile and Session matches
+    if expected_profile is not None and payload["profile"] != expected_profile:
+        raise _Deny(
+            REASON_PROFILE_MISMATCH,
+            "binding profile %s does not match expected %s" % (payload["profile"], expected_profile),
+            payload=payload,
+        )
+    if expected_session is not None and payload["hermes_session_id"] != expected_session:
+        raise _Deny(
+            REASON_SESSION_MISMATCH,
+            "binding hermes_session_id %s does not match expected %s" % (payload["hermes_session_id"], expected_session),
+            payload=payload,
+        )
+
+    # 6. Bound state and project_root
+    if payload["state"] != "bound":
+        raise _Deny(REASON_UNBOUND, "binding state is %s (expected bound)" % payload["state"], payload=payload)
+    if not payload.get("project_root"):
+        raise _Deny(REASON_UNBOUND, "bound binding has null or empty project_root", payload=payload)
+
+
+def _binding_ok(
+    payload: Dict[str, Any],
+    anchor: Any,
+) -> BindingResult:
+    return BindingResult(
+        ok=True,
+        reason=None,
+        detail=None,
+        profile=payload.get("profile"),
+        hermes_session_id=payload.get("hermes_session_id"),
+        project_root=payload.get("project_root"),
+        repo_common_root=payload.get("repo_common_root"),
+        repo_remote=payload.get("repo_remote"),
+        binding_nonce=payload.get("binding_nonce"),
+        seq=payload.get("seq"),
+        state=payload.get("state"),
+        bound_at=payload.get("bound_at"),
+        carried_from=payload.get("carried_from"),
+        project_id=payload.get("project_id"),
+        binding=payload,
+        anchor_sha256=getattr(anchor, "sha256", None),
+    )
+
+
+def _binding_denied(
+    deny: _Deny,
+    anchor: Any = None,
+) -> BindingResult:
+    payload = deny.payload
+    return BindingResult(
+        ok=False,
+        reason=deny.reason,
+        detail=deny.detail,
+        profile=payload.get("profile") if payload else None,
+        hermes_session_id=payload.get("hermes_session_id") if payload else None,
+        project_root=payload.get("project_root") if payload else None,
+        repo_common_root=payload.get("repo_common_root") if payload else None,
+        repo_remote=payload.get("repo_remote") if payload else None,
+        binding_nonce=payload.get("binding_nonce") if payload else None,
+        seq=payload.get("seq") if payload else None,
+        state=payload.get("state") if payload else None,
+        bound_at=payload.get("bound_at") if payload else None,
+        carried_from=payload.get("carried_from") if payload else None,
+        project_id=payload.get("project_id") if payload else None,
+        binding=payload,
+        anchor_sha256=getattr(anchor, "sha256", None),
+    )
+
+
+def verify_binding_envelope(
+    envelope: Union[BindingEnvelope, Mapping[str, Any], bytes, str],
+    *,
+    profile: Optional[str] = None,
+    expected_profile: Optional[str] = None,
+    session: Optional[str] = None,
+    hermes_session: Optional[str] = None,
+    hermes_session_id: Optional[str] = None,
+    expected_session: Optional[str] = None,
+    uid: Optional[int] = None,
+    owner_uid: Optional[int] = None,
+    now: Optional[int] = None,
+    anchor: Optional[_anchor.Anchor] = None,
+    fs: Any = None,
+) -> BindingResult:
+    """Verify a single binding envelope directly."""
+    prof = expected_profile if expected_profile is not None else profile
+    sess = expected_session
+    if sess is None:
+        sess = hermes_session_id if hermes_session_id is not None else (session or hermes_session)
+    target_uid = uid if uid is not None else owner_uid
+
+    trusted = None
+    try:
+        trusted = _check_anchor_binding(anchor, fs, target_uid)
+        eff_uid = target_uid if target_uid is not None else trusted.owner_uid
+        if isinstance(envelope, (BindingEnvelope, AttestationEnvelope)):
+            envelope = envelope.to_dict()
+        try:
+            env = parse_binding_envelope(envelope)
+        except _envelope.EnvelopeError as exc:
+            raise _malformed(exc.detail) from None
+        try:
+            payload = _envelope.decode_payload(env.payload)
+        except _envelope.EnvelopeError as exc:
+            raise _malformed(exc.detail) from None
+
+        _evaluate_binding(
+            env,
+            payload,
+            trusted,
+            uid=eff_uid,
+            now=now,
+            expected_profile=prof,
+            expected_session=sess,
+        )
+        return _binding_ok(payload, trusted)
+    except _Deny as deny:
+        return _binding_denied(deny, trusted)
+    except AttestUsageError:
+        raise
+    except Exception as exc:
+        return _binding_denied(
+            _Deny(REASON_INTERNAL, "%s: %s" % (type(exc).__name__, exc)),
+            trusted,
+        )
+
+
+def verify_binding_file(
+    path: str,
+    *,
+    profile: Optional[str] = None,
+    expected_profile: Optional[str] = None,
+    session: Optional[str] = None,
+    hermes_session: Optional[str] = None,
+    hermes_session_id: Optional[str] = None,
+    expected_session: Optional[str] = None,
+    uid: Optional[int] = None,
+    owner_uid: Optional[int] = None,
+    now: Optional[int] = None,
+    anchor: Optional[_anchor.Anchor] = None,
+    fs: Any = None,
+    max_bytes: int = MAX_BINDING_BYTES,
+) -> BindingResult:
+    """Read and verify a binding envelope file."""
+    try:
+        env = read_binding_file(path, max_bytes=max_bytes)
+    except _envelope.EnvelopeError as exc:
+        reason = REASON_NOT_FOUND if "cannot open binding file" in exc.detail else REASON_MALFORMED
+        return _binding_denied(_Deny(reason, exc.detail))
+    except Exception as exc:
+        return _binding_denied(_Deny(REASON_INTERNAL, "%s: %s" % (type(exc).__name__, exc)))
+    return verify_binding_envelope(
+        env,
+        profile=profile,
+        expected_profile=expected_profile,
+        session=session,
+        hermes_session=hermes_session,
+        hermes_session_id=hermes_session_id,
+        expected_session=expected_session,
+        uid=uid,
+        owner_uid=owner_uid,
+        now=now,
+        anchor=anchor,
+        fs=fs,
+    )
