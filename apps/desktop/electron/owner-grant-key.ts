@@ -49,6 +49,48 @@ import { inspect } from 'node:util'
 
 export const GRANT_FORMAT = 'hermes-owner-grant/v1'
 export const GRANT_DOMAIN_PREFIX = Buffer.concat([Buffer.from(GRANT_FORMAT, 'ascii'), Buffer.from([0])])
+export const GRANT_AUDIENCE: readonly string[] = Object.freeze(['hermes-owner-forward', 'hermes-owner-verify'])
+
+export const BINDING_FORMAT = 'hermes-session-binding/v1'
+export const BINDING_DOMAIN_PREFIX = Buffer.concat([Buffer.from(BINDING_FORMAT, 'ascii'), Buffer.from([0])])
+export const BINDING_AUDIENCE: readonly string[] = Object.freeze(['hermes-main'])
+
+export const ATTESTATION_FORMAT = 'hermes-launch-attestation/v1'
+export const ATTESTATION_DOMAIN_PREFIX = Buffer.concat([Buffer.from(ATTESTATION_FORMAT, 'ascii'), Buffer.from([0])])
+export const ATTESTATION_AUDIENCE: readonly string[] = Object.freeze(['conductor:session-binding'])
+
+export const ALLOWED_SIGN_DOMAINS = Object.freeze([
+  GRANT_FORMAT,
+  BINDING_FORMAT,
+  ATTESTATION_FORMAT
+] as const)
+
+export type AllowedSignDomain = (typeof ALLOWED_SIGN_DOMAINS)[number]
+
+export interface SignDomainConfig {
+  readonly format: AllowedSignDomain
+  readonly prefix: Buffer
+  readonly audience: readonly string[]
+}
+
+export const SIGN_DOMAINS: Readonly<Record<AllowedSignDomain, SignDomainConfig>> = Object.freeze({
+  [GRANT_FORMAT]: Object.freeze({
+    format: GRANT_FORMAT,
+    prefix: GRANT_DOMAIN_PREFIX,
+    audience: GRANT_AUDIENCE
+  }),
+  [BINDING_FORMAT]: Object.freeze({
+    format: BINDING_FORMAT,
+    prefix: BINDING_DOMAIN_PREFIX,
+    audience: BINDING_AUDIENCE
+  }),
+  [ATTESTATION_FORMAT]: Object.freeze({
+    format: ATTESTATION_FORMAT,
+    prefix: ATTESTATION_DOMAIN_PREFIX,
+    audience: ATTESTATION_AUDIENCE
+  })
+})
+
 export const OWNER_KEY_FILE = 'owner-key.v1.enc'
 export const OWNER_KEY_BLOB_FORMAT = 'hermes-owner-key/v1'
 export const KID_PREFIX = 'ok_'
@@ -68,6 +110,7 @@ export type OwnerKeyLog = (level: 'info' | 'warn' | 'error', message: string, me
 export type OwnerKeyErrorCode =
   | 'anchor_mismatch'
   | 'anchor_missing'
+  | 'bad_domain'
   | 'bad_payload'
   | 'key_blob_corrupt'
   | 'key_blob_inconsistent'
@@ -99,7 +142,14 @@ export interface AnchorView {
   keys: ReadonlyArray<{ kid: string; pub: string; status: string }>
 }
 
-export interface OwnerGrantEnvelope {
+export interface OwnerDomainEnvelope {
+  format: string
+  kid: string
+  payload: string
+  sig: string
+}
+
+export interface OwnerGrantEnvelope extends OwnerDomainEnvelope {
   format: typeof GRANT_FORMAT
   kid: string
   payload: string
@@ -181,6 +231,52 @@ function declaredScopes(payload: Uint8Array): string[] {
     return Array.isArray(scope) ? scope.filter((s): s is string => typeof s === 'string') : []
   } catch {
     return []
+  }
+}
+
+/** Validate domain-specific payload constraints (such as audience isolation). */
+function validateDomainPayload(format: AllowedSignDomain, payload: Uint8Array): void {
+  let obj: any
+
+  try {
+    const text = Buffer.from(payload).toString('utf8')
+    obj = JSON.parse(text)
+  } catch {
+    return
+  }
+
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return
+  }
+
+  if ('aud' in obj) {
+    const aud = obj.aud
+
+    if (!Array.isArray(aud) || !aud.every((a: unknown) => typeof a === 'string')) {
+      throw new OwnerKeyError('bad_payload', 'payload aud must be an array of strings')
+    }
+
+    if (format === BINDING_FORMAT) {
+      if (aud.includes('hermes-owner-verify')) {
+        throw new OwnerKeyError('bad_payload', 'session binding payload must not contain hermes-owner-verify audience')
+      }
+
+      if (aud.length !== 1 || aud[0] !== 'hermes-main') {
+        throw new OwnerKeyError('bad_payload', `session binding payload aud must be ["hermes-main"], got ${JSON.stringify(aud)}`)
+      }
+    } else if (format === ATTESTATION_FORMAT) {
+      if (aud.includes('hermes-owner-verify')) {
+        throw new OwnerKeyError('bad_payload', 'launch attestation payload must not contain hermes-owner-verify audience')
+      }
+
+      if (aud.length !== 1 || aud[0] !== 'conductor:session-binding') {
+        throw new OwnerKeyError('bad_payload', `launch attestation payload aud must be ["conductor:session-binding"], got ${JSON.stringify(aud)}`)
+      }
+    } else if (format === GRANT_FORMAT) {
+      if (aud.length === 0 || (!aud.includes('hermes-owner-forward') && !aud.includes('hermes-owner-verify'))) {
+        throw new OwnerKeyError('bad_payload', `grant payload aud must contain hermes-owner-forward or hermes-owner-verify, got ${JSON.stringify(aud)}`)
+      }
+    }
   }
 }
 
@@ -447,18 +543,42 @@ class OwnerKeyStoreImpl {
     }
   }
 
-  /** Sign exact payload bytes as a `hermes-owner-grant/v1` envelope. The anchor gate uses the
-   *  caller's scopes AND any `scope` the payload itself declares, whichever is wider. */
-  signEnvelope(payload: Uint8Array, scopes: readonly string[]): OwnerGrantEnvelope {
+  /** Sign exact payload bytes under an allowlisted domain. The allowlist covers exactly three
+   *  domains: `hermes-owner-grant/v1`, `hermes-session-binding/v1`, and
+   *  `hermes-launch-attestation/v1`. Any other domain throws `bad_domain`. */
+  signDomain(format: string, payload: Uint8Array, scopes: readonly string[] = []): OwnerDomainEnvelope {
+    const domain = (SIGN_DOMAINS as Record<string, SignDomainConfig | undefined>)[format]
+
+    if (!domain) {
+      throw new OwnerKeyError('bad_domain', `domain ${JSON.stringify(format)} is not allowed`)
+    }
+
     if (!(payload instanceof Uint8Array) || payload.length === 0 || payload.length > MAX_PAYLOAD_BYTES) {
       throw new OwnerKeyError('bad_payload', `payload must be 1..${MAX_PAYLOAD_BYTES} bytes`)
     }
 
-    this.assertMaySign([...new Set([...scopes, ...declaredScopes(payload)])])
-    const bytes = Buffer.from(payload)
-    const sig = sign(null, Buffer.concat([GRANT_DOMAIN_PREFIX, bytes]), this.#privateKey!)
+    validateDomainPayload(domain.format, payload)
 
-    return { format: GRANT_FORMAT, kid: this.#public!.kid, payload: b64urlEncode(bytes), sig: b64urlEncode(sig) }
+    const allScopes = format === GRANT_FORMAT
+      ? [...new Set([...scopes, ...declaredScopes(payload)])]
+      : []
+    this.assertMaySign(allScopes)
+
+    const bytes = Buffer.from(payload)
+    const sig = sign(null, Buffer.concat([domain.prefix, bytes]), this.#privateKey!)
+
+    return {
+      format: domain.format,
+      kid: this.#public!.kid,
+      payload: b64urlEncode(bytes),
+      sig: b64urlEncode(sig)
+    }
+  }
+
+  /** Sign exact payload bytes as a `hermes-owner-grant/v1` envelope. The anchor gate uses the
+   *  caller's scopes AND any `scope` the payload itself declares, whichever is wider. */
+  signEnvelope(payload: Uint8Array, scopes: readonly string[]): OwnerGrantEnvelope {
+    return this.signDomain(GRANT_FORMAT, payload, scopes) as OwnerGrantEnvelope
   }
 
   /** The only shape any future IPC reply may carry. */

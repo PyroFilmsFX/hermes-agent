@@ -14,14 +14,24 @@ import { inspect } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import {
+  ALLOWED_SIGN_DOMAINS,
+  ATTESTATION_AUDIENCE,
+  ATTESTATION_DOMAIN_PREFIX,
+  ATTESTATION_FORMAT,
+  BINDING_AUDIENCE,
+  BINDING_DOMAIN_PREFIX,
+  BINDING_FORMAT,
   createOwnerKeyStore,
   defaultOwnerGrantsDir,
   defaultOwnerKeyDir,
+  GRANT_AUDIENCE,
   GRANT_DOMAIN_PREFIX,
+  GRANT_FORMAT,
   kidForPub,
   OWNER_KEY_FILE,
   OwnerKeyError,
-  type SafeStorageLike
+  type SafeStorageLike,
+  SIGN_DOMAINS
 } from './owner-grant-key'
 
 const tmpDirs: string[] = []
@@ -436,3 +446,226 @@ describe('E-6: the private key never appears in IPC, env, logs or a grant', () =
     expect(store.statusForIpc()).toEqual({ enrolled: true, kid: info.kid, pub: info.pub, anchor: 'missing' })
   })
 })
+
+describe('b10 H6: signDomain allowlist for owner grants, session bindings, and launch attestations', () => {
+  test('domain constants, prefixes, and audiences match spec §3 exactly', () => {
+    expect(ALLOWED_SIGN_DOMAINS).toEqual([GRANT_FORMAT, BINDING_FORMAT, ATTESTATION_FORMAT])
+    expect(GRANT_FORMAT).toBe('hermes-owner-grant/v1')
+    expect(BINDING_FORMAT).toBe('hermes-session-binding/v1')
+    expect(ATTESTATION_FORMAT).toBe('hermes-launch-attestation/v1')
+
+    expect(GRANT_DOMAIN_PREFIX.toString('ascii')).toBe('hermes-owner-grant/v1\0')
+    expect(BINDING_DOMAIN_PREFIX.toString('ascii')).toBe('hermes-session-binding/v1\0')
+    expect(ATTESTATION_DOMAIN_PREFIX.toString('ascii')).toBe('hermes-launch-attestation/v1\0')
+
+    expect(GRANT_AUDIENCE).toEqual(['hermes-owner-forward', 'hermes-owner-verify'])
+    expect(BINDING_AUDIENCE).toEqual(['hermes-main'])
+    expect(ATTESTATION_AUDIENCE).toEqual(['conductor:session-binding'])
+
+    expect(Object.keys(SIGN_DOMAINS).sort()).toEqual([ATTESTATION_FORMAT, BINDING_FORMAT, GRANT_FORMAT].sort())
+    expect(SIGN_DOMAINS[GRANT_FORMAT]).toEqual({
+      format: GRANT_FORMAT,
+      prefix: GRANT_DOMAIN_PREFIX,
+      audience: GRANT_AUDIENCE
+    })
+    expect(SIGN_DOMAINS[BINDING_FORMAT]).toEqual({
+      format: BINDING_FORMAT,
+      prefix: BINDING_DOMAIN_PREFIX,
+      audience: BINDING_AUDIENCE
+    })
+    expect(SIGN_DOMAINS[ATTESTATION_FORMAT]).toEqual({
+      format: ATTESTATION_FORMAT,
+      prefix: ATTESTATION_DOMAIN_PREFIX,
+      audience: ATTESTATION_AUDIENCE
+    })
+  })
+
+  test('signDomain signs each of the three allowlisted domains with its own prefix', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+    const pubKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: info.pub }, format: 'jwk' })
+
+    const testCases = [
+      {
+        format: GRANT_FORMAT,
+        prefix: GRANT_DOMAIN_PREFIX,
+        payload: Buffer.from(JSON.stringify({ v: 1, aud: [...GRANT_AUDIENCE], text: 'grant test' }), 'utf8')
+      },
+      {
+        format: BINDING_FORMAT,
+        prefix: BINDING_DOMAIN_PREFIX,
+        payload: Buffer.from(JSON.stringify({ v: 1, aud: [...BINDING_AUDIENCE], seq: 1 }), 'utf8')
+      },
+      {
+        format: ATTESTATION_FORMAT,
+        prefix: ATTESTATION_DOMAIN_PREFIX,
+        payload: Buffer.from(JSON.stringify({ v: 1, aud: [...ATTESTATION_AUDIENCE], launch_seq: 1 }), 'utf8')
+      }
+    ]
+
+    for (const tc of testCases) {
+      const env = store.signDomain(tc.format, tc.payload)
+
+      expect(env.format).toBe(tc.format)
+      expect(env.kid).toBe(info.kid)
+      expect(Buffer.from(env.payload, 'base64url').equals(tc.payload)).toBe(true)
+
+      const sigBytes = Buffer.from(env.sig, 'base64url')
+      const msg = Buffer.concat([tc.prefix, tc.payload])
+
+      // Verifies with expected domain prefix.
+      expect(edVerify(null, msg, pubKey, sigBytes)).toBe(true)
+      // Without domain prefix: must not verify.
+      expect(edVerify(null, tc.payload, pubKey, sigBytes)).toBe(false)
+    }
+  })
+
+  test('cross-rejection: signature for one domain never verifies under another domain prefix', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+    const pubKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: info.pub }, format: 'jwk' })
+
+    const payload = Buffer.from('{"test":"common_bytes"}', 'utf8')
+    const grantEnv = store.signDomain(GRANT_FORMAT, payload)
+    const bindingEnv = store.signDomain(BINDING_FORMAT, payload)
+    const attestEnv = store.signDomain(ATTESTATION_FORMAT, payload)
+
+    const grantSig = Buffer.from(grantEnv.sig, 'base64url')
+    const bindingSig = Buffer.from(bindingEnv.sig, 'base64url')
+    const attestSig = Buffer.from(attestEnv.sig, 'base64url')
+
+    // Grant signature under binding and attestation prefixes
+    expect(edVerify(null, Buffer.concat([BINDING_DOMAIN_PREFIX, payload]), pubKey, grantSig)).toBe(false)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, payload]), pubKey, grantSig)).toBe(false)
+
+    // Binding signature under grant and attestation prefixes
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, payload]), pubKey, bindingSig)).toBe(false)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, payload]), pubKey, bindingSig)).toBe(false)
+
+    // Attestation signature under grant and binding prefixes
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, payload]), pubKey, attestSig)).toBe(false)
+    expect(edVerify(null, Buffer.concat([BINDING_DOMAIN_PREFIX, payload]), pubKey, attestSig)).toBe(false)
+  })
+
+  test('any non-allowlisted domain throws bad_domain error', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+    const payload = Buffer.from('{"test":1}', 'utf8')
+
+    for (const badDomain of [
+      'hermes-owner-grant/v2',
+      'hermes-session-binding',
+      'hermes-launch-attestation',
+      'conductor:session-binding',
+      'hermes-main',
+      '',
+      'custom-domain'
+    ]) {
+      expect(() => store.signDomain(badDomain, payload)).toThrowError(
+        expect.objectContaining({ code: 'bad_domain' })
+      )
+    }
+  })
+
+  test('payload validation: empty, too large, or invalid payload throws bad_payload', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+
+    expect(() => store.signDomain(BINDING_FORMAT, new Uint8Array(0))).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+    expect(() => store.signDomain(BINDING_FORMAT, new Uint8Array(32 * 1024 + 1))).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+    expect(() => store.signDomain(BINDING_FORMAT, 'not-a-uint8array' as any)).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+  })
+
+  test('key state gates: no key, missing anchor, and mismatched anchor throw appropriately', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const payload = Buffer.from('{"test":1}', 'utf8')
+
+    // No key loaded
+    expect(() => store.signDomain(BINDING_FORMAT, payload)).toThrowError(
+      expect.objectContaining({ code: 'no_key' })
+    )
+
+    const info = store.ensure()
+
+    // Missing anchor
+    expect(() => store.signDomain(BINDING_FORMAT, payload)).toThrowError(
+      expect.objectContaining({ code: 'anchor_missing' })
+    )
+
+    // Mismatched anchor
+    const other = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir: tmpKeyDir() }).ensure()
+    store.setAnchor(anchorFor(other.pub))
+    expect(() => store.signDomain(BINDING_FORMAT, payload)).toThrowError(
+      expect.objectContaining({ code: 'anchor_mismatch' })
+    )
+  })
+
+  test('audience isolation: payload aud validation enforces domain constraints', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+
+    // Binding must not declare hermes-owner-verify
+    const badBinding1 = Buffer.from(JSON.stringify({ v: 1, aud: ['hermes-owner-verify'] }), 'utf8')
+    expect(() => store.signDomain(BINDING_FORMAT, badBinding1)).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+
+    // Binding aud must be exactly ["hermes-main"]
+    const badBinding2 = Buffer.from(JSON.stringify({ v: 1, aud: ['conductor:session-binding'] }), 'utf8')
+    expect(() => store.signDomain(BINDING_FORMAT, badBinding2)).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+
+    // Attestation must not declare hermes-owner-verify
+    const badAttest1 = Buffer.from(JSON.stringify({ v: 1, aud: ['hermes-owner-verify'] }), 'utf8')
+    expect(() => store.signDomain(ATTESTATION_FORMAT, badAttest1)).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+
+    // Attestation aud must be exactly ["conductor:session-binding"]
+    const badAttest2 = Buffer.from(JSON.stringify({ v: 1, aud: ['hermes-main'] }), 'utf8')
+    expect(() => store.signDomain(ATTESTATION_FORMAT, badAttest2)).toThrowError(
+      expect.objectContaining({ code: 'bad_payload' })
+    )
+
+    // Valid audiences succeed
+    const goodBinding = Buffer.from(JSON.stringify({ v: 1, aud: ['hermes-main'], seq: 1 }), 'utf8')
+    expect(() => store.signDomain(BINDING_FORMAT, goodBinding)).not.toThrow()
+
+    const goodAttest = Buffer.from(JSON.stringify({ v: 1, aud: ['conductor:session-binding'], launch_seq: 1 }), 'utf8')
+    expect(() => store.signDomain(ATTESTATION_FORMAT, goodAttest)).not.toThrow()
+  })
+
+  test('signEnvelope delegates to signDomain with GRANT_FORMAT and preserves contract', () => {
+    const keyDir = tmpKeyDir()
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage().api, keyDir })
+    const info = store.ensure()
+    store.setAnchor(anchorFor(info.pub))
+
+    const payload = Buffer.from('{"text":"grant via signEnvelope","v":1}', 'utf8')
+    const env = store.signEnvelope(payload, [])
+
+    expect(env.format).toBe(GRANT_FORMAT)
+    expect(env.kid).toBe(info.kid)
+    const pubKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: info.pub }, format: 'jwk' })
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, payload]), pubKey, Buffer.from(env.sig, 'base64url'))).toBe(true)
+  })
+})
+

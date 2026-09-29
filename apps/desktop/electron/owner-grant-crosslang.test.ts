@@ -10,15 +10,31 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, createPublicKey, verify as edVerify } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { createOwnerKeyStore, type SafeStorageLike } from './owner-grant-key'
-import { confirmAndSignGrants, type OwnerGrantEnvelope, type SignedOutcome, type SignRequest } from './owner-grant-sign'
+import {
+  ATTESTATION_DOMAIN_PREFIX,
+  ATTESTATION_FORMAT,
+  BINDING_DOMAIN_PREFIX,
+  BINDING_FORMAT,
+  createOwnerKeyStore,
+  GRANT_DOMAIN_PREFIX,
+  GRANT_FORMAT,
+  type SafeStorageLike
+} from './owner-grant-key'
+import {
+  confirmAndSignGrants,
+  encodePayload,
+  type OwnerGrantEnvelope,
+  type SignedOutcome,
+  type SignRequest
+} from './owner-grant-sign'
+import { verifyStoredOwnerGrant } from './owner-grant-verify'
 
 const PYTHON = process.env.OWNER_GRANT_TEST_PYTHON || '/tmp/venv314/bin/python'
 const REPO = path.resolve(__dirname, '../../..')
@@ -49,13 +65,14 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 uid = os.getuid()
+grants_dir = req.get("grants_dir", "/tmp")
 anchor = A.parse_anchor(json.dumps({
-    "format": "hermes-owner-anchor/v1", "owner_uid": uid, "grants_dir": req["grants_dir"],
+    "format": "hermes-owner-anchor/v1", "owner_uid": uid, "grants_dir": grants_dir,
     "keys": [{"kid": req["kid"], "alg": "Ed25519", "pub": req["pub"], "status": "active",
               "not_before": 0, "retired_at": None}]}).encode("utf-8"))
 pub = E.b64url_decode(req["pub"])
 out = {"kid_py": E.kid_for_pub(pub), "cases": []}
-for case in req["cases"]:
+for case in req.get("cases", []):
     env = case["envelope"]
     row = {"name": case["name"]}
     parsed = E.parse_envelope(env)
@@ -85,6 +102,69 @@ for case in req["cases"]:
         row["lookup"] = {"ok": lr.ok, "reason": lr.reason, "detail": lr.detail,
                          "grant_id": (lr.grant or {}).get("id"), "candidates": lr.candidates}
     out["cases"].append(row)
+if req.get("domain_cases"):
+    out["domain_cases"] = []
+    for dc in req["domain_cases"]:
+        row = {"name": dc["name"], "format": dc["format"]}
+        env = dc["envelope"]
+        payload_bytes = E.b64url_decode(env["payload"])
+        sig_bytes = E.b64url_decode(env["sig"])
+        try:
+            row["reencode_identical"] = E.encode_payload(E.decode_payload(payload_bytes)) == payload_bytes
+        except Exception as exc:
+            row["reencode_identical"] = "error: %s" % exc
+
+        expected_prefix = dc["format"].encode("ascii") + b"\x00"
+        msg = expected_prefix + payload_bytes
+        row["pure_ok"] = ed25519_pure.verify(pub, msg, sig_bytes)
+        try:
+            Ed25519PublicKey.from_public_bytes(pub).verify(sig_bytes, msg)
+            row["crypto_ok"] = True
+        except Exception:
+            row["crypto_ok"] = False
+
+        cross = {}
+        for other_fmt in [
+            "hermes-owner-grant/v1",
+            "hermes-session-binding/v1",
+            "hermes-launch-attestation/v1"
+        ]:
+            if other_fmt != dc["format"]:
+                other_msg = other_fmt.encode("ascii") + b"\x00" + payload_bytes
+                cross[other_fmt] = {
+                    "pure_ok": ed25519_pure.verify(pub, other_msg, sig_bytes)
+                }
+        row["cross_prefix_checks"] = cross
+
+        if dc["format"] != "hermes-owner-grant/v1":
+            vr = V.verify_envelope(env, session="s-1", uid=uid, now=1759140000000, anchor=anchor)
+            row["grant_verify_rejected"] = (not vr.ok) and vr.reason == "malformed"
+
+            spoofed_env = dict(env)
+            spoofed_env["format"] = "hermes-owner-grant/v1"
+            svr = V.verify_envelope(spoofed_env, session="s-1", uid=uid, now=1759140000000, anchor=anchor)
+            row["spoofed_grant_verify_rejected"] = (not svr.ok) and (svr.reason in ("bad_signature", "malformed"))
+            row["spoofed_grant_verify_reason"] = svr.reason
+
+        out["domain_cases"].append(row)
+if req.get("fixture_path"):
+    with open(req["fixture_path"], "r", encoding="utf-8") as f:
+        fx = json.load(f)
+    fx_pub = E.b64url_decode(fx["anchor_key"]["pub"])
+    fx_checks = {}
+    for key, env in [
+        ("attestation", fx["envelope"]),
+        ("binding", fx["binding_envelope"]),
+        ("unbound", fx["unbound_envelope"]),
+        ("grant", fx["grant_envelope"])
+    ]:
+        p = E.b64url_decode(env["payload"])
+        s = E.b64url_decode(env["sig"])
+        prefix = env["format"].encode("ascii") + b"\x00"
+        pure_ok = ed25519_pure.verify(fx_pub, prefix + p, s)
+        reencode = E.encode_payload(E.decode_payload(p)) == p
+        fx_checks[key] = {"pure_ok": pure_ok, "reencode": reencode}
+    out["fixture_checks"] = fx_checks
 if req.get("owner_forward"):
     from tui_gateway import owner_forward as OF
     import tui_gateway.server
@@ -265,6 +345,197 @@ describe.skipIf(!HAVE_PYTHON)('E-10: a Node-signed v1 envelope verifies in the P
       expect(row.pure_ok, name).toBe(false)
       expect(row.crypto_ok, name).toBe(false)
     }
+  }, 60_000)
+
+  test('b10 H6: crosslang vectors and cross-rejection for session bindings and launch attestations', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ogx-b10-'))
+    tmpDirs.push(base)
+    const grantsDir = path.join(base, 'grants')
+    const store = createOwnerKeyStore({ safeStorage: mockSafeStorage, keyDir: path.join(base, 'key') })
+    const info = store.ensure()
+    store.setAnchor({ keys: [{ kid: info.kid, pub: info.pub, status: 'active' }] })
+    const now = 1759140000000
+    const ownerUid = process.getuid!()
+
+    // 1. Durable session binding payload per spec §3
+    const bindingPayloadObj = {
+      v: 1,
+      aud: ['hermes-main'],
+      owner_uid: ownerUid,
+      profile: 'default',
+      hermes_session_id: '20260929_101500_a1b2c3',
+      state: 'bound',
+      seq: 7,
+      binding_nonce: '4NW6Y7T2K5J3Z4X8',
+      bound_at: now,
+      project_root: '/Users/justin/Documents/Projects/Business/hermes-cntrl',
+      repo_common_root: '/Users/justin/Documents/Projects/Business/hermes-cntrl',
+      repo_remote: 'git@github.com:nousresearch/hermes-agent.git',
+      project_id: 'p_deadbeef',
+      carried_from: null
+    }
+    const bindingBytes = encodePayload(bindingPayloadObj)
+    const bindingEnv = store.signDomain(BINDING_FORMAT, bindingBytes)
+
+    // 2. Launch attestation payload per spec §3
+    const attestationPayloadObj = {
+      v: 1,
+      aud: ['conductor:session-binding'],
+      owner_uid: ownerUid,
+      profile: 'default',
+      backend: 'spawn-bk1',
+      hermes_session_id: '20260929_101500_a1b2c3',
+      claude_session_id: '5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11',
+      launch_seq: 3,
+      project_root: '/Users/justin/Documents/Projects/Business/hermes-cntrl',
+      repo_remote: 'git@github.com:nousresearch/hermes-agent.git',
+      binding_nonce: '4NW6Y7T2K5J3Z4X8',
+      binding_seq: 7,
+      issued_at: now,
+      expires_at: now + 30 * 60 * 1000
+    }
+    const attestationBytes = encodePayload(attestationPayloadObj)
+    const attestationEnv = store.signDomain(ATTESTATION_FORMAT, attestationBytes)
+
+    // 3. Unbound launch attestation payload per spec §3 (project_root/nonce null = explicitly unbound)
+    const unboundAttestationPayloadObj = {
+      v: 1,
+      aud: ['conductor:session-binding'],
+      owner_uid: ownerUid,
+      profile: 'default',
+      backend: 'spawn-bk1',
+      hermes_session_id: '20260929_101500_a1b2c3',
+      claude_session_id: '5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11',
+      launch_seq: 4,
+      project_root: null,
+      repo_remote: null,
+      binding_nonce: null,
+      binding_seq: 8,
+      issued_at: now + 1000,
+      expires_at: now + 1000 + 30 * 60 * 1000
+    }
+    const unboundAttestationBytes = encodePayload(unboundAttestationPayloadObj)
+    const unboundAttestationEnv = store.signDomain(ATTESTATION_FORMAT, unboundAttestationBytes)
+
+    // 4. Standard owner grant payload
+    const grantPayloadObj = {
+      v: 1,
+      aud: ['hermes-owner-forward', 'hermes-owner-verify'],
+      backend: 'spawn-bk1',
+      confirm: 'native_dialog',
+      decision_id: 'od_testdecision123456789012',
+      deliver_by: now + 60 * 1000,
+      expires_at: now + 3 * 24 * 60 * 60 * 1000,
+      gesture: 'proposal',
+      issued_at: now,
+      nonce: 'AAAAAAAAAAAAAAAAAAAAAA',
+      owner_uid: ownerUid,
+      scope: ['conductor:gate:review-budget-enable'],
+      single_use: [],
+      source_session: { message_id: 'm1', role: 'user', session_id: 'mgr' },
+      subject: {},
+      targets: [{ claude_session_id: '5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b11', session_id: '20260929_101500_a1b2c3' }],
+      text: 'Enable review budget',
+      text_len: 20,
+      text_sha256: createHash('sha256').update('Enable review budget', 'utf8').digest('hex')
+    }
+    const grantBytes = encodePayload(grantPayloadObj)
+    const grantEnv = store.signDomain(GRANT_FORMAT, grantBytes)
+
+    // -- Node side cross-rejection proofs --
+    const pubKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: info.pub }, format: 'jwk' })
+
+    // Valid signatures verify with their own prefixes
+    expect(edVerify(null, Buffer.concat([BINDING_DOMAIN_PREFIX, bindingBytes]), pubKey, Buffer.from(bindingEnv.sig, 'base64url'))).toBe(true)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, attestationBytes]), pubKey, Buffer.from(attestationEnv.sig, 'base64url'))).toBe(true)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, unboundAttestationBytes]), pubKey, Buffer.from(unboundAttestationEnv.sig, 'base64url'))).toBe(true)
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, grantBytes]), pubKey, Buffer.from(grantEnv.sig, 'base64url'))).toBe(true)
+
+    // Cross-domain prefix checks fail in Node
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, bindingBytes]), pubKey, Buffer.from(bindingEnv.sig, 'base64url'))).toBe(false)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, bindingBytes]), pubKey, Buffer.from(bindingEnv.sig, 'base64url'))).toBe(false)
+
+    expect(edVerify(null, Buffer.concat([GRANT_DOMAIN_PREFIX, attestationBytes]), pubKey, Buffer.from(attestationEnv.sig, 'base64url'))).toBe(false)
+    expect(edVerify(null, Buffer.concat([BINDING_DOMAIN_PREFIX, attestationBytes]), pubKey, Buffer.from(attestationEnv.sig, 'base64url'))).toBe(false)
+
+    expect(edVerify(null, Buffer.concat([BINDING_DOMAIN_PREFIX, grantBytes]), pubKey, Buffer.from(grantEnv.sig, 'base64url'))).toBe(false)
+    expect(edVerify(null, Buffer.concat([ATTESTATION_DOMAIN_PREFIX, grantBytes]), pubKey, Buffer.from(grantEnv.sig, 'base64url'))).toBe(false)
+
+    // Stored grant verifier in Node rejects non-grant formats
+    const anchorView = { ok: true, keys: [{ kid: info.kid, pub: info.pub, status: 'active', retiredAt: null }] }
+    expect(verifyStoredOwnerGrant({ envelope: bindingEnv, text: 'test', sessionId: 's-1' }, anchorView)).toEqual({
+      state: 'unverified',
+      reason: 'no_envelope'
+    })
+    expect(verifyStoredOwnerGrant({ envelope: attestationEnv, text: 'test', sessionId: 's-1' }, anchorView)).toEqual({
+      state: 'unverified',
+      reason: 'no_envelope'
+    })
+
+    // -- Python side verification and cross-rejection --
+    const fixturePath = path.join(REPO, 'tests', 'hermes_owner_grant', 'fixtures', 'attest_v1_fixture.json')
+    expect(fs.existsSync(fixturePath)).toBe(true)
+
+    const result = runPython({
+      repo: REPO,
+      grants_dir: grantsDir,
+      kid: info.kid,
+      pub: info.pub,
+      fixture_path: fixturePath,
+      domain_cases: [
+        { name: 'binding', format: BINDING_FORMAT, envelope: bindingEnv },
+        { name: 'attestation', format: ATTESTATION_FORMAT, envelope: attestationEnv },
+        { name: 'attestation_unbound', format: ATTESTATION_FORMAT, envelope: unboundAttestationEnv },
+        { name: 'grant', format: GRANT_FORMAT, envelope: grantEnv }
+      ]
+    })
+
+    const byName = Object.fromEntries(result.domain_cases.map((c: any) => [c.name, c]))
+
+    // Canonical re-encode identical on Python side
+    expect(byName.binding.reencode_identical).toBe(true)
+    expect(byName.attestation.reencode_identical).toBe(true)
+    expect(byName.attestation_unbound.reencode_identical).toBe(true)
+    expect(byName.grant.reencode_identical).toBe(true)
+
+    // Signatures valid under own domain
+    expect(byName.binding.pure_ok).toBe(true)
+    expect(byName.binding.crypto_ok).toBe(true)
+    expect(byName.attestation.pure_ok).toBe(true)
+    expect(byName.attestation.crypto_ok).toBe(true)
+    expect(byName.attestation_unbound.pure_ok).toBe(true)
+    expect(byName.attestation_unbound.crypto_ok).toBe(true)
+    expect(byName.grant.pure_ok).toBe(true)
+    expect(byName.grant.crypto_ok).toBe(true)
+
+    // Cross-prefix verification fails in Python
+    expect(byName.binding.cross_prefix_checks[GRANT_FORMAT].pure_ok).toBe(false)
+    expect(byName.binding.cross_prefix_checks[ATTESTATION_FORMAT].pure_ok).toBe(false)
+
+    expect(byName.attestation.cross_prefix_checks[GRANT_FORMAT].pure_ok).toBe(false)
+    expect(byName.attestation.cross_prefix_checks[BINDING_FORMAT].pure_ok).toBe(false)
+
+    expect(byName.grant.cross_prefix_checks[BINDING_FORMAT].pure_ok).toBe(false)
+    expect(byName.grant.cross_prefix_checks[ATTESTATION_FORMAT].pure_ok).toBe(false)
+
+    // Grant verifier rejects attestation and binding envelopes
+    expect(byName.binding.grant_verify_rejected).toBe(true)
+    expect(byName.binding.spoofed_grant_verify_rejected).toBe(true)
+    expect(byName.binding.spoofed_grant_verify_reason).toBe('malformed')
+    expect(byName.attestation.grant_verify_rejected).toBe(true)
+    expect(byName.attestation.spoofed_grant_verify_rejected).toBe(true)
+    expect(byName.attestation.spoofed_grant_verify_reason).toBe('bad_signature')
+
+    // Emitted fixture file checks in Python
+    expect(result.fixture_checks).toBeDefined()
+    expect(result.fixture_checks.attestation.pure_ok).toBe(true)
+    expect(result.fixture_checks.attestation.reencode).toBe(true)
+    expect(result.fixture_checks.binding.pure_ok).toBe(true)
+    expect(result.fixture_checks.binding.reencode).toBe(true)
+    expect(result.fixture_checks.unbound.pure_ok).toBe(true)
+    expect(result.fixture_checks.unbound.reencode).toBe(true)
+    expect(result.fixture_checks.grant.pure_ok).toBe(true)
+    expect(result.fixture_checks.grant.reencode).toBe(true)
   }, 60_000)
 })
 
