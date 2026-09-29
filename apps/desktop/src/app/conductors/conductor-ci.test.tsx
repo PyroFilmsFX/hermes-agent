@@ -17,11 +17,20 @@ vi.mock('@/store/conductors', async importOriginal => {
 
 const { $conductors } = await import('@/store/conductors')
 const pr = await import('@/store/pull-requests')
+const { $sessions } = await import('@/store/session')
 const { ConductorsPane } = await import('./conductors-pane')
 const { makeConductorRow, makeResponse } = await import('./conductors-fixtures')
 
 let seq = 0
-const nextRoot = () => `/repo/r7-${++seq}`
+
+// The roster response has no absolute path; the row's repo comes from its own session
+// (fixture rows key `a` belong to Hermes session `hs-a`).
+const nextRoot = () => {
+  const root = `/repo/r7-${++seq}`
+  $sessions.set([{ id: 'hs-a', git_repo_root: root } as unknown as ReturnType<typeof $sessions.get>[number]])
+
+  return root
+}
 
 const PR = {
   branch: 'feat/x',
@@ -50,7 +59,7 @@ function show(row: ReturnType<typeof makeConductorRow>, visible = true) {
 
 const rowFor = (root: string, ci: Partial<ReturnType<typeof makeConductorRow>['build']['ci'][number]>[] = []) =>
   makeConductorRow('a', {
-    project: { branch: 'feat/x', root },
+    project: { branch: 'feat/x' },
     build: {
       ci: ci.map(o => ({ kind: 'pr', ref: '1', branch: 'feat/x', pr: 9, state: 'success', url: '', checked_at: '', ...o }))
     }
@@ -100,7 +109,7 @@ describe('CI/PR cell (§7)', () => {
 
   it('a run-id wait with no fresh observation uses runStatus when visible', async () => {
     const root = nextRoot()
-    const row = makeConductorRow('a', { project: { branch: 'main', root } })
+    const row = makeConductorRow('a', { project: { branch: 'main' } })
     row.build.gates = [{ ...row.build.gates[0], ref: '4242' }]
     const { container } = show(row)
     await act(async () => {})
@@ -149,9 +158,20 @@ describe('shared PR cache', () => {
   })
 
   it('never asks about trunk branches', async () => {
-    const row = makeConductorRow('a', { project: { branch: 'main', root: nextRoot() } })
+    nextRoot()
+    const row = makeConductorRow('a', { project: { branch: 'main' } })
     show(row)
     await act(async () => {})
     expect(prList).not.toHaveBeenCalled()
+  })
+})
+
+describe('repo root comes from the session, never the response', () => {
+  it('a row whose session is unknown to this window makes no gh call', async () => {
+    $sessions.set([])
+    show(rowFor('/ignored'))
+    await act(async () => {})
+    expect(prList).not.toHaveBeenCalled()
+    expect(runStatus).not.toHaveBeenCalled()
   })
 })

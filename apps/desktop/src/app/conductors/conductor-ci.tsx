@@ -18,6 +18,7 @@ import {
   refreshRunStatuses,
   resumeGhReads
 } from '@/store/pull-requests'
+import { $sessions } from '@/store/session'
 
 /** A conductor observation this young is shown as is; no gh call for that ref. */
 export const CI_FRESH_MS = 10 * 60_000
@@ -60,15 +61,16 @@ export function runGlyph(status: string, conclusion: null | string): ChecksGlyph
   return conclusion === 'success' || conclusion === 'skipped' || conclusion === 'neutral' ? 'pass' : 'fail'
 }
 
-/** The absolute repo root, when the backend gave one (`~/x` can't reach gh). */
+/** The row's repo root, from its own Hermes session (the roster response carries no
+ *  absolute path, design §9). Null when the session isn't known to this window. */
 export function rowRepoRoot(row: ConductorRow): null | string {
-  const { root, root_display: display } = row.project
+  const sid = row.orchestrator.hermes_session_id
 
-  if (root) {
-    return root
+  if (!sid) {
+    return null
   }
 
-  return display.startsWith('/') ? display : null
+  return $sessions.get().find(session => session.id === sid)?.git_repo_root || null
 }
 
 /** The branch to ask GitHub about; never a trunk branch. */
