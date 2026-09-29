@@ -822,6 +822,13 @@ ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
 // in flight (so a live answer keeps painting while blurred, occluded, or
 // minimized, exactly as before) and return to Chromium's default throttling
 // once the work settles.
+// Every git child this app spawns inherits this. Read-only commands such as
+// `git status` otherwise take index.lock to refresh the index as a side
+// effect; when the app quits mid-scan the child dies holding it, and the
+// user's next git command fails with "index.lock: File exists". Required
+// locks (commit, add, checkout) are unaffected.
+process.env.GIT_OPTIONAL_LOCKS = '0'
+
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
