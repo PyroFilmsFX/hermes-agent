@@ -542,7 +542,13 @@ declare global {
           // The PR on each of the given branches — plus any known only by
           // number — for badging a list of sessions in one request instead of
           // one `pr view` per checkout.
-          prList: (repoPath: string, branches: string[], numbers?: number[]) => Promise<HermesRepoPullRequests>
+          prList: (
+            repoPath: string,
+            branches: string[],
+            numbers?: number[],
+            withChecks?: boolean
+          ) => Promise<HermesRepoPullRequests>
+          runStatus?: (repoPath: string, runId: number | string) => Promise<HermesGhRunStatus>
           createPr: (repoPath: string) => Promise<{ url: string }>
         }
         // Repo-first discovery: scan bounded roots for git repos (depth-capped).
@@ -1658,11 +1664,26 @@ export interface HermesBranchPullRequest {
   state: string
   title: string
   url: string
+  checks_state?: string | null
+}
+
+export interface HermesRateLimit {
+  remaining: number
+  resetAt: string
+  cost: number
 }
 
 export interface HermesRepoPullRequests {
   ghReady: boolean
   prs: HermesBranchPullRequest[]
+  rate_limit?: HermesRateLimit
+  error?: 'gh_unavailable' | 'rate_limited' | 'backoff' | string
+}
+
+export interface HermesGhRunStatus {
+  status: string
+  conclusion: string | null
+  error?: 'gh_unavailable' | 'rate_limited' | 'backoff' | string
 }
 
 // gh availability/auth + the current branch's PR — drives the review pane's PR

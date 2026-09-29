@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
@@ -416,6 +417,74 @@ def review_ship_info(cwd: str) -> dict:
     return {"ghReady": True, "pr": None}
 
 
+# Rate-limit guard & backoff state for Conductors
+_rate_limit_suspended_until: float = 0.0
+_last_rate_limit: dict | None = None
+_BACKOFF_STEPS_S = (60.0, 120.0, 300.0, 900.0)
+_repo_failures: dict[str, dict] = {}
+
+
+def _reset_conductors_gh_state_for_testing():
+    global _rate_limit_suspended_until, _last_rate_limit
+    _rate_limit_suspended_until = 0.0
+    _last_rate_limit = None
+    _repo_failures.clear()
+
+
+def _is_repo_backed_off(repo_key: str, now: float | None = None) -> bool:
+    if not repo_key:
+        return False
+    if now is None:
+        now = time.time()
+    entry = _repo_failures.get(repo_key)
+    return bool(entry and now < entry.get("backoff_until", 0.0))
+
+
+def _record_repo_failure(repo_key: str, now: float | None = None) -> None:
+    if not repo_key:
+        return
+    if now is None:
+        now = time.time()
+    entry = _repo_failures.setdefault(repo_key, {"count": 0, "backoff_until": 0.0})
+    count = entry["count"] + 1
+    step_idx = min(count - 1, len(_BACKOFF_STEPS_S) - 1)
+    entry["count"] = count
+    entry["backoff_until"] = now + _BACKOFF_STEPS_S[step_idx]
+
+
+def _record_repo_success(repo_key: str) -> None:
+    _repo_failures.pop(repo_key, None)
+
+
+def _parse_reset_at(reset_at: str | int | float) -> float:
+    if isinstance(reset_at, (int, float)):
+        return float(reset_at if reset_at < 1e11 else reset_at / 1000.0)
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(reset_at).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        try:
+            val = float(reset_at)
+            return val if val < 1e11 else val / 1000.0
+        except (ValueError, TypeError):
+            return 0.0
+
+
+def _record_rate_limit(rl: dict | None) -> None:
+    global _rate_limit_suspended_until, _last_rate_limit
+    if not rl:
+        return
+    remaining = int(rl.get("remaining") or 0)
+    reset_at = str(rl.get("resetAt") or "")
+    cost = int(rl.get("cost") or 0)
+    _last_rate_limit = {"remaining": remaining, "resetAt": reset_at, "cost": cost}
+    if remaining < 200:
+        reset_ts = _parse_reset_at(reset_at)
+        if reset_ts > 0:
+            _rate_limit_suspended_until = reset_ts
+
+
 # GraphQL asks per branch so the answer can't be crowded out like a `gh pr list`
 # page. Aliases carry many branches per request; 50 stays inside GitHub's node budget.
 _PR_QUERY_BRANCH_CHUNK = 50
@@ -423,24 +492,49 @@ _PR_QUERY_BRANCH_CAP = 300
 _PR_NODE_FIELDS = "number state isDraft isCrossRepository title url headRefName"
 
 
-def _pr_query(owner: str, name: str, branches: list[str], numbers: list[int]) -> str:
+def _pr_query(
+    owner: str,
+    name: str,
+    branches: list[str],
+    numbers: list[int],
+    with_checks: bool = False,
+) -> str:
+    branch_node_fields = (
+        f"{_PR_NODE_FIELDS} commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}"
+        if with_checks
+        else _PR_NODE_FIELDS
+    )
     fields = [
         f"b{i}: pullRequests(headRefName: {json.dumps(branch)}, first: 5, "
         f"orderBy: {{field: CREATED_AT, direction: DESC}}) "
-        f"{{ nodes {{ {_PR_NODE_FIELDS} }} }}"
+        f"{{ nodes {{ {branch_node_fields} }} }}"
         for i, branch in enumerate(branches)
     ]
     # A PR recovered from a transcript is known by number; asking directly also
     # yields its branch, so it lands in the same by-branch map.
     fields += [f"n{i}: pullRequest(number: {n}) {{ {_PR_NODE_FIELDS} }}" for i, n in enumerate(numbers)]
+    rate_limit = "\nrateLimit{remaining resetAt cost}" if with_checks else ""
     return (f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{\n"
-            + "\n".join(fields) + "\n} }")
+            + "\n".join(fields) + f"\n}}{rate_limit} }}")
 
 
-def _pr_payload(pr: dict) -> dict:
-    return {"branch": str(pr.get("headRefName")), "draft": bool(pr.get("isDraft")),
-            "number": int(pr.get("number") or 0), "state": str(pr.get("state") or "").lower(),
-            "title": str(pr.get("title") or ""), "url": str(pr.get("url") or "")}
+def _pr_payload(pr: dict, with_checks: bool = False) -> dict:
+    payload = {
+        "branch": str(pr.get("headRefName")),
+        "draft": bool(pr.get("isDraft")),
+        "number": int(pr.get("number") or 0),
+        "state": str(pr.get("state") or "").lower(),
+        "title": str(pr.get("title") or ""),
+        "url": str(pr.get("url") or ""),
+    }
+    if with_checks:
+        commits = pr.get("commits") or {}
+        nodes = commits.get("nodes") or []
+        first_commit = nodes[0].get("commit") if nodes and isinstance(nodes[0], dict) else {}
+        rollup = (first_commit or {}).get("statusCheckRollup") or {}
+        state = rollup.get("state")
+        payload["checks_state"] = str(state) if state is not None else None
+    return payload
 
 
 def _own_pr(key: str, field: dict) -> dict | None:
@@ -453,10 +547,31 @@ def _own_pr(key: str, field: dict) -> dict | None:
     return next((n for n in (field.get("nodes") or []) if n and not n.get("isCrossRepository")), None)
 
 
-def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> dict:
+def review_pr_list(
+    cwd: str,
+    branches: list[str],
+    numbers: list[int] = None,
+    with_checks: bool = False,
+    withChecks: bool | None = None,
+) -> dict:
     """PRs on the given branches (plus any asked for by number) — queried per branch
     rather than paging the repo's newest PRs and hoping ours are in the page."""
+    if withChecks is not None:
+        with_checks = withChecks
+
     not_ready = {"ghReady": False, "prs": []}
+    if with_checks:
+        if time.time() < _rate_limit_suspended_until:
+            return {
+                "ghReady": True,
+                "prs": [],
+                "rate_limit": _last_rate_limit or {"remaining": 0, "resetAt": "", "cost": 0},
+                "error": "rate_limited",
+                "suspended": True,
+            }
+        if _is_repo_backed_off(cwd):
+            return {"ghReady": False, "prs": [], "error": "backoff", "backoff": True}
+
     if not _is_dir(cwd):
         return not_ready
     wanted = list(dict.fromkeys(str(b) for b in (branches or []) if b))[:_PR_QUERY_BRANCH_CAP]
@@ -467,20 +582,49 @@ def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> 
     owner, _, name = repo_out.strip().partition("/")
     if not repo_ok or not owner or not name:
         # gh missing, unauthenticated, or no GitHub remote — all "nothing to badge".
+        if with_checks:
+            return {"ghReady": False, "prs": [], "error": "gh_unavailable", "gh_unavailable": True}
         return not_ready
 
+    repo_key = f"{owner}/{name}"
+    if with_checks and _is_repo_backed_off(repo_key):
+        return {"ghReady": False, "prs": [], "error": "backoff", "backoff": True}
+
     prs: list[dict] = []
+    rate_limit: dict | None = None
     step = _PR_QUERY_BRANCH_CHUNK
     chunks = ([(wanted[i:i + step], []) for i in range(0, len(wanted), step)]
               + [([], by_number[i:i + step]) for i in range(0, len(by_number), step)])
     for branch_chunk, number_chunk in chunks:
         # A failed/malformed chunk drops its branches; the rest still resolve.
-        data = _gh_json(cwd, ["api", "graphql", "-f", f"query={_pr_query(owner, name, branch_chunk, number_chunk)}"])
+        query_str = _pr_query(owner, name, branch_chunk, number_chunk, with_checks=with_checks)
+        data = _gh_json(cwd, ["api", "graphql", "-f", f"query={query_str}"])
+        if data is None:
+            if with_checks:
+                _record_repo_failure(repo_key)
+                _record_repo_failure(cwd)
+            continue
+
+        if with_checks:
+            _record_repo_success(repo_key)
+            _record_repo_success(cwd)
+            rl = (data or {}).get("data", {}).get("rateLimit") or (data or {}).get("rateLimit")
+            if isinstance(rl, dict):
+                rate_limit = {
+                    "remaining": int(rl.get("remaining") or 0),
+                    "resetAt": str(rl.get("resetAt") or ""),
+                    "cost": int(rl.get("cost") or 0),
+                }
+                _record_rate_limit(rate_limit)
+
         repository = ((data or {}).get("data") or {}).get("repository") or {}
         for key, field in repository.items():
             pr = _own_pr(key, field) if field else None
             if pr and pr.get("headRefName"):
-                prs.append(_pr_payload(pr))
+                prs.append(_pr_payload(pr, with_checks=with_checks))
+
+    if with_checks:
+        return {"ghReady": True, "prs": prs, "rate_limit": rate_limit}
     return {"ghReady": True, "prs": prs}
 
 
