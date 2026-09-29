@@ -101,7 +101,7 @@ export function registerGitIpc({ resolveGitBinary, resolveGhBinary }: GitIpcDeps
   ipcMain.handle('hermes:git:review:push', async (_event, repoPath) => reviewPush(repoPath, resolveGitBinary()))
   ipcMain.handle('hermes:git:review:shipInfo', async (_event, repoPath) => reviewShipInfo(repoPath, resolveGhBinary()))
   ipcMain.handle('hermes:git:review:prList', async (_event, repoPath, branches, numbers, withChecks) =>
-    reviewPrList(repoPath, resolveGhBinary(), branches, numbers, withChecks)
+    reviewPrList(repoPath, resolveGhBinary(), branches, numbers, withChecks === true)
   )
   ipcMain.handle('hermes:git:review:runStatus', async (_event, repoPath, runId) =>
     ghRunStatus(repoPath, runId, resolveGhBinary())

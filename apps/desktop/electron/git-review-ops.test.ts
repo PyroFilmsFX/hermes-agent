@@ -424,3 +424,27 @@ test('ghRunStatus and reviewPrList pass argv arrays only to runGh', async () => 
     }
   }
 })
+
+test('ghRunStatus refuses run ids and repo slugs that could reshape the gh api path', async () => {
+  _resetConductorsGhStateForTesting()
+  const runRequests: string[][] = []
+  setRunGhForTesting(async args => {
+    if (args.some(arg => arg.includes('actions/runs'))) {
+      runRequests.push(args)
+    }
+    return { ok: true, stdout: 'completed\nsuccess\n' }
+  })
+
+  for (const runId of ['../../user', '1?per_page=100', '12/jobs', '', '-5', 'abc']) {
+    const res = await ghRunStatus('org/repo', runId)
+    assert.equal(res.error, 'invalid_run_id', `run id ${JSON.stringify(runId)}`)
+  }
+
+  for (const repo of ['org/..', 'org/repo?x=1', 'o rg/repo']) {
+    const res = await ghRunStatus(repo, '101')
+    assert.notEqual(res.status, 'completed', `repo ${JSON.stringify(repo)}`)
+  }
+
+  // A non-slug repo may be looked up as a path (`gh repo view`), but no run request goes out.
+  assert.deepEqual(runRequests, [])
+})

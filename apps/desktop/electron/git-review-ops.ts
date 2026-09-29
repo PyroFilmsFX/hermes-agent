@@ -705,10 +705,20 @@ function getAnyCachedRunStatus(runId: string | number): { status: string; conclu
   return null
 }
 
+// GitHub owner/repo names only: these end up in a `gh api` path, so nothing that could
+// add path segments, a query string or a dot-segment gets through.
+const GH_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
+const GH_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/
+const GH_RUN_ID_RE = /^[1-9][0-9]{0,19}$/
+
+function isValidRepoSlug(owner: string, name: string): boolean {
+  return GH_OWNER_RE.test(owner) && GH_REPO_RE.test(name) && name !== '.' && name !== '..'
+}
+
 function parseRepoSlug(repo: string): { owner: string; name: string } | null {
   if (repo && typeof repo === 'string' && repo.includes('/') && !repo.startsWith('/') && !repo.startsWith('.')) {
     const parts = repo.split('/')
-    if (parts.length === 2 && parts[0] && parts[1]) {
+    if (parts.length === 2 && isValidRepoSlug(parts[0], parts[1])) {
       return { owner: parts[0], name: parts[1] }
     }
   }
@@ -915,7 +925,11 @@ async function ghRunStatus(
   runId: number | string,
   ghBin?: string
 ): Promise<{ status: string; conclusion: string | null; error?: string; gh_unavailable?: boolean }> {
-  const idStr = String(runId)
+  const idStr = String(runId ?? '').trim()
+
+  if (!GH_RUN_ID_RE.test(idStr)) {
+    return { status: 'unknown', conclusion: null, error: 'invalid_run_id' }
+  }
 
   // 1. Rate-limit suspension check
   if (checkRateLimitSuspension()) {
@@ -943,7 +957,8 @@ async function ghRunStatus(
     try {
       cwd = resolveRequestedPathForIpc(repo, { purpose: 'ghRunStatus' })
     } catch {
-      cwd = repo
+      // Neither a slug nor an allowed path: never fall back to the raw renderer string.
+      return { status: 'unknown', conclusion: null, error: 'invalid_repo' }
     }
     const cachedOwner = repoOwnerCache.get(cwd)
     if (cachedOwner) {
@@ -965,7 +980,7 @@ async function ghRunStatus(
         return { status: 'unknown', conclusion: null, error: 'api_error' }
       }
       const parts = String(repoRes?.stdout || '').trim().split('/')
-      if (parts.length === 2 && parts[0] && parts[1]) {
+      if (parts.length === 2 && isValidRepoSlug(parts[0], parts[1])) {
         owner = parts[0]
         repoName = parts[1]
         repoKey = `${owner}/${repoName}`
