@@ -238,6 +238,18 @@ def test_desktop_js_job_detection(tmp_path: Path) -> None:
     assert "src/store/profile.test.tsx" in result["desktop_files"]
 
 
+def test_shared_js_change_runs_the_desktop_typecheck_without_desktop_tests(tmp_path: Path) -> None:
+    """apps/shared/src compiles into the renderer and electron builds, so a change there alone
+    must flag desktop (typecheck job) while selecting no desktop test files."""
+    (tmp_path / "apps" / "shared" / "src").mkdir(parents=True)
+    (tmp_path / "apps" / "shared" / "src" / "ansi.ts").write_text("export const a = 1;\n", encoding="utf-8")
+
+    result = select_tests(["apps/shared/src/ansi.ts"], repo_root=tmp_path)
+
+    assert result["desktop"] is True
+    assert result["desktop_files"] == []
+
+
 def test_cli_invocation_json(tmp_path: Path) -> None:
     """CLI prints valid JSON with mode and files."""
     script = REPO_ROOT / "scripts" / "ci" / "select_tests.py"

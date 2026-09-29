@@ -249,10 +249,14 @@ def select_tests(
     root = (repo_root or Path.cwd()).resolve()
     normalized = [p.replace("\\", "/").strip() for p in changed_files if p.strip()]
 
-    # Desktop detection: any change under apps/desktop/**
+    # Desktop detection: any change under apps/desktop/** (tests) or apps/shared/** (the desktop
+    # typecheck compiles apps/shared/src into both the renderer and the electron main build)
     desktop = False
     desktop_files: Set[str] = set()
     for norm in normalized:
+        if norm.startswith("apps/shared/"):
+            desktop = True
+            continue
         if norm == "apps/desktop" or norm.startswith("apps/desktop/"):
             desktop = True
             rel = norm[len("apps/desktop/") :] if norm.startswith("apps/desktop/") else ""
