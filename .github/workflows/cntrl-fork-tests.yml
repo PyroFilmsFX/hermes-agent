@@ -232,3 +232,111 @@ jobs:
         run: |
           read -r -a files <<< "$DESKTOP_FILES"
           npx vitest run "${files[@]}" --maxWorkers=4
+
+  desktop-typecheck:
+    # Every desktop change type-checks all four desktop projects. The electron main process
+    # builds with strictNullChecks off, so a narrowing that passes the renderer check can still
+    # break it; the changed-tests job above never ran tsc (c0deb07865 went green that way).
+    if: github.repository == 'ThinkBotHQ/hermes-agent' && needs.classify.outputs.desktop == 'true'
+    needs: classify
+    name: Desktop typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up the locked JS build toolchain
+        id: node
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Restore node_modules
+        id: node-modules-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            ui-tui/node_modules
+            ui-tui/packages/*/node_modules
+            tests-js/node_modules
+            web/node_modules
+          key: cntrl-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-npm${{ steps.node.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
+
+      - uses: ./.github/actions/retry
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        with:
+          command: npm ci
+
+      - name: Type-check renderer, electron main, e2e and builder config
+        working-directory: apps/desktop
+        run: npm run typecheck
+
+  desktop-launch-smoke:
+    # Type-checks and unit tests cannot see a launch crash: c0deb0749c passed both and crashed every
+    # launch (a module-load read of primaryProfilePin before its declaration). Build the real app
+    # and start it headless under xvfb; apps/desktop/scripts/smoke-launch.mjs passes only when the
+    # main window finishes loading and the app exits 0 (HERMES_DESKTOP_SMOKE=1, see
+    # electron/smoke-launch-guard.ts). Linux runner only: it never opens a window on a Mac.
+    # ~/bin/hermes-dev (scripts/cntrl/hermes-dev) requires this check to pass before it
+    # fast-forwards the live checkout, so keep the job name stable.
+    if: github.repository == 'ThinkBotHQ/hermes-agent' && (needs.classify.outputs.desktop == 'true' || startsWith(github.ref, 'refs/heads/sync/land'))
+    needs: classify
+    name: Desktop launch smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up the locked JS build toolchain
+        id: node
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Restore node_modules
+        id: node-modules-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            ui-tui/node_modules
+            ui-tui/packages/*/node_modules
+            tests-js/node_modules
+            web/node_modules
+          key: cntrl-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-npm${{ steps.node.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
+
+      - uses: ./.github/actions/retry
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        with:
+          command: npm ci
+
+      - name: Install xvfb and the Electron runtime libraries
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # Ubuntu 24.04 renamed libasound2 to libasound2t64; take whichever exists.
+          asound=libasound2t64
+          apt-cache show libasound2t64 >/dev/null 2>&1 || asound=libasound2
+          sudo apt-get install -y -qq --no-install-recommends xvfb xauth libnss3 libatk1.0-0 \
+            libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 libgbm1 libxss1 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxrandr2 libpango-1.0-0 libsecret-1-0 "$asound"
+
+      - name: Ensure the Electron binary is present
+        working-directory: apps/desktop
+        # A node_modules cache saved by a job whose install skipped the download has no binary.
+        run: node -e "require('electron')" 2>/dev/null || node "$(node -p "require.resolve('electron/install.js')")"
+
+      - name: Build the desktop app
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Launch the built app headless and wait for the main window
+        working-directory: apps/desktop
+        run: xvfb-run -a --server-args="-screen 0 1440x900x24" node scripts/smoke-launch.mjs
