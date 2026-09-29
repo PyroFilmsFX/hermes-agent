@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   test:
-    if: github.repository == 'PyroFilmsFX/hermes-agent'
+    if: github.repository == 'ThinkBotHQ/hermes-agent'
     name: Tests (slice ${{ matrix.slice }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 60

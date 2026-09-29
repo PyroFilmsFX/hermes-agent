@@ -55,7 +55,7 @@ inventory. Keep our side for those hunks unless upstream moved the code.
 
 ## This repo is PUBLIC
 
-`myfork` = https://github.com/PyroFilmsFX/hermes-agent, a public fork. GitHub
+`myfork` = https://github.com/ThinkBotHQ/hermes-agent, a public fork. GitHub
 forks of a public repo cannot be made private. So:
 
 - Never commit anything under `.hermes-test/`, `.sdkprobe/`, `.claude/state/`,
