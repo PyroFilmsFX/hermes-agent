@@ -378,6 +378,7 @@ import {
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { createSessionBindingIpcHandlers } from './session-binding-ipc'
+import { createSessionAttestationIssuer } from './session-binding-issuer'
 import { createSessionBindingStore } from './session-binding-store'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
@@ -8104,6 +8105,26 @@ const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
   log: message => rememberLog(message)
 })
 
+// b10 H7a/H7b: session-binding store and launch-attestation issuer.
+const sessionBindingStore = createSessionBindingStore({
+  store: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir()
+})
+sessionBindingStore.loadAll()
+
+const sessionBindingIssuer = createSessionAttestationIssuer({
+  bindingStore: sessionBindingStore,
+  keyStore: ownerGrantKeyStore,
+  grantsDir: defaultOwnerGrantsDir(),
+  ownerUid: process.getuid?.() ?? -1,
+  backend: ownerGrantBackendIds.get(primaryProfileKey()) ?? 'spawn-1',
+  getBackendId: (profile: string) => ownerGrantBackendIds.get(profile) ?? null,
+  fetchJson: (path: string) => fetchJsonForRunningProfile(primaryProfileKey(), path),
+  now: () => Date.now(),
+  log: message => rememberLog(message)
+})
+sessionBindingIssuer.start()
+
 /** The session's live Claude CLI id as its backend announces it (never the state.db column). */
 async function ownerGrantLiveClaudeId(backendProfile: string, profile: string, sessionId: string): Promise<string | null> {
   const row: any = await fetchJsonForRunningProfile(
@@ -15492,13 +15513,7 @@ const handleOwnerGrantAction = createOwnerGrantActionHandler({
 
 ipcMain.handle('hermes:owner-grant:action', async (event: any, action: any) => handleOwnerGrantAction(event, action))
 
-// b10 H8: session-binding store and IPC handlers (set/clear/status).
-const sessionBindingStore = createSessionBindingStore({
-  store: ownerGrantKeyStore,
-  grantsDir: defaultOwnerGrantsDir()
-})
-sessionBindingStore.loadAll()
-
+// b10 H8: session-binding IPC handlers (set/clear/status).
 async function confirmSessionRebind(details: {
   profile: string
   hermes_session_id: string
@@ -15541,13 +15556,23 @@ const sessionBindingHandlers = createSessionBindingIpcHandlers({
   isTrustedSender: isOwnerAppChromeSender,
   store: sessionBindingStore,
   confirmRebind: confirmSessionRebind,
-  isAttestationLive: () => false,
+  isAttestationLive: (profile, hermes_session_id) => sessionBindingIssuer.isAttestationLive(profile, hermes_session_id),
   now: () => Date.now(),
   log: message => rememberLog(message)
 })
 
 ipcMain.handle('hermes:session-binding:set', async (event: any, params: any) => sessionBindingHandlers.set(event, params))
-ipcMain.handle('hermes:session-binding:clear', async (event: any, params: any) => sessionBindingHandlers.clear(event, params))
+ipcMain.handle('hermes:session-binding:clear', async (event: any, params: any) => {
+  const result = await sessionBindingHandlers.clear(event, params)
+  if (result.ok && params && typeof params === 'object') {
+    const profile = (params as any).profile
+    const hermes_session_id = (params as any).hermes_session_id
+    if (typeof profile === 'string' && typeof hermes_session_id === 'string') {
+      sessionBindingIssuer.revoke(profile, hermes_session_id)
+    }
+  }
+  return result
+})
 ipcMain.handle('hermes:session-binding:status', async (event: any, params: any) => sessionBindingHandlers.status(event, params))
 
 const OWNER_SOURCE_ROLES = new Set(['assistant', 'peer', 'user'])

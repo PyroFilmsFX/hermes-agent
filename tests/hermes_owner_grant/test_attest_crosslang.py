@@ -47,3 +47,41 @@ def test_ts_signed_attestation_verifies_in_python(tmp_path):
 def test_ts_signed_binding_and_grant_never_verify_as_attestations(tmp_path):
     for name in ("binding_envelope", "grant_envelope"):
         assert not _verify(FIXTURE[name], tmp_path).ok, name
+
+
+ISSUER_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "attest_issuer_vector.json"
+
+
+def test_issuer_emitted_attestation_verifies(tmp_path):
+    assert ISSUER_FIXTURE_PATH.exists(), "attest_issuer_vector.json fixture must exist"
+    data = json.loads(ISSUER_FIXTURE_PATH.read_text())
+    key = data["anchor_key"]
+    anchor = anchor_mod.Anchor(
+        owner_uid=data["owner_uid"],
+        grants_dir=str(tmp_path),
+        keys=(
+            anchor_mod.AnchorKey(
+                kid=key["kid"],
+                alg=key["alg"],
+                pub=env_mod.b64url_decode(key["pub"]),
+                status=key["status"],
+                not_before=key.get("not_before", 0),
+                retired_at=key.get("retired_at"),
+            ),
+        ),
+        verifier_sha256=None,
+        sha256="0" * 64,
+    )
+    result = attest_mod.verify_attestation_envelope(
+        data["envelope"],
+        claude_session=data["claude_session_id"],
+        uid=data["owner_uid"],
+        now=data["issued_at"] + 60_000,
+        session=data["hermes_session_id"],
+        anchor=anchor,
+    )
+    assert result.ok, (result.reason, result.detail)
+    assert result.hermes_session_id == data["hermes_session_id"]
+    assert result.claude_session_id == data["claude_session_id"]
+    assert result.binding_nonce == data["binding_nonce"]
+    assert result.project_root == data["project_root"]
