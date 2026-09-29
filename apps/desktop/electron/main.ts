@@ -370,7 +370,11 @@ import {
   type OwnerGrantConfirmRequest,
   readInstalledOwnerVerifierManifest
 } from './owner-grant-anchor-install'
-import { CONTINUITY_OBSERVE_MS, createOwnerGrantContinuityIssuer } from './owner-grant-continuity'
+import {
+  collectLiveSessions,
+  CONTINUITY_OBSERVE_MS,
+  createOwnerGrantContinuityIssuer
+} from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
@@ -8089,22 +8093,11 @@ const ownerGrantContinuity = createOwnerGrantContinuityIssuer({
   grantsDir: defaultOwnerGrantsDir(),
   ownerUid: process.getuid?.() ?? -1,
   now: () => Date.now(),
-  listLiveSessions: async backendProfile => {
-    const listed: any = await fetchJsonForRunningProfile(
-      backendProfile,
-      `/api/sessions?profile=${encodeURIComponent(backendProfile)}&limit=20&order=recent`
-    )
-
-    const rows: any[] = Array.isArray(listed?.sessions) ? listed.sessions : Array.isArray(listed) ? listed : []
-    const active = rows.filter(row => row && typeof row.id === 'string' && row.id && !row.ended_at).slice(0, 10)
-    const out: Array<{ profile: string; sessionId: string; live: string | null }> = []
-
-    for (const row of active) {
-      out.push({ profile: backendProfile, sessionId: row.id, live: await ownerGrantLiveClaudeId(backendProfile, backendProfile, row.id) })
-    }
-
-    return out
-  },
+  listLiveSessions: backendProfile =>
+    collectLiveSessions(backendProfile, {
+      fetchJson: path => fetchJsonForRunningProfile(backendProfile, path),
+      readLive: (bp, p, sid) => ownerGrantLiveClaudeId(bp, p, sid)
+    }),
   readLive: (backendProfile, profile, sessionId) => ownerGrantLiveClaudeId(backendProfile, profile, sessionId),
   log: message => rememberLog(message)
 })

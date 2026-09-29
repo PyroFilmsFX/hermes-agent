@@ -42,6 +42,7 @@ from agent.claude_sdk_runtime_continuity import (
     _persisted_sdk_session_id,
     _render_continuity_digest,
     _store_sdk_session_id,
+    _persist_steer_boundary,
 )
 from agent.claude_sdk_runtime_prompt import build_system_prompt_append
 from agent.claude_sdk_runtime_context import _coerce_usage_int
@@ -1429,6 +1430,12 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
                 session._turn_activity_hook = hook
             except Exception:
                 pass
+        # The SDK reader settles multiple queries inside this one host turn.
+        # Refresh the target list every run because a cached SDK session can
+        # span many Hermes turns, each with a different live message list.
+        session._on_steer_settled = functools.partial(
+            _persist_steer_boundary, agent, state.messages
+        )
         try:
             turn = session.run_turn(user_input=send_input)
         except Exception as exc:

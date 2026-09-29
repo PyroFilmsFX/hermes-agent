@@ -215,7 +215,112 @@ export interface ContinuityIssuer {
   onBackendRelaunch(backendProfile: string, backend: string): Promise<ContinuityOutcome[]>
 }
 
-const MAX_OBSERVED = 256
+export const MAX_OBSERVED = 256
+
+export interface CollectLiveSessionsPorts {
+  fetchJson: (path: string) => Promise<unknown>
+  readLive: (backendProfile: string, profile: string, sessionId: string) => Promise<string | null>
+}
+
+export interface CollectLiveSessionsOptions {
+  pageSize?: number
+  maxPages?: number
+  maxActive?: number
+  concurrency?: number
+}
+
+/**
+ * Paginates GET /api/sessions on the backend to observe every session with a live
+ * Claude CLI, without arbitrary 10-count or 20-row caps.
+ *
+ * Concurrency to readLive is capped at <= 4 (default 4) to prevent N-fanout spikes,
+ * and request counts are bounded (maxPages, maxActive). Observations are main-owned
+ * via readLive (never state.db columns).
+ */
+export async function collectLiveSessions(
+  backendProfile: string,
+  ports: CollectLiveSessionsPorts,
+  opts: CollectLiveSessionsOptions = {}
+): Promise<ContinuityLiveSession[]> {
+  if (!nonEmpty(backendProfile)) {
+    return []
+  }
+
+  const pageSize = Math.min(100, Math.max(1, opts.pageSize ?? 100))
+  const maxPages = Math.max(1, opts.maxPages ?? 10)
+  const maxActive = Math.max(1, opts.maxActive ?? MAX_OBSERVED)
+  const concurrency = Math.min(4, Math.max(1, opts.concurrency ?? 4))
+
+  const activeCandidates: Array<{ id: string; profile: string }> = []
+  const seenIds = new Set<string>()
+
+  let offset = 0
+  for (let page = 0; page < maxPages; page++) {
+    const path = `/api/sessions?profile=${encodeURIComponent(backendProfile)}&limit=${pageSize}&offset=${offset}&order=recent`
+    let data: any
+    try {
+      data = await ports.fetchJson(path)
+    } catch {
+      break
+    }
+
+    const rows: any[] = Array.isArray(data?.sessions)
+      ? data.sessions
+      : Array.isArray(data)
+        ? data
+        : []
+
+    if (rows.length === 0) {
+      break
+    }
+
+    for (const row of rows) {
+      if (row && typeof row.id === 'string' && row.id && !row.ended_at && !seenIds.has(row.id)) {
+        seenIds.add(row.id)
+        const profile = typeof row.profile === 'string' && row.profile ? row.profile : backendProfile
+        activeCandidates.push({ id: row.id, profile })
+        if (activeCandidates.length >= maxActive) {
+          break
+        }
+      }
+    }
+
+    if (activeCandidates.length >= maxActive) {
+      break
+    }
+
+    const total = typeof data?.total === 'number' ? data.total : null
+    offset += rows.length
+    if (rows.length < pageSize || (total !== null && offset >= total)) {
+      break
+    }
+  }
+
+  if (activeCandidates.length === 0) {
+    return []
+  }
+
+  const out = new Array<ContinuityLiveSession>(activeCandidates.length)
+  let nextIdx = 0
+  const worker = async () => {
+    while (nextIdx < activeCandidates.length) {
+      const idx = nextIdx++
+      const candidate = activeCandidates[idx]
+      let live: string | null = null
+      try {
+        live = await ports.readLive(backendProfile, candidate.profile, candidate.id)
+      } catch {
+        live = null
+      }
+      out[idx] = { profile: candidate.profile, sessionId: candidate.id, live }
+    }
+  }
+
+  const workerCount = Math.min(concurrency, activeCandidates.length)
+  await Promise.all(Array.from({ length: workerCount }, worker))
+
+  return out
+}
 
 export function createOwnerGrantContinuityIssuer(ports: ContinuityIssuerPorts): ContinuityIssuer {
   // backend profile -> `<profile>\u0000<session id>` -> the latest observation (main-owned memory)

@@ -460,6 +460,108 @@ def test_two_steers_keep_foreground_ownership_until_both_results():
     )
 
 
+def test_steer_results_are_durable_before_turn_release_without_end_duplicates(tmp_path):
+    """Each settled live steer reaches state.db before the foreground turn ends."""
+    from types import SimpleNamespace
+
+    from agent.claude_sdk_runtime_continuity import _persist_turn
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from run_agent import AIAgent
+    from hermes_state import SessionDB
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, StreamEvent, TextBlock, _FakeClient,
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("steer-durability", source="test")
+    db.append_message("steer-durability", "user", "initial")
+    messages = db.get_messages_as_conversation("steer-durability")
+    agent = SimpleNamespace(
+        _session_db=db, _session_db_created=True, _persist_disabled=False,
+        session_id="steer-durability", _session_persist_lock=None,
+        _flushed_db_message_ids=set(), _flushed_db_message_session_id=None,
+        _last_flushed_db_idx=0, _persist_user_message_idx=None,
+        _persist_user_message_override=None, _persist_user_message_timestamp=None,
+        _pending_cli_user_message=None,
+    )
+    agent._ensure_db_session = lambda: None
+    agent._flush_messages_to_session_db = AIAgent._flush_messages_to_session_db.__get__(agent, AIAgent)
+    agent._flush_messages_to_session_db_unlocked = AIAgent._flush_messages_to_session_db_unlocked.__get__(agent, AIAgent)
+
+    def on_steer_settled(steer_text, projected_messages):
+        assert session._turn_inbox is not None, "the host turn must still own the stream at persistence"
+        if steer_text:
+            messages.append({"role": "user", "content": steer_text})
+        messages.extend(projected_messages)
+        assert agent._flush_messages_to_session_db(messages) is True
+        if steer_text:
+            saved = db.get_messages("steer-durability")
+            assert any(row["role"] == "assistant" and row["content"] == f"answer to {steer_text}" for row in saved)
+
+    def result(text, uuid, origin=None):
+        message = ResultMessage(result=text, uuid=uuid)
+        message.origin = origin
+        return message
+
+    class DurableTwoSteerClient(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(StreamEvent(event={
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "working"},
+                }))
+                self._pending.append(AssistantMessage(content=[TextBlock("initial progress")]))
+                self._pending.append(result("initial settled", "initial-result"))
+                return
+            payload = [message async for message in prompt]
+            self.queried.append(payload)
+            text = payload[0]["message"]["content"]
+            self._pending.append(AssistantMessage(content=[TextBlock(f"answer to {text}")]))
+            self._pending.append(result(f"answer to {text}", f"{text}-result", {"kind": "human"}))
+
+    holder = {}
+    sent = 0
+
+    def factory(options=None):
+        holder["client"] = DurableTwoSteerClient(options=options)
+        return holder["client"]
+
+    def on_delta(_text):
+        nonlocal sent
+        if sent == 0:
+            sent = 1
+            assert session.steer("correction-1") is True
+            assert session.steer("correction-2") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=factory,
+        on_stream_delta=on_delta,
+    )
+    session._on_steer_settled = on_steer_settled
+    try:
+        turn = session.run_turn("initial")
+        assert turn.turn_id == "correction-2-result"
+        _persist_turn(agent, SimpleNamespace(
+            turn=turn, messages=messages, failover_reason=None,
+            turn_session_cwd=None,
+        ))
+    finally:
+        session.close()
+
+    saved = db.get_messages("steer-durability")
+    assert [(row["role"], row["content"]) for row in saved if row["role"] in {"user", "assistant"}] == [
+        ("user", "initial"),
+        ("assistant", "initial progress"),
+        ("user", "correction-1"),
+        ("assistant", "answer to correction-1"),
+        ("user", "correction-2"),
+        ("assistant", "answer to correction-2"),
+    ]
+    assert all(message.get(_DB_PERSISTED_MARKER) for message in messages if message.get("role") in {"user", "assistant"})
+
+
 def test_steer_admitted_during_result_projection_remains_foreground_owned(monkeypatch):
     """A steer admitted in the projection/commit gap stays in this turn."""
     from agent.transports import claude_agent_sdk_session_turn as turn_module

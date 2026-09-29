@@ -13,6 +13,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
+  collectLiveSessions,
   CONTINUITY_OBSERVATION_MAX_AGE_MS,
   CONTINUITY_POLL_MS,
   CONTINUITY_SCOPE,
@@ -244,6 +245,88 @@ describe('the observer and the relaunch watcher (main\'s backend lifecycle only)
     expect(w.liveReads.length).toBeGreaterThan(1)
     expect(w.liveReads.length).toBeLessThanOrEqual(10 * 60_000 / CONTINUITY_POLL_MS)
     expect(grants(w.grantsDir)).toEqual([])
+  })
+
+  test('observes live sessions beyond the old 10-active / 20-row slice with bounded concurrency and pagination', async () => {
+    // 25 total sessions:
+    // Page 0 (rows 0-19): 8 ended sessions and 12 active sessions (sess-0 .. sess-11).
+    // Page 1 (rows 20-24): 5 active sessions (sess-12 .. sess-16) - beyond the 20-row limit!
+    // Active session 15 (sess-15) is both past the 10-active slice and on page 2 (past 20 rows).
+    const rowsPage0 = [
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `ended-${i}`, ended_at: NOW - 100_000 })),
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `sess-${i}`, ended_at: null }))
+    ]
+    const rowsPage1 = Array.from({ length: 5 }, (_, i) => ({ id: `sess-${i + 12}`, ended_at: null }))
+
+    const requestedPaths: string[] = []
+    let inFlightReads = 0
+    let maxInFlightReads = 0
+
+    const OLD_15 = '5b0d8a3e-0c7e-4c2e-9d5f-3f1f7d9a0b15'
+    const NEW_15 = '9c4e2f10-7a1b-4d3c-8e5f-0a1b2c3d4e15'
+
+    const fetchJson = async (path: string) => {
+      requestedPaths.push(path)
+      if (path.includes('offset=0')) {
+        return { sessions: rowsPage0, total: 25 }
+      }
+      if (path.includes('offset=20')) {
+        return { sessions: rowsPage1, total: 25 }
+      }
+      return { sessions: [], total: 25 }
+    }
+
+    const readLive = async (_bp: string, _p: string, sid: string) => {
+      inFlightReads++
+      maxInFlightReads = Math.max(maxInFlightReads, inFlightReads)
+      await new Promise(r => setTimeout(r, 5))
+      inFlightReads--
+      if (sid === 'sess-15') {
+        return OLD_15
+      }
+      return null
+    }
+
+    const collected = await collectLiveSessions('default', { fetchJson, readLive }, { pageSize: 20, concurrency: 4 })
+
+    expect(requestedPaths.some(p => p.includes('offset=0'))).toBe(true)
+    expect(requestedPaths.some(p => p.includes('offset=20'))).toBe(true)
+    expect(maxInFlightReads).toBeGreaterThan(0)
+    expect(maxInFlightReads).toBeLessThanOrEqual(4)
+
+    const sess15 = collected.find(s => s.sessionId === 'sess-15')
+    expect(sess15).toBeDefined()
+    expect(sess15?.live).toBe(OLD_15)
+
+    const s = readyStore()
+    let now = NOW
+    const liveMap: Record<string, string | null> = { 'default:sess-15': NEW_15 }
+
+    const issuer = createOwnerGrantContinuityIssuer({
+      store: s.store,
+      grantsDir: s.grantsDir,
+      ownerUid: 501,
+      now: () => now,
+      listLiveSessions: backendProfile =>
+        collectLiveSessions(backendProfile, { fetchJson, readLive }, { pageSize: 20, concurrency: 4 }),
+      readLive: async (_bp, p, sid) => liveMap[`${p}:${sid}`] ?? null,
+      setTimer: (fn, ms) => {
+        now += ms
+        queueMicrotask(fn)
+        return 0
+      }
+    })
+
+    await issuer.observe('default', 'spawn_1')
+
+    const outcomes = await issuer.onBackendRelaunch('default', 'spawn_2')
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ issued: true })
+
+    const p = JSON.parse(Buffer.from((outcomes[0] as any).envelope.payload, 'base64url').toString('utf8'))
+    expect(p.subject[CONTINUITY_SCOPE]).toBe(`${OLD_15}:${NEW_15}`)
+    expect(p.hermes_session_id).toBe('sess-15')
+    expect(grants(s.grantsDir)).toHaveLength(1)
   })
 
   test('the issuer has no request-facing entry point: only observe and onBackendRelaunch', () => {

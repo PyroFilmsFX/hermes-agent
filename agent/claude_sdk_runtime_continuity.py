@@ -582,12 +582,28 @@ def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     )
 
 
+def _persist_steer_boundary(agent, messages, steer_text, projected_messages) -> None:
+    """Persist the live SDK projection at a settled injected-user boundary."""
+    if steer_text:
+        messages.append({"role": "user", "content": steer_text})
+    messages.extend(projected_messages)
+    if getattr(agent, "_session_db", None) is not None:
+        try:
+            agent._flush_messages_to_session_db(messages)
+        except Exception:
+            logger.debug("claude-sdk steer-boundary flush failed", exc_info=True)
+
+
 def _persist_turn(agent, state: _SdkTurnState) -> None:
     """Flush the projected rows FIRST, then persist the SDK resume id."""
     turn = state.turn
     messages = state.messages
     if turn.projected_messages:
-        messages.extend(turn.projected_messages)
+        present = {id(message) for message in messages}
+        messages.extend(
+            message for message in turn.projected_messages
+            if id(message) not in present
+        )
         # Early-return path bypasses conversation_loop's per-step persistence;
         # flush the new projected rows ourselves (idempotent via the intrinsic
         # _DB_PERSISTED_MARKER — the user turn was flushed at turn start).

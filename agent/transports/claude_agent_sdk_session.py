@@ -374,6 +374,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # still belongs to the foreground Hermes turn.  The SDK multiplexes
         # these results on the same stream and marks them with human origin.
         self._pending_steer_results = 0
+        self._pending_steer_inputs: list[str] = []
         # The foreground coroutine owns this acknowledgement while waiting
         # for the reader to publish its claim.  Shutdown resolves it even if
         # the reader cancellation has already dequeued the claim.
@@ -1228,6 +1229,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         # nowhere. Decline instead and let the caller queue it normally. The
         # terminal fence is checked under the same lock as ResultMessage
         # acceptance, closing the result/steer race at the ownership edge.
+        cleaned = text.strip()
         commit_lock = getattr(self, "_interrupt_commit_lock", None)
         with commit_lock if commit_lock is not None else contextlib.nullcontext():
             if getattr(self, "_terminal_result_committed", False):
@@ -1235,6 +1237,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             if self._turn_inbox is None:
                 return False
             self._pending_steer_results = getattr(self, "_pending_steer_results", 0) + 1
+            self._pending_steer_inputs = getattr(self, "_pending_steer_inputs", [])
+            self._pending_steer_inputs.append(cleaned)
         client = self._client
         loop = self._loop
         if client is None or loop is None:
@@ -1242,8 +1246,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._pending_steer_results = max(
                     0, getattr(self, "_pending_steer_results", 0) - 1
                 )
+                if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
+                    self._pending_steer_inputs.pop()
             return False
-        cleaned = text.strip()
         try:
             query = client.query(_sdk_user_message_stream(cleaned, origin={"kind": "human"}))
             future = asyncio.run_coroutine_threadsafe(query, loop)
@@ -1261,6 +1266,9 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                         self._pending_steer_results = max(
                             0, getattr(self, "_pending_steer_results", 0) - 1
                         )
+                        inputs = getattr(self, "_pending_steer_inputs", [])
+                        if cleaned in inputs:
+                            inputs.remove(cleaned)
                     logger.debug("SDK steer query failed after scheduling", exc_info=True)
 
             future.add_done_callback(_finish_steer)
@@ -1271,6 +1279,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 self._pending_steer_results = max(
                     0, getattr(self, "_pending_steer_results", 0) - 1
                 )
+                if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
+                    self._pending_steer_inputs.pop()
             logger.debug("SDK steer scheduling failed", exc_info=True)
             return False
         logger.info(

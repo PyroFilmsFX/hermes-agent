@@ -948,6 +948,7 @@ class ClaudeSdkTurnMixin:
         interrupted = False
         billing_guarded = False
         held_interim_assistant: Any = None
+        persisted_projection_count = 0
 
         def _flush_interim_assistant() -> None:
             nonlocal held_interim_assistant
@@ -1139,9 +1140,24 @@ class ClaudeSdkTurnMixin:
                         is_steer_result = pending_steer > 0 and _is_human_origin(message)
                         if is_steer_result:
                             self._pending_steer_results = pending_steer - 1
+                            pending_inputs = getattr(self, "_pending_steer_inputs", [])
+                            steer_text = pending_inputs.pop(0) if pending_inputs else None
+                        else:
+                            steer_text = None
                         pending_steer_after = getattr(
                             self, "_pending_steer_results", 0
                         )
+                    # The runtime owns the canonical Hermes transcript. Publish
+                    # every projection settled before this SDK boundary there
+                    # while the live turn still owns the stream. The same dicts
+                    # stay in ``out['messages']`` and carry the normal persistence
+                    # markers into the eventual turn-end flush.
+                    if pending_steer > 0:
+                        callback = getattr(self, "_on_steer_settled", None)
+                        if callable(callback):
+                            settled = out["messages"][persisted_projection_count:]
+                            callback(steer_text, settled)
+                        persisted_projection_count = len(out["messages"])
                     if pending_steer > 0 and (
                         not is_steer_result or pending_steer_after > 0
                     ):
@@ -1358,6 +1374,7 @@ class ClaudeSdkTurnMixin:
                 # death, or release must not be mistaken for a later turn's
                 # result. Completed steers already decremented this counter.
                 self._pending_steer_results = 0
+                self._pending_steer_inputs = []
             # Anything the reader parked after our ResultMessage belongs to a
             # CLI-initiated turn that overlapped ours. Route it now — left in
             # a discarded queue it would be lost, and left in the stream it
