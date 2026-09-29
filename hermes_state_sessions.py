@@ -1779,7 +1779,11 @@ class SessionSessionsMixin:
                     lane_archived = self.archive_lane_sessions(
                         lane_archive_hours=lane_archive_hours, exclude_pinned=exclude_pinned
                     )
-                    self.set_meta("last_auto_archive_lanes", str(now))
+                    if lane_archived > 0:
+                        # Record the run only when it changed something: a sweep that finds nothing stays
+                        # read-only, so a GET-only session-list poll that triggers it never writes (the
+                        # caller's own in-memory throttle bounds how often an empty sweep's SELECT runs).
+                        self.set_meta("last_auto_archive_lanes", str(now))
                     result["lane_archived"] = lane_archived
                     result["archived"] += lane_archived
                     if lane_archived > 0:
