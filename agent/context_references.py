@@ -23,7 +23,7 @@ from hermes_cli.sizefmt import format_bytes
 
 # --------------------------------------------------------------------------- Plugin context-reference
 # provider API (Issue #26193) ---------------------------------------------------------------------------
-BUILTIN_PREFIXES = frozenset({"diff", "staged", "file", "folder", "git", "url"})
+BUILTIN_PREFIXES = frozenset({"diff", "staged", "file", "folder", "git", "url", "resource"})
 
 _context_reference_providers: dict[str, "ContextReferenceProvider"] = {}
 
@@ -75,7 +75,7 @@ def get_context_reference_providers() -> dict[str, ContextReferenceProvider]:
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
-    rf"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>{_QUOTED_REFERENCE_VALUE}(?::\d+(?:-\d+)?)?|\S+))"
+    rf"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url|resource):(?P<value>{_QUOTED_REFERENCE_VALUE}(?::\d+(?:-\d+)?)?|\S+))"
 )
 # Plugin fallback: any @<word>:<value> the built-in regex did not claim.
 _PLUGIN_REFERENCE_PATTERN = re.compile(
@@ -270,6 +270,8 @@ async def _expand_reference(
             if not content:
                 return f"{ref.raw}: no content extracted", None
             return None, f"🌐 {ref.raw} ({estimate_tokens_rough(content)} tokens)\n{content}"
+        if ref.kind == "resource":
+            return await _expand_resource_reference(ref)
     except Exception as exc:
         return f"{ref.raw}: {exc}", None
     provider = _context_reference_providers.get(ref.kind)
@@ -281,6 +283,39 @@ async def _expand_reference(
         except Exception as exc:
             return f"{ref.raw}: plugin expansion error: {exc}", None
     return f"{ref.raw}: unsupported reference type", None
+
+
+async def _expand_resource_reference(ref: ContextReference) -> Expansion:
+    """Expand @resource:<uri> into untrusted quoted attached context."""
+    from tools.mcp_tool_resources import read_mcp_resource_async
+    target = ref.target
+    server_name = None
+    if "://" in target:
+        prefix, rest = target.split("://", 1)
+        if "/" in prefix:
+            server_name, scheme = prefix.split("/", 1)
+            target = f"{scheme}://{rest}"
+        elif ":" in prefix:
+            server_name, scheme = prefix.split(":", 1)
+            target = f"{scheme}://{rest}"
+    try:
+        result = await read_mcp_resource_async(target, server_name=server_name)
+    except Exception as exc:
+        return f"{ref.raw}: {exc}", None
+    contents = result.get("contents") or []
+    if not contents:
+        return f"{ref.raw}: empty resource", None
+    parts: list[str] = []
+    for block in contents:
+        if block.get("text") is not None:
+            parts.append(block["text"])
+        elif block.get("blob") is not None:
+            parts.append(f"[binary data, {len(block['blob'])} bytes]")
+    text_content = "\n".join(parts)
+    tokens = estimate_tokens_rough(text_content)
+    # Untrusted data: formatted as quoted code block with URI
+    block = f"📦 {ref.raw} ({tokens} tokens)\n```\n{text_content}\n```"
+    return None, block
 
 
 def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Path | None = None,
