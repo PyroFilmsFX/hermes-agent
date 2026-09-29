@@ -7,6 +7,7 @@ import { translateNow } from '@/i18n'
 import { settlePendingClarifyToolCall, textPart } from '@/lib/chat-messages'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import { normalizeConnectionRequest, setConnectionRequest, updateConnectionRequest } from '@/store/connection-request'
+import { normalizeMcpElicitation, receiveMcpElicitation } from '@/store/mcp-elicitation'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
 import {
@@ -47,7 +48,35 @@ const isConnectionUpdateEvent = (event: GatewayEvent): event is ConnectionUpdate
  *  a delayed cancel for an older prompt must not erase a newer one the same
  *  session raised. */
 export function handleInputRequestEvent(ctx: GatewayEventContext): boolean {
-  const { deps, event, payload, sessionId, occurredAt } = ctx
+  const { deps, event, explicitSid, payload, sessionId, occurredAt } = ctx
+
+  if (event.type === 'mcp.elicitation.request') {
+    // M4a broadcasts this session-less, so the card is app-level unless the
+    // gateway names a session: never attributed to the ambient chat, so a
+    // chat switch cannot hide it. The host is components/mcp-elicitation-dialog.
+    const request = normalizeMcpElicitation(event.payload, {
+      connectionId: event.connectionId ?? null,
+      profile: event.profile ?? null,
+      sessionId: explicitSid || null
+    })
+
+    if (request) {
+      receiveMcpElicitation(request)
+      dispatchNativeNotification({
+        body: request.message,
+        global: !request.sessionId,
+        kind: 'input',
+        sessionId: request.sessionId,
+        tag: 'mcp-elicitation',
+        title: translateNow(
+          request.mode === 'url' ? 'prompts.mcpElicitation.urlTitle' : 'prompts.mcpElicitation.formTitle',
+          request.server
+        )
+      })
+    }
+
+    return true
+  }
 
   if (isConnectionRequestEvent(event)) {
     // Park per-session and upsert a stable tool row so the card renders even if tool.start was missed.

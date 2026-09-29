@@ -5931,7 +5931,50 @@ export const deOverrides = {
     vaultCodeFootnote:
       'Tipp: Speichern Sie den Authentifizierungsschlüssel zusammen mit diesem Login unter Einstellungen → Passwörter & Logins, dann gibt Hermes die Codes für Sie ein.',
     vaultCodeSkip: 'Überspringen',
-    vaultCodeConfirm: 'Code eingeben'
+    vaultCodeConfirm: 'Code eingeben',
+    mcpElicitation: {
+      formTitle: server => `${server} benötigt ein paar Angaben`,
+      urlTitle: server => `${server} möchte einen Link öffnen`,
+      fromServer: server => `Angefordert vom MCP-Server „${server}“`,
+      queued: count => (count === 1 ? '1 weitere Anfrage wartet' : `${count} weitere Anfragen warten`),
+      required: 'Pflichtfeld',
+      optional: 'Optional',
+      noSelection: 'Keine',
+      submit: 'Senden',
+      decline: 'Ablehnen',
+      cancel: 'Abbrechen',
+      openInBrowser: 'Im Browser öffnen',
+      urlLabel: 'Link',
+      urlNote: server =>
+        `Öffnet sich in Ihrem Standardbrowser. Fahren Sie nur fort, wenn Sie ${server} vertrauen und diese Adresse kennen.`,
+      urlInsecure: 'Dieser Link ist nicht verschlüsselt (http).',
+      urlUnsupported: 'Hermes öffnet nur Weblinks (https oder http). Lehnen Sie diese Anfrage ab.',
+      openFailed: 'Der Browser konnte nicht geöffnet werden. Kopieren Sie den Link oder lehnen Sie ab.',
+      sendFailed: 'Ihre Antwort konnte nicht gesendet werden',
+      expired: server => `${server} wartet nicht mehr auf diese Antwort.`,
+      timedOut: server => `Die Anfrage von ${server} ist abgelaufen und wurde abgelehnt.`,
+      hiddenBadge: count =>
+        count === 1
+          ? 'Ein MCP-Server wartet in einem anderen Chat auf eine Eingabe'
+          : `${count} MCP-Anfragen warten in anderen Chats`,
+      show: 'Anzeigen',
+      errors: {
+        required: 'Füllen Sie dieses Feld aus.',
+        unsupported:
+          'Hermes kann dieses Pflichtfeld nicht ausfüllen. Lehnen Sie die Anfrage ab oder brechen Sie sie ab.',
+        enum: 'Wählen Sie eine der Optionen.',
+        number: 'Geben Sie eine Zahl ein.',
+        integer: 'Geben Sie eine ganze Zahl ein.',
+        minimum: limit => `Muss mindestens ${limit} sein.`,
+        maximum: limit => `Darf höchstens ${limit} sein.`,
+        minLength: limit => `Mindestens ${limit} Zeichen.`,
+        maxLength: limit => `Höchstens ${limit} Zeichen.`,
+        email: 'Geben Sie eine E-Mail-Adresse ein.',
+        uri: 'Geben Sie einen vollständigen Link ein, z. B. https://example.com.',
+        date: 'Geben Sie ein Datum ein.',
+        dateTime: 'Geben Sie Datum und Uhrzeit ein.'
+      }
+    }
   },
   desktop: {
     audioReadFailed: 'Aufgenommenes Audio konnte nicht gelesen werden',

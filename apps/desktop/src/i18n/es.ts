@@ -5923,7 +5923,47 @@ export const esOverrides = {
     vaultCodeFootnote:
       'Consejo: guarda la clave del autenticador con este acceso en Configuración → Contraseñas e inicios de sesión y Hermes introducirá los códigos por ti.',
     vaultCodeSkip: 'Omitir',
-    vaultCodeConfirm: 'Introducir código'
+    vaultCodeConfirm: 'Introducir código',
+    mcpElicitation: {
+      formTitle: server => `${server} necesita algunos datos`,
+      urlTitle: server => `${server} quiere abrir un enlace`,
+      fromServer: server => `Solicitado por el servidor MCP «${server}»`,
+      queued: count => (count === 1 ? '1 solicitud más en espera' : `${count} solicitudes más en espera`),
+      required: 'Obligatorio',
+      optional: 'Opcional',
+      noSelection: 'Ninguna',
+      submit: 'Enviar',
+      decline: 'Rechazar',
+      cancel: 'Cancelar',
+      openInBrowser: 'Abrir en el navegador',
+      urlLabel: 'Enlace',
+      urlNote: server =>
+        `Se abre en tu navegador predeterminado. Continúa solo si confías en ${server} y reconoces esta dirección.`,
+      urlInsecure: 'Este enlace no está cifrado (http).',
+      urlUnsupported: 'Hermes solo abre enlaces web (https o http). Rechaza esta solicitud.',
+      openFailed: 'No se pudo abrir el navegador. Copia el enlace o rechaza.',
+      sendFailed: 'No se pudo enviar tu respuesta',
+      expired: server => `${server} ya no espera esta respuesta.`,
+      timedOut: server => `La solicitud de ${server} caducó y se rechazó.`,
+      hiddenBadge: count =>
+        count === 1 ? 'Un servidor MCP espera una respuesta en otro chat' : `${count} solicitudes MCP esperan en otros chats`,
+      show: 'Mostrar',
+      errors: {
+        required: 'Rellena este campo.',
+        unsupported: 'Hermes no puede rellenar este campo obligatorio. Rechaza o cancela la solicitud.',
+        enum: 'Elige una de las opciones.',
+        number: 'Introduce un número.',
+        integer: 'Introduce un número entero.',
+        minimum: limit => `Debe ser al menos ${limit}.`,
+        maximum: limit => `Debe ser como máximo ${limit}.`,
+        minLength: limit => `Usa al menos ${limit} caracteres.`,
+        maxLength: limit => `Usa como máximo ${limit} caracteres.`,
+        email: 'Introduce una dirección de correo.',
+        uri: 'Introduce un enlace completo, como https://example.com.',
+        date: 'Introduce una fecha.',
+        dateTime: 'Introduce una fecha y hora.'
+      }
+    }
   },
   desktop: {
     audioReadFailed: 'No se pudo leer el audio grabado',

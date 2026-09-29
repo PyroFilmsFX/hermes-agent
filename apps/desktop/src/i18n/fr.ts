@@ -5943,7 +5943,49 @@ export const frOverrides = {
     vaultCodeFootnote:
       "Astuce : enregistrez la clé d'authentification avec cet identifiant dans Paramètres → Mots de passe et identifiants ; Hermes saisira alors les codes pour vous.",
     vaultCodeSkip: 'Ignorer',
-    vaultCodeConfirm: 'Saisir le code'
+    vaultCodeConfirm: 'Saisir le code',
+    mcpElicitation: {
+      formTitle: server => `${server} a besoin de quelques informations`,
+      urlTitle: server => `${server} veut ouvrir un lien`,
+      fromServer: server => `Demandé par le serveur MCP « ${server} »`,
+      queued: count => (count === 1 ? '1 autre demande en attente' : `${count} autres demandes en attente`),
+      required: 'Obligatoire',
+      optional: 'Facultatif',
+      noSelection: 'Aucune',
+      submit: 'Envoyer',
+      decline: 'Refuser',
+      cancel: 'Annuler',
+      openInBrowser: 'Ouvrir dans le navigateur',
+      urlLabel: 'Lien',
+      urlNote: server =>
+        `S’ouvre dans votre navigateur par défaut. Continuez seulement si vous faites confiance à ${server} et reconnaissez cette adresse.`,
+      urlInsecure: 'Ce lien n’est pas chiffré (http).',
+      urlUnsupported: 'Hermes n’ouvre que des liens web (https ou http). Refusez cette demande.',
+      openFailed: 'Impossible d’ouvrir le navigateur. Copiez le lien ou refusez.',
+      sendFailed: 'Impossible d’envoyer votre réponse',
+      expired: server => `${server} n’attend plus cette réponse.`,
+      timedOut: server => `La demande de ${server} a expiré et a été refusée.`,
+      hiddenBadge: count =>
+        count === 1
+          ? 'Un serveur MCP attend une réponse dans une autre conversation'
+          : `${count} demandes MCP en attente dans d’autres conversations`,
+      show: 'Afficher',
+      errors: {
+        required: 'Remplissez ce champ.',
+        unsupported: 'Hermes ne peut pas remplir ce champ obligatoire. Refusez ou annulez la demande.',
+        enum: 'Choisissez l’une des options.',
+        number: 'Saisissez un nombre.',
+        integer: 'Saisissez un nombre entier.',
+        minimum: limit => `Doit être au moins ${limit}.`,
+        maximum: limit => `Doit être au plus ${limit}.`,
+        minLength: limit => `Au moins ${limit} caractères.`,
+        maxLength: limit => `Au plus ${limit} caractères.`,
+        email: 'Saisissez une adresse e-mail.',
+        uri: 'Saisissez un lien complet, comme https://example.com.',
+        date: 'Saisissez une date.',
+        dateTime: 'Saisissez une date et une heure.'
+      }
+    }
   },
   desktop: {
     audioReadFailed: "Impossible de lire l'audio enregistré",
