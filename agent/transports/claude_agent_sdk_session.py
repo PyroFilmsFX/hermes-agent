@@ -104,6 +104,7 @@ logger = logging.getLogger(__name__)
 _RENAME_ACK_TIMEOUT_SECONDS = 10.0
 _NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
 _NATIVE_PEER_ADMIT_GRACE_SECONDS = 120.0
+_NATIVE_PEER_WRITE_MAX_SECONDS = 60.0
 
 
 class _RenameClaimDeferred(RuntimeError):
@@ -409,6 +410,10 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._native_peer_msg_id: Optional[str] = None
         self._native_peer_seen = False
         self._native_peer_since = 0.0
+        # Each claim gets a generation: a late callback from an older write can never
+        # clear a newer claim. The admission grace only runs once the write is confirmed.
+        self._native_peer_gen = 0
+        self._native_peer_written = False
         self._idle_boundary_callback: Optional[Callable[[], None]] = None
         self._unsolicited_items: list[dict] = []
         self._unsolicited_tool_items: dict[str, dict] = {}
@@ -1193,8 +1198,8 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         turned into a turn expires, so it can't hold owner input back forever."""
         if not self._native_peer_in_flight:
             return False
-        if self._unsolicited_burst_open:
-            return True
+        if self._unsolicited_burst_open or not getattr(self, "_native_peer_written", True):
+            return True  # a write still in progress can't be presumed lost
         if time.monotonic() - self._native_peer_since < _NATIVE_PEER_ADMIT_GRACE_SECONDS:
             return True
         self._clear_native_peer_locked()
@@ -1204,6 +1209,16 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         self._native_peer_in_flight = False
         self._native_peer_msg_id = None
         self._native_peer_seen = False
+        self._native_peer_written = False
+
+    def _expire_native_peer(self, gen: int) -> None:
+        """Grace timer: release a confirmed write that never became a turn, then wake queued work."""
+        with self._turn_callback_lock:
+            if gen != self._native_peer_gen or not self._native_peer_in_flight:
+                return
+            if self._native_peer_pending_locked():
+                return
+        self._notify_idle_boundary()
 
     def woken_turn_active(self) -> bool:
         with self._turn_callback_lock:
@@ -1384,9 +1399,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         with self._turn_callback_lock:
             if not self.native_peer_idle():
                 return False
+            self._native_peer_gen += 1
+            gen = self._native_peer_gen
             self._native_peer_in_flight = True
             self._native_peer_msg_id = str(origin.get("msg_id") or "")
             self._native_peer_seen = False
+            self._native_peer_written = False
             self._native_peer_since = time.monotonic()
         # A peer message starts a CLI turn without run_turn; its tool calls need a live capability too.
         if callable(refresh_capability := getattr(self, "refresh_session_spawn_capability", None)):
@@ -1397,28 +1415,45 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             future = asyncio.run_coroutine_threadsafe(query, loop)
 
             def _finish_peer(done: Any) -> None:
-                try:
-                    done.result()
-                except Exception:
-                    logger.warning("SDK peer query failed after it was accepted", exc_info=True)
-                    with self._turn_callback_lock:
+                failed = done.cancelled() or done.exception() is not None
+                with self._turn_callback_lock:
+                    if gen != self._native_peer_gen or not self._native_peer_in_flight:
+                        return
+                    if failed:
                         self._clear_native_peer_locked()
+                    else:
+                        self._native_peer_written = True
+                        self._native_peer_since = time.monotonic()
+                if failed:
+                    logger.warning("SDK peer query failed after scheduling: %r",
+                                   None if done.cancelled() else done.exception())
+                    self._notify_idle_boundary()
+                    return
+                timer = threading.Timer(_NATIVE_PEER_ADMIT_GRACE_SECONDS + 0.5,
+                                        self._expire_native_peer, args=(gen,))
+                timer.daemon = True
+                timer.start()
 
             future.add_done_callback(_finish_peer)
             try:
                 future.result(timeout=_NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
             except TimeoutError:
-                # The write may already sit in the CLI's queue: treat it as delivered (a
-                # second path would run the same mailbox row twice). The admission grace
-                # releases the claim if no turn ever starts.
-                logger.info("claude-agent-sdk: native peer query still writing after %ss; treating as delivered",
+                # Delivered means confirmed: keep waiting for the write rather than reporting
+                # success early (a later failure would lose the mailbox row) or failure early
+                # (a later success would deliver it twice).
+                logger.info("claude-agent-sdk: native peer query still writing after %ss; waiting",
                             _NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
-                return True
+                try:
+                    future.result(timeout=_NATIVE_PEER_WRITE_MAX_SECONDS - _NATIVE_PEER_QUERY_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    # Still stuck: cancel. A cancelled write never reached the CLI, so the
+                    # row can safely go back to the mailbox.
+                    future.cancel()
+                    raise
         except Exception:
             with self._turn_callback_lock:
-                self._native_peer_in_flight = False
-                self._native_peer_msg_id = None
-                self._native_peer_seen = False
+                if gen == self._native_peer_gen:
+                    self._clear_native_peer_locked()
             if query is not None and hasattr(query, "close"):
                 query.close()
             logger.debug("SDK peer query scheduling failed", exc_info=True)

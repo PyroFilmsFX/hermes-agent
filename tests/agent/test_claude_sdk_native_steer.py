@@ -138,8 +138,12 @@ def _transport(turn_inbox, client=True, loop=True):
     stub._native_peer_since = 0.0
     stub._native_peer_msg_id = None
     stub._native_peer_seen = False
+    stub._native_peer_gen = 0
+    stub._native_peer_written = False
+    stub.idle_notifications = []
+    stub._notify_idle_boundary = lambda: stub.idle_notifications.append(True)
     for name in ("native_peer_idle", "woken_turn_active", "_native_peer_pending_locked",
-                 "_clear_native_peer_locked"):
+                 "_clear_native_peer_locked", "_expire_native_peer"):
         setattr(stub, name, types.MethodType(getattr(mod.ClaudeAgentSdkSession, name), stub))
     return mod, stub, queried
 
@@ -255,41 +259,133 @@ def test_peer_message_declines_when_scheduled_query_fails(monkeypatch):
     ) is False
 
 
-def test_slow_peer_query_counts_as_delivered_and_keeps_the_cli_claimed(monkeypatch):
-    """A query() still writing after the timeout may already sit in the CLI's queue.
+class _SettlingFuture:
+    """A run_coroutine_threadsafe future the test settles by hand."""
 
-    Reporting failure would send the same mailbox row down a second delivery path."""
-    mod, stub, queried = _transport(turn_inbox=None)
+    def __init__(self, first_wait_times_out=True):
+        self._callbacks, self._exc, self._done, self._cancelled = [], None, False, False
+        self.first_wait_times_out = first_wait_times_out
+        self.waits = []
 
-    class _Fut:
-        cancelled = False
-        def add_done_callback(self, cb):
-            pass
-        def result(self, timeout=None):
-            assert timeout == 5.0
-            raise TimeoutError("query did not settle")
-        def cancel(self):
-            self.cancelled = True
-            return True
+    def add_done_callback(self, cb):
+        self._callbacks.append(cb)
+        if self._done:
+            cb(self)
 
-    future = _Fut()
-    monkeypatch.setattr(
-        mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: future, raising=False,
-    )
-    assert mod.ClaudeAgentSdkSession.send_peer_message(
-        stub, "hello", {"kind": "peer", "msg_id": "row-2"}
-    ) is True
-    assert future.cancelled is False
-    assert stub.woken_turn_active() is True
-    assert mod.ClaudeAgentSdkSession.send_peer_message(
-        stub, "second", {"kind": "peer", "msg_id": "row-3"}
-    ) is False, "one native peer in flight at a time"
+    def settle(self, exc=None):
+        self._done, self._exc = True, exc
+        for cb in self._callbacks:
+            cb(self)
+
+    def result(self, timeout=None):
+        self.waits.append(timeout)
+        if not self._done:
+            raise TimeoutError("still writing")
+        if self._exc:
+            raise self._exc
+        return None
+
+    def cancel(self):
+        if self._done:
+            return False
+        self._cancelled = True
+        self.settle()
+        return True
+
+    def cancelled(self):
+        return self._cancelled
+
+    def exception(self):
+        return self._exc
+
+
+def test_slow_write_that_completes_is_delivered_once(monkeypatch):
+    """A write still going after 5 s is waited on, not reported early either way."""
+    mod, stub, _queried = _transport(turn_inbox=None)
+    future = _SettlingFuture()
+    original_result = future.result
+
+    def result(timeout=None):
+        if len(future.waits) == 1:  # the second wait sees the write land
+            future.settle()
+        return original_result(timeout)
+
+    future.result = result
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: future, raising=False)
+    monkeypatch.setattr(mod.threading, "Timer", lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer", "msg_id": "row-2"}) is True
+    assert future.waits == [5.0, mod._NATIVE_PEER_WRITE_MAX_SECONDS - 5.0]
+    assert stub._native_peer_written is True and stub.woken_turn_active() is True
+
+
+def test_write_stuck_past_the_limit_is_cancelled_and_not_delivered(monkeypatch):
+    """Codex recheck P1: a write reported as delivered and failing later would lose the row."""
+    mod, stub, _queried = _transport(turn_inbox=None)
+    future = _SettlingFuture()
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: future, raising=False)
+
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "hello", {"kind": "peer", "msg_id": "row-2"}) is False
+    assert future.cancelled() is True
+    assert stub._native_peer_in_flight is False
+    assert stub.native_peer_idle() is True
+
+
+def test_unconfirmed_write_never_expires_into_a_second_admission(monkeypatch):
+    """Codex recheck P1: the grace can't release a claim whose write is still pending."""
+    mod, stub, _queried = _transport(turn_inbox=None)
+    stub._native_peer_in_flight = True
+    stub._native_peer_written = False
+    stub._native_peer_since = mod.time.monotonic() - mod._NATIVE_PEER_ADMIT_GRACE_SECONDS - 60
+    assert stub.native_peer_idle() is False
+    assert stub._native_peer_in_flight is True
+
+
+def test_late_failure_of_an_old_write_leaves_the_new_claim(monkeypatch):
+    mod, stub, _queried = _transport(turn_inbox=None)
+    old = _SettlingFuture()
+    old_cbs = []
+    old.add_done_callback = lambda cb: old_cbs.append(cb)
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: old, raising=False)
+    old.result = lambda timeout=None: None  # the scheduling wait returns; settlement comes later
+    monkeypatch.setattr(mod.threading, "Timer", lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "one", {"kind": "peer", "msg_id": "row-1"}) is True
+
+    # The CLI finished that peer turn; a second row is admitted under a new generation.
+    stub._native_peer_in_flight = False
+    new = _SettlingFuture(first_wait_times_out=False)
+    new.settle()
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *a, **kw: new, raising=False)
+    assert mod.ClaudeAgentSdkSession.send_peer_message(stub, "two", {"kind": "peer", "msg_id": "row-3"}) is True
+
+    old._done, old._exc = True, RuntimeError("late failure")
+    for cb in old_cbs:
+        cb(old)
+    assert stub._native_peer_in_flight is True
+    assert stub._native_peer_msg_id == "row-3"
+
+
+def test_grace_expiry_wakes_queued_work(monkeypatch):
+    """Codex recheck P1: expiry must notify the idle boundary so a queued owner prompt drains."""
+    mod, stub, _queried = _transport(turn_inbox=None)
+    stub._native_peer_gen = 4
+    stub._native_peer_in_flight = True
+    stub._native_peer_written = True
+    stub._native_peer_since = mod.time.monotonic() - mod._NATIVE_PEER_ADMIT_GRACE_SECONDS - 1
+
+    stub._expire_native_peer(3)  # a stale timer does nothing
+    assert stub._native_peer_in_flight is True and stub.idle_notifications == []
+
+    stub._expire_native_peer(4)
+    assert stub._native_peer_in_flight is False
+    assert stub.idle_notifications == [True]
 
 
 def test_peer_claim_expires_when_the_cli_never_starts_a_turn(monkeypatch):
-    """An injected input that never became a CLI turn cannot hold owner input back forever."""
+    """A confirmed input that never became a CLI turn cannot hold owner input back forever."""
     mod, stub, _queried = _transport(turn_inbox=None)
     stub._native_peer_in_flight = True
+    stub._native_peer_written = True
     stub._native_peer_since = mod.time.monotonic()
     assert stub.woken_turn_active() is True
     assert stub.native_peer_idle() is False
@@ -303,6 +399,7 @@ def test_peer_claim_expires_when_the_cli_never_starts_a_turn(monkeypatch):
 def test_open_burst_keeps_the_peer_claim_past_the_grace(monkeypatch):
     mod, stub, _queried = _transport(turn_inbox=None)
     stub._native_peer_in_flight = True
+    stub._native_peer_written = True
     stub._native_peer_since = mod.time.monotonic() - mod._NATIVE_PEER_ADMIT_GRACE_SECONDS - 1
     stub._unsolicited_burst_open = True
     assert stub.woken_turn_active() is True
