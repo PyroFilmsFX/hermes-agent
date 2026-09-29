@@ -31,7 +31,7 @@ def env_config(monkeypatch):
         monkeypatch.setattr(
             M, "_provider_config", lambda: {"env": env} if env is not None else {}
         )
-        monkeypatch.setattr(M, "_provider_flag", lambda name: (
+        monkeypatch.setattr(M, "_provider_flag", lambda name, default=False: (
             task_tools if name == "task_tools" else metered_allowed
         ))
         monkeypatch.setattr(M, "_scrubbed_sdk_env", lambda: dict(scrubbed or {}))

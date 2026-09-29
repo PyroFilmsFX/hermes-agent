@@ -62,6 +62,7 @@ def test_imported_crash_marker_never_autocontinues(tmp_path):
     marker = read_turn_marker(tmp_path, "chat")
     assert marker["auto_continue"] is False
     schedule = rebind(session_auto_continue._maybe_schedule_auto_continue, {
+        "_ensure_usage_park_scheduler": lambda: None,
         "_session_home": lambda session: tmp_path,
         "read_turn_marker": read_turn_marker,
     })
