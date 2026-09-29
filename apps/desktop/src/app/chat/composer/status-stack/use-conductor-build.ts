@@ -57,7 +57,7 @@ export function useConductorBuild(sessionId: string | null) {
     void refresh()
 
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && (build ? true : document.hasFocus())) {
         void refresh()
       }
     }, build ? ARMED_POLL_MS : IDLE_POLL_MS)

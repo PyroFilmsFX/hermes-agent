@@ -25,6 +25,7 @@ describe('useConductorBuild polling', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
     request.mockReset()
     request.mockResolvedValue({ build: null, unreadable: false })
     vi.spyOn(gateway, 'requestGatewayForAgent').mockImplementation(request as never)
@@ -79,6 +80,27 @@ describe('useConductorBuild polling', () => {
     request.mockRejectedValue(new Error('offline'))
     render(tree(true))
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    expect(request).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not fire the idle poll while unfocused and catches up on focus', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    render(tree(true))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(request).toHaveBeenCalledTimes(1)
+
+    // Unfocused during idle: interval ticks do not fire
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    expect(request).toHaveBeenCalledTimes(1)
+
+    // Window gains focus: catches up immediately
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    window.dispatchEvent(new Event('focus'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(request).toHaveBeenCalledTimes(2)
+
+    // Focused idle polling resumes every 10 s
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
     expect(request).toHaveBeenCalledTimes(3)
   })
 })

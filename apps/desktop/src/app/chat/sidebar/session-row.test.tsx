@@ -150,12 +150,12 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
 
 const noop = vi.fn()
 
-const renderRow = (session: SessionInfo, extra?: { card?: boolean }) =>
+const renderRow = (session: SessionInfo, extra?: { card?: boolean; isSelected?: boolean }) =>
   render(
     <SidebarSessionRow
       card={extra?.card}
       isPinned={false}
-      isSelected={false}
+      isSelected={extra?.isSelected ?? false}
       onArchive={noop}
       onDelete={noop}
       onPin={noop}
@@ -178,17 +178,19 @@ describe('SidebarSessionRow running arc', () => {
   const arc = (container: HTMLElement) => container.querySelector('.arc-row')
 
   it('paints no arc for a settled session', () => {
-    const { container } = renderRow(makeSession({ title: 'Settled' }))
+    const { container } = renderRow(makeSession({ title: 'Settled' }), { isSelected: true })
 
     expect(arc(container)).toBeNull()
   })
 
-  it('paints the arc while the session is running', () => {
+  it('only the active row renders the animated ring while running', () => {
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
-    const { container } = renderRow(makeSession({ title: 'Running' }))
+    const { container: unfocusedContainer } = renderRow(makeSession({ title: 'Running' }), { isSelected: false })
+    expect(arc(unfocusedContainer)).toBeNull()
 
-    expect(arc(container)).toBeTruthy()
+    const { container: activeContainer } = renderRow(makeSession({ title: 'Running' }), { isSelected: true })
+    expect(arc(activeContainer)).toBeTruthy()
   })
 })
 

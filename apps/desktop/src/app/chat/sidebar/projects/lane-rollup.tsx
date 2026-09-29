@@ -7,6 +7,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { $pullRequestsByBranch } from '@/store/pull-requests'
+import { $activeSessionId, sessionMatchesStoredId } from '@/store/session'
 import { $sessionDotStateById, showsRunningArc } from '@/store/session-dot-state'
 
 import { SidebarRowStack } from '../chrome'
@@ -60,6 +61,22 @@ export function WorktreeLaneRollup({
     }, 0)
   )
 
+  // Only the active session's lane rollup gets the animated arc ring:
+  // other running rollups keep the static dot indicator on their header.
+  const hasActiveRunningSession = useStoresSelector([$sessionDotStateById, $activeSessionId], () => {
+    const activeId = $activeSessionId.get()
+    if (!activeId) {
+      return false
+    }
+    const dotStates = $sessionDotStateById.get()
+    return lanes.some(lane =>
+      lane.sessions.some(session =>
+        (session.id === activeId || sessionMatchesStoredId(session, activeId)) &&
+        showsRunningArc(dotStates[session.id] ?? dotStates[activeId] ?? 'idle')
+      )
+    )
+  })
+
   // The done set as a primitive, so a dot-state edge that doesn't move a lane
   // across the line doesn't re-render the rollup.
   const doneKey = useStoresSelector([$sessionDotStateById, $pullRequestsByBranch], () =>
@@ -106,7 +123,7 @@ export function WorktreeLaneRollup({
   return (
     <SidebarRowStack>
       <div className="relative">
-        {runningCount > 0 && <span aria-hidden="true" className="arc-border arc-row" data-running-arc />}
+        {hasActiveRunningSession && <span aria-hidden="true" className="arc-border arc-row" data-running-arc />}
         <WorkspaceHeader
           icon={leadingIcon}
           label={label}

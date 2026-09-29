@@ -71,11 +71,13 @@
 /* The global renderer pause and the reduced-motion freeze stop the animation;
    drop the layer hint there too, so parked spinners hold no compositor layer. */
 :root[data-renderer-animations-paused] .glyph-spinner__strip {
+  animation-play-state: paused;
   will-change: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .glyph-spinner__strip {
+    animation: none;
     will-change: auto;
   }
 }

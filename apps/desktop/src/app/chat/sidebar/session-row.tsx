@@ -443,7 +443,7 @@ function SidebarSessionRowImpl({
         style={style}
         {...rest}
       >
-        {showsRunningArc(dotState) && <span aria-hidden="true" className="arc-border arc-row" />}
+        {showsRunningArc(dotState) && isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
         <SidebarRowBody
           // Every trailing figure lives in the actions slot, which the row
           // measures — so the title needs a gap from it and nothing else. Hover

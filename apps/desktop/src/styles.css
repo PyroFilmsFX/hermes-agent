@@ -37,6 +37,9 @@
    wake/pet overlays retain their purpose-built visibility behavior. */
 :root[data-renderer-animations-paused]
   :is(
+    .animate-spin,
+    .animate-pulse,
+    .animate-ping,
     .shimmer,
     .quest-glow,
     .pet-egg,
@@ -52,8 +55,27 @@
 :root[data-renderer-animations-paused]
   [data-slot='aui_assistant-message-content']
   .aui-md
-  [data-slot='code-card'][data-streaming='true'] {
+  [data-slot='code-card'][data-streaming='true'],
+:root[data-renderer-animations-paused]
+  [data-slot='aui_assistant-message-content']
+  .aui-md
+  [data-slot='code-card'][data-streaming='true']::after,
+:root[data-renderer-animations-paused]
+  [data-slot='code-card'][data-streaming='true']::after {
   animation-play-state: paused !important;
+}
+
+/* Drop compositor layers when the window is hidden/minimized so parked
+   elements hold no idle VRAM. */
+:root[data-renderer-animations-paused] .arc-border::before,
+:root[data-renderer-animations-paused] .glyph-spinner__strip,
+:root[data-renderer-animations-paused]
+  [data-slot='aui_assistant-message-content']
+  .aui-md
+  [data-slot='code-card'][data-streaming='true']::after,
+:root[data-renderer-animations-paused]
+  [data-slot='code-card'][data-streaming='true']::after {
+  will-change: auto;
 }
 
 /* Sidebar sections: tall viewports give each its own scroller; compact ones
@@ -1236,8 +1258,13 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .arc-border {
+    display: none;
+  }
   .arc-border::before {
+    display: none;
     animation: none;
+    will-change: auto;
   }
 }
 
@@ -2038,12 +2065,20 @@ body.guest-pointer-lock :is(webview, iframe) {
 }
 
 [data-slot='aui_assistant-message-content'] .aui-md [data-slot='code-card'][data-streaming='true'] {
-  animation:
-    code-card-stream-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both,
-    code-card-stream-glow 1.8s ease-in-out 180ms infinite alternate;
+  animation: code-card-stream-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+[data-slot='aui_assistant-message-content'] .aui-md [data-slot='code-card'][data-streaming='true']::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  /* Inset, so the card keeps its overflow-hidden clip (long lines and rounded corners) while streaming. */
   box-shadow:
-    0 0 0 0.0625rem color-mix(in srgb, var(--dt-ring) 10%, transparent),
-    0 0.625rem 1.75rem color-mix(in srgb, var(--dt-ring) 8%, transparent);
+    inset 0 0 0 0.0625rem color-mix(in srgb, var(--dt-ring) 12%, transparent),
+    inset 0 -0.75rem 2rem color-mix(in srgb, var(--dt-ring) 10%, transparent);
+  animation: code-card-stream-glow 1.8s ease-in-out 180ms infinite alternate;
 }
 
 [data-slot='aui_assistant-message-content']
@@ -2488,23 +2523,27 @@ button[data-slot='aui_msg-reactions'] svg {
   }
 }
 
+/* Compositor-only stream glow on ::after pseudo-element; avoids main-thread
+   box-shadow repaint while streaming. */
 @keyframes code-card-stream-glow {
   from {
-    box-shadow:
-      0 0 0 0.0625rem color-mix(in srgb, var(--dt-ring) 6%, transparent),
-      0 0.5rem 1.5rem color-mix(in srgb, var(--dt-ring) 5%, transparent);
+    opacity: 0.5;
   }
 
   to {
-    box-shadow:
-      0 0 0 0.0625rem color-mix(in srgb, var(--dt-ring) 12%, transparent),
-      0 0.75rem 2rem color-mix(in srgb, var(--dt-ring) 10%, transparent);
+    opacity: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   [data-slot='aui_assistant-message-content'] .aui-md [data-slot='code-card'][data-streaming='true'] {
     animation: none;
+  }
+
+  [data-slot='aui_assistant-message-content'] .aui-md [data-slot='code-card'][data-streaming='true']::after {
+    display: none;
+    animation: none;
+    box-shadow: none;
   }
 }
 

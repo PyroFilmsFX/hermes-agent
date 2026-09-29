@@ -4,13 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { $dismissedWorktreeIds, $removedWorktreeIds, $sidebarWorkspaceNodeOpen } from '@/store/layout'
+import { $activeSessionId } from '@/store/session'
 import type * as SessionDotStateMod from '@/store/session-dot-state'
 
 import { RepoFlatSection } from './entered-content'
 import { WorktreeLaneRollup } from './lane-rollup'
 import type { SidebarSessionGroup, SidebarWorkspaceTree } from './workspace-groups'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  $activeSessionId.set(null)
+})
 
 const { mockDotStates } = vi.hoisted(() => {
   let val: Record<string, any> = {}
@@ -217,6 +221,10 @@ describe('WorktreeLaneRollup', () => {
       s3: 'idle'
     })
 
+    // When no running session in the lane is active (e.g. idle s3 is active),
+    // only the static dot is rendered — no animated arc
+    $activeSessionId.set('s3')
+
     const { container } = render(
       <WorktreeLaneRollup
         lanes={lanes}
@@ -228,7 +236,14 @@ describe('WorktreeLaneRollup', () => {
     // Shows 5 active · 0 done · 2 running
     expect(screen.getByTitle('5 active · 0 done · 2 running')).toBeTruthy()
 
-    // Has running dot and running arc
+    // Has running dot, but no animated arc because active session s3 is idle
+    expect(container.querySelector('[data-running-dot]')).toBeTruthy()
+    expect(container.querySelector('[data-running-arc]')).toBeNull()
+
+    // When the active session is running in this lane rollup, the animated arc is mounted
+    act(() => {
+      $activeSessionId.set('s1')
+    })
     expect(container.querySelector('[data-running-dot]')).toBeTruthy()
     expect(container.querySelector('[data-running-arc]')).toBeTruthy()
   })

@@ -82,8 +82,8 @@ if (winParam === 'overlay') {
   void import('./components/intro-reveal/intro-root').then(({ mountIntroReveal }) => mountIntroReveal())
 } else {
   // CSS animations do not inherit Chromium's JS-loop pause policy. Mirror the
-  // main window's visibility state to :root so decorative infinite
-  // animations stop producing frames when nobody can see them.
+  // main window's visibility state and blur state (~2 s delay) to :root so
+  // decorative infinite animations stop producing frames when nobody can see them.
   installRendererAnimationPauseState()
 
   createRoot(document.getElementById('root')!).render(
