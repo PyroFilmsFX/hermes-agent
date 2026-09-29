@@ -335,7 +335,13 @@ class ClaudeSdkPermissionsMixin:
                         enum_values.append(opt)
                     else:
                         enum_values.append(str(opt))
-                if enum_values:
+                if enum_values and q.get("multiSelect"):
+                    # Multi-select: the CLI accepts labels joined with ", " (Agent SDK "Handle
+                    # approvals and user input" -> Response format).
+                    hint = "Choose one or more, separated by commas: " + ", ".join(enum_values)
+                    field_spec["description"] = _control_sanitized_text(
+                        f"{field_spec.get('description', q_text)} ({hint})")
+                elif enum_values:
                     field_spec["enum"] = enum_values
             properties[q_text] = field_spec
             required.append(q_text)
@@ -376,25 +382,15 @@ class ClaudeSdkPermissionsMixin:
         if action == "accept":
             content = getattr(result, "content", None)
             content_dict = content if isinstance(content, dict) else {}
+            # Answers are keyed by question text (Agent SDK AskUserQuestion response format).
+            # Never invent one: an unanswered question denies rather than guessing for the owner.
             answers: dict[str, Any] = {}
             for q in questions:
                 q_text = q["question"]
-                if q_text in content_dict:
-                    answers[q_text] = content_dict[q_text]
-                else:
-                    options = q.get("options")
-                    if isinstance(options, list) and options:
-                        first_opt = options[0]
-                        if isinstance(first_opt, dict):
-                            label = first_opt.get("label", first_opt.get("value", ""))
-                        else:
-                            label = str(first_opt)
-                        answers[q_text] = label
-                    else:
-                        answers[q_text] = "Yes"
-            for k, v in content_dict.items():
-                if k not in answers:
-                    answers[k] = v
+                value = content_dict.get(q_text)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    return PermissionResultDeny(message=f"The owner did not answer: {q_text}")
+                answers[q_text] = value
             updated_input = {**frozen_tool_input, "answers": answers}
             return PermissionResultAllow(updated_input=updated_input)
 

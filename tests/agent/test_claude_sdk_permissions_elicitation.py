@@ -173,9 +173,10 @@ class TestClaudeSdkAskUserQuestionElicitation:
         assert "Which protocol?" in consent_calls[0][0] or "Claude" in consent_calls[0][0]
         assert "Protocol Selection" in consent_calls[0][1] or "Which protocol?" in consent_calls[0][1]
 
-        assert type(result).__name__ == "PermissionResultAllow"
-        assert result.updated_input is not None
-        assert result.updated_input["answers"]["Which protocol?"] == "HTTP"
+        # The consent path can only say yes/no; it cannot carry an answer, so the tool call is
+        # denied with the question named rather than guessing an option on the owner's behalf.
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "Which protocol?" in result.message
 
     def test_no_desktop_consent_declined(self, monkeypatch):
         """When consent is declined in CLI/gateway, PermissionResultDeny is returned."""
@@ -238,3 +239,46 @@ class TestClaudeSdkAskUserQuestionElicitation:
         # Bash runs through approval callback
         res_bash = asyncio.run(can_use_tool("Bash", {"command": "ls -la"}, None))
         assert type(res_bash).__name__ == "PermissionResultAllow"
+
+
+def test_unanswered_desktop_question_denies_and_never_invents_an_answer(monkeypatch):
+    session, _ = _make_session()
+    can_use_tool = session._make_can_use_tool()
+    questions = [
+        {"question": "Pick a region", "options": [{"label": "ord"}, {"label": "iad"}]},
+        {"question": "Enable caching?", "options": [{"label": "Yes"}, {"label": "No"}]},
+    ]
+    monkeypatch.setattr("tools.mcp_tool_sampling._has_connected_desktop_clients", lambda: True)
+
+    async def _answer_only_first(self, context, params):
+        from mcp.types import ElicitResult
+        return ElicitResult(action="accept", content={"Pick a region": "iad"})
+
+    monkeypatch.setattr("tools.mcp_tool_sampling.ElicitationHandler.__call__", _answer_only_first)
+    result = asyncio.run(can_use_tool("AskUserQuestion", {"questions": questions}, None))
+
+    assert type(result).__name__ == "PermissionResultDeny"
+    assert "Enable caching?" in result.message
+
+
+def test_multiselect_question_takes_a_comma_joined_answer(monkeypatch):
+    session, _ = _make_session()
+    can_use_tool = session._make_can_use_tool()
+    questions = [{"question": "Which sections?", "multiSelect": True,
+                  "options": [{"label": "Intro"}, {"label": "Summary"}]}]
+    monkeypatch.setattr("tools.mcp_tool_sampling._has_connected_desktop_clients", lambda: True)
+    seen = {}
+
+    async def _answer(self, context, params):
+        from mcp.types import ElicitResult
+        schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None)
+        seen["field"] = schema["properties"]["Which sections?"]
+        return ElicitResult(action="accept", content={"Which sections?": "Intro, Summary"})
+
+    monkeypatch.setattr("tools.mcp_tool_sampling.ElicitationHandler.__call__", _answer)
+    result = asyncio.run(can_use_tool("AskUserQuestion", {"questions": questions}, None))
+
+    assert "enum" not in seen["field"]
+    assert type(result).__name__ == "PermissionResultAllow"
+    assert result.updated_input["answers"] == {"Which sections?": "Intro, Summary"}
+    assert result.updated_input["questions"] == questions
