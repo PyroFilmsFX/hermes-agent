@@ -1,0 +1,284 @@
+"""Tests for in-memory launch table + runtime lineage across /compress (#49 / b10 H2)."""
+
+import threading
+import time
+import types
+from unittest.mock import MagicMock
+
+import pytest
+
+from agent.claude_sdk_launch_table import (
+    _reset_table_for_tests,
+    record_launch,
+    retire,
+    snapshot,
+    update_lineage,
+    wait_for_change,
+)
+from agent import conversation_compression as cc
+from hermes_state import SessionDB
+from tests.agent.claude_sdk_fakes import ResultMessage, _make_session
+
+
+@pytest.fixture(autouse=True)
+def _clean_launch_table():
+    _reset_table_for_tests()
+    yield
+    _reset_table_for_tests()
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = SessionDB(tmp_path / "state.db")
+    try:
+        yield database
+    finally:
+        database.close()
+
+
+def _make_dummy_agent(db, session_id):
+    return types.SimpleNamespace(
+        _session_db=db,
+        session_id=session_id,
+        platform="cli",
+        model="test-model",
+        _session_init_model_config=None,
+        working_directory=None,
+        _memory_manager=None,
+        context_compressor=types.SimpleNamespace(),
+        _flush_messages_to_session_db=lambda *a, **k: None,
+        _persist_user_message_idx=None,
+        _session_messages=None,
+        _gateway_session_key=None,
+        _cached_system_prompt="sys",
+    )
+
+
+class TestClaudeSdkLaunchTable:
+    def test_record_and_snapshot_monotonic_seq(self):
+        cur_seq, entries = snapshot(0)
+        assert cur_seq == 0
+        assert entries == []
+
+        e1 = record_launch(
+            hermes_session_id="h-1",
+            claude_session_id="c-1",
+            profile="default",
+            lineage=["root"],
+        )
+        assert e1["launch_seq"] == 1
+        assert e1["hermes_session_id"] == "h-1"
+        assert e1["claude_session_id"] == "c-1"
+        assert e1["profile"] == "default"
+        assert e1["lineage"] == ["root"]
+
+        seq1, snap1 = snapshot(0)
+        assert seq1 == 1
+        assert len(snap1) == 1
+        assert snap1[0]["claude_session_id"] == "c-1"
+
+        e2 = record_launch(
+            hermes_session_id="h-2",
+            claude_session_id="c-2",
+            profile="custom",
+        )
+        assert e2["launch_seq"] == 2
+
+        seq2, snap_all = snapshot(0)
+        assert seq2 == 2
+        assert len(snap_all) == 2
+        assert [e["claude_session_id"] for e in snap_all] == ["c-1", "c-2"]
+
+        seq_since, snap_since = snapshot(1)
+        assert seq_since == 2
+        assert len(snap_since) == 1
+        assert snap_since[0]["claude_session_id"] == "c-2"
+
+        seq_none, snap_none = snapshot(2)
+        assert seq_none == 2
+        assert snap_none == []
+
+    def test_wait_for_change_timeout_and_wake(self):
+        # Times out without change
+        t0 = time.monotonic()
+        seq = wait_for_change(since_seq=0, timeout=0.05)
+        elapsed = time.monotonic() - t0
+        assert seq == 0
+        assert elapsed >= 0.04
+
+        # Wakes up when a launch is recorded
+        def bg_record():
+            time.sleep(0.03)
+            record_launch(
+                hermes_session_id="h-wake",
+                claude_session_id="c-wake",
+            )
+
+        thread = threading.Thread(target=bg_record)
+        t1 = time.monotonic()
+        thread.start()
+        seq_woken = wait_for_change(since_seq=0, timeout=1.0)
+        thread.join()
+        elapsed_wake = time.monotonic() - t1
+        assert seq_woken == 1
+        assert elapsed_wake < 0.5
+
+        # Immediate return when seq is already newer than since_seq
+        seq_imm = wait_for_change(since_seq=0, timeout=1.0)
+        assert seq_imm == 1
+
+    def test_retire_removes(self):
+        record_launch(hermes_session_id="h-1", claude_session_id="c-1")
+        record_launch(hermes_session_id="h-2", claude_session_id="c-2")
+
+        retired = retire("c-1")
+        assert retired is not None
+        assert retired["claude_session_id"] == "c-1"
+
+        _, snap = snapshot(0)
+        assert len(snap) == 1
+        assert snap[0]["claude_session_id"] == "c-2"
+
+        # Retiring an already retired or nonexistent entry returns None
+        assert retire("c-1") is None
+        assert retire("nonexistent") is None
+
+    def test_lineage_capped_at_16_oldest_to_newest(self):
+        long_lineage = [f"sid-{i}" for i in range(25)]
+        entry = record_launch(
+            hermes_session_id="h-long",
+            claude_session_id="c-long",
+            lineage=long_lineage,
+        )
+        expected = [f"sid-{i}" for i in range(9, 25)]
+        assert len(entry["lineage"]) == 16
+        assert entry["lineage"] == expected
+        assert entry["hermes_lineage"] == expected
+
+        updated = update_lineage(
+            "c-long",
+            hermes_session_id="h-long-2",
+            lineage=[f"new-{i}" for i in range(30)],
+        )
+        assert updated is not None
+        assert len(updated["lineage"]) == 16
+        assert updated["lineage"] == [f"new-{i}" for i in range(14, 30)]
+        assert updated["hermes_lineage"] == [f"new-{i}" for i in range(14, 30)]
+
+
+class TestLineageAcrossCompression:
+    def test_compress_rotation_appends_parent_and_updates_live_entry(self, db):
+        parent_id = "root-hermes-session"
+        db.create_session(parent_id, source="cli")
+        db.append_message(parent_id, "user", "turn 1")
+        db.append_message(parent_id, "assistant", "resp 1")
+
+        agent = _make_dummy_agent(db, parent_id)
+        planned_sid = "planned-claude-uuid-1"
+        live_session = types.SimpleNamespace(
+            planned_cli_session_id=lambda: planned_sid,
+            _planned_session_id=planned_sid,
+            _hermes_session_id=parent_id,
+        )
+        agent._claude_sdk_session = live_session
+
+        entry = record_launch(
+            hermes_session_id=parent_id,
+            claude_session_id=planned_sid,
+            profile="default",
+        )
+        assert entry["hermes_session_id"] == parent_id
+        assert entry["lineage"] == []
+
+        # First compression rotation
+        cc._publish_rotated_compaction(
+            agent,
+            [{"role": "user", "content": "turn 1"}, {"role": "assistant", "content": "resp 1"}],
+            [{"role": "user", "content": "[handoff 1]"}],
+            new_system_prompt="sys",
+            lease=types.SimpleNamespace(holder=None, ttl=60.0, watermark=None),
+            old_session_id=parent_id,
+            compressed_user_turn_outcome="none",
+        )
+
+        child1_id = agent.session_id
+        assert child1_id != parent_id
+        assert agent._claude_sdk_hermes_lineage == [parent_id]
+        assert live_session._hermes_session_id == child1_id
+
+        _, snap1 = snapshot(0)
+        table_entry1 = next(e for e in snap1 if e["claude_session_id"] == planned_sid)
+        assert table_entry1["hermes_session_id"] == child1_id
+        assert table_entry1["lineage"] == [parent_id]
+
+        # Second compression rotation
+        db.append_message(child1_id, "user", "turn 2")
+        db.append_message(child1_id, "assistant", "resp 2")
+        cc._publish_rotated_compaction(
+            agent,
+            [{"role": "user", "content": "turn 2"}, {"role": "assistant", "content": "resp 2"}],
+            [{"role": "user", "content": "[handoff 2]"}],
+            new_system_prompt="sys",
+            lease=types.SimpleNamespace(holder=None, ttl=60.0, watermark=None),
+            old_session_id=child1_id,
+            compressed_user_turn_outcome="none",
+        )
+
+        child2_id = agent.session_id
+        assert child2_id != child1_id
+        assert agent._claude_sdk_hermes_lineage == [parent_id, child1_id]
+        assert live_session._hermes_session_id == child2_id
+
+        _, snap2 = snapshot(0)
+        table_entry2 = next(e for e in snap2 if e["claude_session_id"] == planned_sid)
+        assert table_entry2["hermes_session_id"] == child2_id
+        assert table_entry2["lineage"] == [parent_id, child1_id]
+
+    def test_forged_state_db_child_does_not_extend_lineage(self, db):
+        legit_sid = "legit-root-session"
+        db.create_session(legit_sid, source="cli")
+        db.append_message(legit_sid, "user", "legit")
+
+        agent = _make_dummy_agent(db, legit_sid)
+        agent._claude_sdk_hermes_lineage = ["prior-ancestor"]
+
+        # Attacker injects a forged continuation row in state.db
+        forged_child = "forged-attacker-child"
+        db.create_session(forged_child, source="cli", parent_session_id=legit_sid)
+        db.append_message(forged_child, "user", "forged handoff")
+
+        # Simulate _adopt_live_compression_child resolving the tip from state.db
+        cc._adopt_live_compression_child(agent, db, legit_sid)
+
+        # Lineage remains strictly the backend's in-memory record
+        assert agent._claude_sdk_hermes_lineage == ["prior-ancestor"]
+
+        # record_compression_continuation also does not extend lineage
+        from tui_gateway.session_task_handoff import record_compression_continuation
+
+        record_compression_continuation(legit_sid, forged_child, None)
+        assert agent._claude_sdk_hermes_lineage == ["prior-ancestor"]
+
+
+class TestSessionLifecycleLaunchTable:
+    def test_session_lifecycle_records_and_retires(self):
+        session, _holder = _make_session(
+            script=[ResultMessage(result="ok")],
+            hermes_session_id="h-lifecycle",
+            hermes_lineage=["ancestor-0"],
+        )
+        planned_id = session.planned_cli_session_id()
+        try:
+            assert snapshot(0)[1] == []
+            session.ensure_started()
+            _, snap = snapshot(0)
+            entry = next(e for e in snap if e["claude_session_id"] == planned_id)
+            assert entry["hermes_session_id"] == "h-lifecycle"
+            assert entry["lineage"] == ["ancestor-0"]
+            assert entry["profile"] == "default"
+        finally:
+            session.close()
+
+        # Retired after close
+        _, snap_closed = snapshot(0)
+        assert not any(e["claude_session_id"] == planned_id for e in snap_closed)

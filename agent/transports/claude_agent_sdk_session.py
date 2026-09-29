@@ -196,6 +196,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         client_factory: Optional[Callable[..., Any]] = None,
         include_hermes_tools: bool = True,
         hermes_session_id: Optional[str] = None,
+        hermes_lineage: Optional[list[str]] = None,
         task_list_id: Optional[str] = None,
         task_env: Optional[dict[str, str]] = None,
         session_name: str = "",
@@ -281,6 +282,7 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
             except Exception:
                 pass
         self._hermes_session_id = hermes_session_id
+        self._hermes_lineage = [str(x) for x in (hermes_lineage or []) if x][-16:]
         self._task_list_id = task_list_id
         self._task_env = dict(task_env) if task_env is not None else None
         # Peer-addressable name for the spawned CLI session (see
@@ -667,6 +669,24 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                 )
                 return None
             self._claim_peer_name()
+            profile = "default"
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+
+                profile = str(get_active_profile_name() or "default")
+            except Exception:
+                pass
+            try:
+                from agent.claude_sdk_launch_table import record_launch
+
+                record_launch(
+                    hermes_session_id=str(self._hermes_session_id or ""),
+                    claude_session_id=self.planned_cli_session_id(),
+                    profile=profile,
+                    lineage=self._hermes_lineage,
+                )
+            except Exception:
+                logger.debug("recording launch table entry failed", exc_info=True)
             startup_client = self._build_client()
             # Assign BEFORE connect: a connect timeout/cancel leaves a
             # half-connected client whose CLI subprocess close() must still reap
@@ -683,6 +703,12 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
                     else:
                         refused = True
             if retired or refused:
+                try:
+                    from agent.claude_sdk_launch_table import retire
+
+                    retire(self.planned_cli_session_id())
+                except Exception:
+                    pass
                 self._cleanup_startup_resources(
                     client=startup_client,
                     loop=startup_loop,
@@ -1140,6 +1166,14 @@ class ClaudeAgentSdkSession(ClaudeSdkTurnMixin, ClaudeSdkPermissionsMixin, Claud
         _forget_sdk_session(self)
         # After the CLI is gone: the name is free only once nobody carries it.
         self._release_peer_names()
+        try:
+            from agent.claude_sdk_launch_table import retire
+
+            planned_id = getattr(self, "_planned_session_id", None)
+            if planned_id:
+                retire(str(planned_id))
+        except Exception:
+            logger.debug("retiring launch table entry failed", exc_info=True)
 
     def __enter__(self) -> "ClaudeAgentSdkSession":
         return self
