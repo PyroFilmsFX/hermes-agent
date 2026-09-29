@@ -160,8 +160,10 @@ async function worktreeClean(gitBin, worktreePath) {
 }
 
 // Bounded parallel map: with ~200 worktrees an unbounded fan-out would spawn
-// ~400 git processes at once.
-const ACCOUNTING_CONCURRENCY = 8
+// ~400 git processes at once. Kept low: each lane's `git status` walks the
+// whole tree (~0.6 s of kernel time on a large repo), and the sidebar may
+// probe several repos at once, so a high bound pins every core.
+const ACCOUNTING_CONCURRENCY = 4
 
 async function mapBounded(items, limit, fn) {
   const results = new Array(items.length)

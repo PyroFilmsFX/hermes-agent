@@ -1246,8 +1246,34 @@ const bumpWorktrees = () => $worktreeRefreshToken.set($worktreeRefreshToken.get(
 // repo while the window was away. The probe is per-repo and bounded, so the
 // caller (a settled turn / window refocus) can re-sync the worktree lanes
 // cheaply, the same way a git GUI refreshes its tree on focus.
-export function refreshWorktrees(): void {
-  bumpWorktrees()
+//
+// Throttled: every settled turn and every refocus calls this, and each probe
+// runs a `git status` per lane (hundreds on a busy repo). With many agents
+// running, turns settle constantly and back-to-back probes pinned the CPU.
+// The first call runs at once; calls inside the window collapse into ONE
+// trailing refresh at its end, so the last change is always picked up.
+// Desktop add/remove still bumps immediately (bumpWorktrees, not this).
+export const WORKTREE_REFRESH_MIN_INTERVAL_MS = 60_000
+let lastWorktreeRefreshAt = Number.NEGATIVE_INFINITY
+let trailingWorktreeRefresh: ReturnType<typeof setTimeout> | null = null
+
+export function refreshWorktrees(now: number = Date.now()): void {
+  const wait = lastWorktreeRefreshAt + WORKTREE_REFRESH_MIN_INTERVAL_MS - now
+
+  if (wait <= 0) {
+    lastWorktreeRefreshAt = now
+    bumpWorktrees()
+
+    return
+  }
+
+  if (trailingWorktreeRefresh === null) {
+    trailingWorktreeRefresh = setTimeout(() => {
+      trailingWorktreeRefresh = null
+      lastWorktreeRefreshAt = Date.now()
+      bumpWorktrees()
+    }, wait)
+  }
 }
 
 // Spin up a fresh worktree the lightest way (`git worktree add -b`) under the
