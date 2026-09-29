@@ -63,6 +63,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/profile-distributions',
         'user-guide/multi-profile-gateways',
         'user-guide/multi-connection-desktop',
+        'user-guide/owner-forward-and-verify',
         'user-guide/git-worktrees',
         'user-guide/docker',
         'user-guide/security',
