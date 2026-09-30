@@ -76,6 +76,7 @@ def test_backstop_claims_the_session_for_the_owner_before_peers_drain(bounded, m
     server._sessions["owner-prio"] = session
     with session["history_lock"]:
         server._enqueue_prompt(session, "owner answer", None, display_kind="owner_forward")
+        owner_hold.cancel_backstop(session)  # this test drives the backstop itself
     time.sleep(BOUND + 0.05)
     session["running"] = False  # the turn ended without its post-turn drain
 

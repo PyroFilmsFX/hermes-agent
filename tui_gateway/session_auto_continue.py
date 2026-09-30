@@ -268,12 +268,6 @@ def _ac_owner_stop_hold(session: dict) -> bool:
     return stop_hold_active(session)
 
 
-def _ac_owner_overdue(session: dict) -> bool:
-    from tui_gateway.owner_hold import overdue_owner_entry
-
-    return overdue_owner_entry(session)
-
-
 def _ac_sdk_woken(session: dict) -> bool:
     from tui_gateway.session_mailbox import _live_claude_sdk
 
@@ -464,12 +458,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
         if _ac_sdk_woken(session):
-            if not _ac_owner_overdue(session):
-                return False
-            # The unclaimed CLI turn never reported its boundary within the bound: the owner's message
-            # claims the stream now (the reader routes the rest of that burst away) instead of parking.
-            logger.warning("owner hold: an unclaimed CLI turn on %s outlived the owner-hold bound; "
-                           "delivering the queued owner message now", sid)
+            # Elapsed time is never a boundary: a prompt sent now would be folded into the unclaimed CLI
+            # turn mid-loop. The owner-hold backstop recovers (interrupt + bounded wait) or fails it visibly.
+            return False
         entries = [queued, *(session.get("queued_prompts") or [])]
         owner_index = next((i for i, entry in enumerate(entries) if _ac_is_owner_entry(entry)), None)
         if _ac_owner_stop_hold(session) and owner_index is None:

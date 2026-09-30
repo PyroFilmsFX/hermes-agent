@@ -103,21 +103,26 @@ def test_owner_submit_that_never_returns_stops_holding_after_the_bound(bounded):
     assert "_owner_submit_waiting" not in session and "_owner_submit_waiting_since" not in session
 
 
-def test_owner_message_parked_behind_a_woken_turn_that_never_ends_is_delivered(bounded, monkeypatch):
+def test_owner_message_parked_behind_a_woken_turn_that_never_ends_fails_visibly(bounded, monkeypatch):
     """The b9 path queues owner input until the CLI reports its boundary. When that boundary never comes, the
-    backstop delivers the owner message as its own turn instead of parking it (and the peer hold) forever."""
+    backstop interrupts the turn, waits a bounded time, then fails the owner message VISIBLY and releases the
+    hold (R2-P1-4): it never parks forever, and it is never sent into the still-active stream."""
+    monkeypatch.setattr(owner_hold, "RECOVERY_TIMEOUT_S", BOUND)
     sdk = _StuckWokenSdk()
     session = _session(sdk)
-    fired = []
+    fired, emitted = [], []
     monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_a: None)
     monkeypatch.setattr(server, "_run_prompt_submit", lambda _r, _sid, _s, text, **_kw: fired.append(text))
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload)))
     monkeypatch.setattr(mailbox, "drain_session", lambda *_a, **_kw: 0)
     server._sessions["owner-hold"] = session
     response = server.handle_request({"id": "r", "method": "prompt.submit", "params": {
         "session_id": "owner-hold", "text": "> Q5: b, re-arm on a fresh ledger"}})
     assert response["result"]["status"] == "queued"
     assert fired == [] and mailbox._mailbox_auto_blocked(session)
-    assert _wait_for(lambda: fired == ["> Q5: b, re-arm on a fresh ledger"]), "the owner message was parked"
+    assert _wait_for(lambda: any(event == "error" for event, _sid, _p in emitted)), "the owner message was parked"
+    assert fired == []
+    assert "Send it again" in next(p["message"] for event, _sid, p in emitted if event == "error")
     assert session["queued_prompt"] is None
     assert mailbox._mailbox_auto_blocked(session) is False
 

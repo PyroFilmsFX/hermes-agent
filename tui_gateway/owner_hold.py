@@ -24,6 +24,12 @@ not (R2-P1-3). Its bound only changes HOW it is delivered: the backstop timer cl
 at the next boundary (atomically, under ``history_lock``, before any peer drain). Every queue discard
 (Stop, /new, delivery, a visible failure) resets its clock, so a fresh owner message gets a fresh bound.
 
+Elapsed time is never a turn boundary (R2-P1-4). Behind an unclaimed CLI turn (a woken/injected burst) the
+owner message is dispatched only after that turn's terminal result. When the bound passes, the backstop
+interrupts the turn and waits up to ``RECOVERY_TIMEOUT_S`` for its result; if the result still does not
+come, the owner submission is failed VISIBLY ("Not delivered ... Send it again") and the hold releases.
+Sending it into the still-active stream would fold it into the injected turn mid-loop.
+
 Peer rows stay durably queued in ``peer_mailbox`` while the hold is up and are drained when it releases.
 Nothing here writes a user turn or injects into a running loop: an owner message only ever runs as its own
 turn at a boundary, so prompt caching and role alternation are untouched.
@@ -42,6 +48,9 @@ logger = logging.getLogger(__name__)
 # The longest any owner hold may keep auto-started work back. Long enough for a normal owner turn to
 # claim the session; short enough that a stuck hold can't park the session's mail for half an hour.
 TIMEOUT_S = 300.0
+# After the bound, how long explicit recovery (interrupt the unclaimed CLI turn) waits for that turn's
+# terminal result before the queued owner message is visibly failed.
+RECOVERY_TIMEOUT_S = 30.0
 _BACKSTOP_SLACK_S = 0.05
 
 
@@ -125,7 +134,8 @@ def owner_submit_finished(session: dict) -> None:
     session.pop("_owner_submit_waiting_expired", None)
 
 
-_OWNER_QUEUE_CLOCK_KEYS = ("_owner_queued_since", "_owner_queued_released", "_owner_queued_gen")
+_OWNER_QUEUE_CLOCK_KEYS = ("_owner_queued_since", "_owner_queued_released", "_owner_queued_gen",
+                           "_owner_recovery_since")
 
 
 def note_owner_queued(session: dict) -> None:
@@ -204,13 +214,14 @@ def _schedule_release_drain(session: dict) -> None:
         schedule_drain(key, session.get("profile_home"))
 
 
-def arm_backstop(session: dict) -> None:
+def arm_backstop(session: dict, delay: float | None = None) -> None:
     """One timer per session: at the bound, re-evaluate the hold, deliver a parked owner message at the
     boundary it was waiting for, then drain peer mail. Re-arms while a fresher hold is still up."""
     if session.get("_owner_hold_backstop"):
         return
     try:
-        timer = threading.Timer(TIMEOUT_S + _BACKSTOP_SLACK_S, _fire_backstop, args=(session,))
+        timer = threading.Timer((TIMEOUT_S if delay is None else max(0.0, delay)) + _BACKSTOP_SLACK_S,
+                                _fire_backstop, args=(session,))
         timer.daemon = True
         timer.start()
     except Exception:  # noqa: BLE001 - no timer thread: the lazy bound and the mailbox retry loop still release
@@ -241,8 +252,85 @@ def _fire_backstop(session: dict) -> None:
         logger.warning("owner hold: backstop failed for session %s", _session_label(session), exc_info=True)
 
 
+def _live_sdk(session: dict) -> Any:
+    with contextlib.suppress(Exception):
+        from tui_gateway.session_mailbox import _live_claude_sdk
+        return _live_claude_sdk(session)
+    return None
+
+
+def _unclaimed_turn_active(sdk: Any) -> bool:
+    check = getattr(sdk, "woken_turn_active", None)
+    try:
+        return bool(check()) if callable(check) else False
+    except Exception:  # noqa: BLE001 - an unreadable stream is not a boundary
+        return True
+
+
+def _not_delivered_text(entry: dict) -> str:
+    text = entry.get("text")
+    preview = " ".join(text.split()) if isinstance(text, str) else "your message with attachments"
+    preview = preview if len(preview) <= 80 else preview[:79] + "\u2026"
+    return (f"Not delivered: \u201c{preview}\u201d was waiting for the session's background turn to finish, "
+            "and that turn did not stop. Send it again.")
+
+
+def fail_queued_owner_entries(sid: str, session: dict, reason: str) -> int:
+    """Visibly fail every queued owner entry: remove it, reset its hold clock, report it to the client as
+    not delivered, and release the hold (peer mail drains). Other queued entries keep their places."""
+    with (session.get("history_lock") or contextlib.nullcontext()):
+        entries = _queued_entries(session)
+        dropped = [entry for entry in entries if _is_owner_entry(entry)]
+        if not dropped:
+            return 0
+        kept = [entry for entry in entries if not _is_owner_entry(entry)]
+        session["queued_prompt"] = kept[0] if kept else None
+        if len(kept) > 1:
+            session["queued_prompts"] = kept[1:]
+        else:
+            session.pop("queued_prompts", None)
+        owner_queue_discarded(session)
+    logger.warning("owner hold: %d queued owner message(s) on session %s not delivered: %s",
+                   len(dropped), _session_label(session), reason)
+    from tui_gateway import server
+
+    for entry in dropped:
+        with contextlib.suppress(Exception):
+            server._emit("error", sid, {"message": _not_delivered_text(entry)})
+    _schedule_release_drain(session)
+    return len(dropped)
+
+
+def _recover_unclaimed_turn(sid: str, session: dict, sdk: Any) -> None:
+    """The owner message is overdue behind an unclaimed CLI turn. First pass: interrupt it and wait (bounded)
+    for its terminal result, whose idle-boundary callback delivers the owner message. Past that wait with
+    the turn still active: fail the owner message visibly. Never dispatches into the active stream."""
+    now = time.time()
+    with (session.get("history_lock") or contextlib.nullcontext()):
+        started = session.get("_owner_recovery_since")
+        if started is None:
+            session["_owner_recovery_since"] = now
+    if started is None:
+        logger.warning("owner hold: owner message on session %s is overdue behind an unclaimed CLI turn; "
+                       "interrupting it and waiting up to %.0fs for its terminal result",
+                       _session_label(session), RECOVERY_TIMEOUT_S)
+        interrupt = getattr(sdk, "interrupt_woken_turn", None)
+        if callable(interrupt):
+            with contextlib.suppress(Exception):
+                interrupt()
+        arm_backstop(session, RECOVERY_TIMEOUT_S)
+        return
+    waited = _age(started, now)
+    if waited < RECOVERY_TIMEOUT_S:
+        arm_backstop(session, RECOVERY_TIMEOUT_S - waited)
+        return
+    fail_queued_owner_entries(sid, session, "the unclaimed CLI turn did not reach its terminal result "
+                                            f"{waited:.0f}s after it was interrupted")
+
+
 def run_backstop(session: dict) -> None:
-    """Evaluate (and so expire) the hold, then run the boundary the owner message was waiting for."""
+    """Evaluate the hold, then run the boundary the owner message was waiting for. Time never stands in for
+    a boundary: behind an unclaimed CLI turn this recovers (interrupt + bounded wait) or fails visibly."""
     if session.get("_closing") or session.get("_finalized"):
         return
     sid = _live_sid(session)
@@ -252,13 +340,22 @@ def run_backstop(session: dict) -> None:
     with lock:
         stop_held = stop_hold_active(session)
         pending = owner_pending(session)
+        overdue = overdue_owner_entry(session)
         parked_owner = bool(_owner_entries(session))
+    if overdue and not session.get("running"):
+        sdk = _live_sdk(session)
+        if sdk is not None and _unclaimed_turn_active(sdk):
+            _recover_unclaimed_turn(sid, session, sdk)
+            with lock:
+                parked_owner = bool(_owner_entries(session))
+                pending = owner_pending(session)
     if parked_owner and not session.get("running"):
-        logger.warning("owner hold: session %s idle with an owner message still queued; delivering it now",
-                       _session_label(session))
+        logger.warning("owner hold: session %s has an owner message still queued; delivering it at the next "
+                       "boundary", _session_label(session))
     from tui_gateway.session_mailbox import _sdk_turn_boundary
 
-    # Delivers a queued owner message first (owner priority), then drains peer mail unless a hold remains.
+    # Delivers a queued owner message first when the session is at a real boundary (it claims the session
+    # under history_lock), then drains peer mail unless a hold remains.
     _sdk_turn_boundary(sid, session)
     if stop_held or pending or (parked_owner and session.get("running")):
         arm_backstop(session)
