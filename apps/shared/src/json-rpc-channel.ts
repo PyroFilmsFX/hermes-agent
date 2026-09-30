@@ -1,3 +1,4 @@
+import type { ClientCapabilitiesParams } from './gateway-contract.generated.js'
 import type { GatewayEvent } from './gateway-events.js'
 
 export type GatewayRequestId = number | string
@@ -92,6 +93,12 @@ export interface JsonRpcTransport {
 }
 
 export interface JsonRpcRequestChannelOptions {
+  /**
+   * Extra client.capabilities flags advertised on top of server_requests.
+   * Per-client: the desktop sets mcp_elicitation (it has the form); the TUI
+   * does not, so the backend falls back to yes/no consent for it.
+   */
+  clientCapabilities?: Partial<ClientCapabilitiesParams>
   createRequestId?: (nextId: number) => GatewayRequestId
   heartbeatDeadlineMs?: number
   heartbeatIntervalMs?: number
@@ -190,6 +197,7 @@ export class JsonRpcRequestChannel {
 
   constructor(options: JsonRpcRequestChannelOptions = {}) {
     this.options = {
+      clientCapabilities: options.clientCapabilities ?? {},
       createRequestId: options.createRequestId ?? ((nextId: number) => `${options.requestIdPrefix ?? 'r'}${nextId}`),
       heartbeatDeadlineMs: options.heartbeatDeadlineMs ?? DEFAULT_HEARTBEAT_DEADLINE_MS,
       heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -487,7 +495,7 @@ export class JsonRpcRequestChannel {
    * that is ignored.
    */
   private advertiseCapabilities(): void {
-    this.request('client.capabilities', { server_requests: true }).catch(() => undefined)
+    this.request('client.capabilities', { server_requests: true, ...this.options.clientCapabilities }).catch(() => undefined)
   }
 
   /**
