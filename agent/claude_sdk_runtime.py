@@ -264,6 +264,12 @@ def _maybe_spawn_background_review(
 
 def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
     turn = state.turn
+    watchdog_answered = bool(
+        getattr(turn, "watchdog_trip", False)
+        and getattr(turn, "fatal_reason", None) is None
+        and "turn timed out" in str(getattr(turn, "error", "") or "").lower()
+        and getattr(turn, "terminal_answer", False)
+    )
     raw_iteration_count = getattr(
         turn, "num_turns", getattr(turn, "iteration_count", None)
     )
@@ -291,10 +297,14 @@ def _assemble_turn_result(agent, state: _SdkTurnState) -> Dict[str, Any]:
         "api_calls": int(getattr(turn, "api_call_made", True)),
         "num_turns": iteration_count,
         "iteration_count": iteration_count,
-        "completed": not turn.interrupted and turn.error is None,
-        "partial": turn.interrupted or turn.error is not None,
-        "failed": bool(turn.error) and not state.effects.interrupted,
-        "error": redact_sensitive_text(str(turn.error or ""), force=True) if turn.error else None,
+        "completed": watchdog_answered or (not turn.interrupted and turn.error is None),
+        "partial": False if watchdog_answered else (turn.interrupted or turn.error is not None),
+        "failed": (
+            False if watchdog_answered else bool(turn.error) and not state.effects.interrupted
+        ),
+        "error": None if watchdog_answered else (
+            redact_sensitive_text(str(turn.error or ""), force=True) if turn.error else None
+        ),
         "interrupted": state.user_interrupted,
         "sdk_effects": state.effects.as_result_dict(),
         **(

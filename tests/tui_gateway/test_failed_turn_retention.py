@@ -249,6 +249,73 @@ def test_completed_turn_still_clears_inflight(emits, turn_env):
     assert server._inflight_snapshot(session) is None
 
 
+@pytest.mark.parametrize(
+    ("answer", "terminal_answer", "projected_messages", "expected_status"),
+    [
+        (
+            "Let me check that. Still checking.",
+            False,
+            [
+                {"role": "assistant", "content": "Let me check that.", "tool_calls": [{"id": "call-1"}]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+            ],
+            "error",
+        ),
+        ("Delivered answer", True, [{"role": "assistant", "content": "Delivered answer"}], "complete"),
+    ],
+)
+def test_sdk_watchdog_result_only_fails_when_it_delivered_no_answer(
+    emits, turn_env, answer, terminal_answer, projected_messages, expected_status
+):
+    from agent.claude_sdk_runtime import _assemble_turn_result
+
+    sdk_turn = types.SimpleNamespace(
+        final_text=answer,
+        terminal_answer=terminal_answer,
+        interrupted=True,
+        error="turn timed out after 901s idle",
+        watchdog_trip=True,
+        should_retire=True,
+        num_turns=1,
+        api_call_made=True,
+        thread_id="sdk-session",
+        projected_messages=projected_messages,
+    )
+    result = _assemble_turn_result(
+        types.SimpleNamespace(),
+        types.SimpleNamespace(
+            turn=sdk_turn,
+            messages=[{"role": "user", "content": "do it"}],
+            effects=types.SimpleNamespace(as_result_dict=lambda: {}, interrupted=False),
+            user_interrupted=False,
+            usage_result={},
+            failover_reason=None,
+        ),
+    )
+    agent = types.SimpleNamespace(
+        session_id="session-key",
+        run_conversation=lambda *a, **k: result,
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent=agent, running=True)
+    server._start_inflight_turn(session, "do it")
+
+    server._run_prompt_submit("rid", "sid", session, "do it")
+
+    payload = _events(emits, "message.complete")[0]
+    assert payload["status"] == expected_status
+    assert not _events(emits, "error")
+    if expected_status == "complete":
+        assert payload["text"] == answer
+        assert "error" not in payload
+        assert result["completed"] is True and result["failed"] is False
+        assert server._inflight_snapshot(session) is None
+    else:
+        assert payload["error"] == sdk_turn.error
+        assert result["failed"] is True
+        assert server._inflight_snapshot(session)["status"] == "error"
+
+
 @pytest.mark.parametrize("streamed_prefix", [None, "", "Earlier commentary. "])
 def test_returned_partial_error_keeps_final_response_text(emits, turn_env, monkeypatch, streamed_prefix):
     """A partial answer survives both the terminal frame and a reconnect that missed it."""

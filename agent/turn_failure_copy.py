@@ -72,10 +72,10 @@ def retract_answered_failed_turns(rows: Any) -> list:
     An interrupted turn is closed with the boundary row at once, but the SDK runtime's
     continuation (or a background result) can still answer the SAME request afterwards. The
     stored rows stay as written (model context and prompt caching are untouched); a boundary
-    followed, before the next fresh user request, by an assistant answer or a tool row is
-    returned with ``display_kind="hidden"`` so no renderer shows "not processed" for a request
-    that was answered. A boundary with no such follow-up (a genuinely unprocessed request) is
-    returned unchanged. Input rows are never mutated."""
+    followed by an answer, or preceded by an answer in the same request, is returned with
+    ``display_kind="hidden"`` so no renderer shows "not processed" for a request that was
+    answered. A boundary with no such answer (a genuinely unprocessed request) is returned
+    unchanged. Input rows are never mutated."""
     rows = list(rows or ())
 
     def _kind(row: Dict[str, Any]) -> Any:
@@ -84,6 +84,24 @@ def retract_answered_failed_turns(rows: Any) -> list:
     out = list(rows)
     for i, row in enumerate(rows):
         if not isinstance(row, dict) or _kind(row) != FAILED_TURN_DISPLAY_KIND or row.get("role") != "assistant":
+            continue
+        for earlier in reversed(rows[:i]):
+            if not isinstance(earlier, dict):
+                continue
+            role, kind = earlier.get("role"), _kind(earlier)
+            if role == "user" and kind not in _NON_REQUEST_USER_KINDS:
+                break
+            if kind in _NON_ANSWER_ASSISTANT_KINDS:
+                continue
+            if role == "tool":
+                break
+            if role == "assistant":
+                if earlier.get("tool_calls"):
+                    break
+                if str(earlier.get("content") or "").strip():
+                    out[i] = {**row, "display_kind": "hidden"}
+                    break
+        if out[i].get("display_kind") == "hidden":
             continue
         for later in rows[i + 1:]:
             if not isinstance(later, dict):
