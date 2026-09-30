@@ -5,19 +5,25 @@ import { useInRouterContext, useNavigate } from 'react-router'
 import type { ConductorRow as ConductorRowData } from '@/api/conductors'
 import type { OpenSessionNavigate } from '@/app/open-session'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
+import { sessionTitle } from '@/lib/chat-runtime'
+import { effectiveSessionRole } from '@/lib/session-role'
 import { formatAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { $conductors, $conductorsNow, acquireConductorsPoller, refreshConductors } from '@/store/conductors'
 import { $activeProfile } from '@/store/profile'
 import { $projects } from '@/store/projects'
+import { $sessions } from '@/store/session'
 import { $sessionBindings, ensureSessionBinding, sessionBindingKey } from '@/store/session-binding'
+import type { SessionInfo } from '@/types/hermes'
 
 import {
   type ConductorOpenEvent,
+  type ConductorTarget,
   conductorOpenIntent,
   conductorTarget,
   copyConductorText,
@@ -49,6 +55,7 @@ import {
   sortConductorRows
 } from './conductors-model'
 
+type OpenSessionById = (sessionId: string, event: ConductorOpenEvent) => void
 type OpenRow = (row: ConductorRowData, event: ConductorOpenEvent) => void
 type SendRow = (row: ConductorRowData, text: string) => void
 
@@ -136,11 +143,82 @@ function SkeletonRows() {
   )
 }
 
+function UnbuiltOrchestrators({
+  onOpen,
+  onToggle,
+  open,
+  sessions
+}: {
+  onOpen: OpenSessionById
+  onToggle: () => void
+  open: boolean
+  sessions: readonly SessionInfo[]
+}) {
+  const { t } = useI18n()
+  const c = t.conductors
+  const now = useStore($conductorsNow)
+
+  return (
+    <div data-slot="conductors-unbuilt">
+      <button
+        aria-expanded={open}
+        className="px-3 py-1.5 text-(--ui-text-tertiary) hover:text-(--ui-text-primary)"
+        data-slot="conductors-unbuilt-toggle"
+        onClick={onToggle}
+        type="button"
+      >
+        {open ? c.hideUnbuilt(sessions.length) : c.showUnbuilt(sessions.length)}
+      </button>
+      {open && (
+        <ul>
+          {sessions.map(session => {
+            const role = effectiveSessionRole(session)
+            const activeAt = (session.last_active || session.started_at) * 1000
+
+            return (
+              <li
+                className="flex items-center gap-2 border-b border-(--ui-stroke-tertiary) px-3 py-1.5"
+                data-session-id={session.id}
+                data-slot="conductors-unbuilt-item"
+                key={session.id}
+              >
+                <span className="min-w-0 truncate text-(--ui-text-primary)">{sessionTitle(session)}</span>
+                {role && (
+                  <Badge
+                    className="text-[0.6rem] font-medium capitalize text-muted-foreground"
+                    size="xs"
+                    variant="outline"
+                  >
+                    {role}
+                  </Badge>
+                )}
+                <span className="ml-auto shrink-0 text-(--ui-text-tertiary)">
+                  {formatAgo(activeAt, c, Math.max(now, activeAt))}
+                </span>
+                <button
+                  className="shrink-0 rounded border border-(--ui-stroke-secondary) px-2 py-0.5 text-(--ui-text-secondary) hover:bg-(--ui-control-hover-background)"
+                  data-slot="conductors-unbuilt-open"
+                  onClick={event => onOpen(session.id, event)}
+                  type="button"
+                >
+                  {c.openUnbuilt}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 const ROW_SELECTOR = '[role="row"][data-row-key]'
 
 export interface ConductorsPaneProps {
   /** Override for the row-open door (tests). Defaults to the §8 intents. */
   onOpenRow?: OpenRow
+  /** Override for the "Orchestrators without a build" open action (tests). */
+  onOpenSession?: OpenSessionById
   /** Override for Send… (tests). Defaults to stash-the-draft-and-open. */
   onSendRow?: SendRow
 }
@@ -166,6 +244,7 @@ function RoutedConductorsPane(props: ConductorsPaneProps) {
 function ConductorsPaneView({
   navigate,
   onOpenRow,
+  onOpenSession,
   onSendRow
 }: ConductorsPaneProps & { navigate: OpenSessionNavigate }) {
   const { t } = useI18n()
@@ -175,6 +254,7 @@ function ConductorsPaneView({
   const activeProfile = useStore($activeProfile)
   const [filter, setFilter] = useState<ConductorFilter>('all')
   const [showAbandoned, setShowAbandoned] = useState(false)
+  const [showUnbuilt, setShowUnbuilt] = useState(false)
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [focusKey, setFocusKey] = useState<null | string>(null)
   const gridRef = useRef<HTMLDivElement>(null)
@@ -200,6 +280,30 @@ function ConductorsPaneView({
 
     return next.rows
   }, [data])
+
+  const sessions = useStore($sessions)
+
+  // O3: orchestrator-like sessions no row points at. Renderer-only; reads the
+  // sessions already in the store.
+  const unbuiltOrchestrators = useMemo(() => {
+    const owned = new Set<string>()
+
+    for (const row of rows) {
+      const id = row.orchestrator.hermes_session_id
+
+      if (id) {
+        owned.add(id)
+      }
+    }
+
+    return sessions
+      .filter(session => {
+        const role = effectiveSessionRole(session)
+
+        return (role === 'orchestrator' || role === 'manager') && !owned.has(session.id)
+      })
+      .sort((a, b) => (b.last_active || b.started_at) - (a.last_active || a.started_at))
+  }, [rows, sessions])
 
   const { abandonedRows, liveRows } = useMemo(() => {
     const generatedAt = data?.generated_at ?? 0
@@ -265,6 +369,20 @@ function ConductorsPaneView({
       }
     },
     [activeProfile, navigate, onOpenRow]
+  )
+
+  const openOrchestratorSession = useCallback<OpenSessionById>(
+    (sessionId, event) => {
+      if (onOpenSession) {
+        onOpenSession(sessionId, event)
+
+        return
+      }
+
+      const target: ConductorTarget = { sessionId }
+      openConductorTarget(target, conductorOpenIntent(event, target), navigate)
+    },
+    [navigate, onOpenSession]
   )
 
   const sendRow = useCallback<SendRow>(
@@ -371,6 +489,15 @@ function ConductorsPaneView({
     />
   )
 
+  const unbuiltSection = unbuiltOrchestrators.length > 0 && (
+    <UnbuiltOrchestrators
+      onOpen={openOrchestratorSession}
+      onToggle={() => setShowUnbuilt(open => !open)}
+      open={showUnbuilt}
+      sessions={unbuiltOrchestrators}
+    />
+  )
+
   return (
     <div className="@container flex h-full min-h-0 flex-col text-xs" data-slot="conductors-pane">
       <div
@@ -439,6 +566,7 @@ function ConductorsPaneView({
           <div className="text-sm text-(--ui-text-primary)">{c.emptyTitle}</div>
           <div className="text-(--ui-text-tertiary)">{c.emptyBody}</div>
           {data.sources.marker_index === 'missing' && <div className="text-(--ui-text-tertiary)">{c.emptyNoIndex}</div>}
+          {unbuiltSection}
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto" data-slot="conductors-body">
@@ -476,6 +604,7 @@ function ConductorsPaneView({
               {showAbandoned ? c.hideAbandoned(abandonedRows.length) : c.showAbandoned(abandonedRows.length)}
             </button>
           )}
+          {unbuiltSection}
         </div>
       )}
     </div>

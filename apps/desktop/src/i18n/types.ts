@@ -2889,6 +2889,9 @@ export interface Translations {
     staleBanner: (asOf: string) => string
     showAbandoned: (count: number) => string
     hideAbandoned: (count: number) => string
+    showUnbuilt: (count: number) => string
+    hideUnbuilt: (count: number) => string
+    openUnbuilt: string
     waves: (count: number) => string
     units: (count: number) => string
     unitsUnknown: string
