@@ -12,8 +12,10 @@ import {
   callMcpAppTool,
   mcpAppLabel,
   type McpResourceReadResult,
+  type McpAppOwnerPin,
   mcpServerFromToolName,
   pickMcpAppHtml,
+  pinMcpAppOwner,
   readMcpAppResource
 } from '@/lib/mcp-apps/resolve'
 import {
@@ -143,9 +145,9 @@ export interface McpAppCardProps {
   uri: string
   toolName: string
   /** Injection seams for tests; default to the gateway RPCs. */
-  readResource?: (server: string, uri: string) => Promise<McpResourceReadResult>
+  readResource?: (server: string, uri: string, owner: McpAppOwnerPin) => Promise<McpResourceReadResult>
   /** Receives the card's pinned session id as its second argument. */
-  callTool?: (request: McpAppToolRequest, sessionId: string | null) => ReturnType<McpAppCallTool>
+  callTool?: (request: McpAppToolRequest, sessionId: string | null, owner: McpAppOwnerPin) => ReturnType<McpAppCallTool>
   /** Session whose transcript rendered this card. Tool calls are pinned to it, never to the focused chat. */
   sessionId?: string | null
   theme?: McpAppTheme
@@ -179,7 +181,18 @@ export const McpAppCard: FC<McpAppCardProps> = ({
     pinnedSession.current = sessionId
   }
 
-  const pinnedCallTool = useCallback<McpAppCallTool>(request => callTool(request, pinnedSession.current), [callTool])
+  // The connection/profile owning that session is pinned with it, so reads and
+  // calls go through that gateway even after the focus moves to another one.
+  const pinnedOwner = useRef<McpAppOwnerPin | null>(null)
+
+  if (!pinnedOwner.current && pinnedSession.current) {
+    pinnedOwner.current = pinMcpAppOwner(pinnedSession.current)
+  }
+
+  const pinnedCallTool = useCallback<McpAppCallTool>(
+    request => callTool(request, pinnedSession.current, pinnedOwner.current ?? Promise.resolve(null)),
+    [callTool]
+  )
 
   // The resource read names its server: the one whose tool result pointed at the app.
   const toolServer = mcpServerFromToolName(toolName)
@@ -195,7 +208,7 @@ export const McpAppCard: FC<McpAppCardProps> = ({
       return
     }
 
-    readResource(toolServer, uri).then(
+    readResource(toolServer, uri, pinnedOwner.current ?? Promise.resolve(null)).then(
       read => {
         if (cancelled) {
           return
