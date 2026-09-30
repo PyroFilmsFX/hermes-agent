@@ -305,6 +305,15 @@ class MockPeer:
         raise TimeoutError(f"Event {event_type} not received within {timeout}s")
 
 
+def _attach_elicitation_client(peer) -> None:
+    """Attach *peer* as a desktop client: live transport + client.capabilities {mcp_elicitation: true}.
+    Only such a client takes the mcp.elicitation.request event path (W2 fix P1-2)."""
+    gateway_server.register_live_transport(peer)
+    resp = gateway_server.dispatch({"jsonrpc": "2.0", "id": 0, "method": "client.capabilities",
+                                    "params": {"server_requests": True, "mcp_elicitation": True}}, transport=peer)
+    assert resp is not None and "result" in resp, resp
+
+
 @pytest.fixture
 def fixture_server_config() -> dict[str, Any]:
     fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "mcp2026_server.py"
@@ -371,7 +380,7 @@ def test_form_roundtrip_returns_typed_content(fixture_server_config: dict) -> No
     assert server is not None and server.session is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None
@@ -410,7 +419,7 @@ def test_invalid_content_rejected_and_request_stays_open(fixture_server_config: 
     assert server is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None
@@ -464,7 +473,7 @@ def test_decline_and_cancel(fixture_server_config: dict) -> None:
     assert server is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None
@@ -529,7 +538,7 @@ def test_elicitation_timeout_declines(fixture_server_config: dict, monkeypatch: 
     assert server is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None
@@ -553,7 +562,7 @@ def test_shutdown_cancels_pending(fixture_server_config: dict) -> None:
     assert server is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None
@@ -586,7 +595,7 @@ def test_url_mode_forwards_url_and_never_opens_it(fixture_server_config: dict, m
     assert server is not None
 
     peer = MockPeer()
-    gateway_server.register_live_transport(peer)
+    _attach_elicitation_client(peer)
     try:
         loop = _loop._running_loop()
         assert loop is not None

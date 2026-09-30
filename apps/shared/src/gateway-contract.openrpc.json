@@ -8305,6 +8305,11 @@
             "default": false,
             "title": "Server Requests",
             "type": "boolean"
+          },
+          "mcp_elicitation": {
+            "default": false,
+            "title": "Mcp Elicitation",
+            "type": "boolean"
           }
         },
         "title": "ClientCapabilitiesParams",

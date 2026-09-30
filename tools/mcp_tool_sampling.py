@@ -268,11 +268,16 @@ _pending_elicitations_lock = threading.Lock()
 
 
 def _has_connected_desktop_clients() -> bool:
-    """Fail-closed check: True when at least one desktop/TUI client is attached."""
+    """True only when an attached client advertised ``client.capabilities {mcp_elicitation: true}`` (it
+    renders ``mcp.elicitation.request``). Any other peer (the TUI, a compute-host relay, an older desktop
+    build) drops that event, and the request would sit until the timeout declined it unseen, so this is
+    False and the handler takes the consent path. Errors fall to the consent path too."""
     try:
         from tui_gateway import server as gw_server
+        from tui_gateway import server_requests
         with gw_server._live_transports_lock:
-            return bool(gw_server._live_transports)
+            peers = list(gw_server._live_transports)
+        return any(server_requests.handles_mcp_elicitation(peer) for peer in peers)
     except Exception:
         return False
 
@@ -394,8 +399,8 @@ def cancel_all_pending_elicitations(server_name: str | None = None) -> None:
 
 
 class ElicitationHandler:
-    """``elicitation_callback`` for one MCP server. Forwards to desktop when connected;
-    falls back to Hermes' approval consent system for CLI, TUI and messaging. Fail-closed:
+    """``elicitation_callback`` for one MCP server. Forwards to a client that advertised
+    ``mcp_elicitation`` when one is attached; falls back to Hermes' approval consent system for CLI, TUI and messaging. Fail-closed:
     timeout, shutdown, or errors return decline/cancel."""
 
     # asyncio-side safety net over the approval's own input() timeout so the MCP loop never blocks
