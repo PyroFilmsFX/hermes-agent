@@ -177,6 +177,16 @@ def _cli_model_id(model):
     return normalize_model_name(str(model))
 
 
+
+def _forget_steer_mark(owner: Any, text: str) -> None:
+    """Drop the newest position mark for *text* (caller holds the commit lock)."""
+    marks = getattr(owner, "_pending_steer_marks", [])
+    for index in range(len(marks) - 1, -1, -1):
+        if marks[index].get("text") == text:
+            del marks[index]
+            return
+
+
 class ClaudeAgentSdkSession(
     ClaudeSdkTurnMixin,
     ClaudeSdkPermissionsMixin,
@@ -391,6 +401,12 @@ class ClaudeAgentSdkSession(
         # these results on the same stream and marks them with human origin.
         self._pending_steer_results = 0
         self._pending_steer_inputs: list[str] = []
+        # One mark per pending steer, index-aligned with ``_pending_steer_inputs``:
+        # ``pos`` is how many projected messages the turn had settled when the
+        # steer was typed (stamped by the turn loop on the next stream message),
+        # so the owner's row lands where it was sent, not before or after the
+        # whole turn's output.
+        self._pending_steer_marks: list[dict[str, Any]] = []
         # The foreground coroutine owns this acknowledgement while waiting
         # for the reader to publish its claim.  Shutdown resolves it even if
         # the reader cancellation has already dequeued the claim.
@@ -1474,6 +1490,8 @@ class ClaudeAgentSdkSession(
             self._pending_steer_results = getattr(self, "_pending_steer_results", 0) + 1
             self._pending_steer_inputs = getattr(self, "_pending_steer_inputs", [])
             self._pending_steer_inputs.append(cleaned)
+            self._pending_steer_marks = getattr(self, "_pending_steer_marks", [])
+            self._pending_steer_marks.append({"text": cleaned, "ts": time.time(), "pos": None})
         client = self._client
         loop = self._loop
         if client is None or loop is None:
@@ -1483,6 +1501,7 @@ class ClaudeAgentSdkSession(
                 )
                 if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
                     self._pending_steer_inputs.pop()
+                _forget_steer_mark(self, cleaned)
             return False
         try:
             query = client.query(_sdk_user_message_stream(cleaned, origin={"kind": "human"}))
@@ -1504,6 +1523,7 @@ class ClaudeAgentSdkSession(
                         inputs = getattr(self, "_pending_steer_inputs", [])
                         if cleaned in inputs:
                             inputs.remove(cleaned)
+                        _forget_steer_mark(self, cleaned)
                     logger.debug("SDK steer query failed after scheduling", exc_info=True)
 
             future.add_done_callback(_finish_steer)
@@ -1516,6 +1536,7 @@ class ClaudeAgentSdkSession(
                 )
                 if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
                     self._pending_steer_inputs.pop()
+                _forget_steer_mark(self, cleaned)
             logger.debug("SDK steer scheduling failed", exc_info=True)
             return False
         logger.info(

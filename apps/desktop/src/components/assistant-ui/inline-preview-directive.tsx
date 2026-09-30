@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
-import { useIsDark } from '@/components/assistant-ui/embeds/use-is-dark'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
+import { onThemeRepaint } from '@/hooks/use-theme-epoch'
 import { readDesktopFileText } from '@/lib/desktop-fs'
 import { localPreviewTarget } from '@/lib/local-preview'
 
@@ -26,12 +26,26 @@ import { localPreviewTarget } from '@/lib/local-preview'
  * stays column-wide. A `height="480"` attribute only sets the starting
  * height — measurement always wins.
  *
- * NATIVE BY DEFAULT. A theme prelude injects first: the app's resolved
- * theme tokens under friendly names (--foreground, --muted-foreground,
- * --accent, --border, --card), the app font, zero body margin/padding, and
- * a transparent background — so widget-shaped content reads as part of the
- * app. The page's own styles override all of it, so a full page keeps its
- * own design.
+ * NATIVE BY DEFAULT. A theme prelude injects first: the app's color scheme,
+ * the app's resolved theme tokens under friendly names (--foreground,
+ * --muted-foreground, --accent, --border, --card), the app font, zero body
+ * margin/padding, and a transparent background — so widget-shaped content
+ * reads as part of the app. The page's own styles override all of it, so a
+ * full page keeps its own design. The prelude re-resolves on every theme
+ * repaint, so a light/dark switch re-themes a live frame.
+ *
+ * The color scheme is load-bearing, not cosmetic: when an iframe element's
+ * used `color-scheme` differs from its document root's, Chromium paints the
+ * frame's canvas an OPAQUE Canvas color (CSS Color Adjust §2.2) — a frame
+ * doc left at the default (light) inside the dark app renders on solid
+ * white, and `background:transparent` can't undo it. The element and the
+ * document therefore always get the SAME scheme, from one resolution.
+ *
+ * CLIPPED LIKE ANY MESSAGE CONTENT. The frame box is its own clip, paint
+ * containment and stacking boundary, and the iframe sits in flow inside it
+ * (no absolutely positioned layer), so the transcript scroller's clip
+ * bounds it and the composer dock (z-30, outside the transcript) paints
+ * over it.
  *
  * WIDGETS TALK BACK OFF-SCREEN. `window.hermes.send(prompt)` (or declarative
  * `data-hermes-send` on any clickable element) routes the prompt through the
@@ -148,17 +162,30 @@ export function collectThemeBridge(): { vars: Record<string, string>; font: stri
   return { vars, font }
 }
 
+export type FrameColorScheme = 'dark' | 'light'
+
+/** The scheme the app is PAINTING: themes/context.tsx sets `color-scheme`
+ *  and the `dark` class on <html> from the same rendered mode, so the class
+ *  is the scheme the iframe element inherits. */
+export function appColorScheme(): FrameColorScheme {
+  return typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'dark' : 'light'
+}
+
 /**
  * The style prelude that makes an inline widget read as NATIVE: the app's
- * resolved theme tokens as CSS vars, the app font, no margin, and a
- * transparent background so the widget sits directly on the chat surface.
- * Injected FIRST, so the page's own styles override every default here — a
- * full page that wants its own look keeps it.
+ * color scheme, its resolved theme tokens as CSS vars, the app font, no
+ * margin, and a transparent background so the widget sits directly on the
+ * chat surface. Injected FIRST, so the page's own styles override every
+ * default here — a full page that wants its own look keeps it.
+ *
+ * `scheme` MUST equal the iframe element's `color-scheme`: a mismatch makes
+ * Chromium paint the frame canvas opaque (white, for a light doc in a dark
+ * app), which no background rule inside the frame can clear.
  */
-export function themePrelude(vars: Record<string, string>, font: string): string {
-  const tokens = Object.entries(vars)
-    .map(([name, value]) => `${name}:${value}`)
-    .join(';')
+export function themePrelude(vars: Record<string, string>, font: string, scheme: FrameColorScheme): string {
+  const tokens = [`color-scheme:${scheme}`, ...Object.entries(vars).map(([name, value]) => `${name}:${value}`)].join(
+    ';'
+  )
 
   const fontRule = font ? `font-family:${font};` : ''
 
@@ -166,6 +193,22 @@ export function themePrelude(vars: Record<string, string>, font: string): string
     `<style>:root{${tokens}}` +
     `html,body{margin:0;padding:0;background:transparent;color:var(--foreground,inherit);${fontRule}}</style>`
   )
+}
+
+export interface FrameTheme {
+  scheme: FrameColorScheme
+  /** The srcdoc prelude for `scheme` and the live tokens. A string, so an
+   *  unchanged theme compares equal and never reloads the frame. */
+  prelude: string
+}
+
+/** Resolve scheme + prelude together from the live document, so the element
+ *  and the document can never be handed different schemes. */
+export function resolveFrameTheme(): FrameTheme {
+  const scheme = appColorScheme()
+  const { vars, font } = collectThemeBridge()
+
+  return { scheme, prelude: themePrelude(vars, font, scheme) }
 }
 
 /** The script injected into the srcdoc that reports content size to the
@@ -244,6 +287,12 @@ export function frameSizeFromMessage(data: unknown, token: string): FrameSizeRep
 
 const HTML_FILE_RE = /\.(?:html?|xhtml)$/i
 
+/** The frame box: its own clip (`overflow-clip`), paint containment, and
+ *  stacking context (`isolate`), so the frame is bounded like any other
+ *  message content. Exported for the regression test. */
+export const INLINE_FRAME_BOX_CLASS =
+  'relative isolate block max-w-full overflow-clip contain-[layout_paint] transition-[height] duration-200'
+
 export function InlinePreviewDirective({
   attrs,
   streaming
@@ -276,7 +325,7 @@ function InlineHtmlFrame({
   streaming: boolean
 }) {
   const cwd = useStore(useSessionView().$cwd)
-  const isDark = useIsDark()
+  const [theme, setTheme] = useState(resolveFrameTheme)
   const [doc, setDoc] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
   const [measured, setMeasured] = useState<number | null>(null)
@@ -370,16 +419,21 @@ function InlineHtmlFrame({
     return () => window.removeEventListener('message', onMessage)
   }, [initialHeight, token])
 
-  // Resolved once per mount; theme switches remount the transcript anyway.
-  const framedDoc = useMemo(() => {
-    if (doc === null) {
-      return null
-    }
+  // Follow the live theme. A light/dark switch does NOT remount the
+  // transcript, so a prelude resolved once would leave the frame on the old
+  // scheme — a scheme that no longer matches the element's, i.e. an opaque
+  // canvas. Re-resolve on every theme repaint; the memo below keys on the
+  // prelude STRING, so unrelated <html> style churn yields an identical
+  // srcdoc and never reloads the widget.
+  useEffect(() => {
+    setTheme(resolveFrameTheme())
 
-    const { vars, font } = collectThemeBridge()
+    return onThemeRepaint(() => setTheme(resolveFrameTheme()))
+  }, [])
 
-    return withInlineChrome(doc, token, themePrelude(vars, font))
-  }, [doc, token])
+  const prelude = theme.prelude
+
+  const framedDoc = useMemo(() => (doc === null ? null : withInlineChrome(doc, token, prelude)), [doc, prelude, token])
 
   if (!path || failed) {
     return <PreviewAttachment target={file} />
@@ -399,16 +453,24 @@ function InlineHtmlFrame({
           style={{ height }}
         />
       ) : (
+        // The frame box is a hard boundary: overflow clip + paint
+        // containment + its own stacking context, and the iframe is IN FLOW
+        // (not an absolutely positioned layer), so nothing the frame paints
+        // can land outside this box — the transcript scroller clips it and
+        // the composer dock paints over it.
         <span
-          className="relative block max-w-full transition-[height] duration-200"
+          className={INLINE_FRAME_BOX_CLASS}
+          data-slot="inline-preview-frame"
           style={{ height, width: width ?? '100%' }}
         >
           <iframe
-            className="absolute inset-0 size-full border-0 bg-transparent"
+            className="block size-full border-0 bg-transparent"
             loading="lazy"
             sandbox="allow-scripts"
             srcDoc={framedDoc}
-            style={{ colorScheme: isDark ? 'dark' : 'light' }}
+            // Same resolution as the srcdoc's `:root{color-scheme}` — they
+            // must match or Chromium paints the canvas opaque.
+            style={{ colorScheme: theme.scheme }}
             title={file}
           />
         </span>

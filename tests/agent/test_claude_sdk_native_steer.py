@@ -632,7 +632,7 @@ def test_steer_results_are_durable_before_turn_release_without_end_duplicates(tm
     agent._flush_messages_to_session_db = AIAgent._flush_messages_to_session_db.__get__(agent, AIAgent)
     agent._flush_messages_to_session_db_unlocked = AIAgent._flush_messages_to_session_db_unlocked.__get__(agent, AIAgent)
 
-    def on_steer_settled(steer_text, projected_messages):
+    def on_steer_settled(steer_text, projected_messages, steer_index=None):
         assert session._turn_inbox is not None, "the host turn must still own the stream at persistence"
         if steer_text:
             messages.append({"role": "user", "content": steer_text})
@@ -792,3 +792,220 @@ def test_late_human_result_is_not_classified_as_unsolicited():
     assert delivered == []
     assert session._unsolicited_results == 0
     assert session._unsolicited_text == []
+
+
+# --- owner message typed mid-turn is written where it was sent ------------------------------------
+
+
+def _steer_order_fakes():
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, StreamEvent, TextBlock, _EOS, _FakeClient,
+    )
+
+    def result(text, uuid, origin=None):
+        message = ResultMessage(result=text, uuid=uuid)
+        message.origin = origin
+        return message
+
+    def delta(text):
+        return StreamEvent(event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}})
+
+    return AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta
+
+
+def test_folded_steer_is_written_between_output_before_and_after_it():
+    """The CLI folded the steer into the running turn (one human-origin result for the whole turn): the owner's
+    row sits after the output that had streamed when it was typed and before the reply that answers it."""
+    from agent.claude_sdk_runtime_continuity import _persist_steer_boundary
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+
+    class FoldedClient(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[TextBlock("pre-steer output")]))
+                self._pending.append(delta("typing"))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(AssistantMessage(content=[TextBlock("reply to the steer")]))
+            self._pending.append(result("reply to the steer", "folded-result", {"kind": "human"}))
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    calls = []
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: FoldedClient(options=options),
+        on_stream_delta=on_delta,
+    )
+    session._on_steer_settled = lambda text, settled, index=None: calls.append((text, list(settled), index))
+    try:
+        session.run_turn("initial")
+    finally:
+        session.close()
+
+    assert len(calls) == 1
+    text, settled, index = calls[0]
+    assert text == "and what do i need to do?"
+    assert [m["content"] for m in settled if m["role"] == "assistant"] == ["pre-steer output", "reply to the steer"]
+    assert index == 1, "the steer belongs after the one message that had streamed, not before the whole turn"
+
+    transcript = []
+    _persist_steer_boundary(types.SimpleNamespace(_session_db=None), transcript, text, settled, index)
+    assert [(m["role"], m["content"]) for m in transcript] == [
+        ("assistant", "pre-steer output"),
+        ("user", "and what do i need to do?"),
+        ("assistant", "reply to the steer"),
+    ]
+
+
+def test_steer_the_turn_never_settles_is_still_written_before_the_late_reply():
+    """The turn released before the steer's own result (the answer surfaces later as unsolicited output): the
+    owner's words used to be dropped, leaving only the reply. They are written at the point they were typed."""
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+
+    class UnsettledClient(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[TextBlock("pre-steer output")]))
+                self._pending.append(delta("typing"))
+                self._pending.append(AssistantMessage(content=[TextBlock("more output")]))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(_EOS)  # the stream ends before any result for the steer
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: UnsettledClient(options=options),
+        on_stream_delta=on_delta,
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+
+    rows = [(m["role"], m["content"]) for m in turn.projected_messages if m["role"] in {"user", "assistant"}]
+    assert rows == [
+        ("assistant", "pre-steer output"),
+        ("user", "and what do i need to do?"),
+        ("assistant", "more output"),
+    ]
+    assert session._pending_steer_marks == []
+
+
+def _assert_steer_outside_tool_group(rows):
+    """call -> result adjacent, steer after them, and the real repair pass keeps both."""
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    roles = [(m["role"], m.get("content") if m["role"] == "user" else None) for m in rows]
+    call = next(i for i, m in enumerate(rows) if m["role"] == "assistant" and m.get("tool_calls"))
+    assert rows[call + 1]["role"] == "tool", f"steer split the call from its result: {roles}"
+    steer = next(i for i, m in enumerate(rows) if m["role"] == "user" and m["content"] == "and what do i need to do?")
+    assert steer > call + 1
+    restored = [dict(m) for m in rows]
+    repair_message_sequence(None, restored)
+    assert any(m["role"] == "assistant" and m.get("tool_calls") for m in restored)
+    assert any(m["role"] == "tool" for m in restored), "repair dropped the completed tool result"
+
+
+def _tool_group_fakes():
+    from tests.agent.claude_sdk_fakes import ToolResultBlock, ToolUseBlock, UserMessage
+
+    return ToolResultBlock, ToolUseBlock, UserMessage
+
+
+def test_release_never_writes_a_steer_between_a_tool_call_and_its_result():
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    ToolResultBlock, ToolUseBlock, UserMessage = _tool_group_fakes()
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[ToolUseBlock(id="tx", name="Bash", input={})]))
+                self._pending.append(delta("typing"))
+                self._pending.append(UserMessage(content=[ToolResultBlock(tool_use_id="tx", content="done")]))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(_EOS)
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: Client(options=options),
+        on_stream_delta=on_delta,
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+    _assert_steer_outside_tool_group(list(turn.projected_messages))
+
+
+def test_folded_steer_never_lands_between_a_tool_call_and_its_result():
+    from agent.claude_sdk_runtime_continuity import _persist_steer_boundary
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    ToolResultBlock, ToolUseBlock, UserMessage = _tool_group_fakes()
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[ToolUseBlock(id="tx", name="Bash", input={})]))
+                self._pending.append(delta("typing"))
+                self._pending.append(UserMessage(content=[ToolResultBlock(tool_use_id="tx", content="done")]))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(AssistantMessage(content=[TextBlock("reply")]))
+            self._pending.append(result("reply", "folded", {"kind": "human"}))
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    calls = []
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: Client(options=options),
+        on_stream_delta=on_delta,
+    )
+    session._on_steer_settled = lambda text, settled, index=None: calls.append((text, list(settled), index))
+    try:
+        session.run_turn("initial")
+    finally:
+        session.close()
+    text, settled, index = calls[0]
+    transcript = []
+    _persist_steer_boundary(types.SimpleNamespace(_session_db=None), transcript, text, settled, index)
+    _assert_steer_outside_tool_group(transcript)
+    assert [m["role"] for m in transcript][-2:] == ["user", "assistant"]
