@@ -194,6 +194,21 @@ describe('live turn event silence', () => {
     expect(failed?.error).not.toMatch(/glm|deepseek|interrupted mid-run/i)
   })
 
+  it('does not latch the owner-Stop interrupt when it settles, so a recovered reply still draws', () => {
+    $activeSessionId.set('rt-recover')
+    publishSessionState('rt-recover', partial('before the crash', { storedSessionId: 's-recover' }))
+    noteSessionEvent('rt-recover')
+
+    vi.advanceTimersByTime(SILENCE_MS)
+
+    const settled = $sessionStates.get()['rt-recover']
+    expect(settled?.busy).toBe(false)
+    // `interrupted` is the owner's Stop latch: it makes message.start, deltas, tool events and
+    // message.complete be dropped until the next prompt.submit. Crash recovery answers after the
+    // silence window, and that reply must not need another owner message to appear.
+    expect(settled?.interrupted).toBe(false)
+  })
+
   it('force-settles a silent live turn that never produced a payload', () => {
     $activeSessionId.set('rt-empty')
     publishSessionState(
