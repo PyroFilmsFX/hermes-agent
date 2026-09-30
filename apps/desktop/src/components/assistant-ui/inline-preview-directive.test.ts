@@ -24,7 +24,7 @@ describe('directiveFrameHeight', () => {
 })
 
 describe('withInlineChrome', () => {
-  const prelude = themePrelude({ '--foreground': '#eee' }, 'Inter')
+  const prelude = themePrelude({ '--foreground': '#eee' }, 'Inter', 'dark')
 
   it('puts the theme prelude FIRST so page styles override it', () => {
     const doc = '<html><head><style>body{color:red}</style></head><body><h1>hi</h1></body></html>'
@@ -53,7 +53,11 @@ describe('withInlineChrome', () => {
 
 describe('themePrelude', () => {
   it('carries resolved tokens, transparent background, and the app font', () => {
-    const prelude = themePrelude({ '--foreground': 'oklch(0.9 0 0)', '--accent': '#7aa2f7' }, 'Inter, sans-serif')
+    const prelude = themePrelude(
+      { '--foreground': 'oklch(0.9 0 0)', '--accent': '#7aa2f7' },
+      'Inter, sans-serif',
+      'dark'
+    )
 
     expect(prelude).toContain('--foreground:oklch(0.9 0 0)')
     expect(prelude).toContain('--accent:#7aa2f7')
@@ -62,7 +66,17 @@ describe('themePrelude', () => {
   })
 
   it('omits the font rule when no font resolved', () => {
-    expect(themePrelude({}, '')).not.toContain('font-family')
+    expect(themePrelude({}, '', 'light')).not.toContain('font-family')
+  })
+
+  // Bug: a frame doc left at the default (light) scheme inside the dark app
+  // gets an OPAQUE white canvas from Chromium. The prelude must declare the
+  // app's scheme on the frame root, even with no tokens resolved.
+  it('declares the given color scheme on the frame root', () => {
+    expect(themePrelude({ '--foreground': '#eee' }, '', 'dark')).toContain(
+      '<style>:root{color-scheme:dark;--foreground:#eee}'
+    )
+    expect(themePrelude({}, '', 'light')).toContain('<style>:root{color-scheme:light}')
   })
 })
 
