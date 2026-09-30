@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { $gateway } from '@/store/gateway'
+import { $activeSessionId } from '@/store/session'
 import { MCP_APP_CSP, MCP_APP_MAX_HTML_BYTES } from '@/lib/mcp-apps/sandbox'
 
 import { McpAppCard, McpAppFrame } from './mcp-app-frame'
@@ -24,13 +26,15 @@ const FIXTURE_HTML =
 
 const THEME = { background: '#ffffff', foreground: '#111111' }
 
-const readFixture = vi.fn(async (uri: string) => ({
+const readFixture = vi.fn(async (_server: string, uri: string) => ({
   server: 'hermes-mcp-2026-fixture',
   uri,
   contents: [{ uri, mimeType: 'text/html;profile=mcp-app', text: FIXTURE_HTML }]
 }))
 
 afterEach(() => {
+  $gateway.set(null as any)
+  $activeSessionId.set(null)
   cleanup()
   vi.clearAllMocks()
 })
@@ -171,13 +175,13 @@ describe('McpAppCard', () => {
 
     await frameReady()
 
-    expect(readFixture).toHaveBeenCalledWith('ui://fixture/app')
+    expect(readFixture).toHaveBeenCalledWith('hermes_mcp_2026_fixture', 'ui://fixture/app')
     expect(screen.getByText('fixture/app')).toBeTruthy()
     expect(screen.getByText('· hermes-mcp-2026-fixture')).toBeTruthy()
   })
 
   it('shows an inline error when the resource is not HTML', async () => {
-    const readJson = vi.fn(async (uri: string) => ({
+    const readJson = vi.fn(async (_server: string, uri: string) => ({
       server: 's',
       uri,
       contents: [{ uri, mimeType: 'application/json', text: '{}' }]
@@ -196,6 +200,7 @@ describe('McpAppCard', () => {
       <McpAppCard
         callTool={callTool}
         readResource={readFixture}
+        sessionId="session-A"
         theme={THEME}
         toolName="mcp__f__t"
         uri="ui://fixture/app"
@@ -231,6 +236,7 @@ describe('McpAppCard', () => {
       <McpAppCard
         callTool={callTool}
         readResource={readFixture}
+        sessionId="session-A"
         theme={THEME}
         toolName="mcp__f__t"
         uri="ui://fixture/app"
@@ -250,12 +256,68 @@ describe('McpAppCard', () => {
         '*'
       )
     )
-    expect(callTool).toHaveBeenCalledWith({
-      server: 'hermes-mcp-2026-fixture',
-      appUri: 'ui://fixture/app',
-      name: 'destructive_action',
-      arguments: {}
-    })
+    expect(callTool).toHaveBeenCalledWith(
+      {
+        server: 'hermes-mcp-2026-fixture',
+        appUri: 'ui://fixture/app',
+        name: 'destructive_action',
+        arguments: {}
+      },
+      'session-A'
+    )
+  })
+
+  it('pins the call to the card session even when another chat is focused', async () => {
+    const mockRequest = vi.fn(async () => ({ structuredContent: { ok: true } }))
+    $gateway.set({ request: mockRequest } as any)
+    $activeSessionId.set('session-B')
+
+    render(
+      <McpAppCard
+        readResource={readFixture}
+        sessionId="session-A"
+        theme={THEME}
+        toolName="mcp__f__t"
+        uri="ui://fixture/app"
+      />
+    )
+
+    await frameReady()
+    clickAppButton(frameEl())
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow once' }))
+
+    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    expect(mockRequest).toHaveBeenCalledWith(
+      'mcp.tools.call',
+      expect.objectContaining({ session_id: 'session-A', name: 'destructive_action' })
+    )
+  })
+
+  it('refuses app tool calls when the card has no session, without prompting', async () => {
+    const callTool = vi.fn()
+    const mockRequest = vi.fn()
+    $gateway.set({ request: mockRequest } as any)
+    $activeSessionId.set('session-B')
+
+    render(
+      <McpAppCard
+        callTool={callTool}
+        readResource={readFixture}
+        theme={THEME}
+        toolName="mcp__f__t"
+        uri="ui://fixture/app"
+      />
+    )
+
+    await frameReady()
+    const reply = vi.spyOn(frameEl().contentWindow!, 'postMessage')
+
+    clickAppButton(frameEl())
+
+    await waitFor(() => expect(reply).toHaveBeenCalledWith(expect.objectContaining({ id: 1, ok: false }), '*'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(callTool).not.toHaveBeenCalled()
+    expect(mockRequest).not.toHaveBeenCalled()
   })
 
   it('ignores tool calls posted by another window and malformed ones', async () => {
@@ -265,6 +327,7 @@ describe('McpAppCard', () => {
       <McpAppCard
         callTool={callTool}
         readResource={readFixture}
+        sessionId="session-A"
         theme={THEME}
         toolName="mcp__f__t"
         uri="ui://fixture/app"

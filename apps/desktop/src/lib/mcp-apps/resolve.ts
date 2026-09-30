@@ -6,7 +6,6 @@
 
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { $gateway } from '@/store/gateway'
-import { $activeSessionId } from '@/store/session'
 
 import type { McpAppToolRequest, McpAppToolResult } from './bridge'
 
@@ -144,15 +143,15 @@ export function pickMcpAppHtml(read: McpResourceReadResult): McpAppHtml {
   return { ok: false, reason: 'not_html' }
 }
 
-/** Read an app resource via the M6a RPC. The URI alone locates the server. */
-export async function readMcpAppResource(uri: string): Promise<McpResourceReadResult> {
+/** Read an app resource via the M6a RPC. The read names its server; the backend never guesses. */
+export async function readMcpAppResource(server: string, uri: string): Promise<McpResourceReadResult> {
   const gateway = $gateway.get()
 
   if (!gateway) {
     throw new Error('Hermes is not connected.')
   }
 
-  return gateway.request<McpResourceReadResult>('mcp.resources.read', { uri })
+  return gateway.request<McpResourceReadResult>('mcp.resources.read', { server, uri })
 }
 
 /**
@@ -160,25 +159,22 @@ export async function readMcpAppResource(uri: string): Promise<McpResourceReadRe
  * registered MCP handler, so the M2 trust gate (`_trust_gate_check`) applies
  * on top of the host approval the bridge already required.
  */
-export async function callMcpAppTool(
-  request: McpAppToolRequest,
-  sessionId?: string | null
-): Promise<McpAppToolResult> {
+export async function callMcpAppTool(request: McpAppToolRequest, sessionId?: string | null): Promise<McpAppToolResult> {
   const gateway = $gateway.get()
 
   if (!gateway) {
     throw new Error('Hermes is not connected.')
   }
 
-  const resolvedSessionId =
-    sessionId ??
-    (request as { sessionId?: string | null }).sessionId ??
-    $activeSessionId.get() ??
-    undefined
+  // The session is the one that rendered the card. Never fall back to the
+  // focused chat: approval gate, cwd and profile belong to the card's session.
+  if (!sessionId) {
+    throw new Error('This MCP app is not attached to a session; the tool call was refused.')
+  }
 
   try {
     return await gateway.request<McpAppToolResult>('mcp.tools.call', {
-      session_id: resolvedSessionId,
+      session_id: sessionId,
       server: request.server,
       name: request.name,
       arguments: request.arguments
@@ -194,4 +190,3 @@ export async function callMcpAppTool(
     throw error
   }
 }
-

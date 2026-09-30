@@ -12,7 +12,8 @@ import { $gateway } from '@/store/gateway'
  * 1. Inside the composer `@` completion popover via `COMPOSER_AREAS.atCompletions`.
  * 2. As draft suggestion pills when the draft text mentions a resource keyword.
  *
- * When selected, inserts a reference chip into the composer as `@resource:<uri>`.
+ * When selected, inserts a reference chip into the composer as `@resource:<server>:<uri>` (the server-qualified
+ * form the backend parses; a bare URI is ambiguous across servers).
  */
 
 export interface McpResourceItem {
@@ -137,9 +138,9 @@ export async function loadSuggestibleResources(): Promise<SuggestibleResource[]>
 }
 
 /** Check if draft text already references this resource. */
-export function draftContainsResource(text: string, uri: string): boolean {
+export function draftContainsResource(text: string, uri: string, server?: string): boolean {
   const lower = text.toLowerCase()
-  const uriLower = uri.toLowerCase()
+  const uriLower = (server ? server + ':' + uri : uri).toLowerCase()
   return (
     lower.includes(`@resource:${uriLower}`) ||
     lower.includes(`@resource:"${uriLower}"`) ||
@@ -180,7 +181,7 @@ export function matchResourceSuggestions(
 
   for (const entry of index) {
     // Already referenced in draft -> skip
-    if (draftContainsResource(text, entry.uri)) {
+    if (draftContainsResource(text, entry.uri, entry.server)) {
       continue
     }
 
@@ -217,8 +218,8 @@ export function matchResourceSuggestions(
 }
 
 /** Insert a resource reference into composer and refocus. */
-export function insertResourceReference(uri: string, name?: string): void {
-  requestComposerInsertRefs([{ kind: 'resource', value: uri, label: name || uri }])
+export function insertResourceReference(server: string, uri: string, name?: string): void {
+  requestComposerInsertRefs([{ kind: 'resource', value: server + ':' + uri, label: name || uri }])
   requestComposerFocus()
 }
 
@@ -233,9 +234,9 @@ export function toSuggestion(match: McpResourceMatch): ComposerSuggestion {
     workingLabel: `Attaching ${match.name}…`,
     workingTip: 'Inserting reference',
     doneLabel: `Attached ${match.name}`,
-    doneTip: `Inserted @resource:${match.uri}`,
+    doneTip: `Inserted @resource:${match.server}:${match.uri}`,
     invoke: async () => {
-      insertResourceReference(match.uri, match.name)
+      insertResourceReference(match.server, match.uri, match.name)
     }
   }
 }
@@ -287,7 +288,7 @@ registry.register({
         : cachedResources
 
       return matches.slice(0, 20).map(r => ({
-        insert: `@resource:${r.uri}`,
+        insert: `@resource:${r.server}:${r.uri}`,
         display: r.name || r.uri,
         meta: r.server ? `${r.server} · ${r.uri}` : r.uri,
         icon: 'package'
