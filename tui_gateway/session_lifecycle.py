@@ -644,7 +644,7 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
             _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
     else:
         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
-    from tui_gateway.owner_hold import set_stop_hold
+    from tui_gateway.owner_hold import owner_queue_discarded, set_stop_hold
 
     with session["history_lock"]:
         session["_turn_cancel_requested"] = True
@@ -655,6 +655,8 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+        # The discarded owner input takes its hold clock with it: the next owner message gets a fresh bound.
+        owner_queue_discarded(session)
     # Stop cancels what was queued behind the stopped turn. An owner message there was drawn as sent: say
     # it was not delivered (the client's error card carries Retry) instead of dropping it silently.
     for entry in dropped_owner:

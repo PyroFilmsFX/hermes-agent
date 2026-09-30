@@ -16,9 +16,13 @@ Both used to be unbounded. Live 2026-09-30 (session 20260924_200208_c68a80): an 
 * on failure (the RPC returns and its ``_owner_submit_waiting`` count drops; a Stop that discards a queued
   owner message reports it to the client as failed, never silently);
 * when the turn ends (the post-turn drain delivers the owner entry first);
-* after ``TIMEOUT_S`` at the latest, with a WARNING log line. A timed-out owner entry stops holding peers
-  but is NOT dropped: it stays first in line, and the backstop timer delivers it at the next boundary even
-  when the CLI never reports one (a woken turn that never settles).
+* after ``TIMEOUT_S`` at the latest for the Stop hold and for an owner RPC that never returns, with a
+  WARNING log line.
+
+A QUEUED owner message is different: while it is queued, peers are never admitted ahead of it, expired or
+not (R2-P1-3). Its bound only changes HOW it is delivered: the backstop timer claims the session for it
+at the next boundary (atomically, under ``history_lock``, before any peer drain). Every queue discard
+(Stop, /new, delivery, a visible failure) resets its clock, so a fresh owner message gets a fresh bound.
 
 Peer rows stay durably queued in ``peer_mailbox`` while the hold is up and are drained when it releases.
 Nothing here writes a user turn or injects into a running loop: an owner message only ever runs as its own
@@ -121,26 +125,43 @@ def owner_submit_finished(session: dict) -> None:
     session.pop("_owner_submit_waiting_expired", None)
 
 
+_OWNER_QUEUE_CLOCK_KEYS = ("_owner_queued_since", "_owner_queued_released", "_owner_queued_gen")
+
+
 def note_owner_queued(session: dict) -> None:
     """Start the owner-queue hold clock (if not already running). Caller holds ``history_lock``.
 
     The clock lives on the session, not on the queue entries: entries are compared and re-built by the
-    queue code, and a delivered owner entry restarts the clock for whatever owner input is still queued."""
+    queue code, and a delivered owner entry restarts the clock for whatever owner input is still queued.
+    The clock is tied to the queue generation: a queue discarded by any path that bumps
+    ``_queued_prompt_generation`` (Stop, compress re-anchor, ...) cannot hand its old deadline to the
+    next owner message."""
+    generation = int(session.get("_queued_prompt_generation", 0))
+    if session.get("_owner_queued_gen", generation) != generation:
+        owner_queue_discarded(session)
     session.setdefault("_owner_queued_since", time.time())
+    session["_owner_queued_gen"] = generation
     arm_backstop(session)
 
 
 def owner_entry_delivered(session: dict) -> None:
     """An owner entry claimed its turn: any owner input still queued gets a fresh bound."""
-    session.pop("_owner_queued_since", None)
-    session.pop("_owner_queued_released", None)
+    for key in _OWNER_QUEUE_CLOCK_KEYS:
+        session.pop(key, None)
+
+
+def owner_queue_discarded(session: dict) -> None:
+    """The queued owner input was thrown away (Stop, /new, a visible failure): its hold clock goes too.
+    Caller holds ``history_lock``."""
+    owner_entry_delivered(session)
 
 
 def owner_pending(session: dict) -> bool:
-    """True while fresh owner input must win admission over auto-started work.
+    """True while owner input must win admission over auto-started work.
 
-    An RPC still claiming its turn or an owner entry queued less than ``TIMEOUT_S`` ago holds. Past the bound
-    the hold is released with a log line; the owner entry itself stays queued, first in line."""
+    An RPC still claiming its turn holds for at most ``TIMEOUT_S``. A QUEUED owner entry holds until it is
+    delivered or visibly failed, expired or not: peers are never admitted ahead of it. Past the bound the
+    backstop delivers it at the next boundary instead (logged once)."""
     now = time.time()
     if session.get("_owner_submit_waiting"):
         since = session.setdefault("_owner_submit_waiting_since", now)
@@ -156,15 +177,12 @@ def owner_pending(session: dict) -> bool:
         owner_entry_delivered(session)
         return False
     since = session.setdefault("_owner_queued_since", now)
-    if _age(since, now) < TIMEOUT_S:
-        return True
-    if not session.get("_owner_queued_released"):
-        session["_owner_queued_released"] = True
+    if _age(since, now) >= TIMEOUT_S and not session.get("_owner_queued_released"):
+        session["_owner_queued_released"] = True  # the log-once latch; it releases nothing
         logger.warning("owner hold: owner message queued on session %s for %.0fs is still waiting for a turn "
-                       "boundary (bound %.0fs); releasing the hold on queued peer mail, the owner message stays "
-                       "first in line", _session_label(session), _age(since, now), TIMEOUT_S)
-        _schedule_release_drain(session)
-    return False
+                       "boundary (bound %.0fs); peer mail stays held behind it and the backstop delivers it at "
+                       "the next boundary", _session_label(session), _age(since, now), TIMEOUT_S)
+    return True
 
 
 def overdue_owner_entry(session: dict) -> bool:

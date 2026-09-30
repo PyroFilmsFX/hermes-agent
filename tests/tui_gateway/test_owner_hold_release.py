@@ -122,7 +122,9 @@ def test_owner_message_parked_behind_a_woken_turn_that_never_ends_is_delivered(b
     assert mailbox._mailbox_auto_blocked(session) is False
 
 
-def test_owner_message_queued_behind_a_stalled_turn_releases_peers_then_runs_first(bounded, monkeypatch, caplog):
+def test_owner_message_queued_behind_a_stalled_turn_keeps_peers_behind_it_then_runs_first(bounded, monkeypatch, caplog):
+    """R2-P1-3: past the bound the owner message is overdue, but peers are still never admitted ahead of
+    it (the bound changes how it is delivered, never who goes first)."""
     fired = []
     monkeypatch.setattr(server, "_run_prompt_submit", lambda _r, _sid, _s, text, **_kw: fired.append(text))
     session = _session(running=True)
@@ -132,8 +134,8 @@ def test_owner_message_queued_behind_a_stalled_turn_releases_peers_then_runs_fir
     assert mailbox._mailbox_auto_blocked(session)
     time.sleep(BOUND + 0.05)
     with caplog.at_level(logging.WARNING, logger="tui_gateway.owner_hold"):
-        assert mailbox._mailbox_auto_blocked(session) is False, "a stalled turn must not hold peer mail forever"
-    assert any("stays first in line" in r.getMessage() for r in caplog.records)
+        assert mailbox._mailbox_auto_blocked(session) is True, "an overdue owner message still goes first"
+    assert any("stays held behind it" in r.getMessage() for r in caplog.records)
     # The stalled turn finally ends: the owner message is still delivered, and ahead of the peer.
     session["running"] = False
     assert server._drain_queued_prompt("r", "owner-hold", session)
