@@ -3023,8 +3023,11 @@ export interface InflightTurn {
   recoverable?: boolean | null
   error_surface?: Record<string, unknown> | null
 }
+/** ``_queued_prompt_snapshot``: the accepted next-turn prompt. A typed send (an owner forward, a peer message) keeps its display kind so a reconnecting client draws it as what it is. */
 export interface QueuedPrompt {
   user: string
+  display_kind?: string | null
+  display_metadata?: Record<string, unknown> | null
 }
 /** One unanswered server→client request (``server_requests.Request.snapshot``); the reconnecting client re-delivers it to its request handlers. */
 export interface OpenRequestEntry {

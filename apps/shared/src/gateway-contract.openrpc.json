@@ -27791,10 +27791,36 @@
       },
       "QueuedPrompt": {
         "additionalProperties": false,
+        "description": "``_queued_prompt_snapshot``: the accepted next-turn prompt. A typed send (an owner forward, a peer\nmessage) keeps its display kind so a reconnecting client draws it as what it is.",
         "properties": {
           "user": {
             "title": "User",
             "type": "string"
+          },
+          "display_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Kind"
+          },
+          "display_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Metadata"
           }
         },
         "required": [

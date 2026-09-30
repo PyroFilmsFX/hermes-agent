@@ -618,6 +618,16 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
+def _emit_owner_not_delivered(sid: str, entry: dict) -> None:
+    text = entry.get("text")
+    preview = " ".join(text.split()) if isinstance(text, str) else "your message with attachments"
+    preview = preview if len(preview) <= 80 else preview[:79] + "\u2026"
+    logger.warning("owner hold: Stop discarded a queued owner message on %s; reporting it as not delivered", sid)
+    with contextlib.suppress(Exception):
+        _emit("error", sid, {"message": f"Not delivered: \u201c{preview}\u201d was waiting behind the turn you "
+                                        "stopped, so it never reached the session. Send it again."})
+
+
 def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None,
                             hold_auto_started: bool = False) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
@@ -634,13 +644,21 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
             _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
     else:
         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
+    from tui_gateway.owner_hold import set_stop_hold
+
     with session["history_lock"]:
         session["_turn_cancel_requested"] = True
         if hold_auto_started:
-            session["_owner_stop_hold"] = True
+            set_stop_hold(session)
+        dropped_owner = [entry for entry in ([session.get("queued_prompt")] + list(session.get("queued_prompts") or []))
+                         if isinstance(entry, dict) and _ac_is_owner_entry(entry)]
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+    # Stop cancels what was queued behind the stopped turn. An owner message there was drawn as sent: say
+    # it was not delivered (the client's error card carries Retry) instead of dropping it silently.
+    for entry in dropped_owner:
+        _emit_owner_not_delivered(sid, entry)
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
