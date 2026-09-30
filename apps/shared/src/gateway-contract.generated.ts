@@ -4301,7 +4301,7 @@ export interface McpResourceItem {
 export interface McpResourceReadParams {
   profile?: string | null
   uri: string
-  server?: string | null
+  server: string
 }
 export interface McpResourceReadResult {
   server: string
@@ -5262,7 +5262,7 @@ export interface RpcMethods {
   'mcp.prompts.list': { params: McpPromptsListParams; result: McpPromptsListResult }
   /** List resources from connected MCP servers. */
   'mcp.resources.list': { params: McpResourcesListParams; result: McpResourcesListResult }
-  /** Read an MCP resource by URI from a connected server. */
+  /** Read an MCP resource by URI from the one named connected server (never a fan-out). */
   'mcp.resources.read': { params: McpResourceReadParams; result: McpResourceReadResult }
   /** Subscribe to updates for an MCP resource on a connected server. */
   'mcp.resources.subscribe': { params: McpResourceSubscriptionParams; result: McpResourceSubscriptionResult }

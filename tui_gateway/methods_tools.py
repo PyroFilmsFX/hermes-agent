@@ -1688,11 +1688,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5024, str(exc))
 
 
-@_scoped_rpc("mcp.resources.read", required=(("uri", _stripped),))
+@_scoped_rpc("mcp.resources.read", required=(("server", _stripped), ("uri", _stripped)))
 def _(rid, params: dict) -> dict:
-    """Read an MCP resource by URI."""
+    """Read an MCP resource by URI from the one named server (exact key or its sanitized form)."""
     uri = _str_arg(params, "uri")
-    server = _str_arg(params, "server") or None
+    server = _str_arg(params, "server")
     mcp_res = _tools_mod("tools.mcp_tool_resources")
     try:
         result = mcp_res.read_mcp_resource(uri, server_name=server)

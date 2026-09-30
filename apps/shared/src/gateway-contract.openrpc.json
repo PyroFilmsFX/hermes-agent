@@ -1772,7 +1772,7 @@
     },
     {
       "name": "mcp.resources.read",
-      "summary": "Read an MCP resource by URI from a connected server.",
+      "summary": "Read an MCP resource by URI from the one named connected server (never a fan-out).",
       "params": [
         {
           "name": "params",
@@ -18417,20 +18417,13 @@
             "type": "string"
           },
           "server": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Server"
+            "title": "Server",
+            "type": "string"
           }
         },
         "required": [
-          "uri"
+          "uri",
+          "server"
         ],
         "title": "McpResourceReadParams",
         "type": "object"

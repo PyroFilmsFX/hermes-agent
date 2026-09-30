@@ -286,7 +286,7 @@ async def _expand_reference(
 
 
 async def _expand_resource_reference(ref: ContextReference) -> Expansion:
-    """Expand @resource:<uri> into untrusted quoted attached context."""
+    """Expand ``@resource:[<server>:|<server>/]<uri>`` into untrusted quoted attached context."""
     from tools.mcp_tool_resources import read_mcp_resource_async
     target = ref.target
     server_name = None
@@ -299,7 +299,8 @@ async def _expand_resource_reference(ref: ContextReference) -> Expansion:
             server_name, scheme = prefix.split(":", 1)
             target = f"{scheme}://{rest}"
     try:
-        result = await read_mcp_resource_async(target, server_name=server_name)
+        # No server named: only the single server whose resources/list has the uri may supply it.
+        result = await read_mcp_resource_async(target, server_name=server_name, resolve_listed=server_name is None)
     except Exception as exc:
         return f"{ref.raw}: {exc}", None
     contents = result.get("contents") or []

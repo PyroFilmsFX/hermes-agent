@@ -635,7 +635,9 @@ method("mcp.resources.list", params=McpResourcesListParams, result=McpResourcesL
 
 class McpResourceReadParams(ProfileParams):
     uri: str
-    server: str | None = None
+    #: The one server to read from: its configured key, or that key's sanitized form (the ``<server>``
+    #: in ``mcp__<server>__<tool>``). Required: a read is never fanned out across servers.
+    server: str
 
 
 class McpResourceContentBlock(Result):
@@ -652,7 +654,7 @@ class McpResourceReadResult(Result):
 
 
 method("mcp.resources.read", params=McpResourceReadParams, result=McpResourceReadResult,
-       doc="Read an MCP resource by URI from a connected server.")
+       doc="Read an MCP resource by URI from the one named connected server (never a fan-out).")
 
 
 class McpResourceSubscriptionParams(ProfileParams):

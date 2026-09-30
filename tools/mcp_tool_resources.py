@@ -233,8 +233,54 @@ def list_mcp_resources(server_target: Any = None, *, server_name: Optional[str] 
     return _run_mcp_coroutine(lambda: _list_mcp_resources_inner(target))
 
 
-async def _read_mcp_resource_inner(uri: str, server_target: Any = None) -> dict:
+def _resolve_resource_server_name(server: str) -> str:
+    """The configured server *server* names: its exact key, or the key whose sanitized form
+    (``sanitize_mcp_name_component``, the one in ``mcp__<server>__<tool>``) equals it. An MCP App card
+    only knows the sanitized form. More than one candidate is refused as ambiguous, never guessed:
+    an exact key that another key also sanitizes to counts as two."""
+    from tools.mcp_tool_schema import sanitize_mcp_name_component
+    from tools.mcp_tool_scope import _key_name, _key_visible_in_scope, _resolve_server_key
+
+    scope = _core._mcp_registry_scope()
+    with _core._lock:
+        keys = [k for k in (*_core._servers.keys(), *_core._lazy_server_configs.keys())
+                if _key_visible_in_scope(k, scope)]
+        exact = _resolve_server_key(server)
+        has_exact = exact in _core._servers or exact in _core._lazy_server_configs
+    names = {_key_name(k) for k in keys if sanitize_mcp_name_component(_key_name(k)) == server}
+    if has_exact:
+        names.add(server)
+    if len(names) > 1:
+        raise ValueError(f"MCP server name '{server}' is ambiguous: it matches {', '.join(sorted(names))}; "
+                         "use the exact configured name")
+    if not names:
+        raise ValueError(f"MCP server '{server}' is not connected")
+    return names.pop()
+
+
+async def _resolve_listed_resource_server(uri: str) -> str:
+    """The one connected server whose ``resources/list`` has *uri*. Unlisted or listed by several
+    servers is refused: reading from whichever server answers first would let any server that
+    accepts every URI supply the content."""
+    listed = {item["server"] for item in await _list_mcp_resources_inner(None) if item.get("uri") == uri}
+    if not listed:
+        raise ValueError(f"No connected MCP server lists resource '{uri}'; name the server: "
+                         f"@resource:<server>:{uri}")
+    if len(listed) > 1:
+        raise ValueError(f"Resource '{uri}' is ambiguous: listed by {', '.join(sorted(listed))}; name the "
+                         f"server: @resource:<server>:{uri}")
+    return listed.pop()
+
+
+async def _read_mcp_resource_inner(uri: str, server_target: Any = None, *, resolve_listed: bool = False) -> dict:
+    """Read *uri* from exactly one server: *server_target* (a name or a direct session), or, with
+    *resolve_listed*, the single server whose ``resources/list`` has it. Never a fan-out."""
     from tools import mcp_tool_discovery as _discovery
+
+    if server_target is None:
+        if not resolve_listed:
+            raise ValueError("An MCP server is required to read a resource (mcp.resources.read {server, uri})")
+        server_target = await _resolve_listed_resource_server(uri)
 
     # 1. Direct server parameters passed (e.g. StdioServerParameters in test fixture)
     if server_target is not None and not isinstance(server_target, str):
@@ -259,34 +305,20 @@ async def _read_mcp_resource_inner(uri: str, server_target: Any = None) -> dict:
             result = await session.read_resource(uri)
         return _render_read_result(server_name, uri, result)
 
-    # 2. Specific connected server name
-    if isinstance(server_target, str):
-        server = _discovery._get_connected_server_for_call(server_target)
-        if server is None or server.session is None:
-            raise ValueError(f"MCP server '{server_target}' is not connected")
-        async with server._rpc_lock:
-            result = await server.session.read_resource(uri)
-        return _render_read_result(server_target, uri, result)
-
-    # 3. All connected servers
-    servers = _get_connected_servers()
-    if not servers:
-        raise ValueError("No connected MCP servers")
-
-    last_exc = None
-    for srv in servers:
-        try:
-            async with srv._rpc_lock:
-                result = await srv.session.read_resource(uri)
-            return _render_read_result(srv.name, uri, result)
-        except Exception as exc:
-            last_exc = exc
-            continue
-    raise ValueError(f"Failed to read resource '{uri}': {last_exc}")
+    # 2. One named server (exact configured key, or its sanitized form)
+    name = _resolve_resource_server_name(server_target)
+    server = _discovery._get_connected_server_for_call(name)
+    if server is None or server.session is None:
+        raise ValueError(f"MCP server '{name}' is not connected")
+    async with server._rpc_lock:
+        result = await server.session.read_resource(uri)
+    return _render_read_result(name, uri, result)
 
 
-async def read_mcp_resource_async(uri: str, server_target: Any = None, *, server_name: Optional[str] = None) -> dict:
-    """Read resource content by URI (async, schedules on _mcp_loop if needed)."""
+async def read_mcp_resource_async(uri: str, server_target: Any = None, *, server_name: Optional[str] = None,
+                                  resolve_listed: bool = False) -> dict:
+    """Read resource content by URI from one server (async, schedules on _mcp_loop if needed). With no
+    server, *resolve_listed* picks the single server listing *uri*; otherwise the read is refused."""
     target = server_name if server_name is not None else server_target
     from tools import mcp_tool_loop as _loop
     _loop._ensure_mcp_loop()
@@ -298,15 +330,16 @@ async def read_mcp_resource_async(uri: str, server_target: Any = None, *, server
 
     if loop is not None and current_loop is not loop:
         from agent.async_utils import safe_schedule_threadsafe
-        future = safe_schedule_threadsafe(_read_mcp_resource_inner(uri, target), loop)
+        future = safe_schedule_threadsafe(_read_mcp_resource_inner(uri, target, resolve_listed=resolve_listed), loop)
         return await asyncio.wrap_future(future)
-    return await _read_mcp_resource_inner(uri, target)
+    return await _read_mcp_resource_inner(uri, target, resolve_listed=resolve_listed)
 
 
-def read_mcp_resource(uri: str, server_target: Any = None, *, server_name: Optional[str] = None) -> dict:
-    """Sync wrapper to read resource content by URI."""
+def read_mcp_resource(uri: str, server_target: Any = None, *, server_name: Optional[str] = None,
+                      resolve_listed: bool = False) -> dict:
+    """Sync wrapper to read resource content by URI from one server (see ``read_mcp_resource_async``)."""
     target = server_name if server_name is not None else server_target
-    return _run_mcp_coroutine(lambda: _read_mcp_resource_inner(uri, target))
+    return _run_mcp_coroutine(lambda: _read_mcp_resource_inner(uri, target, resolve_listed=resolve_listed))
 
 
 async def _subscribe_mcp_resource_inner(server_name: str, uri: str) -> dict:
