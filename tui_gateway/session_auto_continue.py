@@ -76,7 +76,7 @@ def _continue_session_turn(sid: str, session: dict, *, reason: str, on_admitted=
     if session.get("source") == "bot_room":
         return None
     with session["history_lock"]:
-        if (session.get("running") or session.get("_finalized") or session.get("_owner_stop_hold")
+        if (session.get("running") or session.get("_finalized") or _ac_owner_stop_hold(session)
                 or _ac_sdk_woken(session)
                 or _ac_owner_pending(session)):
             return None
@@ -169,7 +169,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
-    if (session.get("_auto_continue_scheduled") or session.get("_owner_stop_hold")
+    if (session.get("_auto_continue_scheduled") or _ac_owner_stop_hold(session)
             or _ac_owner_pending(session) or _ac_sdk_woken(session)):
         return None
     session["_auto_continue_scheduled"] = True
@@ -195,7 +195,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             return
         with session["history_lock"]:
             if (session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized")
-                    or session.get("_owner_stop_hold") or _ac_owner_pending(session) or _ac_sdk_woken(session)):
+                    or _ac_owner_stop_hold(session) or _ac_owner_pending(session) or _ac_sdk_woken(session)):
                 session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
                 return
             session["running"] = True
@@ -255,9 +255,23 @@ def _ac_is_owner_entry(entry: dict) -> bool:
 
 
 def _ac_owner_pending(session: dict) -> bool:
-    return bool(session.get("_owner_submit_waiting")) or any(_ac_is_owner_entry(entry) for entry in
-               ([session["queued_prompt"]] if session.get("queued_prompt") else [])
-               + list(session.get("queued_prompts") or []))
+    """Fresh owner input holds auto-started work back; bounded and self-releasing (tui_gateway/owner_hold.py)."""
+    from tui_gateway.owner_hold import owner_pending
+
+    return owner_pending(session)
+
+
+def _ac_owner_stop_hold(session: dict) -> bool:
+    """The owner's Stop hold on the auto-started chain; released after the bound (tui_gateway/owner_hold.py)."""
+    from tui_gateway.owner_hold import stop_hold_active
+
+    return stop_hold_active(session)
+
+
+def _ac_owner_overdue(session: dict) -> bool:
+    from tui_gateway.owner_hold import overdue_owner_entry
+
+    return overdue_owner_entry(session)
 
 
 def _ac_sdk_woken(session: dict) -> bool:
@@ -299,6 +313,17 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
         session.setdefault("queued_prompts", []).append(queued)
     else:
         session["queued_prompt"] = queued
+    from tui_gateway.owner_hold import note_owner_queued
+
+    # A queued owner message holds peer/background work only for a bounded time, and its backstop
+    # delivers it at the next boundary even when the CLI never reports one.
+    if any(_ac_is_owner_entry(entry) for entry in _owner_hold_entries(session)):
+        note_owner_queued(session)
+
+
+def _owner_hold_entries(session: dict) -> list:
+    head = session.get("queued_prompt")
+    return ([head] if head else []) + list(session.get("queued_prompts") or [])
 
 
 def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict | None:
@@ -439,10 +464,15 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
         if _ac_sdk_woken(session):
-            return False
+            if not _ac_owner_overdue(session):
+                return False
+            # The unclaimed CLI turn never reported its boundary within the bound: the owner's message
+            # claims the stream now (the reader routes the rest of that burst away) instead of parking.
+            logger.warning("owner hold: an unclaimed CLI turn on %s outlived the owner-hold bound; "
+                           "delivering the queued owner message now", sid)
         entries = [queued, *(session.get("queued_prompts") or [])]
         owner_index = next((i for i, entry in enumerate(entries) if _ac_is_owner_entry(entry)), None)
-        if session.get("_owner_stop_hold") and owner_index is None:
+        if _ac_owner_stop_hold(session) and owner_index is None:
             return False
         index = owner_index if owner_index is not None else 0
         queued = entries.pop(index)
@@ -451,6 +481,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         session["running"] = True
         if _ac_is_owner_entry(queued):
             session["_owner_stop_hold"] = False
+            from tui_gateway.owner_hold import owner_entry_delivered
+
+            owner_entry_delivered(session)
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the

@@ -392,10 +392,12 @@ def _native_peer_idle(session: dict, sdk_session: Any) -> bool:
 
 
 def _mailbox_auto_blocked(session: dict) -> bool:
-    from tui_gateway.session_auto_continue import _ac_owner_pending
+    """Owner input pending or a Stop hold: peer rows stay durably queued. Both release on their own
+    (delivery, failure, turn end, or the bound in tui_gateway/owner_hold.py), and the release drains."""
+    from tui_gateway.owner_hold import owner_pending, stop_hold_active
 
     with (session.get("history_lock") or contextlib.nullcontext()):
-        return bool(session.get("_owner_stop_hold") or _ac_owner_pending(session))
+        return bool(stop_hold_active(session) or owner_pending(session))
 
 
 def _install_sdk_boundary(sid: str, session: dict, sdk_session: Any) -> None:
@@ -411,7 +413,9 @@ def _sdk_turn_boundary(sid: str, session: dict) -> None:
     def run() -> None:
         with server._session_profile_runtime_scope(session):
             server._drain_queued_prompt(f"sdk-boundary:{sid}", sid, session)
-            if not session.get("running") and not session.get("_owner_stop_hold"):
+            from tui_gateway.owner_hold import stop_hold_active
+
+            if not session.get("running") and not stop_hold_active(session):
                 drain_session(str(session.get("session_key") or ""), session.get("profile_home"))
 
     server._start_session_work(run, name=f"sdk-boundary-{sid}")
