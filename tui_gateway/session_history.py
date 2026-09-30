@@ -219,9 +219,12 @@ _HISTORY_ROLES = frozenset({"user", "assistant", "tool", "system"})
 def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict]:
     from agent.history_commentary import project_history_commentary
 
+    # Imported functions are not rebound onto server.py (method_ctx.bind_module): import here.
+    from agent.turn_failure_copy import retract_answered_failed_turns
+
     messages = []
     tool_call_args = {}
-    for m in history:
+    for m in retract_answered_failed_turns(history):
         if not isinstance(m, dict):
             continue
         m = project_compaction_message_for_display(m)
