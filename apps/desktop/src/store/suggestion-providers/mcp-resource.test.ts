@@ -142,7 +142,7 @@ describe('buildMcpResourceSuggestionIndex and filtering (filters)', () => {
 
   it('skips resources already referenced in draft', () => {
     const matches = matchResourceSuggestions(
-      'here is @resource:fixture://state for the state ',
+      'here is @resource:fixture:fixture://state for the state ',
       index
     )
     expect(matches.some(m => m.uri === 'fixture://state')).toBe(false)
@@ -159,12 +159,12 @@ describe('insertResourceReference (inserts the reference)', () => {
     const insertSpy = vi.spyOn(composerFocus, 'requestComposerInsertRefs').mockImplementation(() => {})
     const focusSpy = vi.spyOn(composerFocus, 'requestComposerFocus').mockImplementation(() => {})
 
-    insertResourceReference('postgres://schema/users', 'Users Table Schema')
+    insertResourceReference('postgres', 'postgres://schema/users', 'Users Table Schema')
 
     expect(insertSpy).toHaveBeenCalledWith([
       {
         kind: 'resource',
-        value: 'postgres://schema/users',
+        value: 'postgres:postgres://schema/users',
         label: 'Users Table Schema'
       }
     ])
@@ -194,7 +194,7 @@ describe('insertResourceReference (inserts the reference)', () => {
     expect(insertSpy).toHaveBeenCalledWith([
       {
         kind: 'resource',
-        value: 'fixture://state',
+        value: 'fixture:fixture://state',
         label: 'Application State'
       }
     ])
@@ -225,19 +225,19 @@ describe('composer.atCompletions registration', () => {
     // 1. Empty query returns all resources
     const all = source.provide('')
     expect(all).toHaveLength(3)
-    expect(all.map(i => i.insert)).toContain('@resource:fixture://state')
-    expect(all.map(i => i.insert)).toContain('@resource:postgres://schema/users')
+    expect(all.map(i => i.insert)).toContain('@resource:fixture:fixture://state')
+    expect(all.map(i => i.insert)).toContain('@resource:postgres:postgres://schema/users')
 
     // 2. Query matching name or keyword
     const filtered = source.provide('schema')
     expect(filtered).toHaveLength(1)
-    expect(filtered[0].insert).toBe('@resource:postgres://schema/users')
+    expect(filtered[0].insert).toBe('@resource:postgres:postgres://schema/users')
     expect(filtered[0].display).toBe('Users Table Schema')
     expect(filtered[0].meta).toContain('postgres')
 
     // 3. Query with resource: prefix
     const prefixed = source.provide('resource:state')
     expect(prefixed).toHaveLength(1)
-    expect(prefixed[0].insert).toBe('@resource:fixture://state')
+    expect(prefixed[0].insert).toBe('@resource:fixture:fixture://state')
   })
 })

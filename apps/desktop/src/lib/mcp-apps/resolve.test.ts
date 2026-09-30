@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { $gateway } from '@/store/gateway'
 import { $activeSessionId } from '@/store/session'
 
-import { callMcpAppTool } from './resolve'
+import { callMcpAppTool, readMcpAppResource } from './resolve'
 
 describe('callMcpAppTool', () => {
   beforeEach(() => {
@@ -11,29 +11,18 @@ describe('callMcpAppTool', () => {
     $gateway.set(null as any)
   })
 
-  it('passes active session id when none provided explicitly', async () => {
-    const mockRequest = vi.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'ok' }]
-    })
+  it('refuses without a session id and never falls back to the focused chat', async () => {
+    const mockRequest = vi.fn()
     $gateway.set({ request: mockRequest } as any)
     $activeSessionId.set('session-active-123')
 
-    const res = await callMcpAppTool({
-      appUri: 'ui://weather-server/app',
-      server: 'weather-server',
-      name: 'get_forecast',
-      arguments: { city: 'Paris' }
-    })
-
-    expect(mockRequest).toHaveBeenCalledWith('mcp.tools.call', {
-      session_id: 'session-active-123',
-      server: 'weather-server',
-      name: 'get_forecast',
-      arguments: { city: 'Paris' }
-    })
-    expect(res).toEqual({
-      content: [{ type: 'text', text: 'ok' }]
-    })
+    await expect(
+      callMcpAppTool({ appUri: 'ui://w/app', server: 'w', name: 'get_forecast', arguments: {} })
+    ).rejects.toThrow(/not attached to a session/)
+    await expect(
+      callMcpAppTool({ appUri: 'ui://w/app', server: 'w', name: 'get_forecast', arguments: {} }, null)
+    ).rejects.toThrow(/not attached to a session/)
+    expect(mockRequest).not.toHaveBeenCalled()
   })
 
   it('passes explicit session id override', async () => {
@@ -58,6 +47,22 @@ describe('callMcpAppTool', () => {
       server: 'weather-server',
       name: 'get_forecast',
       arguments: { city: 'Tokyo' }
+    })
+  })
+})
+
+describe('readMcpAppResource', () => {
+  it('names its server in the read request', async () => {
+    const mockRequest = vi
+      .fn()
+      .mockResolvedValue({ server: 'weather-server', uri: 'ui://weather-server/app', contents: [] })
+    $gateway.set({ request: mockRequest } as any)
+
+    await readMcpAppResource('weather-server', 'ui://weather-server/app')
+
+    expect(mockRequest).toHaveBeenCalledWith('mcp.resources.read', {
+      server: 'weather-server',
+      uri: 'ui://weather-server/app'
     })
   })
 })

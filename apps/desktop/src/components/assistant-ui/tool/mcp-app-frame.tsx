@@ -143,8 +143,11 @@ export interface McpAppCardProps {
   uri: string
   toolName: string
   /** Injection seams for tests; default to the gateway RPCs. */
-  readResource?: (uri: string) => Promise<McpResourceReadResult>
-  callTool?: McpAppCallTool
+  readResource?: (server: string, uri: string) => Promise<McpResourceReadResult>
+  /** Receives the card's pinned session id as its second argument. */
+  callTool?: (request: McpAppToolRequest, sessionId: string | null) => ReturnType<McpAppCallTool>
+  /** Session whose transcript rendered this card. Tool calls are pinned to it, never to the focused chat. */
+  sessionId?: string | null
   theme?: McpAppTheme
 }
 
@@ -158,6 +161,7 @@ export interface McpAppCardProps {
 export const McpAppCard: FC<McpAppCardProps> = ({
   callTool = callMcpAppTool,
   readResource = readMcpAppResource,
+  sessionId = null,
   theme,
   toolName,
   uri
@@ -167,11 +171,31 @@ export const McpAppCard: FC<McpAppCardProps> = ({
   const [pending, setPending] = useState<PendingApproval | null>(null)
   const pendingRef = useRef<PendingApproval | null>(null)
 
+  // Pinned to the session that rendered the card (first known id wins), so a
+  // later focus change can never redirect an approved call to another chat.
+  const pinnedSession = useRef<string | null>(sessionId)
+
+  if (!pinnedSession.current && sessionId) {
+    pinnedSession.current = sessionId
+  }
+
+  const pinnedCallTool = useCallback<McpAppCallTool>(request => callTool(request, pinnedSession.current), [callTool])
+
+  // The resource read names its server: the one whose tool result pointed at the app.
+  const toolServer = mcpServerFromToolName(toolName)
+
   useEffect(() => {
     let cancelled = false
 
     setState({ status: 'loading' })
-    readResource(uri).then(
+
+    if (!toolServer) {
+      setState({ status: 'error', reason: 'load_failed' })
+
+      return
+    }
+
+    readResource(toolServer, uri).then(
       read => {
         if (cancelled) {
           return
@@ -195,7 +219,7 @@ export const McpAppCard: FC<McpAppCardProps> = ({
     return () => {
       cancelled = true
     }
-  }, [readResource, uri])
+  }, [readResource, toolServer, uri])
 
   // Unmount (or a new app) denies whatever was waiting.
   useEffect(
@@ -210,6 +234,13 @@ export const McpAppCard: FC<McpAppCardProps> = ({
     request =>
       new Promise<boolean>(resolve => {
         pendingRef.current?.resolve(false)
+
+        // No known session: refuse outright instead of prompting for a call that cannot run.
+        if (!pinnedSession.current) {
+          resolve(false)
+
+          return
+        }
 
         const entry: PendingApproval = {
           request,
@@ -272,7 +303,7 @@ export const McpAppCard: FC<McpAppCardProps> = ({
         <McpAppFrame
           approve={approve}
           appUri={uri}
-          callTool={callTool}
+          callTool={pinnedCallTool}
           html={state.html}
           server={state.server}
           theme={theme}

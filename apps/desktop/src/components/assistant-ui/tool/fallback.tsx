@@ -1235,6 +1235,8 @@ export const ToolFallback = ({
     [contributions, part.toolName, part.outputSchema, resolvedStructured]
   )
 
+  const cardSessionId = useStore(useSessionView().$runtimeId)
+
   // MCP Apps (M9): a completed MCP tool result that references a `ui://` app
   // gets the sandboxed app card under its row. Only MCP tools qualify, so a
   // web or shell result carrying look-alike metadata cannot mount an app.
@@ -1260,7 +1262,7 @@ export const ToolFallback = ({
   return (
     <>
       {entry}
-      {appUri ? <McpAppCard key={appUri} toolName={part.toolName} uri={appUri} /> : null}
+      {appUri ? <McpAppCard key={appUri} sessionId={cardSessionId} toolName={part.toolName} uri={appUri} /> : null}
     </>
   )
 }
