@@ -312,11 +312,24 @@ async def _expand_resource_reference(ref: ContextReference) -> Expansion:
             parts.append(block["text"])
         elif block.get("blob") is not None:
             parts.append(f"[binary data, {len(block['blob'])} bytes]")
-    text_content = "\n".join(parts)
+    from tools.ansi_strip import strip_unicode_tags
+    # Untrusted server text: invisible TAG characters (a prompt-injection smuggling channel) go.
+    text_content = strip_unicode_tags("\n".join(parts))
     tokens = estimate_tokens_rough(text_content)
-    # Untrusted data: formatted as quoted code block with URI
-    block = f"📦 {ref.raw} ({tokens} tokens)\n```\n{text_content}\n```"
+    fence = _unbreakable_fence(text_content)
+    block = f"📦 {ref.raw} ({tokens} tokens, untrusted MCP resource data)\n{fence}\n{text_content}\n{fence}"
     return None, block
+
+
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def _unbreakable_fence(text: str) -> str:
+    """A backtick fence longer than any backtick run in *text*, so no line of *text* can close it
+    (Markdown closes a fence only with a run at least as long as the opener). Three when *text* has
+    none longer than two."""
+    longest = max((len(m.group(0)) for m in _BACKTICK_RUN.finditer(text)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Path | None = None,
