@@ -511,6 +511,46 @@ async function requestOnPrimaryGateway<T>(
     : gateway.request<T>(method, params, timeoutMs, signal)
 }
 
+/**
+ * Send an RPC through the ALREADY-CONNECTED socket that owns a session's
+ * (connection, profile) route. Passive by design: it never dials, activates,
+ * retains or falls back to the active gateway, so a caller that must not touch
+ * any other backend (MCP app cards) gets a refusal instead of a wrong route.
+ */
+export async function requestConnectedGatewayForOwner<T>(
+  connectionId: null | string,
+  profile: string,
+  method: string,
+  params: Record<string, unknown> = {}
+): Promise<T> {
+  const key = normKey(profile)
+  const id = String(connectionId ?? '').trim()
+  const scope = registryBackendScopeKey(connectionId, key)
+  const refuse = () => new Error("The Hermes backend that owns this app's session is not connected.")
+
+  if (scope === key ? key === g.primaryProfile : isPrimaryRegistryRoute(id, key)) {
+    if (!isOpen(g.primaryGateway)) {
+      throw refuse()
+    }
+
+    return g.primaryGateway!.request<T>(method, params)
+  }
+
+  const secondary = g.secondaries.get(scope)?.gateway ?? null
+
+  if (secondary && isOpen(secondary)) {
+    return secondary.request<T>(method, params)
+  }
+
+  // One host serving several profiles over the primary socket: the request
+  // rides it with an explicit profile scope.
+  if (id && id === g.primaryConnectionId && isOpen(g.primaryGateway) && (await ridesPrimaryBackend(id, key))) {
+    return g.primaryGateway!.request<T>(method, { ...params, profile: key })
+  }
+
+  throw refuse()
+}
+
 export function isActivePrimary(): boolean {
   return g.activeKey === g.primaryProfile
 }

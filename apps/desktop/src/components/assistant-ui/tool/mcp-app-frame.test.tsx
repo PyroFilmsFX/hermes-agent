@@ -9,6 +9,18 @@ import { MCP_APP_CSP, MCP_APP_MAX_HTML_BYTES } from '@/lib/mcp-apps/sandbox'
 
 import { McpAppCard, McpAppFrame } from './mcp-app-frame'
 
+const routed = vi.hoisted(() => ({ request: vi.fn() }))
+
+// The card's session is owned by connection conn-A / profile prof-A; the
+// active gateway is a different backend and must stay untouched.
+vi.mock('@/app/session/hooks/use-session-actions/utils', () => ({
+  resolveSessionOwner: vi.fn(async () => ({ connectionId: 'conn-A', profile: 'prof-A' }))
+}))
+vi.mock('@/store/gateway', async importOriginal => ({
+  ...((await importOriginal()) as object),
+  requestConnectedGatewayForOwner: routed.request
+}))
+
 vi.mock('@assistant-ui/react', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useAuiState: (select: (state: unknown) => unknown) =>
@@ -175,7 +187,7 @@ describe('McpAppCard', () => {
 
     await frameReady()
 
-    expect(readFixture).toHaveBeenCalledWith('hermes_mcp_2026_fixture', 'ui://fixture/app')
+    expect(readFixture).toHaveBeenCalledWith('hermes_mcp_2026_fixture', 'ui://fixture/app', expect.anything())
     expect(screen.getByText('fixture/app')).toBeTruthy()
     expect(screen.getByText('· hermes-mcp-2026-fixture')).toBeTruthy()
   })
@@ -263,13 +275,15 @@ describe('McpAppCard', () => {
         name: 'destructive_action',
         arguments: {}
       },
-      'session-A'
+      'session-A',
+      expect.anything()
     )
   })
 
   it('pins the call to the card session even when another chat is focused', async () => {
-    const mockRequest = vi.fn(async () => ({ structuredContent: { ok: true } }))
-    $gateway.set({ request: mockRequest } as any)
+    routed.request.mockResolvedValue({ structuredContent: { ok: true } })
+    const activeRequest = vi.fn()
+    $gateway.set({ request: activeRequest } as any)
     $activeSessionId.set('session-B')
 
     render(
@@ -286,8 +300,11 @@ describe('McpAppCard', () => {
     clickAppButton(frameEl())
     fireEvent.click(await screen.findByRole('button', { name: 'Allow once' }))
 
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
-    expect(mockRequest).toHaveBeenCalledWith(
+    await waitFor(() => expect(routed.request).toHaveBeenCalled())
+    expect(activeRequest).not.toHaveBeenCalled()
+    expect(routed.request).toHaveBeenCalledWith(
+      'conn-A',
+      'prof-A',
       'mcp.tools.call',
       expect.objectContaining({ session_id: 'session-A', name: 'destructive_action' })
     )

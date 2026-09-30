@@ -5,7 +5,9 @@
  */
 
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
-import { $gateway } from '@/store/gateway'
+import { resolveSessionOwner } from '@/app/session/hooks/use-session-actions/utils'
+import { requestConnectedGatewayForOwner } from '@/store/gateway'
+import { isSessionOwnerRoute } from '@/store/session-request-router'
 
 import type { McpAppToolRequest, McpAppToolResult } from './bridge'
 
@@ -143,29 +145,74 @@ export function pickMcpAppHtml(read: McpResourceReadResult): McpAppHtml {
   return { ok: false, reason: 'not_html' }
 }
 
-/** Read an app resource via the M6a RPC. The read names its server; the backend never guesses. */
-export async function readMcpAppResource(server: string, uri: string): Promise<McpResourceReadResult> {
-  const gateway = $gateway.get()
+/** The gateway route (connection + profile) that owns a card's session. */
+export interface McpAppOwner {
+  connectionId: string | null
+  profile: string
+}
 
-  if (!gateway) {
-    throw new Error('Hermes is not connected.')
+/** Resolved once, when the card first renders; null when no exact owner is known. */
+export type McpAppOwnerPin = Promise<McpAppOwner | null>
+
+/**
+ * Pin the connection/profile that owns the session. Never consults the active
+ * gateway or profile: an unknown owner resolves to null and the card refuses.
+ */
+export function pinMcpAppOwner(sessionId: string | null | undefined): McpAppOwnerPin {
+  if (!sessionId) {
+    return Promise.resolve(null)
   }
 
-  return gateway.request<McpResourceReadResult>('mcp.resources.read', { server, uri })
+  return resolveSessionOwner(sessionId).then(
+    scope => {
+      if (isSessionOwnerRoute(scope)) {
+        return { connectionId: scope.connectionId, profile: scope.profile }
+      }
+
+      return typeof scope === 'string' && scope.trim() ? { connectionId: null, profile: scope.trim() } : null
+    },
+    () => null
+  )
+}
+
+const NO_OWNER = 'This MCP app is not attached to a session backend; the request was refused.'
+
+async function requestOnOwner<T>(
+  owner: McpAppOwnerPin | null | undefined,
+  method: string,
+  params: Record<string, unknown>
+): Promise<T> {
+  const route = owner ? await owner : null
+
+  if (!route) {
+    throw new Error(NO_OWNER)
+  }
+
+  return requestConnectedGatewayForOwner<T>(route.connectionId, route.profile, method, params)
 }
 
 /**
- * Execute an approved app tool call through the gateway. The backend runs the
- * registered MCP handler, so the M2 trust gate (`_trust_gate_check`) applies
- * on top of the host approval the bridge already required.
+ * Read an app resource via the M6a RPC, through the gateway that owns the
+ * card's session (never the active one). The read names its server; the backend never guesses.
  */
-export async function callMcpAppTool(request: McpAppToolRequest, sessionId?: string | null): Promise<McpAppToolResult> {
-  const gateway = $gateway.get()
+export async function readMcpAppResource(
+  server: string,
+  uri: string,
+  owner?: McpAppOwnerPin | null
+): Promise<McpResourceReadResult> {
+  return requestOnOwner<McpResourceReadResult>(owner, 'mcp.resources.read', { server, uri })
+}
 
-  if (!gateway) {
-    throw new Error('Hermes is not connected.')
-  }
-
+/**
+ * Execute an approved app tool call through the gateway that owns the card's
+ * session. The backend runs the registered MCP handler, so the M2 trust gate
+ * applies on top of the host approval the bridge already required.
+ */
+export async function callMcpAppTool(
+  request: McpAppToolRequest,
+  sessionId?: string | null,
+  owner?: McpAppOwnerPin | null
+): Promise<McpAppToolResult> {
   // The session is the one that rendered the card. Never fall back to the
   // focused chat: approval gate, cwd and profile belong to the card's session.
   if (!sessionId) {
@@ -173,7 +220,7 @@ export async function callMcpAppTool(request: McpAppToolRequest, sessionId?: str
   }
 
   try {
-    return await gateway.request<McpAppToolResult>('mcp.tools.call', {
+    return await requestOnOwner<McpAppToolResult>(owner, 'mcp.tools.call', {
       session_id: sessionId,
       server: request.server,
       name: request.name,
