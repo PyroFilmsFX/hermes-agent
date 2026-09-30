@@ -1,0 +1,8 @@
+{
+  "schema": "tb-gates/v1",
+  "uv_extras": ["claude-agent-sdk"],
+  "test_commands": [
+    {"id": "suite", "argv": ["scripts/run_tests.sh"]},
+    {"id": "pytest", "argv": [".venv/bin/python", "-m", "pytest"]}
+  ]
+}
