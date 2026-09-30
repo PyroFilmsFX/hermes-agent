@@ -431,7 +431,13 @@ function settleSilentLiveTurn(runtimeId: string) {
     ...current,
     awaitingResponse: false,
     busy: false,
-    interrupted: true,
+    // NOT `interrupted: true`. That latch means "the owner pressed Stop": it makes
+    // message.start / deltas / tool events / message.complete for this session get
+    // dropped until the next prompt.submit clears it. A silent turn is not owner
+    // intent. Crash recovery and auto-continue routinely go quiet for longer than
+    // the silence window (backend rebuild, CLI resume, backoff) and then answer;
+    // latching here made that recovered reply invisible until the owner sent
+    // another message. The retry card is enough; fresh events must still draw.
     messages: withSilentTurnRetry(current.messages, current.streamId),
     pendingBranchGroup: null,
     streamId: null,

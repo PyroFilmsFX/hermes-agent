@@ -58,6 +58,51 @@ def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     return None
 
 
+# User rows that are not a fresh owner request: they never close the window in which a later
+# assistant row still answers the request a failed-turn boundary was written for.
+_NON_REQUEST_USER_KINDS = frozenset({
+    "peer_message", "auto_continue", "session_lifecycle", "hidden", "process_complete",
+})
+_NON_ANSWER_ASSISTANT_KINDS = frozenset({FAILED_TURN_DISPLAY_KIND, "hidden", "session_lifecycle"})
+
+
+def retract_answered_failed_turns(rows: Any) -> list:
+    """Display projection: hide a failed-turn boundary the request later outgrew.
+
+    An interrupted turn is closed with the boundary row at once, but the SDK runtime's
+    continuation (or a background result) can still answer the SAME request afterwards. The
+    stored rows stay as written (model context and prompt caching are untouched); a boundary
+    followed, before the next fresh user request, by an assistant answer or a tool row is
+    returned with ``display_kind="hidden"`` so no renderer shows "not processed" for a request
+    that was answered. A boundary with no such follow-up (a genuinely unprocessed request) is
+    returned unchanged. Input rows are never mutated."""
+    rows = list(rows or ())
+
+    def _kind(row: Dict[str, Any]) -> Any:
+        return row.get("display_kind") or untyped_failed_turn_display_kind(row.get("role"), row.get("content"))
+
+    out = list(rows)
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict) or _kind(row) != FAILED_TURN_DISPLAY_KIND or row.get("role") != "assistant":
+            continue
+        for later in rows[i + 1:]:
+            if not isinstance(later, dict):
+                continue
+            role, kind = later.get("role"), _kind(later)
+            if role == "user":
+                if kind not in _NON_REQUEST_USER_KINDS:
+                    break
+                continue
+            answered = role == "tool" or (
+                role == "assistant" and kind not in _NON_ANSWER_ASSISTANT_KINDS
+                and (later.get("tool_calls") or str(later.get("content") or "").strip())
+            )
+            if answered:
+                out[i] = {**row, "display_kind": "hidden"}
+                break
+    return out
+
+
 def failed_turn_notice(turn_messages: Any) -> str:
     """Boundary copy for a failed turn: never claim "not processed" when a tool may have run."""
     for row in turn_messages or ():
