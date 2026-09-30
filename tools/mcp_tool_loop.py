@@ -33,6 +33,14 @@ _mcp_task_pollers: dict[str, asyncio.Task] = {}
 # memory on purpose: after a process restart a reconnecting server gets a fresh window rather than
 # having its rows expired before it has finished connecting.
 _mcp_task_server_missing_since: dict[tuple[str, str], float] = {}
+# A row whose CONNECTED server keeps failing tasks/get or tasks/result (e.g. it lost its task state)
+# is expired after this many consecutive failed RPCs, or once this long has passed since the first
+# of them, whichever comes first (``mcp.task_rpc_failure_max`` / ``mcp.task_rpc_failure_expiry_s``).
+MCP_TASK_RPC_FAILURE_MAX = 10
+MCP_TASK_RPC_FAILURE_EXPIRY_S = 600.0
+# (server, task_id) -> (consecutive failed RPCs, monotonic time of the first). In memory, like
+# ``_mcp_task_server_missing_since``: a success clears it; a process restart starts it fresh.
+_mcp_task_rpc_failures: dict[tuple[str, str], tuple[int, float]] = {}
 
 
 class _LockCookie:
@@ -294,6 +302,18 @@ def _task_server_gone_expiry() -> float:
         return MCP_TASK_SERVER_GONE_EXPIRY_S
 
 
+def _task_rpc_failure_limits() -> tuple[int, float]:
+    """(max consecutive failed RPCs, max seconds since the first) before a row is expired."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly().get("mcp") or {}
+        count = int(cfg.get("task_rpc_failure_max", MCP_TASK_RPC_FAILURE_MAX))
+        window = float(cfg.get("task_rpc_failure_expiry_s", MCP_TASK_RPC_FAILURE_EXPIRY_S))
+        return max(1, count), max(0.0, window)
+    except (TypeError, ValueError, AttributeError):
+        return MCP_TASK_RPC_FAILURE_MAX, MCP_TASK_RPC_FAILURE_EXPIRY_S
+
+
 def _task_db():
     from hermes_state import SessionDB
     db = SessionDB()
@@ -365,15 +385,20 @@ async def _poll_mcp_tasks_scoped(home_override) -> None:
         reset_hermes_home_override(token)
 
 
-def _expire_mcp_task(db, row: dict, gone_for: float) -> None:
-    """Park a row whose server has been gone past the window: ``expired_at`` is set, the row stays."""
+def _expire_mcp_task(db, row: dict, gone_for: float, *, reason: Optional[str] = None) -> None:
+    """Park a row that can no longer be polled: ``expired_at`` is set, the row stays."""
     now = time.time()
     db._execute_write(lambda conn: conn.execute(
         "UPDATE mcp_pending_tasks SET expired_at = COALESCE(expired_at, ?) "
         "WHERE server = ? AND task_id = ? AND delivered_at IS NULL", (now, row["server"], row["task_id"])))
-    logger.warning("MCP task %s/%s expired: server '%s' has been disconnected for %.0fs; the row is kept "
-                   "with expired_at set and is no longer polled", row["server"], row["task_id"], row["server"],
-                   gone_for)
+    key = (row["server"], row["task_id"])
+    _mcp_task_server_missing_since.pop(key, None)
+    _mcp_task_backoff.pop(key, None)
+    _mcp_task_rpc_failures.pop(key, None)
+    if reason is None:
+        reason = "server '%s' has been disconnected for %.0fs" % (row["server"], gone_for)
+    logger.warning("MCP task %s/%s expired: %s; the row is kept with expired_at set and is no longer polled",
+                   row["server"], row["task_id"], reason)
 
 
 def _enqueue_task_wake(db, row: dict, result: Any) -> None:
@@ -401,11 +426,26 @@ def _enqueue_task_wake(db, row: dict, result: Any) -> None:
     schedule_drain(str(row["session_id"]), None)
 
 
-async def _poll_mcp_tasks_once() -> None:
+class _PollPass:
+    """What one poll pass did: ``failed`` row RPCs that raised, ``progressed`` rows that had a
+    successful RPC or reached a terminal state (delivered or expired)."""
+    __slots__ = ("failed", "progressed")
+
+    def __init__(self) -> None:
+        self.failed = 0
+        self.progressed = 0
+
+    @property
+    def stalled(self) -> bool:
+        return self.failed > 0 and self.progressed == 0
+
+
+async def _poll_mcp_tasks_once() -> _PollPass:
     import mcp.types as types
     from pydantic import TypeAdapter
     from tools import mcp_tool as core
 
+    outcome = _PollPass()
     db = _task_db()
     try:
         rows = [dict(row) for row in db._read_all(
@@ -423,8 +463,7 @@ async def _poll_mcp_tasks_once() -> None:
                 gone_for = now - _mcp_task_server_missing_since.setdefault(key, now)
                 if gone_for >= expiry:
                     _expire_mcp_task(db, row, gone_for)
-                    _mcp_task_server_missing_since.pop(key, None)
-                    _mcp_task_backoff.pop(key, None)
+                    outcome.progressed += 1
                 continue
             _mcp_task_server_missing_since.pop(key, None)  # reconnected inside the window: resume
             retry_at, delay = _mcp_task_backoff.get(key, (0.0, MCP_TASK_POLL_INTERVAL_S))
@@ -437,32 +476,51 @@ async def _poll_mcp_tasks_once() -> None:
                         types.GetTaskResult)
                     if status.status != "completed":
                         _mcp_task_backoff.pop(key, None)
+                        _mcp_task_rpc_failures.pop(key, None)
+                        outcome.progressed += 1
                         continue
                     result = await server.session.send_request(
                         types.GetTaskPayloadRequest(params=types.GetTaskPayloadRequestParams(taskId=row["task_id"])),
                         TypeAdapter(dict[str, Any]))
                 _enqueue_task_wake(db, row, result)
                 _mcp_task_backoff.pop(key, None)
+                _mcp_task_rpc_failures.pop(key, None)
+                outcome.progressed += 1
             except Exception:
-                delay = min(max(delay * 2, MCP_TASK_POLL_INTERVAL_S), 300.0)
-                _mcp_task_backoff[key] = (time.monotonic() + delay, delay)
+                outcome.failed += 1
                 logger.debug("MCP task poll failed for %s/%s", *key, exc_info=True)
+                # A connected server that keeps rejecting the row (lost task state, unknown id) would
+                # otherwise keep it pending, and the poller alive, forever: bound it per row.
+                now = time.monotonic()
+                count, first = _mcp_task_rpc_failures.get(key, (0, now))
+                count += 1
+                max_failures, window = _task_rpc_failure_limits()
+                if count >= max_failures or now - first >= window:
+                    _expire_mcp_task(db, row, 0.0, reason=(
+                        "server '%s' is connected but failed %d consecutive task polls over %.0fs"
+                        % (row["server"], count, now - first)))
+                    outcome.progressed += 1
+                    continue
+                _mcp_task_rpc_failures[key] = (count, first)
+                delay = min(max(delay * 2, MCP_TASK_POLL_INTERVAL_S), 300.0)
+                _mcp_task_backoff[key] = (now + delay, delay)
     finally:
         db.close()
+    return outcome
 
 
 async def _poll_mcp_tasks() -> None:
-    """Poll until nothing is pending. Every exit is bounded: rows of a vanished server expire,
-    a failing pending-check stops at once and repeated failed passes stop after a few tries (the
-    next persisted task or MCP loop start brings the poller back)."""
+    """Poll until nothing is pending. Every exit is bounded: rows of a vanished server expire, rows a
+    connected server keeps failing expire, a failing pending-check stops at once and repeated failed
+    passes (raised, or every row RPC failed) stop after a few tries (the next persisted task or MCP
+    loop start brings the poller back)."""
     key = _profile_task_key()
     current = asyncio.current_task()
     failures = 0
     try:
         while True:
             try:
-                await _poll_mcp_tasks_once()
-                failures = 0
+                outcome = await _poll_mcp_tasks_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -472,6 +530,18 @@ async def _poll_mcp_tasks() -> None:
                                    exc_info=True)
                     return
                 logger.debug("MCP task poller failed", exc_info=True)
+            else:
+                # A pass whose row RPCs all failed is a failed poll too, even though the pass itself
+                # returned; a pass that only skipped backed-off rows neither counts nor resets.
+                if outcome is not None and outcome.stalled:
+                    failures += 1
+                    if failures >= _MCP_TASK_POLL_MAX_FAILURES:
+                        logger.warning("MCP task poller stopping after %d consecutive failed polls (every "
+                                       "task RPC failed); pending rows resume on the next task or MCP "
+                                       "loop start", failures)
+                        return
+                elif outcome is None or outcome.progressed:
+                    failures = 0
             try:
                 if not _has_pending_mcp_tasks():
                     return

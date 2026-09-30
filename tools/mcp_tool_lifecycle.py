@@ -326,6 +326,7 @@ async def _drain_mcp_loop_tasks(*, timeout: Optional[float] = None) -> None:
         await asyncio.wait(pollers, timeout=timeout)
     task_loop._mcp_task_pollers.clear()
     task_loop._mcp_task_server_missing_since.clear()
+    task_loop._mcp_task_rpc_failures.clear()
     pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
     if not pending:
         return

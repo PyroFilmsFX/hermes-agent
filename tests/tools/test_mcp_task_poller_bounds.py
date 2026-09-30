@@ -189,3 +189,136 @@ def test_repeated_poll_failures_stop_the_poller(task_env, monkeypatch, caplog) -
         loop._run_on_mcp_loop(loop._poll_mcp_tasks, timeout=3)
     assert 1 < len(calls) <= 10
     assert any(rec.levelno >= logging.WARNING for rec in caplog.records)
+
+
+# --- R2-P1-2: a connected server that keeps rejecting tasks/get must not keep the poller alive ---
+
+class _RejectingTaskSession:
+    """Connected, but tasks/get fails (e.g. the server lost its task state). ``fail_times=None``
+    fails forever; an int fails that many times and then completes."""
+
+    def __init__(self, fail_times=None):
+        self.fail_times = fail_times
+        self.gets = 0
+        self.payloads = 0
+
+    async def send_request(self, request, result_type):
+        if request.method == "tasks/get":
+            self.gets += 1
+            if self.fail_times is None or self.gets <= self.fail_times:
+                raise RuntimeError("unknown task")
+            from mcp import types
+            return types.GetTaskResult(taskId=request.params.task_id, status="completed",
+                                       createdAt="2026-01-01T00:00:00Z",
+                                       lastUpdatedAt="2026-01-01T00:00:01Z", ttl=60)
+        self.payloads += 1
+        return {"content": [{"type": "text", "text": "late output"}]}
+
+
+def _mailbox_rows(dedupe: str) -> list:
+    from hermes_state import SessionDB
+    db = SessionDB()
+    try:
+        return [dict(r) for r in db._read_all("SELECT * FROM peer_mailbox WHERE dedupe_key = ?", (dedupe,))]
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def connected_server(task_env, monkeypatch):
+    from tools import mcp_tool as core
+
+    loop = task_env.loop
+    monkeypatch.setattr(loop, "MCP_TASK_POLL_INTERVAL_S", 0.01)  # per-row backoff starts tiny
+    added: list[str] = []
+
+    def add(name: str, session) -> _TaskServer:
+        server = _TaskServer(name)
+        server.session = session
+        with core._lock:
+            core._servers[name + "-key"] = server
+        added.append(name + "-key")
+        return server
+
+    yield add
+    with core._lock:
+        for key in added:
+            core._servers.pop(key, None)
+    getattr(loop, "_mcp_task_rpc_failures", {}).clear()
+
+
+def _run_poller(loop, budget: float = 40.0) -> None:
+    """Run the poller to completion; a poller that never exits is cancelled and fails the test."""
+    async def bounded():
+        await asyncio.wait_for(loop._poll_mcp_tasks(), budget)
+    loop._run_on_mcp_loop(bounded, timeout=budget + 5)
+
+
+def test_connected_server_rejecting_tasks_get_expires_row_and_poller_exits(
+        task_env, connected_server, monkeypatch, caplog) -> None:
+    loop = task_env.loop
+    monkeypatch.setattr(loop, "_task_rpc_failure_limits", lambda: (3, 3600.0), raising=False)
+    monkeypatch.setattr(loop, "_MCP_TASK_POLL_MAX_FAILURES", 100)  # the per-row bound must do it alone
+    session = _RejectingTaskSession(fail_times=None)
+    connected_server("stateless", session)
+    _persist("stateless", "t-rejected")
+
+    with caplog.at_level(logging.WARNING, logger="tools.mcp_tool"):
+        _run_poller(loop)  # raises TimeoutError if the poller never exits
+
+    row = _row("t-rejected")
+    assert row is not None, "an expired row is parked, never deleted"
+    assert row["delivered_at"] is None
+    assert row["expired_at"] is not None
+    assert session.gets == 3
+    assert loop._has_pending_mcp_tasks() is False
+    assert ("stateless", "t-rejected") not in loop._mcp_task_rpc_failures
+    assert any("t-rejected" in rec.getMessage() and "expired" in rec.getMessage()
+               for rec in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_rejecting_row_expires_after_the_time_bound(task_env, connected_server, monkeypatch) -> None:
+    loop = task_env.loop
+    monkeypatch.setattr(loop, "_task_rpc_failure_limits", lambda: (1000, 0.2), raising=False)
+    monkeypatch.setattr(loop, "_MCP_TASK_POLL_MAX_FAILURES", 1000)
+    connected_server("stateless", _RejectingTaskSession(fail_times=None))
+    _persist("stateless", "t-rejected-slow")
+
+    _run_poller(loop)
+
+    row = _row("t-rejected-slow")
+    assert row["expired_at"] is not None and row["delivered_at"] is None
+
+
+def test_failed_passes_without_progress_reach_the_outer_bound(
+        task_env, connected_server, monkeypatch, caplog) -> None:
+    """Per-row bounds out of reach: the outer bound still stops a poller whose passes only fail."""
+    loop = task_env.loop
+    monkeypatch.setattr(loop, "_task_rpc_failure_limits", lambda: (1000, 3600.0), raising=False)
+    monkeypatch.setattr(loop, "_MCP_TASK_POLL_MAX_FAILURES", 2)
+    session = _RejectingTaskSession(fail_times=None)
+    connected_server("stateless", session)
+    _persist("stateless", "t-outer")
+
+    with caplog.at_level(logging.WARNING, logger="tools.mcp_tool"):
+        _run_poller(loop)
+
+    assert session.gets >= loop._MCP_TASK_POLL_MAX_FAILURES
+    assert _row("t-outer")["expired_at"] is None  # not expired: the next task / loop start resumes it
+    assert any("consecutive" in rec.getMessage() for rec in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_transient_tasks_get_failure_then_success_delivers_once(task_env, connected_server, monkeypatch) -> None:
+    loop = task_env.loop
+    monkeypatch.setattr(loop, "_task_rpc_failure_limits", lambda: (3, 3600.0), raising=False)
+    session = _RejectingTaskSession(fail_times=1)
+    connected_server("flaky", session)
+    _persist("flaky", "t-flaky")
+
+    _run_poller(loop)
+
+    row = _row("t-flaky")
+    assert row["delivered_at"] is not None and row["expired_at"] is None
+    assert session.payloads == 1
+    assert len(_mailbox_rows("mcp-task:flaky:t-flaky")) == 1
+    assert ("flaky", "t-flaky") not in getattr(loop, "_mcp_task_rpc_failures", {})
