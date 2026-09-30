@@ -582,6 +582,20 @@ def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     )
 
 
+def steer_insert_index(rows, index) -> int:
+    """Nearest position at or after *index* that is not inside an open tool group.
+
+    A steer is a user row; between an assistant tool call and its result it would make the restore-time
+    orphan repair drop the completed result. Skip forward past the group's remaining tool results (also
+    leading results whose call was persisted in an earlier batch); a group that never completes in this
+    batch ends where its results stop.
+    """
+    at = max(0, min(int(index), len(rows)))
+    while at < len(rows) and isinstance(rows[at], dict) and rows[at].get("role") == "tool":
+        at += 1
+    return at
+
+
 def _persist_steer_boundary(agent, messages, steer_text, projected_messages, steer_index=None) -> None:
     """Persist the live SDK projection at a settled injected-user boundary.
 
@@ -590,7 +604,7 @@ def _persist_steer_boundary(agent, messages, steer_text, projected_messages, ste
     """
     projected = list(projected_messages)
     if steer_text:
-        at = 0 if steer_index is None else max(0, min(int(steer_index), len(projected)))
+        at = 0 if steer_index is None else steer_insert_index(projected, steer_index)
         projected.insert(at, {"role": "user", "content": steer_text})
     messages.extend(projected)
     if getattr(agent, "_session_db", None) is not None:

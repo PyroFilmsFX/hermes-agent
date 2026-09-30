@@ -908,3 +908,104 @@ def test_steer_the_turn_never_settles_is_still_written_before_the_late_reply():
         ("assistant", "more output"),
     ]
     assert session._pending_steer_marks == []
+
+
+def _assert_steer_outside_tool_group(rows):
+    """call -> result adjacent, steer after them, and the real repair pass keeps both."""
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    roles = [(m["role"], m.get("content") if m["role"] == "user" else None) for m in rows]
+    call = next(i for i, m in enumerate(rows) if m["role"] == "assistant" and m.get("tool_calls"))
+    assert rows[call + 1]["role"] == "tool", f"steer split the call from its result: {roles}"
+    steer = next(i for i, m in enumerate(rows) if m["role"] == "user" and m["content"] == "and what do i need to do?")
+    assert steer > call + 1
+    restored = [dict(m) for m in rows]
+    repair_message_sequence(None, restored)
+    assert any(m["role"] == "assistant" and m.get("tool_calls") for m in restored)
+    assert any(m["role"] == "tool" for m in restored), "repair dropped the completed tool result"
+
+
+def _tool_group_fakes():
+    from tests.agent.claude_sdk_fakes import ToolResultBlock, ToolUseBlock, UserMessage
+
+    return ToolResultBlock, ToolUseBlock, UserMessage
+
+
+def test_release_never_writes_a_steer_between_a_tool_call_and_its_result():
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    ToolResultBlock, ToolUseBlock, UserMessage = _tool_group_fakes()
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[ToolUseBlock(id="tx", name="Bash", input={})]))
+                self._pending.append(delta("typing"))
+                self._pending.append(UserMessage(content=[ToolResultBlock(tool_use_id="tx", content="done")]))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(_EOS)
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: Client(options=options),
+        on_stream_delta=on_delta,
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+    _assert_steer_outside_tool_group(list(turn.projected_messages))
+
+
+def test_folded_steer_never_lands_between_a_tool_call_and_its_result():
+    from agent.claude_sdk_runtime_continuity import _persist_steer_boundary
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    ToolResultBlock, ToolUseBlock, UserMessage = _tool_group_fakes()
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.append(AssistantMessage(content=[ToolUseBlock(id="tx", name="Bash", input={})]))
+                self._pending.append(delta("typing"))
+                self._pending.append(UserMessage(content=[ToolResultBlock(tool_use_id="tx", content="done")]))
+                return
+            self.queried.append([message async for message in prompt])
+            self._pending.append(AssistantMessage(content=[TextBlock("reply")]))
+            self._pending.append(result("reply", "folded", {"kind": "human"}))
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            assert session.steer("and what do i need to do?") is True
+
+    calls = []
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: Client(options=options),
+        on_stream_delta=on_delta,
+    )
+    session._on_steer_settled = lambda text, settled, index=None: calls.append((text, list(settled), index))
+    try:
+        session.run_turn("initial")
+    finally:
+        session.close()
+    text, settled, index = calls[0]
+    transcript = []
+    _persist_steer_boundary(types.SimpleNamespace(_session_db=None), transcript, text, settled, index)
+    _assert_steer_outside_tool_group(transcript)
+    assert [m["role"] for m in transcript][-2:] == ["user", "assistant"]

@@ -1401,6 +1401,11 @@ class ClaudeSdkTurnMixin:
                     _pos = _mark.get("pos")
                     _pos = len(out["messages"]) if _pos is None else _pos + inserted
                     _pos = max(persisted_projection_count, min(_pos, len(out["messages"])))
+                    from agent.claude_sdk_runtime_continuity import steer_insert_index
+
+                    _pos = persisted_projection_count + steer_insert_index(
+                        out["messages"][persisted_projection_count:], _pos - persisted_projection_count
+                    )
                     out["messages"].insert(_pos, {"role": "user", "content": _text, "timestamp": _mark.get("ts")})
                     inserted += 1
                 self._pending_steer_results = 0
