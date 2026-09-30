@@ -1020,6 +1020,13 @@ class ClaudeSdkTurnMixin:
                     # Any stream message is liveness — stamp before anything
                     # else so the caller-thread watchdog sees it.
                     watch.tick()
+                # A steer typed since the last message sits AFTER everything
+                # projected so far and BEFORE whatever this message adds:
+                # stamp that position now so its row is written where it was
+                # sent (see _persist_steer_boundary), not before/after the turn.
+                for _mark in getattr(self, "_pending_steer_marks", ()):
+                    if _mark.get("pos") is None:
+                        _mark["pos"] = len(out["messages"])
                 if isinstance(message, _StreamEnd):
                     with self._interrupt_commit_lock:
                         interrupted = interrupted or self._interrupt_event.is_set()
@@ -1142,8 +1149,11 @@ class ClaudeSdkTurnMixin:
                             self._pending_steer_results = pending_steer - 1
                             pending_inputs = getattr(self, "_pending_steer_inputs", [])
                             steer_text = pending_inputs.pop(0) if pending_inputs else None
+                            marks = getattr(self, "_pending_steer_marks", [])
+                            steer_mark = marks.pop(0) if marks else None
                         else:
                             steer_text = None
+                            steer_mark = None
                         pending_steer_after = getattr(
                             self, "_pending_steer_results", 0
                         )
@@ -1156,7 +1166,12 @@ class ClaudeSdkTurnMixin:
                         callback = getattr(self, "_on_steer_settled", None)
                         if callable(callback):
                             settled = out["messages"][persisted_projection_count:]
-                            callback(steer_text, settled)
+                            steer_pos = (steer_mark or {}).get("pos")
+                            callback(
+                                steer_text, settled,
+                                None if steer_pos is None
+                                else max(0, min(steer_pos - persisted_projection_count, len(settled))),
+                            )
                         persisted_projection_count = len(out["messages"])
                     if pending_steer > 0 and (
                         not is_steer_result or pending_steer_after > 0
@@ -1373,8 +1388,24 @@ class ClaudeSdkTurnMixin:
                 # Any steer whose query was abandoned by interruption, stream
                 # death, or release must not be mistaken for a later turn's
                 # result. Completed steers already decremented this counter.
+                # A steer the turn never settled (its answer, if any, arrives
+                # late as unsolicited output) still needs its row: the owner's
+                # words go into the transcript where they were typed, ahead of
+                # the reply that answers them.
+                leftovers = list(getattr(self, "_pending_steer_marks", ()))
+                inserted = 0
+                for _mark in leftovers:
+                    _text = str(_mark.get("text") or "")
+                    if not _text:
+                        continue
+                    _pos = _mark.get("pos")
+                    _pos = len(out["messages"]) if _pos is None else _pos + inserted
+                    _pos = max(persisted_projection_count, min(_pos, len(out["messages"])))
+                    out["messages"].insert(_pos, {"role": "user", "content": _text, "timestamp": _mark.get("ts")})
+                    inserted += 1
                 self._pending_steer_results = 0
                 self._pending_steer_inputs = []
+                self._pending_steer_marks = []
             # Anything the reader parked after our ResultMessage belongs to a
             # CLI-initiated turn that overlapped ours. Route it now — left in
             # a discarded queue it would be lost, and left in the stream it

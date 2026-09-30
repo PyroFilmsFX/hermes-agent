@@ -582,11 +582,17 @@ def _render_continuity_digest(prior_messages: List[Dict[str, Any]]) -> str:
     )
 
 
-def _persist_steer_boundary(agent, messages, steer_text, projected_messages) -> None:
-    """Persist the live SDK projection at a settled injected-user boundary."""
+def _persist_steer_boundary(agent, messages, steer_text, projected_messages, steer_index=None) -> None:
+    """Persist the live SDK projection at a settled injected-user boundary.
+
+    ``steer_index`` is where the owner's steer was typed within ``projected_messages`` (output that
+    streamed before it stays above it, the answer below); ``None`` keeps the steer ahead of the batch.
+    """
+    projected = list(projected_messages)
     if steer_text:
-        messages.append({"role": "user", "content": steer_text})
-    messages.extend(projected_messages)
+        at = 0 if steer_index is None else max(0, min(int(steer_index), len(projected)))
+        projected.insert(at, {"role": "user", "content": steer_text})
+    messages.extend(projected)
     if getattr(agent, "_session_db", None) is not None:
         try:
             agent._flush_messages_to_session_db(messages)
