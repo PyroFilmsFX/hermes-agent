@@ -338,6 +338,7 @@ CREATE TABLE IF NOT EXISTS mcp_pending_tasks (
     created_at REAL NOT NULL,
     completed_at REAL,
     delivered_at REAL,
+    expired_at REAL,
     PRIMARY KEY (server, task_id)
 );
 

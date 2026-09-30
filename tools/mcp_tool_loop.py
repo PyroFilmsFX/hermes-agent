@@ -19,8 +19,20 @@ from tools import mcp_tool_lifecycle as _lifecycle
 
 logger = logging.getLogger("tools.mcp_tool")
 MCP_TASK_POLL_INTERVAL_S = 5.0
+# A pending row whose server stays disconnected this long is parked with ``expired_at`` (kept, never
+# deleted) so the poller can exit; ``mcp.task_server_gone_expiry_s`` overrides it.
+MCP_TASK_SERVER_GONE_EXPIRY_S = 3600.0
+# Consecutive failed poll passes before the poller gives up (it restarts on the next task / loop start).
+_MCP_TASK_POLL_MAX_FAILURES = 5
+# Undelivered, unexpired: the only rows the poller works on.
+_PENDING_TASK_WHERE = "delivered_at IS NULL AND expired_at IS NULL"
 _mcp_task_backoff: dict[tuple[str, str], tuple[float, float]] = {}
+# Only touched on the MCP loop thread (start, poll, drain all run there).
 _mcp_task_pollers: dict[str, asyncio.Task] = {}
+# (server, task_id) -> monotonic time the poller first found that row's server disconnected. In
+# memory on purpose: after a process restart a reconnecting server gets a fresh window rather than
+# having its rows expired before it has finished connecting.
+_mcp_task_server_missing_since: dict[tuple[str, str], float] = {}
 
 
 class _LockCookie:
@@ -272,6 +284,16 @@ def _task_poll_interval() -> float:
         return MCP_TASK_POLL_INTERVAL_S
 
 
+def _task_server_gone_expiry() -> float:
+    try:
+        from hermes_cli.config import load_config_readonly
+        value = float((load_config_readonly().get("mcp") or {}).get(
+            "task_server_gone_expiry_s", MCP_TASK_SERVER_GONE_EXPIRY_S))
+        return max(0.0, value)
+    except (TypeError, ValueError, AttributeError):
+        return MCP_TASK_SERVER_GONE_EXPIRY_S
+
+
 def _task_db():
     from hermes_state import SessionDB
     db = SessionDB()
@@ -287,13 +309,17 @@ def _profile_task_key() -> str:
 def _has_pending_mcp_tasks() -> bool:
     db = _task_db()
     try:
-        return db._read_one("SELECT 1 FROM mcp_pending_tasks WHERE delivered_at IS NULL LIMIT 1") is not None
+        return db._read_one(f"SELECT 1 FROM mcp_pending_tasks WHERE {_PENDING_TASK_WHERE} LIMIT 1") is not None
     finally:
         db.close()
 
 
 def _ensure_mcp_task_poller_if_pending() -> None:
-    """Start one poller for the active profile only when its DB has undelivered task rows."""
+    """Start one poller for the active profile only when its DB has pending task rows. The poller
+    polls MCP-loop-owned sessions under their ``_rpc_lock``, so it is created ON ``_mcp_loop`` and
+    nowhere else: a caller on another running loop (``@resource`` expansion runs on the agent /
+    gateway loop) hands the start over with ``call_soon_threadsafe``. With the MCP loop down this is
+    a no-op; ``_ensure_mcp_loop`` calls it again once the loop is up."""
     try:
         if not _has_pending_mcp_tasks():
             return
@@ -301,23 +327,53 @@ def _ensure_mcp_task_poller_if_pending() -> None:
     except Exception:
         logger.debug("Unable to check for pending MCP tasks", exc_info=True)
         return
+    from tools import mcp_tool as _origin
+    loop = _origin._mcp_loop
+    if loop is None or not loop.is_running():
+        return
+    try:  # the start runs on the loop thread, where the caller's profile override is not set
+        from hermes_constants import get_hermes_home_override
+        home_override = get_hermes_home_override()
+    except Exception:
+        home_override = None
 
     def start() -> None:
         task = _mcp_task_pollers.get(key)
         if task is None or task.done():
-            _mcp_task_pollers[key] = asyncio.create_task(_poll_mcp_tasks(), name="_poll_mcp_tasks")
+            _mcp_task_pollers[key] = loop.create_task(_poll_mcp_tasks_scoped(home_override), name="_poll_mcp_tasks")
 
     try:
         running = asyncio.get_running_loop()
     except RuntimeError:
         running = None
-    if running is not None:
+    if running is loop:
         start()
         return
-    from tools import mcp_tool as _origin
-    loop = _origin._mcp_loop
-    if loop is not None and loop.is_running():
+    with contextlib.suppress(RuntimeError):  # the loop closed between the check and the hand-off
         loop.call_soon_threadsafe(start)
+
+
+async def _poll_mcp_tasks_scoped(home_override) -> None:
+    """``_poll_mcp_tasks`` under the starting caller's profile override (task-local on the MCP loop)."""
+    if not home_override:
+        return await _poll_mcp_tasks()
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(home_override)
+    try:
+        return await _poll_mcp_tasks()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _expire_mcp_task(db, row: dict, gone_for: float) -> None:
+    """Park a row whose server has been gone past the window: ``expired_at`` is set, the row stays."""
+    now = time.time()
+    db._execute_write(lambda conn: conn.execute(
+        "UPDATE mcp_pending_tasks SET expired_at = COALESCE(expired_at, ?) "
+        "WHERE server = ? AND task_id = ? AND delivered_at IS NULL", (now, row["server"], row["task_id"])))
+    logger.warning("MCP task %s/%s expired: server '%s' has been disconnected for %.0fs; the row is kept "
+                   "with expired_at set and is no longer polled", row["server"], row["task_id"], row["server"],
+                   gone_for)
 
 
 def _enqueue_task_wake(db, row: dict, result: Any) -> None:
@@ -353,16 +409,26 @@ async def _poll_mcp_tasks_once() -> None:
     db = _task_db()
     try:
         rows = [dict(row) for row in db._read_all(
-            "SELECT * FROM mcp_pending_tasks WHERE delivered_at IS NULL ORDER BY created_at")]
+            f"SELECT * FROM mcp_pending_tasks WHERE {_PENDING_TASK_WHERE} ORDER BY created_at")]
         with core._lock:
             servers = {str(server.name): server for server in core._servers.values() if server.session is not None}
+        expiry = _task_server_gone_expiry()
         for row in rows:
             key = (row["server"], row["task_id"])
-            retry_at, delay = _mcp_task_backoff.get(key, (0.0, MCP_TASK_POLL_INTERVAL_S))
-            if time.monotonic() < retry_at:
-                continue
             server = servers.get(row["server"])
             if server is None:
+                # Parked until the server reconnects, bounded: past the window the row expires so a
+                # server that never comes back cannot keep the poller alive forever.
+                now = time.monotonic()
+                gone_for = now - _mcp_task_server_missing_since.setdefault(key, now)
+                if gone_for >= expiry:
+                    _expire_mcp_task(db, row, gone_for)
+                    _mcp_task_server_missing_since.pop(key, None)
+                    _mcp_task_backoff.pop(key, None)
+                continue
+            _mcp_task_server_missing_since.pop(key, None)  # reconnected inside the window: resume
+            retry_at, delay = _mcp_task_backoff.get(key, (0.0, MCP_TASK_POLL_INTERVAL_S))
+            if time.monotonic() < retry_at:
                 continue
             try:
                 async with server._rpc_lock:
@@ -386,21 +452,32 @@ async def _poll_mcp_tasks_once() -> None:
 
 
 async def _poll_mcp_tasks() -> None:
+    """Poll until nothing is pending. Every exit is bounded: rows of a vanished server expire,
+    a failing pending-check stops at once and repeated failed passes stop after a few tries (the
+    next persisted task or MCP loop start brings the poller back)."""
     key = _profile_task_key()
     current = asyncio.current_task()
+    failures = 0
     try:
         while True:
             try:
                 await _poll_mcp_tasks_once()
+                failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception:
+                failures += 1
+                if failures >= _MCP_TASK_POLL_MAX_FAILURES:
+                    logger.warning("MCP task poller stopping after %d consecutive failed polls", failures,
+                                   exc_info=True)
+                    return
                 logger.debug("MCP task poller failed", exc_info=True)
             try:
                 if not _has_pending_mcp_tasks():
                     return
             except Exception:
-                logger.debug("Unable to check for pending MCP tasks", exc_info=True)
+                logger.warning("MCP task poller stopping: the pending-task check failed", exc_info=True)
+                return
             await asyncio.sleep(_task_poll_interval())
     finally:
         if current is not None and _mcp_task_pollers.get(key) is current:
