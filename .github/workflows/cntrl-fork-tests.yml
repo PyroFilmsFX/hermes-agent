@@ -10,6 +10,8 @@ on:
       - cntrl-hermes-worker
       - "sync/land-**"
       - "lane/**"
+      # conductor pr_discipline heads (host lanes open PRs from wave/*)
+      - "wave/**"
   workflow_dispatch:
 
 permissions:
