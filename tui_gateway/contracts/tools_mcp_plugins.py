@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from .base import JsonValue, Params, Result, WireEnum
+from .base import JsonValue, Params, Payload, Result, WireEnum
 from .common import OpenModel, ProfileParams, SessionLiveInfo
 from .connectors_operation import CatalogAppState, CatalogTier
-from .registry import method
+from .registry import event, method
 
 
 class _SessionScoped(Params):
@@ -487,6 +487,58 @@ method("mcp.servers.remove", params=McpServerNameParams, result=McpServersRemove
        doc="Drop a server from the profile's config.yaml.")
 
 
+# ── MCP prompts ───────────────────────────────────────────────────────────────────────────────
+
+
+class McpPromptArgument(Result):
+    name: str
+    description: str | None = None
+    required: bool = False
+
+
+class McpPromptRow(Result):
+    server: str
+    name: str
+    command: str
+    description: str = ""
+    arguments: list[McpPromptArgument] = Field(default_factory=list)
+
+
+class McpPromptsListParams(ProfileParams):
+    session_id: str | None = None
+    server: str | None = None
+
+
+class McpPromptsListResult(Result):
+    prompts: list[McpPromptRow] = Field(default_factory=list)
+
+
+method("mcp.prompts.list", params=McpPromptsListParams, result=McpPromptsListResult,
+       doc="List prompt templates advertised by connected MCP servers.")
+
+
+class McpPromptsGetParams(ProfileParams):
+    server: str
+    name: str
+    arguments: dict[str, JsonValue] | None = None
+    session_id: str | None = None
+
+
+class McpPromptMessage(Result):
+    role: str
+    content: str
+
+
+class McpPromptsGetResult(Result):
+    messages: list[McpPromptMessage] = Field(default_factory=list)
+    text: str = ""
+    description: str | None = None
+
+
+method("mcp.prompts.get", params=McpPromptsGetParams, result=McpPromptsGetResult,
+       doc="Fetch and render an MCP prompt template with filled arguments.")
+
+
 class McpOauthStartParams(McpServerNameParams):
     """With ``client_redirect_uri`` the CLIENT hosts the loopback and relays the code via
     ``mcp.servers.oauth.callback``."""
@@ -556,6 +608,129 @@ class McpOauthCallbackResult(Result):
 
 method("mcp.servers.oauth.callback", params=McpOauthCallbackParams, result=McpOauthCallbackResult,
        doc="Relay a client-captured redirect into a client_redirect_uri flow.")
+
+
+# ── MCP resources (M6) ─────────────────────────────────────────────────────────
+
+
+class McpResourceItem(Result):
+    server: str
+    uri: str
+    name: str
+    description: str | None = None
+    mimeType: str | None = None
+
+
+class McpResourcesListParams(ProfileParams):
+    server: str | None = None
+
+
+class McpResourcesListResult(Result):
+    resources: list[McpResourceItem] = Field(default_factory=list)
+
+
+method("mcp.resources.list", params=McpResourcesListParams, result=McpResourcesListResult,
+       doc="List resources from connected MCP servers.")
+
+
+class McpResourceReadParams(ProfileParams):
+    uri: str
+    #: The one server to read from: its configured key, or that key's sanitized form (the ``<server>``
+    #: in ``mcp__<server>__<tool>``). Required: a read is never fanned out across servers.
+    server: str
+
+
+class McpResourceContentBlock(Result):
+    uri: str
+    mimeType: str | None = None
+    text: str | None = None
+    blob: str | None = None
+
+
+class McpResourceReadResult(Result):
+    server: str
+    uri: str
+    contents: list[McpResourceContentBlock] = Field(default_factory=list)
+
+
+method("mcp.resources.read", params=McpResourceReadParams, result=McpResourceReadResult,
+       doc="Read an MCP resource by URI from the one named connected server (never a fan-out).")
+
+
+class McpResourceSubscriptionParams(ProfileParams):
+    server: str
+    uri: str
+
+
+class McpResourceSubscriptionResult(Result):
+    ok: bool
+    server: str
+    uri: str
+
+
+method("mcp.resources.subscribe", params=McpResourceSubscriptionParams, result=McpResourceSubscriptionResult,
+       doc="Subscribe to updates for an MCP resource on a connected server.")
+
+method("mcp.resources.unsubscribe", params=McpResourceSubscriptionParams, result=McpResourceSubscriptionResult,
+       doc="Unsubscribe from updates for an MCP resource on a connected server.")
+
+
+# ── MCP tool execution (M9b) ───────────────────────────────────────────────────
+
+
+class McpToolsCallParams(Params):
+    session_id: str
+    server: str
+    name: str
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class McpToolsCallResult(Result):
+    content: list[JsonValue] = Field(default_factory=list)
+    structuredContent: JsonValue | None = None
+    isError: bool | None = None
+
+
+method("mcp.tools.call", params=McpToolsCallParams, result=McpToolsCallResult,
+       doc="Execute an MCP tool on a connected server under the calling session's approval context.")
+
+
+# ── MCP elicitation ──────────────────────────────────────────────────────────────────────────
+
+
+class McpElicitationRequestPayload(Payload):
+    """MCP server requested user input mid-call (elicitation/create)."""
+
+    request_id: str
+    server: str
+    message: str
+    mode: str = "form"
+    requestedSchema: dict[str, JsonValue] | None = None
+    url: str | None = None
+
+
+event("mcp.elicitation.request", McpElicitationRequestPayload,
+      doc="MCP server requested user input (form or URL mode).")
+
+
+class McpElicitationAction(WireEnum):
+    ACCEPT = "accept"
+    DECLINE = "decline"
+    CANCEL = "cancel"
+
+
+class McpElicitationRespondParams(Params):
+    request_id: str
+    action: McpElicitationAction
+    content: dict[str, JsonValue] | None = None
+
+
+class McpElicitationRespondResult(Result):
+    ok: bool = True
+
+
+method("mcp.elicitation.respond", params=McpElicitationRespondParams, result=McpElicitationRespondResult,
+       doc="Complete a pending MCP elicitation request with accept, decline, or cancel.")
 
 
 # ── plugins ───────────────────────────────────────────────────────────────────────────────────

@@ -193,6 +193,22 @@ describe('JsonRpcRequestChannel', () => {
     expect(sent).toHaveLength(1)
   })
 
+  it('sends only server_requests by default and merges extra client capabilities when given', () => {
+    const ready = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
+    const plain = spyTransport()
+    const withCaps = spyTransport()
+    const defaultChannel = new JsonRpcRequestChannel()
+    const capChannel = new JsonRpcRequestChannel({ clientCapabilities: { mcp_elicitation: true } })
+
+    defaultChannel.attach(plain.transport)
+    defaultChannel.handleFrame(ready)
+    capChannel.attach(withCaps.transport)
+    capChannel.handleFrame(ready)
+
+    expect(JSON.parse(plain.sent[0]).params).toEqual({ server_requests: true })
+    expect(JSON.parse(withCaps.sent[0]).params).toEqual({ mcp_elicitation: true, server_requests: true })
+  })
+
   it('routes a server request to the first accepting handler and answers -32601 when nobody accepts', () => {
     const unhandled: string[] = []
     const channel = new JsonRpcRequestChannel({ onUnhandledRequest: req => void unhandled.push(req.method) })

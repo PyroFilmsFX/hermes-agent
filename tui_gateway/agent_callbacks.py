@@ -541,6 +541,9 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     session.update(updates)
     session.pop("queued_prompts", None)
     with session["history_lock"]:
+        from tui_gateway.owner_hold import owner_queue_discarded
+
+        owner_queue_discarded(session)
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
     info = _session_info(new_agent, session)

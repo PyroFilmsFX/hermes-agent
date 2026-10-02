@@ -603,6 +603,27 @@ describe('GatewayClient websocket attach mode', () => {
     }
   })
 
+  it('advertises only server_requests: the TUI has no MCP elicitation form', () => {
+    process.env.HERMES_TUI_GATEWAY_URL = 'ws://gateway.test/api/ws?token=abc'
+    const gw = new GatewayClient()
+
+    try {
+      gw.start()
+      const socket = FakeWebSocket.instances[0]!
+
+      socket.open()
+      socket.message(
+        JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
+      )
+      const frames = socket.sent.map(text => JSON.parse(text) as { method: string; params: unknown })
+      const advert = frames.find(frame => frame.method === 'client.capabilities')
+
+      expect(advert?.params).toEqual({ server_requests: true })
+    } finally {
+      gw.kill()
+    }
+  })
+
   it('does not heartbeat an older backend that omits the capability', async () => {
     vi.useFakeTimers()
     process.env.HERMES_TUI_GATEWAY_URL = 'ws://gateway.test/api/ws?token=abc'

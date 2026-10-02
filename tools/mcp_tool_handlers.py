@@ -30,6 +30,27 @@ _MISSING = object()
 
 declaration.on_change = invalidate_check_fn_cache
 
+
+def _persist_mcp_task(result, *, server_name: str, session_id: str, tool_call_id: str) -> Optional[str]:
+    structured = mcp_field(result, "structured_content", "structuredContent", {}) or {}
+    task = getattr(result, "task", None) or mcp_field(structured, "task", "task") or {}
+    task_id = (getattr(result, "task_id", None) or mcp_field(structured, "task_id", "taskId")
+               or getattr(task, "task_id", None) or mcp_field(task, "task_id", "taskId"))
+    result_type = getattr(result, "result_type", None) or mcp_field(structured, "result_type", "resultType")
+    if result_type != "task" or not task_id or not session_id or not tool_call_id:
+        return None
+    from hermes_state import SessionDB
+    db = SessionDB()
+    try:
+        db._execute_write(lambda conn: conn.execute(
+            "INSERT OR IGNORE INTO mcp_pending_tasks "
+            "(server, task_id, session_id, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (server_name, str(task_id), session_id, tool_call_id, time.time())))
+    finally:
+        db.close()
+    _loop._ensure_mcp_task_poller_if_pending()
+    return str(task_id)
+
 _NEEDS_REAUTH_MSG = (
     "MCP server '{s}' requires re-authentication. Run `hermes mcp login {s}` (or delete the tokens file under "
     "~/.hermes/mcp-tokens/ and restart). Do NOT retry this tool — ask the user to re-authenticate.")
@@ -68,6 +89,13 @@ def _tool_display_title(registry_name: str) -> str | None:
     server_name = _core._mcp_tool_server_names.get(registry_name)
     tool_name = _core._tool_raw_names.get(registry_name)
     return _tool_metadata(server_name, tool_name).get("title") if server_name and tool_name else None
+
+
+def _tool_output_schema(registry_name: str) -> dict | None:
+    """outputSchema captured at discovery for a registered MCP tool."""
+    server_name = _core._mcp_tool_server_names.get(registry_name)
+    tool_name = _core._tool_raw_names.get(registry_name)
+    return _tool_metadata(server_name, tool_name).get("outputSchema") if server_name and tool_name else None
 
 
 def _traceparent(value: str | None) -> str:
@@ -473,8 +501,16 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         except Exception:
             logger.debug("MCP %s/%s progress callback failed", server_name, tool_name, exc_info=True)
 
-    _call_coro = server.session.call_tool(
-        tool_name, arguments=args, progress_callback=_on_progress, meta={"traceparent": _traceparent(traceparent)})
+    call_kwargs = {
+        "arguments": args,
+        "progress_callback": _on_progress,
+        "meta": {"traceparent": _traceparent(traceparent)},
+    }
+    capabilities = getattr(getattr(server, "initialize_result", None), "capabilities", None)
+    if capabilities is not None and getattr(capabilities, "tasks", None) is not None:
+        call_kwargs["meta"]["io.modelcontextprotocol/tasks"] = {}
+        call_kwargs["allow_claimed"] = True
+    _call_coro = server.session.call_tool(tool_name, **call_kwargs)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
@@ -625,7 +661,9 @@ def _render_call_tool_result(result, server_name: str) -> str:
     # (#56059). When the serialized form exceeds the hard cap, replace it with the truncated string (head +
     # tail preserved) so it degrades gracefully instead of flooding downstream.
     if structured is not None:
-        payload["structuredContent" if text_result else "result"] = structured
+        payload["structuredContent"] = structured
+        if not text_result:
+            payload["result"] = structured
     if meta is not None:
         payload["_meta"] = meta
     payload.setdefault("result", text_result)
@@ -670,6 +708,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 server._mark_session_proven()
             if schema_error is not None:
                 return schema_error
+            task_id = _persist_mcp_task(result, server_name=server_name,
+                                        session_id=kwargs.get("session_id") or "",
+                                        tool_call_id=kwargs.get("tool_call_id") or "")
+            if task_id:
+                return json.dumps({"status": "waiting_on_task", "server": server_name,
+                                   "task_id": task_id, "tool_call_id": kwargs.get("tool_call_id")})
             return _render_validated_call_tool_result(result, server_name, tool_name)
 
         def _on_failure(exc):
@@ -762,6 +806,236 @@ def _render_get_prompt(result, server_name: str) -> dict:
             entry["content"] = strip_unicode_tags(msg.content.text if hasattr(msg.content, "text") else str(msg.content))
         messages.append(entry)
     return {"messages": messages, **_pick(result, ("description", "description", True))}
+
+
+def parse_prompt_args(arg_str: Optional[str], declared_args: Optional[List[dict]] = None) -> Dict[str, Any]:
+    """Parse prompt arguments from a command string.
+
+    Supports:
+    - key=value or key="quoted value"
+    - --key value or --key=value
+    - positional arguments mapped to declared arguments in order
+    """
+    if not arg_str or not arg_str.strip():
+        return {}
+    import shlex
+    try:
+        tokens = shlex.split(arg_str)
+    except Exception:
+        tokens = arg_str.split()
+
+    result: Dict[str, Any] = {}
+    positional: List[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            clean = tok[2:]
+            if "=" in clean:
+                k, v = clean.split("=", 1)
+                result[k] = v
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                result[clean] = tokens[i + 1]
+                i += 1
+            else:
+                result[clean] = True
+        elif "=" in tok and not tok.startswith("="):
+            k, v = tok.split("=", 1)
+            result[k] = v
+        else:
+            positional.append(tok)
+        i += 1
+
+    if declared_args and positional:
+        assigned = set(result.keys())
+        pos_idx = 0
+        for decl in declared_args:
+            name = decl.get("name")
+            if name and name not in assigned:
+                result[name] = positional[pos_idx]
+                pos_idx += 1
+                if pos_idx >= len(positional):
+                    break
+
+    return result
+
+
+def _run_mcp_coroutine(coro_fn):
+    """Run an async coroutine on the MCP loop, or current/new loop if MCP loop is down."""
+    loop = _loop._running_loop()
+    if loop is not None:
+        return _loop._run_on_mcp_loop(coro_fn, timeout=60)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if current_loop is not None and current_loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro_fn())).result(timeout=60)
+    return asyncio.run(coro_fn())
+
+
+async def async_list_mcp_prompts(server_target: Any = None) -> List[dict]:
+    """List prompt templates from connected MCP servers.
+
+    ``server_target`` may be:
+    - None: query all connected MCP servers that declare the prompts capability
+    - str (server_name): query that specific registered server
+    - an MCP ClientSession, client object, or ServerParameters directly (useful in stdio/fixture tests)
+    """
+    from tools import mcp_tool_discovery as _discovery
+
+    results: List[dict] = []
+
+    # Direct server parameters passed (e.g. StdioServerParameters in test fixture)
+    if server_target is not None and not isinstance(server_target, str):
+        if hasattr(server_target, "command") and hasattr(server_target, "args"):
+            from mcp import Client
+            try:
+                async with Client(server_target) as client:
+                    return await async_list_mcp_prompts(client.session)
+            except BaseException as exc:
+                cur = exc
+                while getattr(cur, "exceptions", None):
+                    cur = cur.exceptions[0]
+                raise cur
+
+        session = getattr(server_target, "session", server_target)
+        lock = getattr(server_target, "_rpc_lock", None)
+        server_name = getattr(server_target, "name", "mcp")
+        if lock:
+            async with lock:
+                res = await session.list_prompts()
+        else:
+            res = await session.list_prompts()
+        prompts = getattr(res, "prompts", [])
+        rendered = _render_prompt_list(prompts, server_name)
+        for p in rendered.get("prompts", []):
+            results.append({
+                "server": server_name,
+                "name": p["name"],
+                "command": f"/{server_name}:{p['name']}",
+                "description": p.get("description", ""),
+                "arguments": p.get("arguments", []),
+            })
+        return results
+
+    if isinstance(server_target, str):
+        server = _discovery._get_connected_server_for_call(server_target)
+        if not server or not server.session:
+            raise ValueError(f"MCP server '{server_target}' is not connected")
+        servers_to_query = [(server_target, server)]
+    else:
+        with _core._lock:
+            servers_to_query = [
+                (key, s) for key, s in _core._servers.items()
+                if s is not None and s.session is not None
+            ]
+
+    for s_name, server in servers_to_query:
+        init_res = getattr(server, "initialize_result", None)
+        if init_res:
+            caps = getattr(init_res, "capabilities", None)
+            if caps and getattr(caps, "prompts", None) is None:
+                continue
+
+        try:
+            async with server._rpc_lock:
+                res = await _core._paginate_full_list(server.session.list_prompts, "prompts", s_name)
+            prompts = res if isinstance(res, list) else getattr(res, "prompts", [])
+            rendered = _render_prompt_list(prompts, s_name)
+            for p in rendered.get("prompts", []):
+                results.append({
+                    "server": s_name,
+                    "name": p["name"],
+                    "command": f"/{s_name}:{p['name']}",
+                    "description": p.get("description", ""),
+                    "arguments": p.get("arguments", []),
+                })
+        except Exception as exc:
+            logger.debug("Failed to list prompts for MCP server '%s': %s", s_name, exc)
+
+    return results
+
+
+def list_mcp_prompts(server_target: Any = None) -> List[dict]:
+    """Sync wrapper for async_list_mcp_prompts."""
+    return _run_mcp_coroutine(lambda: async_list_mcp_prompts(server_target))
+
+
+async def async_get_mcp_prompt(
+    server_target: Any,
+    name: str,
+    arguments: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Fetch and render an MCP prompt by name from an MCP server or session.
+
+    ``server_target`` may be:
+    - str (server_name): query that specific registered server
+    - an MCP ClientSession, client object, or ServerParameters directly
+    """
+    from tools import mcp_tool_discovery as _discovery
+    import mcp.shared.exceptions
+
+    arguments = dict(arguments or {})
+
+    # Direct server parameters passed (e.g. in test fixture)
+    if server_target is not None and not isinstance(server_target, str):
+        if hasattr(server_target, "command") and hasattr(server_target, "args"):
+            from mcp import Client
+            try:
+                async with Client(server_target) as client:
+                    return await async_get_mcp_prompt(client.session, name, arguments)
+            except BaseException as exc:
+                cur = exc
+                while getattr(cur, "exceptions", None):
+                    cur = cur.exceptions[0]
+                raise cur
+
+    if isinstance(server_target, str):
+        server = _discovery._get_connected_server_for_call(server_target)
+        if not server or not server.session:
+            raise ValueError(f"MCP server '{server_target}' is not connected")
+        session = server.session
+        lock = server._rpc_lock
+        server_name = server_target
+    else:
+        session = getattr(server_target, "session", server_target)
+        lock = getattr(server_target, "_rpc_lock", None)
+        server_name = getattr(server_target, "name", "mcp")
+
+    # Validate required arguments against declared prompt arguments
+    prompts_list = await async_list_mcp_prompts(session)
+    target_prompt = next((p for p in prompts_list if p["name"] == name), None)
+    if target_prompt and target_prompt.get("arguments"):
+        for arg_def in target_prompt["arguments"]:
+            arg_name = arg_def.get("name")
+            if arg_def.get("required") and (arg_name not in arguments or arguments[arg_name] is None or arguments[arg_name] == ""):
+                raise ValueError(f"Missing required argument: '{arg_name}'")
+
+    try:
+        if lock:
+            async with lock:
+                res = await session.get_prompt(name, arguments=arguments)
+        else:
+            res = await session.get_prompt(name, arguments=arguments)
+    except mcp.shared.exceptions.MCPError as exc:
+        raise ValueError(str(exc)) from exc
+
+    rendered = _render_get_prompt(res, server_name)
+    messages = rendered.get("messages", [])
+    text = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
+    return {
+        "messages": messages,
+        "text": text,
+        "description": rendered.get("description"),
+    }
+
+
+def get_mcp_prompt(server_target: Any, name: str, arguments: Optional[Dict[str, Any]] = None) -> dict:
+    """Sync wrapper for async_get_mcp_prompt."""
+    return _run_mcp_coroutine(lambda: async_get_mcp_prompt(server_target, name, arguments))
 
 
 _make_list_resources_handler = _make_utility_handler(

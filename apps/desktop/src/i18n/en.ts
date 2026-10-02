@@ -5271,6 +5271,18 @@ export const en: Translations = {
       sendEdited: 'Send edited message',
       attachingFile: 'Attaching…'
     },
+    mcpApp: {
+      badge: 'App',
+      frameTitle: (app, server) => `${app} from ${server}`,
+      loading: 'Loading app…',
+      loadFailed: 'Could not load this app.',
+      notHtml: 'This resource is not an HTML app.',
+      tooLarge: kib => `This app is too large to show (over ${kib} KiB).`,
+      navigatedAway: 'This app tried to leave its page, so it was closed.',
+      wantsToRun: tool => `The app wants to run “${tool}”. Nothing runs until you allow it.`,
+      allowOnce: 'Allow once',
+      deny: 'Deny'
+    },
     approval: {
       gatewayDisconnected:
         'Hermes is offline right now. The command is still waiting for your answer (until the approval timeout). Reconnect, then send it again.',
@@ -5492,7 +5504,47 @@ export const en: Translations = {
     vaultCodeFootnote:
       'Tip: save the authenticator key with this login in Settings → Passwords & Logins and Hermes enters codes for you.',
     vaultCodeSkip: 'Skip',
-    vaultCodeConfirm: 'Enter code'
+    vaultCodeConfirm: 'Enter code',
+    mcpElicitation: {
+      formTitle: server => `${server} needs a few details`,
+      urlTitle: server => `${server} wants to open a link`,
+      fromServer: server => `Requested by the MCP server “${server}”`,
+      queued: count => (count === 1 ? '1 more request waiting' : `${count} more requests waiting`),
+      required: 'Required',
+      optional: 'Optional',
+      noSelection: 'None',
+      submit: 'Submit',
+      decline: 'Decline',
+      cancel: 'Cancel',
+      openInBrowser: 'Open in browser',
+      urlLabel: 'Link',
+      urlNote: server =>
+        `Opens in your default browser. Continue only if you trust ${server} and recognise this address.`,
+      urlInsecure: 'This link is not encrypted (http).',
+      urlUnsupported: 'Hermes only opens web links (https or http). Decline this request.',
+      openFailed: 'Could not open your browser. Copy the link, or decline.',
+      sendFailed: 'Could not send your answer',
+      expired: server => `${server} is no longer waiting for this answer.`,
+      timedOut: server => `The request from ${server} timed out and was declined.`,
+      hiddenBadge: count =>
+        count === 1 ? 'An MCP server is waiting for input in another chat' : `${count} MCP requests waiting in other chats`,
+      show: 'Show',
+      errors: {
+        required: 'Fill in this field.',
+        unsupported: 'Hermes cannot fill in this required field. Decline or cancel the request.',
+        enum: 'Choose one of the options.',
+        number: 'Enter a number.',
+        integer: 'Enter a whole number.',
+        minimum: limit => `Must be at least ${limit}.`,
+        maximum: limit => `Must be at most ${limit}.`,
+        minLength: limit => `Use at least ${limit} characters.`,
+        maxLength: limit => `Use at most ${limit} characters.`,
+        email: 'Enter an email address.',
+        uri: 'Enter a full link, like https://example.com.',
+        date: 'Enter a date.',
+        dateTime: 'Enter a date and time.'
+      }
+    }
   },
 
   desktop: {

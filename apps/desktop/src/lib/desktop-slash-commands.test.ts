@@ -92,6 +92,8 @@ describe('desktop slash command curation', () => {
     // A registry command the table has never heard of is still a command.
     expect(slashCompletionGroup('/refine', 'command')).toBe('Commands')
     expect(slashCompletionGroup('/docx', 'skill')).toBe('Skills')
+    expect(slashCompletionGroup('/mcp2026:greeting', 'prompt')).toBe('Prompts')
+    expect(slashCompletionGroup('/mcp2026:greeting')).toBe('Prompts')
     // Older backends omit kind — fall back to the table.
     expect(slashCompletionGroup('/new')).toBe('Commands')
     expect(slashCompletionGroup('/docx')).toBe('Skills')

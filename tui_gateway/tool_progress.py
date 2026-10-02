@@ -511,10 +511,13 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             or _connector_tool_lifecycle(name, args)):
         payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)}
         with contextlib.suppress(Exception):
-            from tools.mcp_tool_handlers import _tool_display_title
+            from tools.mcp_tool_handlers import _tool_display_title, _tool_output_schema
             payload["title"] = _tool_display_title(name)
             if payload["title"] is None:
                 payload.pop("title")
+            output_schema = _tool_output_schema(name)
+            if output_schema is not None:
+                payload["outputSchema"] = output_schema
         if (labels := _tool_labels(name, args)) is not None:
             payload["labels"] = labels
         # Full args (not just the 80-char `context` preview) so the desktop's expanded tool row is complete
@@ -587,6 +590,11 @@ def _on_tool_complete(
     duration_s = time.time() - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
+    with contextlib.suppress(Exception):
+        from tools.mcp_tool_handlers import _tool_output_schema
+        output_schema = _tool_output_schema(name)
+        if output_schema is not None:
+            payload["outputSchema"] = output_schema
     if sdk_result:
         # Verbatim (capped) string: JSON-decoding here turned scalar outputs
         # such as "42\n" / "null\n" into values the desktop card drops, and
@@ -597,6 +605,8 @@ def _on_tool_complete(
             payload["result"] = json.loads(result)
         except Exception:
             payload["result"] = result
+        if isinstance(payload.get("result"), dict) and "structuredContent" in payload["result"]:
+            payload["structuredContent"] = payload["result"]["structuredContent"]
     if sdk_result and truncated and len(result_text) <= _SDK_LIVE_RESULT_MAX_CHARS:
         truncated = None
     if sdk_result and truncated:

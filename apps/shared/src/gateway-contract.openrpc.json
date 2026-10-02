@@ -1699,6 +1699,132 @@
       }
     },
     {
+      "name": "mcp.elicitation.respond",
+      "summary": "Complete a pending MCP elicitation request with accept, decline, or cancel.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpElicitationRespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpElicitationRespondResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.prompts.get",
+      "summary": "Fetch and render an MCP prompt template with filled arguments.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpPromptsGetParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpPromptsGetResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.prompts.list",
+      "summary": "List prompt templates advertised by connected MCP servers.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpPromptsListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpPromptsListResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.list",
+      "summary": "List resources from connected MCP servers.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourcesListParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourcesListResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.read",
+      "summary": "Read an MCP resource by URI from the one named connected server (never a fan-out).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceReadParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceReadResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.subscribe",
+      "summary": "Subscribe to updates for an MCP resource on a connected server.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceSubscriptionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceSubscriptionResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.resources.unsubscribe",
+      "summary": "Unsubscribe from updates for an MCP resource on a connected server.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpResourceSubscriptionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpResourceSubscriptionResult"
+        }
+      }
+    },
+    {
       "name": "mcp.servers.add",
       "summary": "Add a server to the profile's config from a catalog preset and/or an explicit config.",
       "params": [
@@ -1875,6 +2001,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/McpServersTestResult"
+        }
+      }
+    },
+    {
+      "name": "mcp.tools.call",
+      "summary": "Execute an MCP tool on a connected server under the calling session's approval context.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/McpToolsCallParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/McpToolsCallResult"
         }
       }
     },
@@ -8160,6 +8304,11 @@
           "server_requests": {
             "default": false,
             "title": "Server Requests",
+            "type": "boolean"
+          },
+          "mcp_elicitation": {
+            "default": false,
+            "title": "Mcp Elicitation",
             "type": "boolean"
           }
         },
@@ -17461,6 +17610,113 @@
         "title": "McpCatalogResult",
         "type": "object"
       },
+      "McpElicitationAction": {
+        "enum": [
+          "accept",
+          "decline",
+          "cancel"
+        ],
+        "title": "McpElicitationAction",
+        "type": "string"
+      },
+      "McpElicitationRequestPayload": {
+        "additionalProperties": false,
+        "description": "MCP server requested user input mid-call (elicitation/create).",
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "mode": {
+            "default": "form",
+            "title": "Mode",
+            "type": "string"
+          },
+          "requestedSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requestedschema"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          }
+        },
+        "required": [
+          "request_id",
+          "server",
+          "message"
+        ],
+        "title": "McpElicitationRequestPayload",
+        "type": "object"
+      },
+      "McpElicitationRespondParams": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/McpElicitationAction"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Content"
+          }
+        },
+        "required": [
+          "request_id",
+          "action"
+        ],
+        "title": "McpElicitationRespondParams",
+        "type": "object"
+      },
+      "McpElicitationRespondResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "McpElicitationRespondResult",
+        "type": "object"
+      },
       "McpOauthCallbackParams": {
         "additionalProperties": false,
         "properties": {
@@ -17811,6 +18067,491 @@
           "description"
         ],
         "title": "McpProbeTool",
+        "type": "object"
+      },
+      "McpPromptArgument": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "McpPromptArgument",
+        "type": "object"
+      },
+      "McpPromptMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "McpPromptMessage",
+        "type": "object"
+      },
+      "McpPromptRow": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptArgument"
+            },
+            "title": "Arguments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "server",
+          "name",
+          "command"
+        ],
+        "title": "McpPromptRow",
+        "type": "object"
+      },
+      "McpPromptsGetParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Arguments"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "server",
+          "name"
+        ],
+        "title": "McpPromptsGetParams",
+        "type": "object"
+      },
+      "McpPromptsGetResult": {
+        "additionalProperties": false,
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          }
+        },
+        "title": "McpPromptsGetResult",
+        "type": "object"
+      },
+      "McpPromptsListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Server"
+          }
+        },
+        "title": "McpPromptsListParams",
+        "type": "object"
+      },
+      "McpPromptsListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "prompts": {
+            "items": {
+              "$ref": "#/components/schemas/McpPromptRow"
+            },
+            "title": "Prompts",
+            "type": "array"
+          }
+        },
+        "title": "McpPromptsListResult",
+        "type": "object"
+      },
+      "McpResourceContentBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "mimeType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mimetype"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          },
+          "blob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Blob"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "title": "McpResourceContentBlock",
+        "type": "object"
+      },
+      "McpResourceItem": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "mimeType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mimetype"
+          }
+        },
+        "required": [
+          "server",
+          "uri",
+          "name"
+        ],
+        "title": "McpResourceItem",
+        "type": "object"
+      },
+      "McpResourceReadParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "server"
+        ],
+        "title": "McpResourceReadParams",
+        "type": "object"
+      },
+      "McpResourceReadResult": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          },
+          "contents": {
+            "items": {
+              "$ref": "#/components/schemas/McpResourceContentBlock"
+            },
+            "title": "Contents",
+            "type": "array"
+          }
+        },
+        "required": [
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceReadResult",
+        "type": "object"
+      },
+      "McpResourceSubscriptionParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceSubscriptionParams",
+        "type": "object"
+      },
+      "McpResourceSubscriptionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "server",
+          "uri"
+        ],
+        "title": "McpResourceSubscriptionResult",
+        "type": "object"
+      },
+      "McpResourcesListParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Server"
+          }
+        },
+        "title": "McpResourcesListParams",
+        "type": "object"
+      },
+      "McpResourcesListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/McpResourceItem"
+            },
+            "title": "Resources",
+            "type": "array"
+          }
+        },
+        "title": "McpResourcesListResult",
         "type": "object"
       },
       "McpRuntimeStatus": {
@@ -18391,6 +19132,69 @@
           "oauth_needed"
         ],
         "title": "McpServersTestResult",
+        "type": "object"
+      },
+      "McpToolsCallParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          }
+        },
+        "required": [
+          "session_id",
+          "server",
+          "name"
+        ],
+        "title": "McpToolsCallParams",
+        "type": "object"
+      },
+      "McpToolsCallResult": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "items": {},
+            "title": "Content",
+            "type": "array"
+          },
+          "structuredContent": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Structuredcontent"
+          },
+          "isError": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Iserror"
+          }
+        },
+        "title": "McpToolsCallResult",
         "type": "object"
       },
       "MessageCompletePayload": {
@@ -22425,6 +23229,31 @@
           "key"
         ],
         "title": "PluginActivation",
+        "type": "object"
+      },
+      "PluginEventPayload": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/server.py::forward_plugin_event``.",
+        "properties": {
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "plugin",
+          "name"
+        ],
+        "title": "PluginEventPayload",
         "type": "object"
       },
       "PluginLiveNow": {
@@ -26962,10 +27791,36 @@
       },
       "QueuedPrompt": {
         "additionalProperties": false,
+        "description": "``_queued_prompt_snapshot``: the accepted next-turn prompt. A typed send (an owner forward, a peer\nmessage) keeps its display kind so a reconnecting client draws it as what it is.",
         "properties": {
           "user": {
             "title": "User",
             "type": "string"
+          },
+          "display_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Kind"
+          },
+          "display_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Metadata"
           }
         },
         "required": [
@@ -36373,6 +37228,23 @@
             "default": null,
             "title": "Result"
           },
+          "structuredContent": {
+            "default": null,
+            "title": "Structuredcontent"
+          },
+          "outputSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outputschema"
+          },
           "summary": {
             "anyOf": [
               {
@@ -36748,6 +37620,19 @@
             ],
             "default": null,
             "title": "Title"
+          },
+          "outputSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outputschema"
           },
           "args": {
             "anyOf": [
@@ -40218,6 +41103,18 @@
       ]
     },
     {
+      "name": "mcp.elicitation.request",
+      "summary": "MCP server requested user input (form or URL mode).",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/McpElicitationRequestPayload"
+          }
+        }
+      ]
+    },
+    {
       "name": "message.complete",
       "summary": "The turn ended: final text, usage and outcome.",
       "params": [
@@ -40441,6 +41338,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/ChangeSignalPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "plugin.event",
+      "summary": "A backend plugin emitted an event; forwarded to desktop plugins.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PluginEventPayload"
           }
         }
       ]

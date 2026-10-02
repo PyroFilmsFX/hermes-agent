@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { dispatchPluginNativeNotification } from '@/store/native-notifications'
 
-import { emitGatewayEvent } from './events'
+import { emitGatewayEvent, onGatewayEvent } from './events'
 import { createPluginContext } from './plugin'
 
 vi.mock('@/store/native-notifications', () => ({ dispatchPluginNativeNotification: vi.fn() }))
@@ -120,6 +120,128 @@ describe('createPluginContext.os', () => {
       await expect(ctx.os.writeClipboard('hi')).resolves.toBe(false)
     } finally {
       delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    }
+  })
+})
+
+describe('M11: plugin.event bridge to desktop plugins host.onEvent', () => {
+  it('dispatches event to matching handler only', () => {
+    const matchHandler = vi.fn()
+    const otherHandler = vi.fn()
+
+    const offMatch = onGatewayEvent('task.completed', matchHandler)
+    const offOther = onGatewayEvent('task.failed', otherHandler)
+
+    try {
+      emitGatewayEvent({
+        type: 'plugin.event',
+        payload: {
+          plugin: 'kanban',
+          name: 'task.completed',
+          payload: { taskId: 't-1', status: 'done' }
+        }
+      } as never)
+
+      expect(matchHandler).toHaveBeenCalledTimes(1)
+      expect(matchHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'plugin.event',
+          payload: {
+            plugin: 'kanban',
+            name: 'task.completed',
+            payload: { taskId: 't-1', status: 'done' }
+          }
+        })
+      )
+      expect(otherHandler).not.toHaveBeenCalled()
+    } finally {
+      offMatch()
+      offOther()
+    }
+  })
+
+  it('isolates throwing handlers so other handlers still run', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const brokenHandler = vi.fn(() => {
+      throw new Error('handler crashed')
+    })
+    const healthyHandler = vi.fn()
+
+    const offBroken = onGatewayEvent('sync.event', brokenHandler)
+    const offHealthy = onGatewayEvent('sync.event', healthyHandler)
+
+    try {
+      emitGatewayEvent({
+        type: 'plugin.event',
+        payload: {
+          plugin: 'sync-plugin',
+          name: 'sync.event',
+          payload: { count: 5 }
+        }
+      } as never)
+
+      expect(brokenHandler).toHaveBeenCalledTimes(1)
+      expect(healthyHandler).toHaveBeenCalledTimes(1)
+      expect(errorSpy).toHaveBeenCalled()
+    } finally {
+      offBroken()
+      offHealthy()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('unsubscribes handler on plugin unload', () => {
+    const disposers: Array<() => void> = []
+    const ctx = createPluginContext('lifecycle-plugin', d => disposers.push(d))
+    const handler = vi.fn()
+
+    ctx.onEvent('item.updated', handler)
+
+    emitGatewayEvent({
+      type: 'plugin.event',
+      payload: {
+        plugin: 'lifecycle-plugin',
+        name: 'item.updated',
+        payload: { id: 10 }
+      }
+    } as never)
+
+    expect(handler).toHaveBeenCalledTimes(1)
+
+    disposers.forEach(d => d())
+
+    emitGatewayEvent({
+      type: 'plugin.event',
+      payload: {
+        plugin: 'lifecycle-plugin',
+        name: 'item.updated',
+        payload: { id: 20 }
+      }
+    } as never)
+
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('completes direct dispatch within 1 second', () => {
+    const handler = vi.fn()
+    const off = onGatewayEvent('speed.test', handler)
+
+    try {
+      const start = performance.now()
+      emitGatewayEvent({
+        type: 'plugin.event',
+        payload: {
+          plugin: 'perf-plugin',
+          name: 'speed.test',
+          payload: { ts: Date.now() }
+        }
+      } as never)
+      const elapsed = performance.now() - start
+
+      expect(handler).toHaveBeenCalledTimes(1)
+      expect(elapsed).toBeLessThan(1000)
+    } finally {
+      off()
     }
   })
 })

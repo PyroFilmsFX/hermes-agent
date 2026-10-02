@@ -19,6 +19,15 @@ import {
 
 import { useSessionView } from '@/app/chat/session-view'
 import { AnsiText } from '@/components/assistant-ui/ansi-text'
+import { ErrorBoundary } from '@/components/error-boundary'
+import { type Contribution, useContributions } from '@/contrib'
+import {
+  extractStructuredContent,
+  findToolCardContribution,
+  TOOL_CARD_AREA,
+  type ToolCardContribution,
+  type ToolCardProps
+} from '@/lib/tool-cards'
 import { MarkdownImage } from '@/components/assistant-ui/markdown-text'
 import { TimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
@@ -44,6 +53,7 @@ import { useI18n } from '@/i18n'
 import { connectorCalls, mcpTargets } from '@/lib/connector-tools'
 import { PrettyLink, LinkifiedText as SharedLinkifiedText, urlSlugTitleLabel } from '@/lib/external-link'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
+import { findMcpAppUri } from '@/lib/mcp-apps/resolve'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
 import { toolResultRecord } from '@/lib/tool-result-metadata'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
@@ -81,6 +91,7 @@ import {
   type ToolStatus,
   type ToolTitleAction
 } from './fallback-model'
+import { McpAppCard } from './mcp-app-frame'
 import { isToolCallPart, summarizeToolRun } from './run-summary'
 import { ToolRunTicker } from './run-ticker'
 
@@ -1094,13 +1105,70 @@ export const ToolGroupSlot: FC<PropsWithChildren<{ endIndex: number; startIndex:
 }
 
 /**
- * Per-tool fallback. Now strictly returns a single ToolEntry — the
- * grouping decision lives in ToolGroupSlot above, so this never swaps
- * its return type and the underlying ToolEntry stays mounted across
- * group-shape changes.
+ * Per-tool fallback. Renders a custom card if a contribution in `tool.card` matches
+ * the tool's `server/tool` or `outputSchema` `$id` and receives `structuredContent`.
+ * Otherwise falls back to ToolEntry unchanged.
  */
 type TimelineToolCallProps = ToolCallMessagePartProps &
-  Pick<ToolPart, 'completedAt' | 'interrupted' | 'timestamp' | 'toolResultMetadata'>
+  Partial<
+    Pick<
+      ToolPart,
+      | 'completedAt'
+      | 'interrupted'
+      | 'timestamp'
+      | 'toolResultMetadata'
+      | 'toolTitle'
+      | 'progressPreview'
+      | 'structuredContent'
+      | 'outputSchema'
+    >
+  >
+
+function ToolCardLeaf({
+  fallback,
+  props,
+  renderFn
+}: {
+  fallback: ReactNode
+  props: ToolCardProps
+  renderFn?: ToolCardContribution['render']
+}) {
+  if (!renderFn) {
+    return <>{fallback}</>
+  }
+  return <>{renderFn(props)}</>
+}
+
+const ToolCardHost: FC<{
+  contribution: Contribution
+  fallback: ReactNode
+  part: ToolPart
+  structuredContent: unknown
+}> = ({ contribution, fallback, part, structuredContent }) => {
+  const data = (contribution.data || {}) as ToolCardContribution
+  const renderFn = data.render || (contribution.render as unknown as ToolCardContribution['render'])
+
+  const cardProps: ToolCardProps = useMemo(
+    () => ({
+      structuredContent,
+      toolName: part.toolName,
+      toolCallId: part.toolCallId,
+      args: part.args,
+      result: part.result,
+      isError: part.isError,
+      completedAt: part.completedAt,
+      timestamp: part.timestamp,
+      part
+    }),
+    [structuredContent, part]
+  )
+
+  return (
+    <ErrorBoundary fallback={() => fallback} label={`tool.card:${contribution.id}`}>
+      <ToolCardLeaf fallback={fallback} props={cardProps} renderFn={renderFn} />
+    </ErrorBoundary>
+  )
+}
 
 export const ToolFallback = ({
   toolCallId,
@@ -1111,20 +1179,90 @@ export const ToolFallback = ({
   isError,
   result,
   toolResultMetadata,
-  timestamp
+  timestamp,
+  toolTitle,
+  progressPreview,
+  structuredContent,
+  outputSchema
 }: TimelineToolCallProps) => {
-  const part: ToolPart = {
-    args,
-    completedAt,
-    interrupted,
-    isError,
-    result,
-    toolResultMetadata,
-    timestamp,
-    toolCallId,
-    toolName,
-    type: 'tool-call'
-  }
+  const contributions = useContributions(TOOL_CARD_AREA)
 
-  return <ToolEntry part={part} />
+  const part: ToolPart = useMemo(
+    () => ({
+      args,
+      completedAt,
+      interrupted,
+      isError,
+      result,
+      toolResultMetadata,
+      timestamp,
+      toolCallId,
+      toolName,
+      type: 'tool-call',
+      toolTitle,
+      progressPreview,
+      structuredContent:
+        structuredContent !== undefined
+          ? structuredContent
+          : result && typeof result === 'object' && 'structuredContent' in result
+            ? (result as Record<string, unknown>).structuredContent
+            : undefined,
+      outputSchema
+    }),
+    [
+      args,
+      completedAt,
+      interrupted,
+      isError,
+      result,
+      toolResultMetadata,
+      timestamp,
+      toolCallId,
+      toolName,
+      toolTitle,
+      progressPreview,
+      structuredContent,
+      outputSchema
+    ]
+  )
+
+  const resolvedStructured = extractStructuredContent(part)
+  const matchingContrib = useMemo(
+    () =>
+      resolvedStructured !== undefined
+        ? findToolCardContribution(contributions, part.toolName, part.outputSchema)
+        : undefined,
+    [contributions, part.toolName, part.outputSchema, resolvedStructured]
+  )
+
+  const cardSessionId = useStore(useSessionView().$runtimeId)
+
+  // MCP Apps (M9): a completed MCP tool result that references a `ui://` app
+  // gets the sandboxed app card under its row. Only MCP tools qualify, so a
+  // web or shell result carrying look-alike metadata cannot mount an app.
+  const appUri = useMemo(
+    () =>
+      part.toolName.startsWith('mcp__') && !part.isError && part.result !== undefined
+        ? findMcpAppUri(part.result)
+        : null,
+    [part.toolName, part.isError, part.result]
+  )
+
+  const entry = matchingContrib ? (
+    <ToolCardHost
+      contribution={matchingContrib}
+      fallback={<ToolEntry part={part} />}
+      part={part}
+      structuredContent={resolvedStructured}
+    />
+  ) : (
+    <ToolEntry part={part} />
+  )
+
+  return (
+    <>
+      {entry}
+      {appUri ? <McpAppCard key={appUri} sessionId={cardSessionId} toolName={part.toolName} uri={appUri} /> : null}
+    </>
+  )
 }

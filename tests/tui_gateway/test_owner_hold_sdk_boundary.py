@@ -1,0 +1,136 @@
+"""R2-P1-4: elapsed time is never a turn boundary for the SDK stream.
+
+An owner message queued behind an unclaimed CLI turn (a woken/injected burst) is dispatched only after
+that turn's acknowledged terminal result. When the bound passes, the backstop does explicit transport
+recovery (interrupt, then wait a bounded time for the terminal result). If the result still does not
+come, the owner submission is VISIBLY failed ("Not delivered ... Send it again") and the hold releases;
+the prompt never reaches query() on the still-active stream (that would fold it into the injected turn
+mid-loop, reader at agent/transports/claude_agent_sdk_session_turn.py ``_is_own_prompt_echo``).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from tui_gateway import owner_hold
+from tui_gateway import server
+from tui_gateway import session_mailbox as mailbox
+
+BOUND = 0.2
+RECOVERY = 0.3
+SID = "owner-sdk"
+
+
+class _WokenSdk:
+    """An unclaimed CLI turn. ``ends_on_interrupt=n``: the n-th interrupt makes it reach its terminal
+    result shortly after (the reader then reports the idle boundary); ``None``: it never ends."""
+
+    def __init__(self, ends_on_interrupt=None):
+        self.active = True
+        self.interrupts = 0
+        self.callback = None
+        self.ends_on_interrupt = ends_on_interrupt
+
+    def woken_turn_active(self):
+        return self.active
+
+    def interrupt_woken_turn(self):
+        self.interrupts += 1
+        if self.ends_on_interrupt is not None and self.interrupts >= self.ends_on_interrupt and self.active:
+            def end():
+                time.sleep(0.05)
+                self.active = False
+                if self.callback is not None:
+                    self.callback()
+            threading.Thread(target=end, daemon=True).start()
+        return True
+
+    def set_idle_boundary_callback(self, callback):
+        self.callback = callback
+
+
+def _session(sdk):
+    return {
+        "agent": SimpleNamespace(api_mode="claude_agent_sdk", _claude_sdk_session=sdk),
+        "session_key": SID, "history": [], "history_lock": threading.RLock(), "history_version": 0,
+        "running": False, "transport": None, "attached_images": [], "image_counter": 0, "cols": 80,
+        "slash_worker": None, "show_reasoning": False, "tool_progress_mode": "all",
+    }
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+@pytest.fixture
+def harness(monkeypatch):
+    monkeypatch.setattr(owner_hold, "TIMEOUT_S", BOUND)
+    monkeypatch.setattr(owner_hold, "RECOVERY_TIMEOUT_S", RECOVERY, raising=False)
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda _s, **_kw: contextlib.nullcontext())
+    monkeypatch.setattr(server, "_start_session_work", lambda target, **_kw: target())
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_a: None)
+    monkeypatch.setattr(mailbox, "schedule_drain", lambda *_a, **_kw: None)
+    monkeypatch.setattr(mailbox, "drain_session", lambda *_a, **_kw: 0)
+    h = SimpleNamespace(fired=[], emitted=[], sdk=None)
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: h.emitted.append((event, sid, payload)))
+
+    def run_prompt_submit(_rid, _sid, _session, prompt, **_kw):
+        # What reaches query(): record whether the SDK stream was still inside the unclaimed turn.
+        h.fired.append((prompt, h.sdk.woken_turn_active()))
+
+    monkeypatch.setattr(server, "_run_prompt_submit", run_prompt_submit)
+    yield h
+    server._sessions.pop(SID, None)
+
+
+def _submit(session, h, sdk, text):
+    server._sessions[SID] = session
+    h.sdk = sdk
+    response = server.handle_request({"id": "r", "method": "prompt.submit",
+                                      "params": {"session_id": SID, "text": text}})
+    assert response["result"]["status"] == "queued"
+
+
+def _errors(h):
+    return [payload["message"] for event, sid, payload in h.emitted
+            if event == "error" and sid == SID and isinstance(payload, dict)]
+
+
+def test_owner_prompt_never_enters_an_sdk_turn_that_never_ends_and_fails_visibly(harness) -> None:
+    sdk = _WokenSdk(ends_on_interrupt=None)
+    session = _session(sdk)
+    _submit(session, harness, sdk, "ship the hotfix after CI")
+
+    assert _wait_for(lambda: _errors(harness)), "the parked owner message must end as a visible error"
+    time.sleep(BOUND + RECOVERY)  # nothing may fire later either
+    assert harness.fired == [], "the owner prompt was passed to query() on the still-active stream"
+    errors = _errors(harness)
+    assert len(errors) == 1
+    assert "Not delivered" in errors[0] and "ship the hotfix after CI" in errors[0] and "Send it again" in errors[0]
+    assert sdk.interrupts >= 2, "the bound must first try explicit recovery (interrupt, then wait)"
+    assert session["queued_prompt"] is None and not session.get("queued_prompts")
+    assert mailbox._mailbox_auto_blocked(session) is False, "the failed owner message releases the hold"
+    assert "_owner_queued_since" not in session and "_owner_recovery_since" not in session
+
+
+def test_owner_prompt_is_delivered_at_the_boundary_that_follows_the_recovery_interrupt(harness) -> None:
+    sdk = _WokenSdk(ends_on_interrupt=2)  # the submit-time interrupt does not take; the recovery one does
+    session = _session(sdk)
+    _submit(session, harness, sdk, "and bump the version")
+
+    assert _wait_for(lambda: harness.fired), "the owner message was never delivered"
+    time.sleep(RECOVERY + 0.1)
+    assert harness.fired == [("and bump the version", False)], "delivered only after the terminal result"
+    assert sdk.interrupts == 2
+    assert _errors(harness) == []
+    assert "_owner_recovery_since" not in session

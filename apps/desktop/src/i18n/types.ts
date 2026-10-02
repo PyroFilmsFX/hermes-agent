@@ -4401,6 +4401,18 @@ export interface Translations {
       sendEdited: string
       attachingFile: string
     }
+    mcpApp: {
+      badge: string
+      frameTitle: (app: string, server: string) => string
+      loading: string
+      loadFailed: string
+      notHtml: string
+      tooLarge: (kib: number) => string
+      navigatedAway: string
+      wantsToRun: (tool: string) => string
+      allowOnce: string
+      deny: string
+    }
     approval: {
       gatewayDisconnected: string
       sendFailed: string
@@ -4578,6 +4590,44 @@ export interface Translations {
     vaultUnlockPlaceholder: string
     vaultUnlockKeepLocked: string
     vaultUnlockConfirm: string
+    mcpElicitation: {
+      formTitle: (server: string) => string
+      urlTitle: (server: string) => string
+      fromServer: (server: string) => string
+      queued: (count: number) => string
+      required: string
+      optional: string
+      noSelection: string
+      submit: string
+      decline: string
+      cancel: string
+      openInBrowser: string
+      urlLabel: string
+      urlNote: (server: string) => string
+      urlInsecure: string
+      urlUnsupported: string
+      openFailed: string
+      sendFailed: string
+      expired: (server: string) => string
+      timedOut: (server: string) => string
+      hiddenBadge: (count: number) => string
+      show: string
+      errors: {
+        required: string
+        unsupported: string
+        enum: string
+        number: string
+        integer: string
+        minimum: (limit: number) => string
+        maximum: (limit: number) => string
+        minLength: (limit: number) => string
+        maxLength: (limit: number) => string
+        email: string
+        uri: string
+        date: string
+        dateTime: string
+      }
+    }
   }
 
   desktop: {

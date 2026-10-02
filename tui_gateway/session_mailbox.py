@@ -392,10 +392,12 @@ def _native_peer_idle(session: dict, sdk_session: Any) -> bool:
 
 
 def _mailbox_auto_blocked(session: dict) -> bool:
-    from tui_gateway.session_auto_continue import _ac_owner_pending
+    """Owner input pending or a Stop hold: peer rows stay durably queued. Both release on their own
+    (delivery, failure, turn end, or the bound in tui_gateway/owner_hold.py), and the release drains."""
+    from tui_gateway.owner_hold import owner_pending, stop_hold_active
 
     with (session.get("history_lock") or contextlib.nullcontext()):
-        return bool(session.get("_owner_stop_hold") or _ac_owner_pending(session))
+        return bool(stop_hold_active(session) or owner_pending(session))
 
 
 def _install_sdk_boundary(sid: str, session: dict, sdk_session: Any) -> None:
@@ -411,7 +413,9 @@ def _sdk_turn_boundary(sid: str, session: dict) -> None:
     def run() -> None:
         with server._session_profile_runtime_scope(session):
             server._drain_queued_prompt(f"sdk-boundary:{sid}", sid, session)
-            if not session.get("running") and not session.get("_owner_stop_hold"):
+            from tui_gateway.owner_hold import stop_hold_active
+
+            if not session.get("running") and not stop_hold_active(session):
                 drain_session(str(session.get("session_key") or ""), session.get("profile_home"))
 
     server._start_session_work(run, name=f"sdk-boundary-{sid}")
@@ -509,6 +513,7 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
         return unfit
     target = _tip(db, str(row["target_session_id"]))
     live = _find_live(target, profile_home)
+    task_wake = dict(row).get("from_label") == "MCP task"
     if live is not None:
         if _mailbox_auto_blocked(live[1]):
             return STATUS_QUEUED, "owner input pending or Stop hold active"
@@ -517,7 +522,8 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
             return native
         if not db.peer_mailbox_claim(row["id"], _OWNER):
             return STATUS_QUEUED, "another delivery of this message is in progress"
-        return _submit_claimed(db, row, live[0], via="live", ok_status=STATUS_DELIVERED_LIVE, pol=pol)
+        return _submit_claimed(db, row, live[0], via="task" if task_wake else "live",
+                               ok_status=STATUS_DELIVERED_LIVE, pol=pol)
     with contextlib.suppress(Exception):
         if not db.get_session(target):
             db.peer_mailbox_fail(row["id"], "target session no longer exists")
@@ -544,7 +550,8 @@ def _deliver_row(db, row: dict, *, profile_home: str | None, allow_resume: bool,
             if (session := server._sessions.get(sid)) is not None and not session.get("pinned_resident"):
                 session["_peer_mailbox_woken"] = True
         _emit_mailbox_woken_lifecycle(sid, row, profile_home)
-        return _submit_claimed(db, row, sid, via="resume", ok_status=STATUS_RESUMED, pol=pol)
+        return _submit_claimed(db, row, sid, via="task" if task_wake else "resume",
+                               ok_status=STATUS_RESUMED, pol=pol)
     finally:
         _gate.release(target)
 

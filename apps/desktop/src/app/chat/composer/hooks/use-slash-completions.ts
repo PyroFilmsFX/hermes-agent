@@ -298,7 +298,7 @@ export function useSlashCompletions(options: {
         // Do not re-sort skills by usage here — complete.slash already ranked
         // by fuzzy score, then usage. A second usage pass buried exact name
         // matches that the table had mis-filed as skills.
-        const groupOrder = ['Commands', 'Skills', 'Options']
+        const groupOrder = ['Commands', 'Skills', 'Prompts', 'Options']
 
         if (isArgCompletion) {
           return { items: decorated, query }

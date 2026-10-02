@@ -473,7 +473,8 @@ class TestSession:
         # MCP read surface under every supported SDK permission mode.
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         fields = session.build_option_fields()
-        assert fields["disallowed_tools"] == ["AskUserQuestion", "Read"]
+        assert fields["disallowed_tools"] == ["Read"]
+        assert "AskUserQuestion" not in fields["disallowed_tools"]
         assert "Bash" not in fields["disallowed_tools"]
         assert "Edit" not in fields["disallowed_tools"]
         assert "Write" not in fields["disallowed_tools"]
@@ -640,11 +641,15 @@ class TestSession:
             monkeypatch.delenv(key, raising=False)
         # The interpreter-path scrub is a separate default (test_claude_sdk_configured_env);
         # isolate it so this test stays about metered vectors alone.
-        for key in ("PYTHONPATH", "PYTHONHOME"):
+        # ... and the sibling-session id scrub (it blanks an inherited HERMES_SESSION_ID,
+        # which an earlier test in the same process can leave behind).
+        for key in ("PYTHONPATH", "PYTHONHOME", "HERMES_SESSION_ID"):
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG"):  # per-session / D62 L1 default, independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG",
+                             # b10 hint, present only when this host has an owner anchor installed
+                             "HERMES_SESSION_ATTEST_DIR"):  # per-session / D62 L1 default, independent of this
             env.pop(per_session, None)
         assert env == {}
 
@@ -663,11 +668,14 @@ class TestSession:
             raising=False,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake")
-        for key in ("PYTHONPATH", "PYTHONHOME"):  # interpreter-path scrub is independent of this opt-in
+        # The interpreter-path and sibling-session-id scrubs are independent of this opt-in.
+        for key in ("PYTHONPATH", "PYTHONHOME", "HERMES_SESSION_ID"):
             monkeypatch.delenv(key, raising=False)
         session, _ = _make_session(script=[ResultMessage(result="ok")])
         env = session.build_option_fields()["env"]
-        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG"):  # per-session / D62 L1 default, independent of this
+        for per_session in ("TB_STATE_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_RETRY_WATCHDOG",
+                             # b10 hint, present only when this host has an owner anchor installed
+                             "HERMES_SESSION_ATTEST_DIR"):  # per-session / D62 L1 default, independent of this
             env.pop(per_session, None)
         assert env == {}
 

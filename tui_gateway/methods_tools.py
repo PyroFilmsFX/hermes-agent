@@ -473,6 +473,28 @@ def _catalog_plugin_commands(cat: _Catalog) -> None:
         cat.commands[key] = {"argument_mode": mode, "desktop": None}
 
 
+def _catalog_mcp_prompts(cat: _Catalog) -> None:
+    try:
+        from tools.mcp_tool_handlers import list_mcp_prompts
+        prompts = list_mcp_prompts()
+    except Exception:
+        return
+    if not prompts:
+        return
+    cat.cat_map.setdefault("Prompts", [])
+    for p in prompts:
+        server = p["server"]
+        pname = p["name"]
+        key = f"/{server}:{pname}"
+        desc = p.get("description") or f"MCP prompt from {server}"
+        args = p.get("arguments") or []
+        if args:
+            arg_names = " ".join(f"{a['name']}=" for a in args)
+            desc = f"{desc} [{arg_names}]"
+        cat.add(key, desc, "Prompts")
+        cat.commands[key] = {"argument_mode": "mixed", "desktop": None}
+
+
 def _catalog_skills(cat: _Catalog, skills: dict[str, dict]) -> str:
     """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (every consumer ranks by them).
     Returns the one-line notice for skills whose name is a built-in command (no ``/<name>`` entry;
@@ -512,6 +534,10 @@ def _(rid, params: dict) -> dict:
         _catalog_plugin_commands(cat)
     except Exception as e:
         warning = warning or f"plugin command discovery unavailable: {e}"
+    try:
+        _catalog_mcp_prompts(cat)
+    except Exception as e:
+        warning = warning or f"mcp prompts discovery unavailable: {e}"
     skills: dict[str, dict] = {}
     try:
         with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params)):
@@ -962,18 +988,43 @@ _SLASH_BUILTINS = {
     "loop": _cmd_loop, "undo": _cmd_undo, "snapshot": _cmd_snapshot, "snap": _cmd_snapshot,
     "compress": _cmd_compress, "compact": _cmd_compress}
 
+
+def _dispatch_mcp_prompt(rid, params, session, name, arg):
+    if ":" not in name:
+        return None
+    server_name, prompt_name = name.split(":", 1)
+    try:
+        from tools.mcp_tool_handlers import get_mcp_prompt, parse_prompt_args, list_mcp_prompts
+        prompts = list_mcp_prompts(server_name)
+        target = next((p for p in prompts if p["name"].lower() == prompt_name.lower()), None)
+        if target is None:
+            return None
+        declared_args = target.get("arguments", [])
+        parsed_args = parse_prompt_args(arg, declared_args)
+        rendered = get_mcp_prompt(server_name, target["name"], parsed_args)
+        text = rendered.get("text", "")
+        if not text and rendered.get("messages"):
+            text = "\n\n".join(m.get("content", "") for m in rendered["messages"] if m.get("content"))
+        return _ok(rid, {"type": "prefill", "message": text, "notice": f"Prompt /{server_name}:{target['name']} loaded"})
+    except ValueError as e:
+        return _err(rid, 4018, str(e))
+    except Exception as e:
+        logger.error("MCP prompt dispatch failed: %s", e, exc_info=True)
+        return _err(rid, 4018, f"Failed to get MCP prompt: {e}")
+
+
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
     session = _sessions.get(params.get("session_id", ""))
 
-    # Stage order is load-bearing: quick > plugin > bundle > skill > built-in > SDK-lane plugin skill
+    # Stage order is load-bearing: quick > plugin > bundle > mcp_prompt > skill > built-in > SDK-lane plugin skill
     # (last: a Claude Code plugin skill only fills a name Hermes itself does not own). One home binding
     # around the whole loop: the routing guard (``_is_profile_skill_command``) and the stages
     # must resolve against the SAME profile or a secondary-only skill is routed here and then
     # not found (#110695).
-    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_skill, _SLASH_BUILTINS.get(name),
-              _dispatch_sdk_slash)
+    stages = (_dispatch_quick, _dispatch_plugin, _dispatch_bundle, _dispatch_mcp_prompt, _dispatch_skill,
+              _SLASH_BUILTINS.get(name), _dispatch_sdk_slash)
     with _session_home_scope(session):
         for stage in filter(None, stages):
             res = stage(rid, params, session, name, arg)
@@ -1003,6 +1054,9 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"output": live_output or "(no output)"})
     if base in _WORKER_BLOCKED_COMMANDS and _is_snapshot_restore(arg):
         return _err(rid, 4018, "snapshot restore mutates live config/state; use command.dispatch for /snapshot restore")
+    # MCP prompt commands (/<server>:<prompt>) route straight to command.dispatch
+    if ":" in base:
+        return _methods["command.dispatch"](rid, {"name": base, "arg": arg, "session_id": sid})
     # Pending-input built-ins route straight to command.dispatch (some clients fail the
     # error-then-retry fallback); bundles go the same way under their resolved key.
     with _session_home_scope(session):  # a secondary-only bundle must route too (#110695)
@@ -1376,6 +1430,57 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"servers": out})
 
 
+@_scoped_rpc("mcp.prompts.list")
+def _(rid, params: dict) -> dict:
+    """List prompt templates advertised by connected MCP servers."""
+    try:
+        from tools.mcp_tool_handlers import list_mcp_prompts
+        prompts = list_mcp_prompts(params.get("server"))
+        rows = [
+            {
+                "server": p["server"],
+                "name": p["name"],
+                "command": p.get("command") or f"/{p['server']}:{p['name']}",
+                "description": p.get("description", ""),
+                "arguments": [
+                    {
+                        "name": a["name"],
+                        "description": a.get("description"),
+                        "required": bool(a.get("required", False)),
+                    }
+                    for a in p.get("arguments", [])
+                ],
+            }
+            for p in prompts
+        ]
+        return _ok(rid, {"prompts": rows})
+    except Exception as exc:
+        return _err(rid, 5024, f"mcp.prompts.list failed: {exc}")
+
+
+@_scoped_rpc("mcp.prompts.get", required=(("server", _stripped), ("name", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Fetch and render an MCP prompt template with filled arguments."""
+    server = params.get("server", "").strip()
+    name = params.get("name", "").strip()
+    args = params.get("arguments") or {}
+    try:
+        from tools.mcp_tool_handlers import get_mcp_prompt
+        res = get_mcp_prompt(server, name, args)
+        return _ok(rid, {
+            "messages": [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in res.get("messages", [])
+            ],
+            "text": res.get("text", ""),
+            "description": res.get("description"),
+        })
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, f"mcp.prompts.get failed: {exc}")
+
+
 @_mcp_rpc("list", required=())
 def _(rid, params: dict) -> dict:
     """``{servers: [{name, transport, url, command, args, env (key names), auth, oauth_tokens_present,
@@ -1565,6 +1670,215 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, deliver(
         _str_arg(params, "session_id"), _str_arg(params, "name"), code=code, state=state, error=error,
         iss=iss))
+
+
+# ─── MCP resources (mcp.resources.*) ─────────────────────────────────────────
+
+@_scoped_rpc("mcp.resources.list", required=())
+def _(rid, params: dict) -> dict:
+    """List resources from connected MCP servers."""
+    server = _str_arg(params, "server") or None
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        resources = mcp_res.list_mcp_resources(server_name=server)
+        return _ok(rid, {"resources": resources})
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.read", required=(("server", _stripped), ("uri", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Read an MCP resource by URI from the one named server (exact key or its sanitized form)."""
+    uri = _str_arg(params, "uri")
+    server = _str_arg(params, "server")
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.read_mcp_resource(uri, server_name=server)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.subscribe", required=(("server", _stripped), ("uri", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Subscribe to updates for an MCP resource."""
+    server = _str_arg(params, "server")
+    uri = _str_arg(params, "uri")
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.subscribe_mcp_resource(server, uri)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+@_scoped_rpc("mcp.resources.unsubscribe", required=(("server", _stripped), ("uri", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Unsubscribe from updates for an MCP resource."""
+    server = _str_arg(params, "server")
+    uri = _str_arg(params, "uri")
+    mcp_res = _tools_mod("tools.mcp_tool_resources")
+    try:
+        result = mcp_res.unsubscribe_mcp_resource(server, uri)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
+
+
+# ─── MCP tool execution (mcp.tools.call) ───────────────────────────────────
+
+
+@method("mcp.tools.call")
+def _(rid, params: dict) -> dict:
+    """Execute an MCP tool on a connected server under the calling session's approval context."""
+    import json
+    from tools.approval_context import reset_current_session_key, set_current_session_key
+
+    session_id = _str_arg(params, "session_id")
+    if not session_id:
+        return _err(rid, 4001, "session_id required")
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    if session.get("closing") or session.get("finalized"):
+        return _err(rid, 4001, f"session '{session_id}' not found")
+
+    server_name = _str_arg(params, "server")
+    if not server_name:
+        return _err(rid, 4000, "server required")
+
+    tool_name = _str_arg(params, "name")
+    if not tool_name:
+        return _err(rid, 4000, "name required")
+
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    elif not isinstance(arguments, dict):
+        return _err(rid, 4000, "arguments must be a JSON object")
+
+    try:
+        raw_args = json.dumps(arguments, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return _err(rid, 4000, f"arguments could not be serialized to JSON: {exc}")
+
+    if len(raw_args) > 64 * 1024:
+        return _err(rid, 4000, f"arguments exceed 64 KiB limit ({len(raw_args)} bytes)")
+
+    _discovery = _tools_mod("tools.mcp_tool_discovery")
+    server_task = _discovery._get_connected_server_for_call(server_name)
+    if server_task is None or getattr(server_task, "session", None) is None:
+        return _err(rid, 4018, f"MCP server '{server_name}' is not connected")
+
+    exposed_tools = getattr(server_task, "_tools", ()) or ()
+    is_exposed = False
+    for t in exposed_tools:
+        tname = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        if tname == tool_name:
+            is_exposed = True
+            break
+    if not is_exposed:
+        return _err(rid, 4018, f"Tool '{tool_name}' is not exposed by server '{server_name}'")
+
+    schema_mod = _tools_mod("tools.mcp_tool_schema")
+    prefixed_name = schema_mod.mcp_prefixed_tool_name(server_name, tool_name)
+    registry = _tools_mod("tools.registry").registry
+    entry = registry.get_entry(prefixed_name, scope=session.get("profile_home"))
+    if entry is None or not entry.handler:
+        return _err(rid, 4018, f"Tool handler '{prefixed_name}' not found")
+
+    session_key = session.get("session_key") or session.get("id") or session_id
+    approval_token = set_current_session_key(session_key)
+    tokens = _set_session_context(
+        session_key,
+        cwd=str(session.get("cwd") or ""),
+        ui_session_id=session_id
+    )
+    profile_scope = _session_profile_runtime_scope(session)
+
+    try:
+        with profile_scope:
+            raw_result = entry.handler(arguments)
+    except Exception as exc:
+        return _ok(rid, {
+            "content": [{"type": "text", "text": str(exc)}],
+            "isError": True,
+        })
+    finally:
+        _clear_session_context(tokens)
+        reset_current_session_key(approval_token)
+
+    if isinstance(raw_result, str):
+        try:
+            parsed = json.loads(raw_result)
+        except Exception:
+            parsed = {"result": raw_result}
+    elif isinstance(raw_result, dict):
+        parsed = raw_result
+    else:
+        parsed = {"result": str(raw_result)}
+
+    if "error" in parsed:
+        err_text = str(parsed["error"])
+        return _ok(rid, {
+            "content": [{"type": "text", "text": err_text}],
+            "isError": True,
+        })
+
+    content = parsed.get("content")
+    if content is None:
+        res = parsed.get("result")
+        if isinstance(res, list):
+            content = res
+        elif isinstance(res, str):
+            content = [{"type": "text", "text": res}]
+        elif isinstance(res, dict):
+            content = [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]
+        elif res is not None:
+            content = [{"type": "text", "text": str(res)}]
+        else:
+            content = []
+
+    out: dict = {"content": content}
+    if "structuredContent" in parsed:
+        out["structuredContent"] = parsed["structuredContent"]
+    if parsed.get("isError"):
+        out["isError"] = True
+    return _ok(rid, out)
+
+
+# ─── MCP elicitation (mcp.elicitation.*) ───────────────────────────────────
+
+def emit_elicitation_request(payload: dict) -> None:
+    """Forward an MCP elicitation request to connected desktop clients."""
+    from tui_gateway.server import _broadcast_global_event
+    _broadcast_global_event("mcp.elicitation.request", payload)
+
+
+@_scoped_rpc("mcp.elicitation.respond", required=(("request_id", _stripped), ("action", _stripped)))
+def _(rid, params: dict) -> dict:
+    """Complete a pending MCP elicitation request with accept, decline, or cancel."""
+    request_id = _str_arg(params, "request_id")
+    action = _str_arg(params, "action")
+    content = params.get("content")
+    mcp_sampling = _tools_mod("tools.mcp_tool_sampling")
+    try:
+        result = mcp_sampling.respond_elicitation(request_id, action, content)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4000, str(exc))
+    except KeyError as exc:
+        return _err(rid, 4018, str(exc))
+    except Exception as exc:
+        return _err(rid, 5024, str(exc))
 
 
 # ─── Plugins ─────────────────────────────────────────────────────────────────

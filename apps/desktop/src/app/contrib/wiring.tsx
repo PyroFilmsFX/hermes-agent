@@ -22,6 +22,7 @@ import { FindBar } from '@/components/find-bar'
 import { FreeTierSignInDialog } from '@/components/free-tier/sign-in-dialog'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { IntroRevealGate } from '@/components/intro-reveal'
+import { McpElicitationHost } from '@/components/mcp-elicitation-dialog'
 import { NotificationStack } from '@/components/notifications'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { OnboardingChatGate } from '@/components/onboarding-chat/gate'
@@ -1459,6 +1460,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       {/* Fallback modal when opening an external URL fails — carries the URL
           so a dead system-browser click is never silent. */}
       <ExternalOpenFailedDialog />
+
+      {/* MCP elicitation (M4b): a server asked for input mid-tool-call — one
+          form / URL-consent card at a time; renders nothing when none wait. */}
+      <McpElicitationHost />
 
       {/* Petdex floating mascot — renders nothing unless installed + enabled.
           Never in the HUD: that window is the chat bar and nothing else. */}

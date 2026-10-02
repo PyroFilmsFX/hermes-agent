@@ -7,6 +7,8 @@ export interface ToolPart {
   toolResultMetadata?: ToolResultMetadata
   toolTitle?: string
   progressPreview?: string
+  structuredContent?: unknown
+  outputSchema?: Record<string, unknown> | null
   args?: unknown
   completedAt?: number
   interrupted?: boolean

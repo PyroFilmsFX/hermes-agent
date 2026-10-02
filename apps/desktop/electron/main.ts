@@ -244,6 +244,7 @@ import {
   stopFind
 } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
+import { createFrameNavigationGuard } from './frame-navigation'
 import { registerFsIpc } from './fs-ipc'
 import type {
   GatewayFileSaveContext,
@@ -13292,6 +13293,15 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
 
     event.preventDefault()
     void openExternalUrl(url)
+  })
+  const frameGuard = createFrameNavigationGuard()
+  win.webContents.on('frame-created', (_event, details) => {
+    frameGuard.noteFrame(details.frame?.frameTreeNodeId, details.frame?.name)
+  })
+  win.webContents.on('will-frame-navigate', (event) => {
+    if (frameGuard.shouldBlock(event.isMainFrame, event.url, event.frame?.frameTreeNodeId, event.frame?.name)) {
+      event.preventDefault()
+    }
   })
 }
 
