@@ -401,6 +401,26 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # Latched when ``ping`` returns -32601; keepalives then use list_tools. Reset per connect.
         self._ping_unsupported: bool = False
 
+    def _session_kwargs(self) -> dict:
+        kwargs = super()._session_kwargs()
+        if _ensure_mcp_sdk():
+            from typing import Literal
+            from mcp.types import CallToolResult, Result, Task
+            from mcp.client.extension import ResultClaim
+
+            class MCPTaskHandle(Result):
+                result_type: Literal["task"] = "task"
+                task_id: str | None = None
+                task: Task | None = None
+
+            async def _resolve_task(_result, _ctx):
+                return CallToolResult(content=[])
+
+            kwargs["extensions"] = {"io.modelcontextprotocol/tasks": {}}
+            kwargs["result_claims"] = {"io.modelcontextprotocol/tasks": (
+                ResultClaim(result_type="task", model=MCPTaskHandle, resolve=_resolve_task),)}
+        return kwargs
+
     # Content types a real Streamable-HTTP endpoint may return on the initial POST/GET;
     # anything else on a 2xx means the URL is not an MCP endpoint.
     _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")

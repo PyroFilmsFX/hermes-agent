@@ -52,8 +52,24 @@ export function emitGatewayEvent(event: GatewayEvent): void {
     return
   }
 
-  for (const type of [event.type, '*']) {
+  const types = [event.type, '*']
+  if (event.type === 'plugin.event') {
+    const payload = event.payload as { plugin?: string; name?: string; payload?: unknown } | undefined
+    if (payload?.name) {
+      types.push(payload.name)
+      if (payload.plugin) {
+        types.push(`${payload.plugin}:${payload.name}`)
+      }
+    }
+  }
+
+  const dispatched = new Set<GatewayEventListener>()
+  for (const type of types) {
     for (const listener of listeners.get(type) ?? []) {
+      if (dispatched.has(listener)) {
+        continue
+      }
+      dispatched.add(listener)
       try {
         listener(event)
       } catch (error) {

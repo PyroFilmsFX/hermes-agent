@@ -31,6 +31,10 @@ class ClientCapabilitiesParams(Params):
     #: error for methods it has no handler for. A WebSocket client that never says so is treated as a
     #: build older than server→client requests and every such request fails fast for it.
     server_requests: bool = False
+    #: The client renders ``mcp.elicitation.request`` and answers it with ``mcp.elicitation.respond``. Only
+    #: then does an MCP elicitation (or an SDK AskUserQuestion) go to the client as that event; otherwise it
+    #: takes the approval consent path the CLI, TUI and messaging surfaces answer.
+    mcp_elicitation: bool = False
 
 
 class ClientCapabilitiesResult(Result):

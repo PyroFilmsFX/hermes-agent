@@ -31,6 +31,8 @@ export interface GatewayClientOptions {
   /** Fetch `session.events.since` after a reconnect (default). Off for notification-only feeds whose peer never answers RPCs. */
   replay?: boolean
   requestIdPrefix?: string
+  /** Extra client.capabilities flags (e.g. mcp_elicitation) advertised on each connection. */
+  clientCapabilities?: JsonRpcRequestChannelOptions['clientCapabilities']
   requestTimeoutMs?: number
   socketFactory?: (url: string) => WebSocketLike
   notConnectedErrorMessage?: string
@@ -146,6 +148,7 @@ export class JsonRpcGatewayClient {
 
   constructor(options: GatewayClientOptions = {}) {
     this.options = {
+      clientCapabilities: options.clientCapabilities ?? {},
       closedErrorMessage: options.closedErrorMessage ?? 'WebSocket closed',
       connectErrorMessage: options.connectErrorMessage ?? 'WebSocket connection failed',
       connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
@@ -162,6 +165,7 @@ export class JsonRpcGatewayClient {
       socketFactory: options.socketFactory
     }
     this.channel = new JsonRpcRequestChannel({
+      clientCapabilities: this.options.clientCapabilities,
       createRequestId: this.options.createRequestId,
       heartbeatDeadlineMs: this.options.heartbeatDeadlineMs,
       heartbeatIntervalMs: this.options.heartbeatIntervalMs,

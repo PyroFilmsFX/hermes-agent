@@ -86,6 +86,10 @@ _answerable: Callable[[str], bool] = lambda sid: True  # noqa: E731
 # Client transports that sent ``client.capabilities {server_requests: true}`` (identity set: StdioTransport
 # has __slots__ and cannot be weak-referenced; ws.py forgets a peer on disconnect).
 _answering_clients: set = set()
+# Client transports that sent ``client.capabilities {mcp_elicitation: true}``: they render the
+# ``mcp.elicitation.request`` form and answer it with ``mcp.elicitation.respond``. Only such a client
+# takes MCP elicitation off the consent path (tools/mcp_tool_sampling.py::_has_connected_desktop_clients).
+_elicitation_clients: set = set()
 
 
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
@@ -103,10 +107,25 @@ def advertise(transport: Any, server_requests: bool) -> None:
             _answering_clients.discard(transport)
 
 
+def advertise_mcp_elicitation(transport: Any, handles: bool) -> None:
+    """Record whether *transport*'s client renders ``mcp.elicitation.request`` (``client.capabilities``)."""
+    with _lock:
+        if handles:
+            _elicitation_clients.add(transport)
+        else:
+            _elicitation_clients.discard(transport)
+
+
+def handles_mcp_elicitation(transport: Any) -> bool:
+    with _lock:
+        return transport in _elicitation_clients
+
+
 def forget(transport: Any) -> None:
-    """Drop a disconnected transport's advertisement."""
+    """Drop a disconnected transport's advertisements."""
     with _lock:
         _answering_clients.discard(transport)
+        _elicitation_clients.discard(transport)
 
 
 def answers_requests(transport: Any) -> bool:

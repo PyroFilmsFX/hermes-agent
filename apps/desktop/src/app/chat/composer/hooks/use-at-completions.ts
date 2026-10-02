@@ -13,8 +13,8 @@ import { COMPOSER_AREAS } from '../contrib'
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
 import { useLiveCompletionAdapter } from './use-live-completion-adapter'
 
-const KIND_RE = /^@(file|folder|url|image|tool|git):(.*)$/
-const REF_STARTERS = new Set(['file', 'folder', 'url', 'image', 'tool', 'git'])
+const KIND_RE = /^@(file|folder|url|image|tool|git|resource):(.*)$/
+const REF_STARTERS = new Set(['file', 'folder', 'url', 'image', 'tool', 'git', 'resource'])
 // These bare tokens are context actions, not profile handles.
 const SIMPLE_CONTEXT_REFS = new Set(['@diff', '@staged'])
 
@@ -24,7 +24,8 @@ const STARTER_META: Record<string, string> = {
   url: 'Attach a URL reference',
   image: 'Attach an image reference',
   tool: 'Attach a tool reference',
-  git: 'Attach git context'
+  git: 'Attach git context',
+  resource: 'Attach an MCP resource reference'
 }
 
 function starterEntries(query: string): CompletionEntry[] {

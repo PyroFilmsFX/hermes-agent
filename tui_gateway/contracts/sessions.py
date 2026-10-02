@@ -44,7 +44,12 @@ class InflightTurn(Result):
 
 
 class QueuedPrompt(Result):
+    """``_queued_prompt_snapshot``: the accepted next-turn prompt. A typed send (an owner forward, a peer
+    message) keeps its display kind so a reconnecting client draws it as what it is."""
+
     user: str
+    display_kind: str | None = None
+    display_metadata: dict[str, JsonValue] | None = None
 
 
 class TodoState(Result):

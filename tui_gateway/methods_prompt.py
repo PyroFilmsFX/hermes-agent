@@ -596,17 +596,17 @@ def _owner_waiting_submit(fn):
             session = _sessions.get(params.get("session_id", ""))
         if session is None:
             return fn(rid, params)
+        from tui_gateway.owner_hold import owner_submit_finished, owner_submit_started
+
         with session["history_lock"]:
-            session["_owner_submit_waiting"] = int(session.get("_owner_submit_waiting", 0)) + 1
+            owner_submit_started(session)
         try:
             return fn(rid, params)
         finally:
+            # Released on every exit (queued, claimed, refused, raised); a submit that never returns is
+            # released by the bound in tui_gateway/owner_hold.py instead of holding peer mail forever.
             with session["history_lock"]:
-                remaining = int(session.get("_owner_submit_waiting", 0)) - 1
-                if remaining > 0:
-                    session["_owner_submit_waiting"] = remaining
-                else:
-                    session.pop("_owner_submit_waiting", None)
+                owner_submit_finished(session)
     return wrapped
 
 

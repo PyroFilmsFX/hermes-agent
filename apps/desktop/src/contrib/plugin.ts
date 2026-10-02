@@ -14,6 +14,7 @@
 
 import { pluginRest, type PluginRestOptions, pluginSocket } from '@/hermes'
 import { createPluginI18n, type PluginI18n } from '@/i18n'
+import { openExternalDoor } from '@/lib/os-open-external'
 import { readKey, writeKey } from '@/lib/storage'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 
@@ -202,12 +203,7 @@ function createPluginOs(pluginId: string): PluginOs {
 
   return {
     notify: input => dispatchPluginNativeNotification(pluginId, input),
-    openExternal: url =>
-      attempt(async bridge => {
-        await bridge.openExternal(url)
-
-        return true
-      }),
+    openExternal: url => openExternalDoor(url),
     pickOpenPath: options =>
       attemptPath(async bridge => {
         const picked = await bridge.selectPaths?.({ ...options, multiple: false })

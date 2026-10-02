@@ -42,6 +42,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_turn_tool_max_suspend,
 )
 from agent.transports.claude_sdk_peer_envelope import effective_origin
+from agent.transports.claude_sdk_peer_envelope import parse as parse_peer_envelope
 from agent.transports.claude_agent_sdk_session_child import SdkShuttingDownError
 from agent.transports.claude_agent_sdk_session_watchdog import (
     _is_rename_ack,
@@ -118,6 +119,31 @@ def _is_own_prompt_echo(message: Any) -> bool:
         # carry blocks or a parent tool id).
         return getattr(message, "parent_tool_use_id", None) is None
     return not any(type(block).__name__ == "ToolResultBlock" for block in content)
+
+
+def _own_envelope_sender(prompt: Any) -> Optional[str]:
+    """``hermes-session:<sender>`` when this turn's prompt is exactly one peer envelope, else None.
+
+    A peer row delivered live runs as the host's own query; the CLI parses the envelope and stamps
+    that query's echo AND its ResultMessage ``{'kind': 'peer', 'from': 'hermes-session:<sender>',
+    'hostInjected': True}`` (live 2026-09-30, session c68a80)."""
+    if isinstance(prompt, str):
+        text = prompt
+    elif isinstance(prompt, list):
+        text = "\n".join(str(block.get("text") or "") for block in prompt
+                         if isinstance(block, dict) and block.get("type") == "text")
+    else:
+        return None
+    envelope = parse_peer_envelope(text)
+    if not envelope:
+        return None
+    return f"hermes-session:{envelope.get('fromSession') or 'unknown'}"
+
+
+def _is_own_envelope_result(origin: Any, own_sender: Optional[str]) -> bool:
+    """The CLI attributed this injected-origin result to the host's own envelope query."""
+    return bool(own_sender and isinstance(origin, dict) and origin.get("kind") == "peer"
+                and origin.get("hostInjected") is True and str(origin.get("from") or "") == own_sender)
 
 
 def _prefold_peer_items(session: Any) -> list:
@@ -689,6 +715,7 @@ class ClaudeSdkTurnMixin:
 
         result.final_text = turn_data["final_text"]
         result.projected_messages = turn_data["messages"]
+        result.terminal_answer = bool(turn_data.get("terminal_answer", False))
         result.tool_iterations = turn_data["tool_iterations"]
         result.token_usage_last = turn_data["usage"]
         result.token_usage_total = turn_data["usage"]
@@ -842,6 +869,7 @@ class ClaudeSdkTurnMixin:
         projector = ClaudeSdkEventProjector()
         out: dict[str, Any] = {
             "final_text": "",
+            "terminal_answer": False,
             "messages": [],
             "tool_iterations": 0,
             "usage": None,
@@ -868,6 +896,7 @@ class ClaudeSdkTurnMixin:
         }
 
         boundary_interrupt = False
+        own_envelope_sender = _own_envelope_sender(prompt)
 
         def _snapshot_interrupt() -> bool:
             with self._interrupt_commit_lock:
@@ -1072,6 +1101,12 @@ class ClaudeSdkTurnMixin:
                     # One fold unlocks exactly one result.
                     if getattr(self, "_host_prompt_folded", False):
                         self._host_prompt_folded = False
+                    elif _is_own_envelope_result(getattr(message, "origin", None), own_envelope_sender):
+                        # The CLI re-attributed this turn's own peer-envelope query as a
+                        # host-injected peer turn: its result IS this turn's answer. Routing it
+                        # away left the host turn running until the idle limit and parked every
+                        # owner message queued behind it (live 2026-09-30, session c68a80).
+                        own_envelope_sender = None
                     else:
                         self._handle_unsolicited(message)
                         continue
@@ -1245,6 +1280,25 @@ class ClaudeSdkTurnMixin:
                 if not interrupted and not billing_guarded:
                     if projection.messages:
                         out["messages"].extend(projection.messages)
+                    projected_tools = any(
+                        message.get("role") == "tool"
+                        or bool(message.get("tool_calls"))
+                        for message in projection.messages
+                        if isinstance(message, dict)
+                    )
+                    assistant_outputs = [
+                        message for message in projection.messages
+                        if isinstance(message, dict) and message.get("role") == "assistant"
+                    ]
+                    if projection.is_tool_iteration or projected_tools:
+                        out["terminal_answer"] = False
+                    elif assistant_outputs:
+                        last_assistant = assistant_outputs[-1]
+                        out["terminal_answer"] = bool(
+                            isinstance(last_assistant.get("content"), str)
+                            and last_assistant["content"].strip()
+                            and not last_assistant.get("tool_calls")
+                        )
                     if projection.is_tool_iteration:
                         out["tool_iterations"] += 1
                         self._notify_tool_iteration()

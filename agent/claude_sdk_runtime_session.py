@@ -1250,7 +1250,8 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         sink = _background_result_sink(agent)
         if sink is not None:
             sink.lifecycle("continuing", attempt=continues, reason=reason, mode=continue_mode)
-        logger.warning(
+        _log = logger.info if reason == "watchdog" else logger.warning
+        _log(
             "claude-agent-sdk: turn interrupted (%s); continuing session (%s/%s, %s)",
             reason, continues, max_continues, continue_mode,
         )
@@ -1439,6 +1440,13 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
         )
         try:
             turn = session.run_turn(user_input=send_input)
+            if getattr(turn, "watchdog_trip", False):
+                logger.warning(
+                    "claude-agent-sdk: watchdog trip: %s",
+                    redact_sensitive_text(
+                        str(getattr(turn, "error", None) or "turn timed out"), force=True
+                    ),
+                )
         except Exception as exc:
             safe_exc = redact_sensitive_text(str(exc), force=True)
             _emit_child_exited(session, safe_exc)
@@ -1552,7 +1560,8 @@ def _run_sdk_attempts(agent, state: _SdkTurnState) -> Optional[Dict[str, Any]]:
             )
             _emit_child_exited(session, getattr(turn, "error", None), turn)
             recovering_dead_turn = True
-            logger.warning(
+            _log = logger.info if getattr(turn, "watchdog_trip", False) else logger.warning
+            _log(
                 "claude-agent-sdk session retired (turn error: %s)",
                 redact_sensitive_text(str(turn.error or ""), force=True),
             )

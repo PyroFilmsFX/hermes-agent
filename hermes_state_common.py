@@ -330,6 +330,18 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mcp_pending_tasks (
+    server TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    completed_at REAL,
+    delivered_at REAL,
+    expired_at REAL,
+    PRIMARY KEY (server, task_id)
+);
+
 CREATE TABLE IF NOT EXISTS system_prompts (
     hash TEXT PRIMARY KEY,
     prompt TEXT NOT NULL

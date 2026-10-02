@@ -1744,6 +1744,7 @@ export interface GatewayCapabilitiesResult {
 }
 export interface ClientCapabilitiesParams {
   server_requests?: boolean
+  mcp_elicitation?: boolean
 }
 export interface ClientCapabilitiesResult {
   server_requests: string[]
@@ -3022,8 +3023,11 @@ export interface InflightTurn {
   recoverable?: boolean | null
   error_surface?: Record<string, unknown> | null
 }
+/** ``_queued_prompt_snapshot``: the accepted next-turn prompt. A typed send (an owner forward, a peer message) keeps its display kind so a reconnecting client draws it as what it is. */
 export interface QueuedPrompt {
   user: string
+  display_kind?: string | null
+  display_metadata?: Record<string, unknown> | null
 }
 /** One unanswered server→client request (``server_requests.Request.snapshot``); the reconnecting client re-delivers it to its request handlers. */
 export interface OpenRequestEntry {
@@ -4201,6 +4205,42 @@ export interface McpServersRemoveResult {
   ok: boolean
   removed: boolean
 }
+export interface McpPromptsListParams {
+  profile?: string | null
+  session_id?: string | null
+  server?: string | null
+}
+export interface McpPromptsListResult {
+  prompts?: McpPromptRow[]
+}
+export interface McpPromptRow {
+  server: string
+  name: string
+  command: string
+  description?: string
+  arguments?: McpPromptArgument[]
+}
+export interface McpPromptArgument {
+  name: string
+  description?: string | null
+  required?: boolean
+}
+export interface McpPromptsGetParams {
+  profile?: string | null
+  server: string
+  name: string
+  arguments?: Record<string, unknown> | null
+  session_id?: string | null
+}
+export interface McpPromptsGetResult {
+  messages?: McpPromptMessage[]
+  text?: string
+  description?: string | null
+}
+export interface McpPromptMessage {
+  role: string
+  content: string
+}
 /** With ``client_redirect_uri`` the CLIENT hosts the loopback and relays the code via ``mcp.servers.oauth.callback``. */
 export interface McpOauthStartParams {
   profile?: string | null
@@ -4246,6 +4286,66 @@ export interface McpOauthCallbackResult {
   ok: boolean
   session_id?: string | null
   error_message?: string | null
+}
+export interface McpResourcesListParams {
+  profile?: string | null
+  server?: string | null
+}
+export interface McpResourcesListResult {
+  resources?: McpResourceItem[]
+}
+export interface McpResourceItem {
+  server: string
+  uri: string
+  name: string
+  description?: string | null
+  mimeType?: string | null
+}
+export interface McpResourceReadParams {
+  profile?: string | null
+  uri: string
+  server: string
+}
+export interface McpResourceReadResult {
+  server: string
+  uri: string
+  contents?: McpResourceContentBlock[]
+}
+export interface McpResourceContentBlock {
+  uri: string
+  mimeType?: string | null
+  text?: string | null
+  blob?: string | null
+}
+export interface McpResourceSubscriptionParams {
+  profile?: string | null
+  server: string
+  uri: string
+}
+export interface McpResourceSubscriptionResult {
+  ok: boolean
+  server: string
+  uri: string
+}
+export interface McpToolsCallParams {
+  session_id: string
+  server: string
+  name: string
+  arguments?: Record<string, unknown>
+}
+export interface McpToolsCallResult {
+  content?: unknown[]
+  structuredContent?: unknown | null
+  isError?: boolean | null
+}
+export interface McpElicitationRespondParams {
+  request_id: string
+  action: McpElicitationAction
+  content?: Record<string, unknown> | null
+}
+export type McpElicitationAction = 'accept' | 'decline' | 'cancel'
+export interface McpElicitationRespondResult {
+  ok?: boolean
 }
 export type PluginsListParams = Record<string, never>
 export interface PluginsListResult {
@@ -4683,6 +4783,7 @@ export interface ToolStartPayload {
   name: string
   context?: string | null
   title?: string | null
+  outputSchema?: Record<string, unknown> | null
   args?: Record<string, unknown> | null
   args_text?: string | null
   preview?: string | null
@@ -4704,6 +4805,8 @@ export interface ToolCompletePayload {
   args?: Record<string, unknown> | null
   duration_s?: number | null
   result?: unknown
+  structuredContent?: unknown
+  outputSchema?: Record<string, unknown> | null
   summary?: string | null
   result_text?: string | null
   inline_diff?: string | null
@@ -4947,6 +5050,21 @@ export interface PeerMailboxSettledPayload {
   status: string
   attempts?: number
 }
+/** ``tui_gateway/server.py::forward_plugin_event``. */
+export interface PluginEventPayload {
+  plugin: string
+  name: string
+  payload?: Record<string, unknown>
+}
+/** MCP server requested user input mid-call (elicitation/create). */
+export interface McpElicitationRequestPayload {
+  request_id: string
+  server: string
+  message: string
+  mode?: string
+  requestedSchema?: Record<string, unknown> | null
+  url?: string | null
+}
 export type ConnectorErrorReason = 'INVALID_PARAMS' | 'NOT_OWNER' | 'UNSUPPORTED_RUNTIME' | 'CONNECTOR_REQUEST_FAILED' | 'INVALID_CONNECTOR_RESPONSE' | 'UNKNOWN_TARGET' | 'LINK_STILL_VALID' | 'REISSUE_REFUSED' | 'UNKNOWN_OPERATION' | 'INVALID_ANSWER' | 'NEEDS_NOUS_AUTH' | 'CONNECTOR_NOT_FOUND' | 'TOOLS_UNAVAILABLE' | 'CONNECTORS_UNAVAILABLE' | 'CATALOG_UNAVAILABLE' | 'ACCOUNTS_UNAVAILABLE' | 'CONNECTION_NOT_FOUND' | 'POLICY_UNAVAILABLE' | 'POLICY_CONFLICT' | 'FORBIDDEN_SCOPE' | 'ORG_REQUIRED' | 'ORG_ACCESS_DENIED' | 'INVALID_POLICY'
 
 // ── Client→server methods ──
@@ -5139,6 +5257,20 @@ export interface RpcMethods {
   'llm.oneshot': { params: LlmOneshotParams; result: LlmOneshotResult }
   /** Curated MCP presets with per-profile installed/enabled state and the env keys each needs. */
   'mcp.catalog': { params: ProfileParams; result: McpCatalogResult }
+  /** Complete a pending MCP elicitation request with accept, decline, or cancel. */
+  'mcp.elicitation.respond': { params: McpElicitationRespondParams; result: McpElicitationRespondResult }
+  /** Fetch and render an MCP prompt template with filled arguments. */
+  'mcp.prompts.get': { params: McpPromptsGetParams; result: McpPromptsGetResult }
+  /** List prompt templates advertised by connected MCP servers. */
+  'mcp.prompts.list': { params: McpPromptsListParams; result: McpPromptsListResult }
+  /** List resources from connected MCP servers. */
+  'mcp.resources.list': { params: McpResourcesListParams; result: McpResourcesListResult }
+  /** Read an MCP resource by URI from the one named connected server (never a fan-out). */
+  'mcp.resources.read': { params: McpResourceReadParams; result: McpResourceReadResult }
+  /** Subscribe to updates for an MCP resource on a connected server. */
+  'mcp.resources.subscribe': { params: McpResourceSubscriptionParams; result: McpResourceSubscriptionResult }
+  /** Unsubscribe from updates for an MCP resource on a connected server. */
+  'mcp.resources.unsubscribe': { params: McpResourceSubscriptionParams; result: McpResourceSubscriptionResult }
   /** Add a server to the profile's config from a catalog preset and/or an explicit config. */
   'mcp.servers.add': { params: McpServersAddParams; result: McpServersAddResult }
   /** Configured MCP servers for the (scoped) profile, secrets redacted to env-key names. */
@@ -5159,6 +5291,8 @@ export interface RpcMethods {
   'mcp.servers.status': { params: ProfileParams; result: McpServersStatusResult }
   /** Connect, list tools, disconnect — an OAuth server with no token on disk is reported as not ok. */
   'mcp.servers.test': { params: McpServerNameParams; result: McpServersTestResult }
+  /** Execute an MCP tool on a connected server under the calling session's approval context. */
+  'mcp.tools.call': { params: McpToolsCallParams; result: McpToolsCallResult }
   /** Set/clear one author's emoji reaction on a message; returns the row's full reaction list. */
   'message.react': { params: MessageReactParams; result: MessageReactResult }
   /** Remove every credential (env keys and OAuth state) for a provider. */
@@ -5550,6 +5684,13 @@ export const RPC_METHODS = [
   'learning.frames',
   'llm.oneshot',
   'mcp.catalog',
+  'mcp.elicitation.respond',
+  'mcp.prompts.get',
+  'mcp.prompts.list',
+  'mcp.resources.list',
+  'mcp.resources.read',
+  'mcp.resources.subscribe',
+  'mcp.resources.unsubscribe',
   'mcp.servers.add',
   'mcp.servers.list',
   'mcp.servers.oauth.callback',
@@ -5560,6 +5701,7 @@ export const RPC_METHODS = [
   'mcp.servers.set_api_key',
   'mcp.servers.status',
   'mcp.servers.test',
+  'mcp.tools.call',
   'message.react',
   'model.disconnect',
   'model.options',
@@ -5793,6 +5935,8 @@ export interface BackendGatewayEventMap {
   'gateway.ready': GatewayReadyPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
+  /** MCP server requested user input (form or URL mode). */
+  'mcp.elicitation.request': McpElicitationRequestPayload
   /** The turn ended: final text, usage and outcome. */
   'message.complete': MessageCompletePayload
   /** One streamed chunk of the assistant reply. */
@@ -5831,6 +5975,8 @@ export interface BackendGatewayEventMap {
   'pet.hatch.progress': PetHatchProgressPayload
   /** gateway_state.json moved; refetch platform status. */
   'platforms.changed': ChangeSignalPayload
+  /** A backend plugin emitted an event; forwarded to desktop plugins. */
+  'plugin.event': PluginEventPayload
   /** Close the preview pane or one tab. */
   'preview.close': PreviewClosePayload
   /** Open a URL / file in the desktop preview pane. */
@@ -5928,6 +6074,7 @@ export const GATEWAY_EVENT_TYPES = [
   'error',
   'gateway.ready',
   'layout.apply',
+  'mcp.elicitation.request',
   'message.complete',
   'message.delta',
   'message.interim',
@@ -5947,6 +6094,7 @@ export const GATEWAY_EVENT_TYPES = [
   'pet.generate.progress',
   'pet.hatch.progress',
   'platforms.changed',
+  'plugin.event',
   'preview.close',
   'preview.open',
   'preview.restart.complete',

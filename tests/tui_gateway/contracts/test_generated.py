@@ -72,6 +72,7 @@ def emitted_event_names() -> set[str]:
         names.update(_DESKTOP_UI_EMIT.findall(_read(src)))
     names.update(_BROKER_FRAME.findall(_read(REPO / "gateway" / "browser_control_broker.py")))
     names.update(_SETUP_READY.findall(_read(REPO / "hermes_cli" / "free_tier_bootstrap.py")))
+    names.update(_LITERAL_EMIT.findall(_read(REPO / "hermes_cli" / "plugins.py")))
     return names
 
 
@@ -89,3 +90,91 @@ def test_catalog_covers_the_whole_wire():
     from tui_gateway.contracts import registry
 
     registry.assert_complete(server._methods, emitted_event_names(), sent_server_requests())
+
+
+class _CapturePeer:
+    """Mock transport to capture frames emitted to connected clients."""
+
+    def __init__(self):
+        self.frames = []
+
+    def write(self, frame):
+        self.frames.append(frame)
+        return True
+
+    def close(self):
+        pass
+
+
+def test_plugin_emit_captured_by_gateway():
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tui_gateway import server
+
+    peer = _CapturePeer()
+    server.register_live_transport(peer)
+    try:
+        manager = PluginManager()
+        manager._discovered = True
+        manifest = PluginManifest(name="alpha", key="alpha_key")
+        ctx = PluginContext(manifest, manager)
+
+        count = ctx.emit("custom.event", {"hello": "world", "num": 42})
+        assert count == 0
+
+        plugin_frames = [f for f in peer.frames if f.get("params", {}).get("type") == "plugin.event"]
+        assert len(plugin_frames) == 1
+        params = plugin_frames[0]["params"]
+        assert params["payload"] == {
+            "plugin": "alpha_key",
+            "name": "custom.event",
+            "payload": {"hello": "world", "num": 42},
+        }
+    finally:
+        server.unregister_live_transport(peer)
+
+
+def test_plugin_emit_oversize_dropped(caplog):
+    import logging
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tui_gateway import server
+
+    peer = _CapturePeer()
+    server.register_live_transport(peer)
+    try:
+        manager = PluginManager()
+        manager._discovered = True
+        manifest = PluginManifest(name="beta", key="beta_key")
+        ctx = PluginContext(manifest, manager)
+
+        large_str = "x" * (65 * 1024)
+        with caplog.at_level(logging.WARNING):
+            ctx.emit("oversize.event", {"large": large_str})
+
+        plugin_frames = [f for f in peer.frames if f.get("params", {}).get("type") == "plugin.event"]
+        assert len(plugin_frames) == 0
+        assert any("exceeds 64 KiB" in r.message for r in caplog.records)
+    finally:
+        server.unregister_live_transport(peer)
+
+
+def test_plugin_emit_non_serialisable_dropped(caplog):
+    import logging
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tui_gateway import server
+
+    peer = _CapturePeer()
+    server.register_live_transport(peer)
+    try:
+        manager = PluginManager()
+        manager._discovered = True
+        manifest = PluginManifest(name="gamma", key="gamma_key")
+        ctx = PluginContext(manifest, manager)
+
+        with caplog.at_level(logging.WARNING):
+            ctx.emit("unserialisable.event", {"bad": object()})
+
+        plugin_frames = [f for f in peer.frames if f.get("params", {}).get("type") == "plugin.event"]
+        assert len(plugin_frames) == 0
+        assert any("not JSON-serialisable" in r.message for r in caplog.records)
+    finally:
+        server.unregister_live_transport(peer)

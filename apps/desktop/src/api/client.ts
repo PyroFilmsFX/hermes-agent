@@ -31,6 +31,8 @@ export const GATEWAY_NOT_CONNECTED_MESSAGE = 'Hermes gateway is not connected'
 export class HermesGateway extends JsonRpcGatewayClient {
   constructor() {
     super({
+      // The desktop renders the MCP elicitation form; without this flag the backend falls back to yes/no consent.
+      clientCapabilities: { mcp_elicitation: true },
       closedErrorMessage: 'Hermes gateway connection closed',
       connectErrorMessage: 'Could not connect to Hermes gateway',
       createRequestId: nextId => nextId,

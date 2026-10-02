@@ -235,6 +235,40 @@ class LoadedPlugin:
     deferred: bool = False
 
 
+def _forward_plugin_event(plugin: str, name: str, payload: Optional[dict] = None) -> bool:
+    """Forward a backend plugin event to connected desktop clients as plugin.event."""
+    import json
+    try:
+        from tui_gateway.server import _broadcast_global_event
+    except ImportError:
+        logger.warning("Plugin '%s' event '%s' dropped: no tui_gateway in this process", plugin, name)
+        return False
+
+    if payload is None:
+        payload = {}
+    try:
+        raw = json.dumps(payload)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Plugin '%s' event '%s' payload is not JSON-serialisable: %s", plugin, name, exc)
+        return False
+
+    raw_bytes = raw.encode("utf-8")
+    if len(raw_bytes) > 64 * 1024:
+        logger.warning(
+            "Plugin '%s' event '%s' payload exceeds 64 KiB (%d bytes) — dropping event",
+            plugin, name, len(raw_bytes),
+        )
+        return False
+
+    event_payload = {
+        "plugin": plugin,
+        "name": name,
+        "payload": json.loads(raw),
+    }
+    _broadcast_global_event("plugin.event", event_payload)
+    return True
+
+
 class PluginContext:
     """Facade given to plugins so they can register tools and hooks."""
 
@@ -1005,7 +1039,12 @@ class PluginContext:
                              f"prefix is reserved for core")
         if payload is not None and not isinstance(payload, dict):
             raise TypeError(f"Plugin '{plugin_key}' emit() payload must be a dict or None")
-        return self._manager._dispatch_event(f"{plugin_key}:{event}", payload or {})
+        safe_payload = payload or {}
+        try:
+            _forward_plugin_event(plugin_key, event, safe_payload)
+        except Exception:
+            logger.debug("Failed to forward plugin event to gateway: %s:%s", plugin_key, event, exc_info=True)
+        return self._manager._dispatch_event(f"{plugin_key}:{event}", safe_payload)
 
     def subscribe(self, event: str, callback: Callable) -> None:
         """Subscribe to a fully-qualified ``<plugin_key>:<event>`` name (unrestricted — only

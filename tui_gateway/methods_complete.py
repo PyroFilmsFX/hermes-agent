@@ -308,6 +308,37 @@ def _(rid, params: dict) -> dict:
     # skills/bundles are the only completions for an inline `/skill` typed mid-message.
     skill_names = {key.lstrip("/").lower() for key in (*skill_commands, *skill_bundles)}
 
+    # Check if text is an MCP prompt argument completion (/<server>:<prompt> ...)
+    parts = text.split(maxsplit=1)
+    base = parts[0]
+    if ":" in base and base.startswith("/") and (len(parts) > 1 or text.endswith(" ")):
+        server_name, prompt_name = base.lstrip("/").split(":", 1)
+        try:
+            from tools.mcp_tool_handlers import list_mcp_prompts, parse_prompt_args
+            prompts = list_mcp_prompts(server_name)
+            target = next((p for p in prompts if p["name"].lower() == prompt_name.lower()), None)
+            if target and target.get("arguments"):
+                sub_text = parts[1] if len(parts) > 1 else ""
+                already_args = set(parse_prompt_args(sub_text).keys())
+                last_word = text.rsplit(" ", 1)[-1]
+                arg_items = []
+                for arg in target["arguments"]:
+                    aname = arg["name"]
+                    if not last_word or aname.lower().startswith(last_word.lower()) or aname not in already_args:
+                        req_str = "required" if arg.get("required") else "optional"
+                        desc = arg.get("description") or req_str
+                        arg_items.append({
+                            "text": f"{aname}=",
+                            "display": f"{aname}=",
+                            "meta": f"{desc} ({req_str})" if desc != req_str else req_str,
+                            "kind": "prompt",
+                        })
+                if arg_items:
+                    replace_from = text.rfind(" ") + 1 if " " in text else len(text)
+                    return _ok(rid, {"items": arg_items, "replace_from": replace_from})
+        except Exception:
+            pass
+
     def to_items(doc: Document) -> list[dict]:
         # display/display_meta are FormattedText; the TUI contract is a plain string
         # (the raw list trips Ink's row layout into 1-char truncation).
@@ -318,6 +349,28 @@ def _(rid, params: dict) -> dict:
                 "kind": "skill" if c.text.strip().lstrip("/").lower() in skill_names else "command"}
             for c in completer.get_completions(doc, None)]
     items = to_items(Document(text, len(text)))
+
+    # Include MCP prompt command completions
+    if text.rsplit(" ", 1)[-1].startswith("/"):
+        try:
+            from tools.mcp_tool_handlers import list_mcp_prompts
+            last_token = text.rsplit(" ", 1)[-1].lower()
+            for p in list_mcp_prompts():
+                pkey = f"/{p['server']}:{p['name']}"
+                if last_token == "/" or pkey.lower().startswith(last_token) or (len(last_token) > 1 and last_token.lstrip("/") in pkey.lower()):
+                    desc = p.get("description", "")
+                    args = p.get("arguments") or []
+                    if args:
+                        arg_names = " ".join(f"{a['name']}=" for a in args)
+                        desc = f"{desc} [{arg_names}]"
+                    items.append({
+                        "text": pkey,
+                        "display": pkey,
+                        "meta": desc,
+                        "kind": "prompt",
+                    })
+        except Exception:
+            pass
     # Rank + bound while a `/token` is under the cursor (the one stage skills are
     # offered at); an argument stage (`/personality `) keeps its command's order.
     if text.rsplit(" ", 1)[-1].startswith("/"):
