@@ -20,6 +20,7 @@ export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 REPO=${HERMES_DEV_REPO:-/Users/justin/Documents/Projects/Business/hermes-cntrl}  # override: test harness only
 SHIP=${HERMES_SHIP_BRANCH:-cntrl-hermes-worker}
 SHIP_REMOTE=${HERMES_SHIP_REMOTE:-myfork}
+SHIP_FETCH_TIMEOUT=${HERMES_SHIP_FETCH_TIMEOUT:-8}  # seconds; the fetch is advisory and must never hold up a launch
 SHIP_WORKTREE=${HERMES_SHIP_WORKTREE:-$REPO/.worktrees/cntrl-hermes-worker}
 GUARD_DIR=${HERMES_DEV_GUARD_DIR:-$REPO/.git/hermes-dev-guard}
 GUARD_GH_REPO=ThinkBotHQ/hermes-agent
@@ -180,8 +181,12 @@ cd "$REPO" || exit 1
 # at". So fetch, and say plainly when the remote is ahead. This never moves a branch.
 remote_ahead=''
 if git remote get-url "$SHIP_REMOTE" >/dev/null 2>&1; then
-  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet "$SHIP_REMOTE" "$SHIP" 2>/dev/null; then
-    print -P "%F{yellow}hermes-dev: could not fetch $SHIP_REMOTE/$SHIP (offline?) — using the local $SHIP branch as is%f"
+  # Hard wall-clock limit: perl arms an alarm and execs git, so a remote that accepts the
+  # connection and then stalls is killed after $SHIP_FETCH_TIMEOUT seconds. No prompts either way.
+  if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes" \
+      perl -e 'alarm shift; exec @ARGV or exit 127' "$SHIP_FETCH_TIMEOUT" \
+      git fetch --quiet "$SHIP_REMOTE" "$SHIP" >/dev/null 2>&1; then
+    print -P "%F{yellow}hermes-dev: could not fetch $SHIP_REMOTE/$SHIP within ${SHIP_FETCH_TIMEOUT}s (offline or slow?) — using the local $SHIP branch as is%f"
   fi
   remote_tip=$(git rev-parse -q --verify "refs/remotes/$SHIP_REMOTE/$SHIP" 2>/dev/null)
   local_tip=$(git rev-parse -q --verify "refs/heads/$SHIP" 2>/dev/null)
@@ -189,7 +194,7 @@ if git remote get-url "$SHIP_REMOTE" >/dev/null 2>&1; then
       && git merge-base --is-ancestor "$local_tip" "$remote_tip"; then
     remote_ahead=$remote_tip
     print -P "%F{yellow}hermes-dev: $SHIP_REMOTE/$SHIP is at ${remote_tip:0:10} but the local $SHIP branch is at ${local_tip:0:10} ($(git rev-list --count "$local_tip..$remote_tip") commits behind).%f"
-    print -P "%F{yellow}hermes-dev: this launch uses the LOCAL branch. To pick up the remote: git -C $SHIP_WORKTREE merge --ff-only $SHIP_REMOTE/$SHIP   then run hermes-dev again.%f"
+    print -P "%F{yellow}hermes-dev: this launch uses the LOCAL branch. To pick up the remote: git -C ${(q)SHIP_WORKTREE} merge --ff-only ${(q)SHIP_REMOTE}/${(q)SHIP}   then run hermes-dev again.%f"
   fi
 fi
 

@@ -177,6 +177,19 @@ launch "$E2E_B" "myfork/cntrl-hermes-worker is at ${E2E_C:0:10} but the local cn
 launch "$E2E_B" "the remote is ahead at ${E2E_C:0:10}" "remote ahead: the at-local line names the remote sha"
 [[ "$(git -C "$E2E/repo" rev-parse cntrl-hermes-worker)" == "$E2E_B" ]] || { print "CASE WRONG e2e remote ahead: the local branch moved"; failures=$((failures + 1)); }
 
+# A remote that accepts the fetch and then stalls must not hold up the launch: a stub git sleeps
+# on `fetch` (everything else goes to the real git). The launcher has to give up after its
+# time limit, say so, and still start the app on the local branch.
+REAL_GIT=$(command -v git)
+print "#!/bin/sh\n[ \"\$1\" = fetch ] && { sleep 30; exit 0; }\nexec $REAL_GIT \"\$@\"" >"$E2E/bin/git" && chmod +x "$E2E/bin/git"
+export HERMES_SHIP_FETCH_TIMEOUT=1
+stall_started=$SECONDS
+launch "$E2E_B" "could not fetch myfork/cntrl-hermes-worker within 1s" "stalled fetch: gives up and says so"
+launch "$E2E_B" "STUB npm run dev --workspace apps/desktop" "stalled fetch: the app still starts"
+stall_took=$((SECONDS - stall_started))
+if (( stall_took > 12 )); then print "CASE WRONG e2e stalled fetch: two launches took ${stall_took}s (the fetch was not bounded)"; failures=$((failures + 1)); else print "CASE OK    e2e stalled fetch: two launches took ${stall_took}s"; fi
+rm -f "$E2E/bin/git"; unset HERMES_SHIP_FETCH_TIMEOUT
+
 print
 if (( failures )); then
   print "harness: $failures case(s) WRONG"
