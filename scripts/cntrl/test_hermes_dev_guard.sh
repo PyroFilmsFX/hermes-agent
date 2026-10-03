@@ -167,6 +167,16 @@ canned "$E2E_B" completed success
 launch "$E2E_B" "STUB npm run dev:prod --workspace apps/desktop" "smoke passed: fast-forwards to B" --prod
 launch "$E2E_B" "already at cntrl-hermes-worker" "relaunch at B: no guard, no sync"
 
+# The remote ship branch moves ahead of the local one (a push from elsewhere): the launcher must
+# say so and must not claim "already at". It stays on the local branch and never moves it.
+git init -q --bare "$E2E/remote.git" && git -C "$E2E/repo" remote add myfork "$E2E/remote.git"
+print c >"$E2E/ship/apps/desktop/x" && git -C "$E2E/ship" commit -qam C
+E2E_C=$(git -C "$E2E/ship" rev-parse HEAD)
+git -C "$E2E/ship" push -q myfork cntrl-hermes-worker && git -C "$E2E/ship" reset -q --hard "$E2E_B"
+launch "$E2E_B" "myfork/cntrl-hermes-worker is at ${E2E_C:0:10} but the local cntrl-hermes-worker branch is at ${E2E_B:0:10} (1 commits behind)" "remote ahead: says so, stays on B"
+launch "$E2E_B" "the remote is ahead at ${E2E_C:0:10}" "remote ahead: the at-local line names the remote sha"
+[[ "$(git -C "$E2E/repo" rev-parse cntrl-hermes-worker)" == "$E2E_B" ]] || { print "CASE WRONG e2e remote ahead: the local branch moved"; failures=$((failures + 1)); }
+
 print
 if (( failures )); then
   print "harness: $failures case(s) WRONG"

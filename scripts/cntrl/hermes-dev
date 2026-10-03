@@ -19,6 +19,7 @@ set -u
 export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 REPO=${HERMES_DEV_REPO:-/Users/justin/Documents/Projects/Business/hermes-cntrl}  # override: test harness only
 SHIP=${HERMES_SHIP_BRANCH:-cntrl-hermes-worker}
+SHIP_REMOTE=${HERMES_SHIP_REMOTE:-myfork}
 SHIP_WORKTREE=${HERMES_SHIP_WORKTREE:-$REPO/.worktrees/cntrl-hermes-worker}
 GUARD_DIR=${HERMES_DEV_GUARD_DIR:-$REPO/.git/hermes-dev-guard}
 GUARD_GH_REPO=ThinkBotHQ/hermes-agent
@@ -174,6 +175,24 @@ done
 
 cd "$REPO" || exit 1
 
+# The sync target below is the LOCAL $SHIP branch. A push that moved only the remote is invisible
+# to it: on 2026-10-03 the owner pushed a batch, relaunched, and got the old build with "already
+# at". So fetch, and say plainly when the remote is ahead. This never moves a branch.
+remote_ahead=''
+if git remote get-url "$SHIP_REMOTE" >/dev/null 2>&1; then
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet "$SHIP_REMOTE" "$SHIP" 2>/dev/null; then
+    print -P "%F{yellow}hermes-dev: could not fetch $SHIP_REMOTE/$SHIP (offline?) — using the local $SHIP branch as is%f"
+  fi
+  remote_tip=$(git rev-parse -q --verify "refs/remotes/$SHIP_REMOTE/$SHIP" 2>/dev/null)
+  local_tip=$(git rev-parse -q --verify "refs/heads/$SHIP" 2>/dev/null)
+  if [[ -n "$remote_tip" && -n "$local_tip" && "$remote_tip" != "$local_tip" ]] \
+      && git merge-base --is-ancestor "$local_tip" "$remote_tip"; then
+    remote_ahead=$remote_tip
+    print -P "%F{yellow}hermes-dev: $SHIP_REMOTE/$SHIP is at ${remote_tip:0:10} but the local $SHIP branch is at ${local_tip:0:10} ($(git rev-list --count "$local_tip..$remote_tip") commits behind).%f"
+    print -P "%F{yellow}hermes-dev: this launch uses the LOCAL branch. To pick up the remote: git -C $SHIP_WORKTREE merge --ff-only $SHIP_REMOTE/$SHIP   then run hermes-dev again.%f"
+  fi
+fi
+
 before=$(git rev-parse HEAD)
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   print -P "%F{yellow}hermes-dev: local edits in $REPO — NOT syncing, starting on ${before:0:10}%f"
@@ -209,7 +228,11 @@ elif git merge-base --is-ancestor HEAD "$SHIP"; then
         print "hermes-dev: js deps changed -> npm install"; npm install --no-audit --no-fund || exit 1
       fi
     else
-      print "hermes-dev: already at $SHIP (${before:0:10})"
+      if [[ -n "$remote_ahead" ]]; then
+        print "hermes-dev: at the local $SHIP (${before:0:10}); the remote is ahead at ${remote_ahead:0:10} (see above)"
+      else
+        print "hermes-dev: already at $SHIP (${before:0:10})"
+      fi
     fi
   fi
 else
