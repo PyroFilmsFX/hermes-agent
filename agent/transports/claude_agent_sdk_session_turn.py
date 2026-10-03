@@ -715,6 +715,7 @@ class ClaudeSdkTurnMixin:
 
         result.final_text = turn_data["final_text"]
         result.projected_messages = turn_data["messages"]
+        result.terminal_answer = bool(turn_data.get("terminal_answer", False))
         result.tool_iterations = turn_data["tool_iterations"]
         result.token_usage_last = turn_data["usage"]
         result.token_usage_total = turn_data["usage"]
@@ -868,6 +869,7 @@ class ClaudeSdkTurnMixin:
         projector = ClaudeSdkEventProjector()
         out: dict[str, Any] = {
             "final_text": "",
+            "terminal_answer": False,
             "messages": [],
             "tool_iterations": 0,
             "usage": None,
@@ -1278,6 +1280,25 @@ class ClaudeSdkTurnMixin:
                 if not interrupted and not billing_guarded:
                     if projection.messages:
                         out["messages"].extend(projection.messages)
+                    projected_tools = any(
+                        message.get("role") == "tool"
+                        or bool(message.get("tool_calls"))
+                        for message in projection.messages
+                        if isinstance(message, dict)
+                    )
+                    assistant_outputs = [
+                        message for message in projection.messages
+                        if isinstance(message, dict) and message.get("role") == "assistant"
+                    ]
+                    if projection.is_tool_iteration or projected_tools:
+                        out["terminal_answer"] = False
+                    elif assistant_outputs:
+                        last_assistant = assistant_outputs[-1]
+                        out["terminal_answer"] = bool(
+                            isinstance(last_assistant.get("content"), str)
+                            and last_assistant["content"].strip()
+                            and not last_assistant.get("tool_calls")
+                        )
                     if projection.is_tool_iteration:
                         out["tool_iterations"] += 1
                         self._notify_tool_iteration()

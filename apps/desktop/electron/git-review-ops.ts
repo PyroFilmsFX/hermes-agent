@@ -32,16 +32,28 @@ function ghEnv(ghBin) {
 
 // Run the `gh` CLI in a repo. Resolves { ok, stdout } so callers branch on
 // availability/auth without a throw. gh missing/unauthed → ok:false.
-function runGh(args, cwd, ghBin): Promise<{ ok: boolean; stdout: string }> {
+function defaultRunGh(
+  args: string[],
+  cwd: string,
+  ghBin?: string
+): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: any }> {
   return new Promise(resolve => {
     execFile(
       ghBin || 'gh',
       args,
       { cwd, env: ghEnv(ghBin), windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
-      (err, stdout) => resolve({ ok: !err, stdout: String(stdout || '') })
+      (err, stdout, stderr) =>
+        resolve({ ok: !err, stdout: String(stdout || ''), stderr: String(stderr || ''), error: err })
     )
   })
 }
+
+let runGh = defaultRunGh
+
+function setRunGhForTesting(fn: typeof defaultRunGh | null) {
+  runGh = fn || defaultRunGh
+}
+
 
 function gitFor(cwd, gitBin) {
   // `gitBin` is resolved inside the Electron main process from known install
@@ -584,6 +596,156 @@ async function reviewShipInfo(repoPath, ghBin) {
   }
 }
 
+// Rate-limit guard state (shared between reviewPrList with withChecks and ghRunStatus)
+let suspendedUntil = 0
+let lastRateLimit: { remaining: number; resetAt: string; cost: number } | null = null
+
+// Per-repo failure backoff: 1 → 2 → 5 → 15 min
+const BACKOFF_STEPS_MS = [1 * 60_000, 2 * 60_000, 5 * 60_000, 15 * 60_000]
+const repoFailures = new Map<string, { count: number; backoffUntil: number }>()
+const repoOwnerCache = new Map<string, { owner: string; name: string }>()
+
+// Global run-status call limiter: max 4 calls per minute
+const RUN_STATUS_WINDOW_MS = 60_000
+const RUN_STATUS_MAX_PER_MIN = 4
+const runStatusCallTimestamps: number[] = []
+
+// Run-status cache: 60 s per run id
+const RUN_STATUS_CACHE_TTL_MS = 60_000
+const runStatusCache = new Map<
+  string,
+  { status: string; conclusion: string | null; timestamp: number }
+>()
+
+function _resetConductorsGhStateForTesting(): void {
+  suspendedUntil = 0
+  lastRateLimit = null
+  repoFailures.clear()
+  repoOwnerCache.clear()
+  runStatusCallTimestamps.length = 0
+  runStatusCache.clear()
+}
+
+function checkRateLimitSuspension(now = Date.now()): boolean {
+  return now < suspendedUntil
+}
+
+function recordRateLimit(rateLimit: { remaining: number; resetAt: string; cost?: number } | null | undefined): void {
+  if (!rateLimit) return
+  lastRateLimit = {
+    remaining: Number(rateLimit.remaining) || 0,
+    resetAt: String(rateLimit.resetAt || ''),
+    cost: Number(rateLimit.cost) || 0
+  }
+  if (lastRateLimit.remaining < 200) {
+    const parsed = Date.parse(lastRateLimit.resetAt)
+    if (!isNaN(parsed)) {
+      suspendedUntil = parsed
+    } else {
+      const num = Number(lastRateLimit.resetAt)
+      if (!isNaN(num) && num > 0) {
+        suspendedUntil = num > 1e11 ? num : num * 1000
+      }
+    }
+  }
+}
+
+function isRepoBackedOff(key: string, now = Date.now()): boolean {
+  if (!key) return false
+  const entry = repoFailures.get(key)
+  return Boolean(entry && now < entry.backoffUntil)
+}
+
+function recordRepoFailure(key: string, now = Date.now()): void {
+  if (!key) return
+  const entry = repoFailures.get(key) || { count: 0, backoffUntil: 0 }
+  const count = entry.count + 1
+  const stepIdx = Math.min(count - 1, BACKOFF_STEPS_MS.length - 1)
+  const backoffMs = BACKOFF_STEPS_MS[stepIdx]
+  repoFailures.set(key, {
+    count,
+    backoffUntil: now + backoffMs
+  })
+}
+
+function recordRepoSuccess(key: string): void {
+  if (!key) return
+  repoFailures.delete(key)
+}
+
+function recordRunStatusCall(now = Date.now()): void {
+  runStatusCallTimestamps.push(now)
+}
+
+function canMakeRunStatusCall(now = Date.now()): boolean {
+  while (runStatusCallTimestamps.length > 0 && now - runStatusCallTimestamps[0] >= RUN_STATUS_WINDOW_MS) {
+    runStatusCallTimestamps.shift()
+  }
+  return runStatusCallTimestamps.length < RUN_STATUS_MAX_PER_MIN
+}
+
+function getRunStatusFromCache(
+  runId: string | number,
+  now = Date.now(),
+  maxAgeMs = RUN_STATUS_CACHE_TTL_MS
+): { status: string; conclusion: string | null } | null {
+  const entry = runStatusCache.get(String(runId))
+  if (!entry) return null
+  if (now - entry.timestamp <= maxAgeMs) {
+    return { status: entry.status, conclusion: entry.conclusion }
+  }
+  return null
+}
+
+function getAnyCachedRunStatus(runId: string | number): { status: string; conclusion: string | null } | null {
+  const entry = runStatusCache.get(String(runId))
+  if (entry) {
+    return { status: entry.status, conclusion: entry.conclusion }
+  }
+  return null
+}
+
+// GitHub owner/repo names only: these end up in a `gh api` path, so nothing that could
+// add path segments, a query string or a dot-segment gets through.
+const GH_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
+const GH_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/
+const GH_RUN_ID_RE = /^[1-9][0-9]{0,19}$/
+
+function isValidRepoSlug(owner: string, name: string): boolean {
+  return GH_OWNER_RE.test(owner) && GH_REPO_RE.test(name) && name !== '.' && name !== '..'
+}
+
+function parseRepoSlug(repo: string): { owner: string; name: string } | null {
+  if (repo && typeof repo === 'string' && repo.includes('/') && !repo.startsWith('/') && !repo.startsWith('.')) {
+    const parts = repo.split('/')
+    if (parts.length === 2 && isValidRepoSlug(parts[0], parts[1])) {
+      return { owner: parts[0], name: parts[1] }
+    }
+  }
+  return null
+}
+
+function isGhUnavailable(res: { ok: boolean; stdout?: string; stderr?: string; error?: any }): boolean {
+  if (res.ok) return false
+  if (res.error?.code === 'ENOENT' || res.error?.code === 127) return true
+  const combined = `${res.stdout || ''} ${res.stderr || ''} ${res.error?.message || ''}`.toLowerCase()
+  if (
+    combined.includes('enoent') ||
+    combined.includes('not found') ||
+    combined.includes('command not found') ||
+    combined.includes('not logged in') ||
+    combined.includes('authentication') ||
+    combined.includes('auth login') ||
+    combined.includes('gh_unavailable')
+  ) {
+    return true
+  }
+  if (!res.stdout && !res.stderr && !res.error) {
+    return true
+  }
+  return false
+}
+
 // GraphQL asks per branch, so the answer can't be crowded out the way a
 // `gh pr list` page can. Aliases let one request carry many branches; 50 keeps
 // the document well inside GitHub's node budget.
@@ -592,13 +754,16 @@ const PR_QUERY_BRANCH_CAP = 300
 
 const PR_NODE_FIELDS = 'number state isDraft isCrossRepository title url headRefName'
 
-function prQueryFor(owner, name, branches, numbers) {
+function prQueryFor(owner, name, branches, numbers, withChecks = false) {
+  const branchFields = withChecks
+    ? `${PR_NODE_FIELDS} commits(last:1){nodes{commit{statusCheckRollup{state}}}}`
+    : PR_NODE_FIELDS
   const fields = [
     ...branches.map(
       (branch, i) =>
         `b${i}: pullRequests(headRefName: ${JSON.stringify(branch)}, first: 5, ` +
         `orderBy: {field: CREATED_AT, direction: DESC}) ` +
-        `{ nodes { ${PR_NODE_FIELDS} } }`
+        `{ nodes { ${branchFields} } }`
     ),
     // A PR recovered from a transcript is known by number, and asking for it
     // directly also tells us its branch — so it lands in the same by-branch map
@@ -606,29 +771,61 @@ function prQueryFor(owner, name, branches, numbers) {
     ...numbers.map((number, i) => `n${i}: pullRequest(number: ${number}) { ${PR_NODE_FIELDS} }`)
   ].join('\n')
 
-  return `query { repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {\n${fields}\n} }`
+  const rateLimit = withChecks ? '\nrateLimit{remaining resetAt cost}' : ''
+
+  return `query { repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {\n${fields}\n}${rateLimit} }`
 }
 
-const prPayload = pr => ({
-  branch: String(pr.headRefName),
-  draft: Boolean(pr.isDraft),
-  number: Number(pr.number) || 0,
-  state: String(pr.state || '').toLowerCase(),
-  title: String(pr.title || ''),
-  url: String(pr.url || '')
-})
+function extractChecksState(pr) {
+  const nodes = pr?.commits?.nodes
+  const firstCommit = Array.isArray(nodes) && nodes[0]?.commit ? nodes[0].commit : null
+  const rollup = firstCommit?.statusCheckRollup
+  if (!rollup || rollup.state == null) {
+    return null
+  }
+  return String(rollup.state)
+}
+
+const prPayload = (pr, withChecks = false) => {
+  const payload: any = {
+    branch: String(pr.headRefName),
+    draft: Boolean(pr.isDraft),
+    number: Number(pr.number) || 0,
+    state: String(pr.state || '').toLowerCase(),
+    title: String(pr.title || ''),
+    url: String(pr.url || '')
+  }
+  if (withChecks) {
+    payload.checks_state = extractChecksState(pr)
+  }
+  return payload
+}
 
 // The PR for each of the given branches, keyed by branch. Asks GitHub about the
 // branches we actually have sessions on rather than listing the repo's newest
 // PRs and hoping ours are in the page — on a busy repo they are not. One
 // GraphQL request per 50 branches; reads only.
-async function reviewPrList(repoPath, ghBin, branches, numbers) {
+async function reviewPrList(repoPath, ghBin, branches, numbers, withChecks = false) {
+  if (withChecks && checkRateLimitSuspension()) {
+    return {
+      ghReady: true,
+      prs: [],
+      rate_limit: lastRateLimit || { remaining: 0, resetAt: new Date(suspendedUntil).toISOString(), cost: 0 },
+      error: 'rate_limited',
+      suspended: true
+    }
+  }
+
   let cwd
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review PR list' })
   } catch {
     return { ghReady: false, prs: [] }
+  }
+
+  if (withChecks && isRepoBackedOff(cwd)) {
+    return { ghReady: false, prs: [], error: 'backoff', backoff: true }
   }
 
   const wanted = [...new Set((branches || []).filter(Boolean).map(String))].slice(0, PR_QUERY_BRANCH_CAP)
@@ -639,15 +836,26 @@ async function reviewPrList(repoPath, ghBin, branches, numbers) {
   }
 
   const repo = await runGh(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], cwd, ghBin)
-  const [owner, name] = repo.stdout.trim().split('/')
+  const [owner, name] = String(repo?.stdout || '').trim().split('/')
 
-  if (!repo.ok || !owner || !name) {
+  if (!repo?.ok || !owner || !name) {
     // gh missing, unauthenticated, or no GitHub remote — all "nothing to badge".
+    if (withChecks) {
+      return { ghReady: false, prs: [], error: 'gh_unavailable', gh_unavailable: true }
+    }
     return { ghReady: false, prs: [] }
+  }
+
+  const repoKey = `${owner}/${name}`
+  repoOwnerCache.set(cwd, { owner, name })
+
+  if (withChecks && isRepoBackedOff(repoKey)) {
+    return { ghReady: false, prs: [], error: 'backoff', backoff: true }
   }
 
   const prs = []
   const chunks = []
+  let rate_limit: { remaining: number; resetAt: string; cost: number } | null = null
 
   for (let start = 0; start < wanted.length; start += PR_QUERY_BRANCH_CHUNK) {
     chunks.push([wanted.slice(start, start + PR_QUERY_BRANCH_CHUNK), []])
@@ -658,15 +866,35 @@ async function reviewPrList(repoPath, ghBin, branches, numbers) {
   }
 
   for (const [branchChunk, numberChunk] of chunks) {
-    const query = prQueryFor(owner, name, branchChunk, numberChunk)
+    const query = prQueryFor(owner, name, branchChunk, numberChunk, withChecks)
     const res = await runGh(['api', 'graphql', '-f', `query=${query}`], cwd, ghBin)
 
     if (!res.ok) {
+      if (withChecks) {
+        recordRepoFailure(repoKey)
+        recordRepoFailure(cwd)
+      }
       continue
     }
 
+    if (withChecks) {
+      recordRepoSuccess(repoKey)
+      recordRepoSuccess(cwd)
+    }
+
     try {
-      const repository = JSON.parse(res.stdout)?.data?.repository ?? {}
+      const parsed = JSON.parse(res.stdout)
+      if (withChecks && parsed?.data?.rateLimit) {
+        const rl = parsed.data.rateLimit
+        rate_limit = {
+          remaining: Number(rl.remaining) || 0,
+          resetAt: String(rl.resetAt || ''),
+          cost: Number(rl.cost) || 0
+        }
+        recordRateLimit(rate_limit)
+      }
+
+      const repository = parsed?.data?.repository ?? {}
 
       for (const key of Object.keys(repository)) {
         // Asked for by number, so it's ours by construction — a fork PR can't
@@ -678,7 +906,7 @@ async function reviewPrList(repoPath, ghBin, branches, numbers) {
           : (repository[key]?.nodes ?? []).find(node => node && !node.isCrossRepository)
 
         if (pr?.headRefName) {
-          prs.push(prPayload(pr))
+          prs.push(prPayload(pr, withChecks))
         }
       }
     } catch {
@@ -686,8 +914,137 @@ async function reviewPrList(repoPath, ghBin, branches, numbers) {
     }
   }
 
+  if (withChecks) {
+    return { ghReady: true, prs, rate_limit }
+  }
   return { ghReady: true, prs }
 }
+
+async function ghRunStatus(
+  repo: string,
+  runId: number | string,
+  ghBin?: string
+): Promise<{ status: string; conclusion: string | null; error?: string; gh_unavailable?: boolean }> {
+  const idStr = String(runId ?? '').trim()
+
+  if (!GH_RUN_ID_RE.test(idStr)) {
+    return { status: 'unknown', conclusion: null, error: 'invalid_run_id' }
+  }
+
+  // 1. Rate-limit suspension check
+  if (checkRateLimitSuspension()) {
+    const cached = getAnyCachedRunStatus(idStr)
+    if (cached) {
+      return { status: cached.status, conclusion: cached.conclusion, error: 'rate_limited' }
+    }
+    return { status: 'unknown', conclusion: null, error: 'rate_limited' }
+  }
+
+  // 2. Fresh cache hit (<= 60 s)
+  const freshCached = getRunStatusFromCache(idStr)
+  if (freshCached) {
+    return { status: freshCached.status, conclusion: freshCached.conclusion }
+  }
+
+  // Determine repo slug / cwd / key
+  const slug = parseRepoSlug(repo)
+  let repoKey = slug ? `${slug.owner}/${slug.name}` : repo
+  let owner = slug ? slug.owner : ''
+  let repoName = slug ? slug.name : ''
+  let cwd = process.cwd()
+
+  if (!slug) {
+    try {
+      cwd = resolveRequestedPathForIpc(repo, { purpose: 'ghRunStatus' })
+    } catch {
+      // Neither a slug nor an allowed path: never fall back to the raw renderer string.
+      return { status: 'unknown', conclusion: null, error: 'invalid_repo' }
+    }
+    const cachedOwner = repoOwnerCache.get(cwd)
+    if (cachedOwner) {
+      owner = cachedOwner.owner
+      repoName = cachedOwner.name
+      repoKey = `${owner}/${repoName}`
+    } else {
+      const repoRes = await runGh(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], cwd, ghBin)
+      if (!repoRes.ok) {
+        if (isGhUnavailable(repoRes)) {
+          return { status: 'gh_unavailable', conclusion: null, error: 'gh_unavailable', gh_unavailable: true }
+        }
+        recordRepoFailure(repoKey)
+        recordRepoFailure(cwd)
+        const cached = getAnyCachedRunStatus(idStr)
+        if (cached) {
+          return { status: cached.status, conclusion: cached.conclusion, error: 'api_error' }
+        }
+        return { status: 'unknown', conclusion: null, error: 'api_error' }
+      }
+      const parts = String(repoRes?.stdout || '').trim().split('/')
+      if (parts.length === 2 && isValidRepoSlug(parts[0], parts[1])) {
+        owner = parts[0]
+        repoName = parts[1]
+        repoKey = `${owner}/${repoName}`
+        repoOwnerCache.set(cwd, { owner, name: repoName })
+      } else {
+        return { status: 'unknown', conclusion: null }
+      }
+    }
+  }
+
+  // 3. Per-repo failure backoff check
+  if (isRepoBackedOff(repoKey) || isRepoBackedOff(cwd)) {
+    const cached = getAnyCachedRunStatus(idStr)
+    if (cached) {
+      return { status: cached.status, conclusion: cached.conclusion, error: 'backoff' }
+    }
+    return { status: 'unknown', conclusion: null, error: 'backoff' }
+  }
+
+  // 4. Global 4/min limit check
+  if (!canMakeRunStatusCall()) {
+    // excess returns the cached value or unknown
+    const cached = getAnyCachedRunStatus(idStr)
+    if (cached) {
+      return { status: cached.status, conclusion: cached.conclusion }
+    }
+    return { status: 'unknown', conclusion: null }
+  }
+
+  // 5. Make the call using argv array
+  recordRunStatusCall()
+  const args = ['api', `repos/${owner}/${repoName}/actions/runs/${idStr}`, '--jq', '.status,.conclusion']
+  const res = await runGh(args, cwd, ghBin)
+
+  if (!res?.ok) {
+    if (isGhUnavailable(res || { ok: false })) {
+      return { status: 'gh_unavailable', conclusion: null, error: 'gh_unavailable', gh_unavailable: true }
+    }
+    recordRepoFailure(repoKey)
+    recordRepoFailure(cwd)
+    const cached = getAnyCachedRunStatus(idStr)
+    if (cached) {
+      return { status: cached.status, conclusion: cached.conclusion, error: 'api_error' }
+    }
+    return { status: 'unknown', conclusion: null, error: 'api_error' }
+  }
+
+  // 6. Success!
+  recordRepoSuccess(repoKey)
+  recordRepoSuccess(cwd)
+  const lines = String(res?.stdout || '').trim().split('\n').map(l => l.trim()).filter(Boolean)
+  const status = lines[0] || 'unknown'
+  const rawConclusion = lines[1]
+  const conclusion = rawConclusion && rawConclusion !== 'null' ? rawConclusion : null
+
+  runStatusCache.set(idStr, {
+    status,
+    conclusion,
+    timestamp: Date.now()
+  })
+
+  return { status, conclusion }
+}
+
 
 // Create a PR for the current branch (pushing first so gh has a remote ref),
 // letting gh fill title/body from the commits. Returns the new PR url.
@@ -810,9 +1167,12 @@ async function repoStatus(repoPath, gitBin) {
 }
 
 export {
+  _resetConductorsGhStateForTesting,
   branchBase,
   fileDiffVsHead,
+  ghRunStatus,
   gitFor,
+  prQueryFor,
   repoStatus,
   resolveRenamePath,
   REVIEW_FILE_CAP,
@@ -827,5 +1187,8 @@ export {
   reviewRevParse,
   reviewShipInfo,
   reviewStage,
-  reviewUnstage
+  reviewUnstage,
+  runGh,
+  setRunGhForTesting
 }
+

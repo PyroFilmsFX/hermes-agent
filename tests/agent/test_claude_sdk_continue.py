@@ -181,7 +181,7 @@ def test_no_continue_on_user_stop_or_auth(monkeypatch, case):
     assert len(created) == 1
 
 
-def test_watchdog_trip_continues_instead_of_ending(monkeypatch):
+def test_watchdog_trip_continues_instead_of_ending(monkeypatch, caplog):
     agent = _make_agent()
     trip = _turn(interrupted=True, watchdog_trip=True, error="turn idle for 900s; interrupted",
                  tool_iterations=2)
@@ -192,6 +192,8 @@ def test_watchdog_trip_continues_instead_of_ending(monkeypatch):
 
     assert len(created) == 2 and created[1][0]["resume_id"] == "sdk-A"
     assert state.turn.error is None
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert warnings == ["claude-agent-sdk: watchdog trip: turn idle for 900s; interrupted"]
 
 
 def test_transient_error_after_side_effects_continues_not_replays(monkeypatch):

@@ -2853,6 +2853,94 @@ export interface Translations {
     copyPath: string
   }
 
+  conductors: {
+    title: string
+    boundChip: string
+    boundTip: string
+    paletteLabel: string
+    viewAll: string
+    gridLabel: string
+    needsYou: (count: number) => string
+    updated: (ago: string) => string
+    refresh: string
+    filters: Record<'active' | 'all' | 'idleStale' | 'needsMe', string>
+    columns: Record<
+      'activity' | 'blockers' | 'ci' | 'estimate' | 'lanes' | 'now' | 'project' | 'remaining' | 'seats' | 'session',
+      string
+    >
+    liveness: Record<'abandoned' | 'active' | 'idle' | 'quiet' | 'stale', string>
+    livenessHint: Record<'abandoned' | 'active' | 'idle' | 'quiet' | 'stale', string>
+    idleSince: (clock: string) => string
+    derived: string
+    derivedRelayOnly: string
+    derivedWorkspace: string
+    ghLimit: (clock: string) => string
+    ghLimitHint: string
+    ghSignedOut: string
+    ciChecks: { fail: string; none: string; pass: string; pending: string }
+    loading: string
+    emptyTitle: string
+    emptyBody: string
+    emptyNoIndex: string
+    emptyFilter: string
+    errorTitle: string
+    errorBody: string
+    retry: string
+    staleBanner: (asOf: string) => string
+    showAbandoned: (count: number) => string
+    hideAbandoned: (count: number) => string
+    showUnbuilt: (count: number) => string
+    hideUnbuilt: (count: number) => string
+    openUnbuilt: string
+    waves: (count: number) => string
+    units: (count: number) => string
+    unitsUnknown: string
+    more: (count: number) => string
+    estimateMissing: string
+    estimateStale: (asOf: string) => string
+    gates: (count: number) => string
+    gateSince: (clock: string) => string
+    gateDue: (day: string) => string
+    seatUnknown: string
+    refusedAtLeast: (count: number) => string
+    staleLanes: (count: number) => string
+    blocked: string
+    notHermesSession: string
+    otherProfile: (profile: string) => string
+    /** Medium-width merged column headers (§8: 4+5 and 6+7). */
+    mergedColumns: Record<'crew' | 'plan', string>
+    lanesSuffix: string
+    expand: string
+    collapse: string
+    rowActions: string
+    openSession: string
+    send: string
+    sendTitle: (session: string) => string
+    sendPlaceholder: string
+    sendSubmit: string
+    sendHint: string
+    copySessionId: string
+    copyRunId: string
+    openPr: (pr: number) => string
+    openRun: string
+    detail: Record<
+      'attribution' | 'blockers' | 'currentUnits' | 'gates' | 'lanes' | 'otherBuilds' | 'refusals' | 'remainingWaves',
+      string
+    >
+    detailNone: string
+    detailLanes: (running: number, stale: number, cap: null | number) => string
+    detailUnits: (count: number) => string
+    attribution: Record<'bound' | 'db' | 'live' | 'none' | 'stamped' | 'workspace', string>
+    ownerLive: Record<'attached' | 'busy' | 'cli' | 'none', string>
+    recordHint: Record<'mismatched' | 'newer_schema', string>
+    none: string
+    ageNow: string
+    ageSeconds: (seconds: number) => string
+    ageMinutes: (minutes: number) => string
+    ageHours: (hours: number) => string
+    ageDays: (days: number) => string
+  }
+
   artifactCard: {
     kind: Record<'code' | 'html' | 'svg', string>
     generating: (lines: number) => string

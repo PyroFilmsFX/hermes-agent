@@ -1031,6 +1031,7 @@ from hermes_cli.web_routers import (  # noqa: E402
     chat_ws as _chat_ws_routes,
     chat_workspaces as _chat_workspaces_routes,
     dashboard_ui as _dashboard_ui_routes,
+    conductors as _conductors_routes,
 )
 
 app.include_router(_files_routes.router)
@@ -1043,6 +1044,7 @@ app.include_router(_display_routes.router)
 app.include_router(_actions_routes.status_router)
 app.include_router(_sessions_routes.list_router)
 app.include_router(_profiles_routes.sessions_router)
+app.include_router(_conductors_routes.router)
 app.include_router(_sessions_routes.search_router)
 app.include_router(_memory_providers_routes.router)
 app.include_router(_config_env_routes.config_router)

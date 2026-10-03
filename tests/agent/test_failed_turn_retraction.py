@@ -58,6 +58,42 @@ def test_genuinely_unprocessed_request_still_shows_the_boundary():
     assert shown[-1]["text"] == FAILED_TURN_NOTICE
 
 
+def test_boundary_after_answer_in_same_request_is_hidden_but_unanswered_one_remains():
+    rows = [
+        {"role": "user", "content": "do it"},
+        {"role": "assistant", "content": "Done."},
+        _boundary(),
+        {"role": "user", "content": "another request"},
+        _boundary(),
+    ]
+
+    out = retract_answered_failed_turns(rows)
+
+    assert _kinds(out) == [None, None, "hidden", None, FAILED_TURN_DISPLAY_KIND]
+    assert rows[2]["display_kind"] == FAILED_TURN_DISPLAY_KIND
+
+
+def test_tool_call_is_not_an_answer_before_failed_turn_boundary():
+    rows = [
+        {"role": "user", "content": "do it"},
+        {"role": "assistant", "content": "Checking now.", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+        _boundary(),
+    ]
+
+    assert _kinds(retract_answered_failed_turns(rows))[-1] == FAILED_TURN_DISPLAY_KIND
+
+
+def test_text_answer_before_failed_turn_boundary_is_hidden():
+    rows = [
+        {"role": "user", "content": "do it"},
+        {"role": "assistant", "content": "Done."},
+        _boundary(),
+    ]
+
+    assert _kinds(retract_answered_failed_turns(rows))[-1] == "hidden"
+
+
 def test_legacy_untyped_boundary_is_retracted_too():
     rows = [
         {"role": "user", "content": "a"},

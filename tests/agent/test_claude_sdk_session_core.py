@@ -265,6 +265,7 @@ class TestSession:
             session.close()
         assert turn.error is None
         assert turn.final_text == "done reading"
+        assert turn.terminal_answer is True
         assert turn.tool_iterations == 1
         assert turn.token_usage_last == {"input_tokens": 10, "output_tokens": 5}
         assert turn.thread_id == "sdk-session-1"
@@ -274,6 +275,23 @@ class TestSession:
         ]
         assert holder["client"].queried == ["read /x please"]
         assert not turn.should_retire
+
+    def test_assistant_commentary_with_tool_call_is_not_terminal_answer(self):
+        session, _holder = _make_session(script=[
+            AssistantMessage(content=[
+                TextBlock("Let me check that."),
+                ToolUseBlock(id="t1", name="Read", input={"file_path": "/x"}),
+            ]),
+            UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="result")]),
+            ResultMessage(result="Let me check that."),
+        ])
+        try:
+            turn = session.run_turn("check that")
+        finally:
+            session.close()
+
+        assert turn.final_text == "Let me check that."
+        assert turn.terminal_answer is False
 
     def test_mixed_text_and_data_image_reaches_sdk_as_native_content(self):
         session, holder = _make_session(script=[ResultMessage(result="a diagram")])
