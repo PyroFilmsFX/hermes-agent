@@ -674,18 +674,39 @@ async function pidIsOurDashboard(
     ' raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
     ' args=[x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
     'except OSError:\n' +
-    ' try:\n' +
-    '  line=subprocess.check_output(["ps","-ww","-o","command=","-p",str(pid)],text=True).strip()\n' +
-    ' except subprocess.CalledProcessError:\n' +
-    '  # pid already gone — a dead process is FOREIGN, not a transport error\n' +
-    '  print("FOREIGN");sys.exit(0)\n' +
-    // `ps -o command=` joins argv with spaces and drops quoting, so a path with a space
-    // (a spaced $HOME, "/Applications/Hermes Desktop.app") would split apart. Re-quote the
-    // exact expected paths first; the proof below still compares them verbatim.
-    ' for known in sorted({expected_token,*expected_entries}-{""},key=len,reverse=True):\n' +
-    '  if " " in known:\n' +
-    '   line=line.replace(known,shlex.quote(known))\n' +
-    ' args=shlex.split(line)\n' +
+    // No /proc (macOS). `ps -o command=` joins argv with spaces and drops quoting, so one argument
+    // containing a space and two separate arguments read the same: no parse of that text can
+    // prove a spaced path. KERN_PROCARGS2 returns the real NUL-separated argv, so the proof below
+    // compares exact arguments. It only answers for the caller's own processes.
+    ' args=None\n' +
+    ' if sys.platform=="darwin":\n' +
+    '  try:\n' +
+    '   import ctypes,struct\n' +
+    '   libc=ctypes.CDLL(None)\n' +
+    '   libc.sysctl.argtypes=[ctypes.POINTER(ctypes.c_int),ctypes.c_uint,ctypes.c_void_p,ctypes.POINTER(ctypes.c_size_t),ctypes.c_void_p,ctypes.c_size_t]\n' +
+    '   amax=ctypes.c_int(0);asz=ctypes.c_size_t(ctypes.sizeof(amax))\n' +
+    '   libc.sysctl((ctypes.c_int*2)(1,8),2,ctypes.byref(amax),ctypes.byref(asz),None,0)\n' +
+    '   buf=ctypes.create_string_buffer(amax.value if amax.value>0 else 1048576)\n' +
+    '   size=ctypes.c_size_t(len(buf))\n' +
+    '   if libc.sysctl((ctypes.c_int*3)(1,49,pid),3,buf,ctypes.byref(size),None,0)==0 and size.value>4:\n' +
+    '    data=buf.raw[:size.value]\n' +
+    '    argc=struct.unpack("i",data[:4])[0]\n' +
+    '    rest=data[4:]\n' +
+    '    rest=rest[rest.index(b"\\0"):].lstrip(b"\\0")\n' +
+    '    parts=rest.split(b"\\0")\n' +
+    '    if 0<argc<=len(parts):\n' +
+    '     args=[x.decode("utf-8","surrogateescape") for x in parts[:argc]]\n' +
+    '  except Exception:\n' +
+    '   args=None\n' +
+    // Anywhere else without /proc only the flattened text exists. A spaced path cannot be proven
+    // from it, so it fails closed (FOREIGN): never re-join separate arguments into one path.
+    ' if args is None:\n' +
+    '  try:\n' +
+    '   line=subprocess.check_output(["ps","-ww","-o","command=","-p",str(pid)],text=True).strip()\n' +
+    '  except subprocess.CalledProcessError:\n' +
+    '   # pid already gone — a dead process is FOREIGN, not a transport error\n' +
+    '   print("FOREIGN");sys.exit(0)\n' +
+    '  args=shlex.split(line)\n' +
     'ok=False\n' +
     'try:\n' +
     ' serve=args.index("serve")\n' +

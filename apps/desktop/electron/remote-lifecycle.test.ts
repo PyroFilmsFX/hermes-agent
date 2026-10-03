@@ -689,6 +689,43 @@ test.skipIf(process.platform === 'win32')(
         await pidIsOurDashboard(ssh, child.pid, SPAWN_NONCE, launcher, '/unrelated/hermes-home', OWNERSHIP_ID, 'ops'),
         true
       )
+
+      // A foreign process whose argv splits the token path at its space reads the same as ours in
+      // `ps -o command=`. Only the real argument boundaries tell them apart.
+      const cut: number = tokenPath.indexOf(' ')
+
+      assert.ok(cut > 0, 'the token path must contain a space for this case')
+
+      const splitToken = spawnInstaller([
+        '--profile',
+        'ops',
+        'serve',
+        '--isolated',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--ssh-session-token-file',
+        tokenPath.slice(0, cut),
+        tokenPath.slice(cut + 1),
+        '--ssh-owner-nonce',
+        SPAWN_NONCE
+      ])
+
+      assert.equal(await waitForEntrypoint(splitToken), true, 'the split-token process must be running')
+      assert.equal(
+        await pidIsOurDashboard(
+          ssh,
+          splitToken.pid,
+          SPAWN_NONCE,
+          launcher,
+          '/unrelated/hermes-home',
+          OWNERSHIP_ID,
+          'ops'
+        ),
+        false,
+        'a token path rebuilt from two arguments is not ours'
+      )
       assert.equal(
         await pidIsOurDashboard(
           ssh,
